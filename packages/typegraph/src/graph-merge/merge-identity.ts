@@ -84,7 +84,6 @@ import {
   type Store,
   storeBackend,
   storeRuntime,
-  storeStatementPort,
   TypeGraphError,
 } from "./typegraph-internal";
 import type { DroppedItem } from "./types";
@@ -833,7 +832,7 @@ async function snapshotIdentityClasses<G extends GraphDef>(
   plannedDeletions: ReadonlySet<MergeKey>,
   txBackend?: OperationBackend,
 ): Promise<IdentityClassSnapshot> {
-  const classes = await storeStatementPort(target).structuralIdentityClasses(
+  const classes = await storeRuntime(target).structuralIdentityClasses(
     seeds,
     txBackend,
   );
@@ -1054,9 +1053,10 @@ export async function assertPlannedIdentityIdsFresh<G extends GraphDef>(
     ...plan.identityRetractions.map((retraction) => retraction.id),
   ];
   if (plannedIds.length === 0) return;
-  const storedById = await storeStatementPort(
-    target,
-  ).identityAssertionRowsByIds(plannedIds, txBackend);
+  const storedById = await storeRuntime(target).identityAssertionRowsByIds(
+    plannedIds,
+    txBackend,
+  );
   for (const assertion of plan.identityAssertions) {
     const stored = storedById.get(assertion.id);
     if (
@@ -1298,7 +1298,7 @@ export async function assertIdentityPeersStable<G extends GraphDef>(
 ): Promise<void> {
   if (probe === undefined) return;
   const live = (
-    await storeStatementPort(target).liveNodesSharingIds(probe.ids, txBackend)
+    await storeRuntime(target).liveNodesSharingIds(probe.ids, txBackend)
   ).filter((peer) => !probe.plannedDeletions.has(mergeKey(peer.kind, peer.id)));
   // Under "fold" ANY new same-id peer changes the classes the plan folded
   // on; under "ignore" only a peer of a kind DISJOINT with a seed sharing

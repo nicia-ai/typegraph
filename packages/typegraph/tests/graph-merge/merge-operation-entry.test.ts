@@ -11,10 +11,10 @@
  * the context's runtime (`enterTransactionOperation`); nothing is looked up
  * from an object.
  *
- * The Store runtime port's members that take a statement target have a
- * statement port (`storeStatementPort`) that runs on the handle it is given;
- * their public forms carry no session, so a transaction handed to them
- * enters as a binding of its own.
+ * The Store runtime port's members that take a statement target take it
+ * through a signature the public API spells, with no session: a merge's
+ * operation handle or a transaction handed to one joins as a binding of its
+ * own (`enterTargetOperation`), after the member's early returns.
  *
  * Operations change nothing a database can observe yet, so these cases watch
  * the mints themselves, wrapped with spies that call through.
@@ -30,7 +30,7 @@ import {
   type Store,
 } from "../../src";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
-import type { GraphBackend } from "../../src/backend/types";
+import type { GraphBackend, TransactionBackend } from "../../src/backend/types";
 import {
   branch,
   captureStoreOperationTarget,
@@ -50,23 +50,13 @@ import type * as OperationScopeModule from "../../src/store/operation-scope";
 import {
   enterOperation,
   enterTargetOperation,
+  enterTransactionOperation,
   openTransactionSession,
   operationEntrySession,
-  type StoreTransactionBackend,
   type TransactionSession,
 } from "../../src/store/operation-scope";
-import type * as RuntimePortModule from "../../src/store/runtime-port";
-import {
-  enterTransactionOperation,
-  storeQueryBackend,
-  storeRuntime,
-  storeStatementPort,
-  transactionBackend,
-} from "../../src/store/runtime-port";
-import {
-  TRANSACTION_RUNTIME,
-  type TransactionRuntime,
-} from "../../src/store/types";
+import { storeRuntime } from "../../src/store/runtime-port";
+import { TRANSACTION_RUNTIME } from "../../src/store/types";
 
 vi.mock("../../src/store/operation-scope", async (importOriginal) => {
   const actual: typeof OperationScopeModule = await importOriginal();
@@ -74,15 +64,8 @@ vi.mock("../../src/store/operation-scope", async (importOriginal) => {
     ...actual,
     enterOperation: vi.fn(actual.enterOperation),
     enterTargetOperation: vi.fn(actual.enterTargetOperation),
-    openTransactionSession: vi.fn(actual.openTransactionSession),
-  };
-});
-
-vi.mock("../../src/store/runtime-port", async (importOriginal) => {
-  const actual: typeof RuntimePortModule = await importOriginal();
-  return {
-    ...actual,
     enterTransactionOperation: vi.fn(actual.enterTransactionOperation),
+    openTransactionSession: vi.fn(actual.openTransactionSession),
   };
 });
 
@@ -153,16 +136,12 @@ function openedSessions(): readonly TransactionSession[] {
 
 /**
  * The session of the operation each `enterTransactionOperation` call since
- * the last clear entered: the `enterOperation` call it made, which is the
- * next invocation of the mint after its own.
+ * the last clear entered (it enters inside the mint module, so its
+ * `enterOperation` is not among the spied calls).
  */
 function runtimeEntrySessions(): readonly TransactionSession[] {
-  const enterOrder = enterOperationSpy.mock.invocationCallOrder;
-  return enterTransactionOperationSpy.mock.invocationCallOrder.map((order) => {
-    const index = enterOrder.findIndex((entered) => entered > order);
-    const result = enterOperationSpy.mock.results[index];
-    if (result?.type !== "return")
-      throw new Error("the runtime entered no operation");
+  return enterTransactionOperationSpy.mock.results.map((result) => {
+    if (result.type !== "return") throw new Error("mint threw");
     const session = operationEntrySession(result.value);
     if (session === undefined)
       throw new Error("the runtime entered the root backend");
@@ -182,7 +161,7 @@ function expectOneOperationOf(session: TransactionSession): void {
   expect(runtime[0]).toBe(session);
   const sessions = enteredSessions();
   // The merge drives at least one collection write of its own.
-  expect(sessions.length).toBeGreaterThan(1);
+  expect(sessions.length).toBeGreaterThan(0);
   for (const entered of sessions) expect(entered).toBe(session);
 }
 
@@ -319,108 +298,109 @@ describe("merge apply enters one operation of its transaction's session", () => 
   });
 });
 
+const IdentityItem = defineNode("Item", {
+  schema: z.object({ name: z.string() }),
+});
+const identityGraph = defineGraph({
+  id: "merge_operation_entry_identity",
+  nodes: { Item: { type: IdentityItem } },
+  edges: {},
+  identity: { sameIdAcrossKinds: "fold" },
+});
+
+async function createIdentityTarget(): Promise<Store<typeof identityGraph>> {
+  const { backend } = createLocalSqliteBackend();
+  cleanups.push(() => backend.close());
+  const [store] = await createAdapterStoreWithSchema(identityGraph, backend);
+  await store.nodes.Item.create({ name: "kept" }, { id: "kept" });
+  return store;
+}
+
+/** The runtime ports of `graph` and `identityGraph`, side by side. */
+type AnyRuntime =
+  | ReturnType<typeof storeRuntime<typeof graph>>
+  | ReturnType<typeof storeRuntime<typeof identityGraph>>;
+
 describe("the Store runtime port's statement targets", () => {
-  it("the statement port runs on the handle it is given, minting nothing; the public member enters a transaction as a binding of its own", async () => {
-    const target = await createTarget();
-    await target.transaction(async (tx) => {
-      const session = await readSessionOf(tx);
-      const handle = enterTransactionOperation(tx);
-      const raw: StoreTransactionBackend = transactionBackend(tx);
-
-      clearMints();
-      const throughPort = await storeStatementPort(target).liveNodesSharingIds(
-        ["kept"],
-        handle,
-      );
-      expect(throughPort).toEqual([{ kind: "Item", id: "kept" }]);
-      expect(openTransactionSessionSpy).not.toHaveBeenCalled();
-      expect(enterOperationSpy).not.toHaveBeenCalled();
-      expect(enterTargetOperationSpy).not.toHaveBeenCalled();
-
-      clearMints();
-      const throughPublic = await storeRuntime(target).liveNodesSharingIds(
-        ["kept"],
-        tx[TRANSACTION_RUNTIME].backend,
-      );
-      expect(throughPublic).toEqual(throughPort);
-      expect(enterTargetOperationSpy).toHaveBeenCalledTimes(1);
-      expect(enterTargetOperationSpy.mock.calls[0]?.[0]).toBe(raw);
-      const [joined] = targetEntrySessions();
-      expect(joined).toBeDefined();
-      expect(joined).not.toBe(session);
-    });
-  });
-
-  it("storeQueryBackend runs on the handle it is given, minting nothing", async () => {
-    const target = await createTarget();
-    await target.transaction(async (tx) => {
-      const handle = enterTransactionOperation(tx);
-      clearMints();
-      expect(storeQueryBackend(target, handle)).toBeDefined();
-      expect(enterTargetOperationSpy).not.toHaveBeenCalled();
-      expect(openTransactionSessionSpy).not.toHaveBeenCalled();
-    });
-  });
-
-  it("each public member that takes a target enters a transaction once and the root as itself", async () => {
-    const target = await createTarget();
+  it("a member handed a merge's operation handle or a transaction joins it as a binding of its own, and the root as itself", async () => {
+    const target = await createIdentityTarget();
     const runtime = storeRuntime(target);
     const root: GraphBackend = runtime.backend;
     await target.transaction(async (tx) => {
-      const raw = tx[TRANSACTION_RUNTIME].backend;
-      const calls: readonly (readonly [string, () => Promise<unknown>])[] = [
+      clearMints();
+      await tx.nodes.Item.create({ name: "own" }, { id: "own" });
+      const [session] = enteredSessions();
+      if (session === undefined) throw new Error("no session entered");
+      // What merge apply hands the members: the handle of the operation it
+      // entered in this transaction's session.
+      const handle = enterTransactionOperation(tx).backend;
+      const raw: TransactionBackend = tx[TRANSACTION_RUNTIME].backend;
+      const calls: readonly (readonly [
+        string,
+        TransactionBackend,
+        () => unknown,
+      ])[] = [handle, raw].flatMap((passed) => [
+        [
+          "queryBackend",
+          passed,
+          () => {
+            runtime.queryBackend(passed);
+          },
+        ],
         [
           "liveNodesSharingIds",
-          () => runtime.liveNodesSharingIds(["kept"], raw),
+          passed,
+          () => runtime.liveNodesSharingIds(["kept"], passed),
         ],
         [
           "identityAssertionRowsByIds",
-          () => runtime.identityAssertionRowsByIds(["a"], raw),
+          passed,
+          () => runtime.identityAssertionRowsByIds(["a"], passed),
         ],
         [
           "structuralIdentityClasses",
+          passed,
           () =>
             runtime.structuralIdentityClasses(
               [{ kind: "Item", id: "kept" }],
-              raw,
+              passed,
             ),
         ],
         [
           "interchangeIdentityAssertionsByIdsAtTarget",
+          passed,
           () =>
-            runtime.interchangeIdentityAssertionsByIdsAtTarget?.(
-              raw,
+            requirePort(runtime.interchangeIdentityAssertionsByIdsAtTarget)(
+              passed,
               ["a"],
               "state",
-            ) ?? Promise.reject(new Error("member missing")),
-        ],
-        [
-          "applyResolvedNodeUniqueness",
-          () =>
-            runtime.applyResolvedNodeUniqueness(
-              raw,
-              { upserts: [], releases: [] },
-              () => Promise.resolve("applied"),
             ),
         ],
-      ];
-      const session = await readSessionOf(tx);
-      for (const [label, call] of calls) {
+      ]);
+      const observed: unknown[] = [];
+      for (const [label, passed, call] of calls) {
         clearMints();
         await call();
-        // One new binding of the transaction per call, never the context's.
-        const joined = [...targetEntrySessions(), ...openedSessions()].filter(
-          (entered) => entered !== undefined,
-        );
-        expect({ label, joined: joined.length }).toEqual({ label, joined: 1 });
-        expect(joined[0]).not.toBe(session);
-        const passed = [
-          ...enterTargetOperationSpy.mock.calls.map(([target]) => target),
-          ...openTransactionSessionSpy.mock.calls.map(([target]) => target),
-        ];
-        expect(passed).toEqual([raw]);
-        expect(passed[0]).toBe(raw);
+        const joined = targetEntrySessions();
+        observed.push({
+          label,
+          targetEntries: joined.length,
+          ofThePassedTarget: enterTargetOperationSpy.mock.calls.every(
+            ([argument]) => argument === passed,
+          ),
+          // A binding of its own: a new session, never the transaction's.
+          ownBinding:
+            joined[0] !== undefined && (joined[0] as unknown) !== session,
+        });
       }
+      expect(observed).toEqual(
+        calls.map(([label]) => ({
+          label,
+          targetEntries: 1,
+          ofThePassedTarget: true,
+          ownBinding: true,
+        })),
+      );
     });
 
     clearMints();
@@ -429,49 +409,87 @@ describe("the Store runtime port's statement targets", () => {
     expect(openTransactionSessionSpy).not.toHaveBeenCalled();
     expect(targetEntrySessions()).toEqual([undefined, undefined]);
     expect(
-      enterTargetOperationSpy.mock.calls.map(([target]) => target),
+      enterTargetOperationSpy.mock.calls.map(([argument]) => argument),
     ).toEqual([root, root]);
   });
-});
 
-describe("enterTransactionOperation", () => {
-  it("enters through the session the runtime carries, and as a binding of its own when the runtime carries none", async () => {
-    const target = await createTarget();
-    await target.transaction(async (tx) => {
+  it("a member returns before it enters: a call that reads or writes nothing enters nothing", async () => {
+    const identityTarget = await createIdentityTarget();
+    const plainTarget = await createTarget();
+    const outcomes: unknown[] = [];
+    const settle = async (
+      label: string,
+      call: () => Promise<unknown>,
+    ): Promise<void> => {
       clearMints();
-      await tx.nodes.Item.create({ name: "own" }, { id: "own" });
-      const [session] = enteredSessions();
-      if (session === undefined) throw new Error("no session entered");
-
-      clearMints();
-      enterTransactionOperation(tx);
-      expect(runtimeEntrySessions()).toEqual([session]);
-      expect(runtimeEntrySessions()[0]).toBe(session);
-      expect(openTransactionSessionSpy).not.toHaveBeenCalled();
-
-      // A runtime authored without the entry (an older version's): its
-      // transaction carries no session to join.
-      const runtime = tx[TRANSACTION_RUNTIME];
-      const bare: TransactionRuntime = {
-        backend: runtime.backend,
-        deleteNodeWithPolicy: runtime.deleteNodeWithPolicy,
-        reviveNode: runtime.reviveNode,
-        acquireWriteFences: runtime.acquireWriteFences,
-        acquireReadFences: runtime.acquireReadFences,
-        assertWritable: runtime.assertWritable,
-      };
-      clearMints();
-      expect(enterTransactionOperation({ [TRANSACTION_RUNTIME]: bare })).toBe(
-        runtime.backend,
+      const outcome = await call().then(
+        (value) => ({ resolved: value }),
+        (error: unknown) => ({ rejected: String(error) }),
       );
-      expect(openTransactionSessionSpy).toHaveBeenCalledTimes(1);
-      expect(openTransactionSessionSpy.mock.calls[0]?.[0]).toBe(
-        runtime.backend,
+      outcomes.push({
+        label,
+        outcome,
+        entered:
+          enterTargetOperationSpy.mock.calls.length +
+          openTransactionSessionSpy.mock.calls.length +
+          enterOperationSpy.mock.calls.length,
+      });
+    };
+    for (const [label, runtime] of [
+      ["identity", storeRuntime(identityTarget)],
+      ["plain", storeRuntime(plainTarget)],
+    ] as const satisfies readonly (readonly [string, AnyRuntime])[]) {
+      const interchange = requirePort(
+        runtime.interchangeIdentityAssertionsByIdsAtTarget,
       );
-      const [opened] = openedSessions();
-      expect(opened).not.toBe(session);
-      expect(enteredSessions()).toHaveLength(1);
-      expect(enteredSessions()[0]).toBe(opened);
+      // An untyped caller with no target and no ids: nothing to read.
+      await settle(`${label} interchange, no ids, no target`, () =>
+        interchange(undefined as never, [], "state"),
+      );
+      await settle(`${label} uniqueness, nothing cleared`, () =>
+        runtime.applyResolvedNodeUniqueness(
+          undefined as never,
+          { upserts: [], releases: [] },
+          () => Promise.resolve("applied"),
+        ),
+      );
+    }
+    const plain = storeRuntime(plainTarget);
+    await plainTarget.transaction(async (tx) => {
+      const raw = tx[TRANSACTION_RUNTIME].backend;
+      // A graph without identity has no identity tables to read.
+      await settle("plain interchange, identity disabled", () =>
+        requirePort(plain.interchangeIdentityAssertionsByIdsAtTarget)(
+          raw,
+          ["a"],
+          "state",
+        ),
+      );
+      await settle("plain assertion rows, identity disabled", () =>
+        plain.identityAssertionRowsByIds(["a"], raw),
+      );
+      await settle("plain structural classes, identity disabled", () =>
+        plain.structuralIdentityClasses([{ kind: "Item", id: "kept" }], raw),
+      );
     });
+    const empty = (label: string, resolved: unknown) => ({
+      label,
+      outcome: { resolved },
+      entered: 0,
+    });
+    expect(outcomes).toEqual([
+      empty("identity interchange, no ids, no target", []),
+      empty("identity uniqueness, nothing cleared", "applied"),
+      empty("plain interchange, no ids, no target", []),
+      empty("plain uniqueness, nothing cleared", "applied"),
+      empty("plain interchange, identity disabled", []),
+      empty("plain assertion rows, identity disabled", new Map()),
+      empty("plain structural classes, identity disabled", new Map()),
+    ]);
   });
 });
+
+function requirePort<T>(port: T | undefined): T {
+  if (port === undefined) throw new Error("the runtime port lacks this member");
+  return port;
+}

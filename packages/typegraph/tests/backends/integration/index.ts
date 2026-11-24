@@ -68,6 +68,7 @@ export { registerIdentityIntegrationTests } from "./identity";
 export { registerCurrentIdentityTraversalTests } from "./identity-current-traversal";
 export { registerHistoricalIdentityTraversalTests } from "./identity-historical-traversal";
 export { registerIdentityImportIntegrationTests } from "./identity-import";
+export { registerIdentityOperationRoutingIntegrationTests } from "./identity-operation-routing";
 export { registerIdentityReplayIntegrationTests } from "./identity-replay";
 export { registerIdentitySeparationIntegrationTests } from "./identity-separation";
 export { registerImportCompositionMoveIntegrationTests } from "./import-composition-moves";
@@ -99,6 +100,7 @@ export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-prope
 export { registerPaginationSystemColumnIntegrationTests } from "./pagination-system-columns";
 export { registerPredicateIntegrationTests } from "./predicates";
 export { registerProvenanceIntegrationTests } from "./provenance";
+export { registerProvenanceInterchangeOperationRoutingIntegrationTests } from "./provenance-interchange-operation-routing";
 export { registerProvenanceRelationshipFactRecipeTests } from "./provenance-relationship-fact-recipe";
 export { registerQueryFragmentIntegrationTests } from "./query-fragments";
 export { registerQueryHookIntegrationTests } from "./query-hooks";

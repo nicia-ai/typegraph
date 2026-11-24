@@ -11,9 +11,7 @@ type TypeGraphGlobalSymbolName =
   | "store-runtime-v1"
   | "typegraph-recorded-read-source-v1"
   | "engine-recorded-read-source-v1"
-  | "transaction-runtime-v1"
-  | "transaction-operation-v1"
-  | "store-statement-port-v1";
+  | "transaction-runtime-v1";
 
 /** Returns a process-wide symbol shared across ESM/CJS package instances. */
 export function typeGraphGlobalSymbol<TSymbol extends symbol>(

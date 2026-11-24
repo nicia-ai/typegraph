@@ -24,12 +24,11 @@
  * held lock.
  */
 import type { GraphDef } from "../core/define-graph";
-import { legacyTransactionOperation } from "../store/operation-scope";
+import { type Operation } from "../store/operation-scope";
 import { lockRecordedGraphWrite } from "../store/recorded-capture";
 import {
   transactionAcquireReadFences,
   transactionAcquireWriteFences,
-  transactionBackend,
 } from "../store/runtime-port";
 import { type TransactionContext } from "../store/types";
 
@@ -69,13 +68,13 @@ export function acquireCallerTransactionReadLocks<G extends GraphDef>(
  * computation reads several relations, and PostgreSQL's READ COMMITTED gives
  * each statement its own snapshot — without the lock a concurrent transition
  * could commit between those reads and tear the view.
+ *
+ * Taken through `operation`'s handle: the operation the read it guards
+ * entered.
  */
-export async function acquireCapabilityReadLock<G extends GraphDef>(
-  tx: TransactionContext<G>,
+export async function acquireCapabilityReadLock(
+  operation: Operation,
   graphId: string,
 ): Promise<void> {
-  await lockRecordedGraphWrite(
-    legacyTransactionOperation(transactionBackend(tx)),
-    graphId,
-  );
+  await lockRecordedGraphWrite(operation.backend, graphId);
 }

@@ -4,6 +4,7 @@ import { type GraphDef } from "../core/define-graph";
 import { type ReadCoordinate } from "../core/temporal";
 import { type SqlSchema } from "../query/compiler/schema";
 import { type KindRegistry } from "../registry/kind-registry";
+import { type StatementBackend } from "../store/operation-scope";
 import { type PlainNodeRef } from "./sql-target";
 import { type IdentityNode } from "./types";
 
@@ -34,6 +35,24 @@ export type IdentityServiceContext<G extends GraphDef> = Readonly<{
     coordinate?: ReadCoordinate,
   ) => Promise<readonly (IdentityNode<G> | undefined)[]>;
 }>;
+
+/**
+ * The context ONE identity call runs under: {@link IdentityServiceContext}
+ * whose `backend` is the target that call's statements go through (the
+ * pooled root, or the handle of the operation the call entered) and whose
+ * `loadNodes` reads through that same target. Built per call, after the
+ * call's refusals, from the call's statement target; never retained past it.
+ *
+ * {@link IdentityServiceContext} keeps its public shape (the runtime port's
+ * `identityContext` spells it), and its `backend` is not a statement target
+ * here: code holding only that type reads it for refusals and SQL
+ * compilation, and receives the target of its statements explicitly.
+ */
+export type IdentityCallContext<G extends GraphDef> = Omit<
+  IdentityServiceContext<G>,
+  "backend"
+> &
+  Readonly<{ backend: StatementBackend }>;
 
 export type IdentityTransferAssertion = Readonly<{
   id: string;

@@ -30,8 +30,9 @@ import {
   getSearchableFields,
 } from "./fulltext-sync";
 import {
-  legacyTransactionOperation,
+  enterTargetOperation,
   type OperationBackend,
+  operationEntryBackend,
   type StatementBackend,
   type StoreTransactionBackend,
 } from "./operation-scope";
@@ -165,11 +166,14 @@ export async function rebuildFulltextIndex(
   return runFulltextRebuild(
     {
       read: backend,
+      // Each page's transaction opens its session where it opens, and the
+      // page's writes are that session's one operation. Without interactive
+      // transactions the page runs on the pooled root, which enters nothing.
       runPage: (write) =>
         runOptionallyInTransaction(
           backend,
           (target: GraphBackend | StoreTransactionBackend) =>
-            write(legacyTransactionOperation(target)),
+            write(operationEntryBackend(enterTargetOperation(target))),
         ),
     },
     ctx,

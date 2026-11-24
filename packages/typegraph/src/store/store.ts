@@ -171,10 +171,11 @@ import {
   createIdentityReadFacade,
   detachIdentityForNode,
   foldIdentityForCreatedNodes,
+  type IdentityCallContext,
+  type IdentityFacadeSource,
   type IdentityFoldPlan,
   type IdentityImportSummary,
   type IdentityRebuildContext,
-  type IdentityServiceContext,
   type IdentityTransferAssertion,
   type IdentityTransitionCursor,
   type IdentityTransitionTransfer,
@@ -368,15 +369,18 @@ import { readNodeByReference } from "./node-reference-read";
 import {
   enterOperation,
   enterTargetOperation,
+  type EntryScope,
   legacyTransactionOperation,
   openTransactionSession,
   type Operation,
   type OperationBackend,
+  type OperationEntry,
   operationEntryBackend,
   type OperationScoped,
   type StatementBackend,
   storeAdoptSchemaWriteTransaction,
   type StoreTransactionBackend,
+  transactionRuntimeSession,
   type TransactionSession,
 } from "./operation-scope";
 import {
@@ -498,9 +502,6 @@ import {
   runInTransactionContext,
   STORE_RUNTIME,
   type StoreRuntime,
-  type StoreStatementPort,
-  withStoreStatementPort,
-  withTransactionOperation,
 } from "./runtime-port";
 import {
   publishSavepointEffect,
@@ -1725,8 +1726,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
     this.#options = options;
     this.#schemaMetadata = schemaMetadata ?? UNKNOWN_SCHEMA_METADATA;
-    const statementPort = this.#createStatementPort();
-    const runtime: StoreRuntime<G> = {
+    this[STORE_RUNTIME] = {
       backend: this.#backend,
       evolutionPlanningTarget: (plan) => this.#evolutionPlanningTarget(plan),
       captureEnabled: this.#captureEnabled,
@@ -1738,7 +1738,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // caller that could only rebuild this object could not observe the one
       // the queries actually run on.
       queryBackend: (target?: GraphBackend | StoreTransactionBackend) =>
-        statementPort.queryBackend(outsideStatementTarget(target)),
+        this.#createHookedQueryBackend(
+          outsideStatementTarget(target) ?? this[STORE_RUNTIME].backend,
+        ),
       sealedQuery: (coordinate) => this.sealedQuery(coordinate),
       recordedNodeGetById: (kind, id, coordinate) =>
         this.recordedNodeGetById(kind, id, coordinate),
@@ -1782,33 +1784,92 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         transaction: StoreTransactionBackend,
         writes,
         apply,
-      ) =>
-        statementPort.applyResolvedNodeUniqueness(
-          enterOperation(openTransactionSession(transaction)).backend,
-          writes,
+      ) => {
+        const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
+        if (
+          upserts.every((upsert) => upsert.constraints.length === 0) &&
+          releases.length === 0
+        ) {
+          // Nothing is cleared, so nothing needs rebuilding, so the write set
+          // owes no set-wide preflight either. A kind with no uniqueness
+          // declaration may still owe DISJOINTNESS claims, and those are taken
+          // and released by the individual writes inside `apply()` exactly as
+          // they are outside a merge — this branch is what keeps that true.
+          return apply();
+        }
+        // The transaction arrives through a signature the public API spells,
+        // with no session: it joins as a binding of its own.
+        const target = enterOperation(
+          openTransactionSession(transaction),
+        ).backend;
+        // The per-graph write lock, before any claim or sidecar work: the
+        // rebuild below writes claim rows, and the lock is what the claim
+        // discipline requires ahead of them. It is reentrant and memoized per
+        // transaction, so a merge that already took it pays no round trip.
+        const lock = await lockRecordedGraphWrite(target, this.graphId);
+        return applyResolvedNodeClaims(
+          {
+            graphId: this.graphId,
+            registry: this.#registry,
+            lock,
+            claimsVerdict: this.#claimsVerdict,
+            uniqueSidecarBatch: this.#uniqueSidecarBatch,
+          },
+          target,
+          upserts,
+          releases,
           apply,
-        ),
+        );
+      },
       liveNodesSharingIds: async (
         ids,
         target?: GraphBackend | StoreTransactionBackend,
-      ) =>
-        statementPort.liveNodesSharingIds(ids, outsideStatementTarget(target)),
+      ) => {
+        const backend = outsideStatementTarget(target) ?? this.#baseBackend;
+        const liveKindsById = await liveNodeKindsSharingIds(
+          this.#identityContext(backend),
+          backend,
+          ids,
+        );
+        const peers: Readonly<{ kind: string; id: string }>[] = [];
+        for (const [id, kinds] of liveKindsById) {
+          for (const kind of kinds) peers.push({ kind, id });
+        }
+        return peers;
+      },
       identityAssertionRowsByIds: async (
         ids,
         target?: GraphBackend | StoreTransactionBackend,
-      ) =>
-        statementPort.identityAssertionRowsByIds(
+      ) => {
+        // An identity-disabled graph has no assertions table to read from.
+        if (this.#graph.identity === undefined) return new Map();
+        const backend = outsideStatementTarget(target) ?? this.#baseBackend;
+        const ctx = this.#identityContext(backend);
+        const rows = await loadAssertionsByIds(
+          backend,
+          ctx.schema,
+          this.graphId,
           ids,
-          outsideStatementTarget(target),
-        ),
+        );
+        return new Map(
+          [...rows].map(([id, row]) => [id, toTransferAssertion(row)]),
+        );
+      },
       structuralIdentityClasses: async (
         references,
         target?: GraphBackend | StoreTransactionBackend,
-      ) =>
-        statementPort.structuralIdentityClasses(
+      ) => {
+        // An identity-disabled graph has no closure table to read from.
+        if (this.#graph.identity === undefined) return new Map();
+        const backend = outsideStatementTarget(target) ?? this.#baseBackend;
+        const ctx = this.#identityContext(backend);
+        return loadCurrentStructuralClasses(
+          backend,
+          ctx.schema,
+          this.graphId,
           references,
-          outsideStatementTarget(target),
-        ),
+        );
+      },
       readCurrentIdentityAssertions: (mode, options) =>
         this.readCurrentIdentityAssertions(mode, options),
       identityAssertionsAtTarget: (
@@ -1828,17 +1889,22 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           options,
         ),
       interchangeIdentityAssertionsByIdsAtTarget: async (
-        target: GraphBackend | StoreTransactionBackend,
+        transaction: GraphBackend | StoreTransactionBackend,
         ids,
         mode,
         options,
-      ) =>
-        statementPort.interchangeIdentityAssertionsByIdsAtTarget(
-          operationEntryBackend(enterTargetOperation(target)),
+      ) => {
+        // Returns before entry: an empty read enters nothing.
+        if (this.#graph.identity === undefined || ids.length === 0) return [];
+        const target = this.#identityTargetBackend(transaction);
+        return readIdentityAssertionsByIdsAtTarget(
+          this.#identityContext(target),
+          target,
           ids,
           mode,
           options,
-        ),
+        );
+      },
       readIdentityAssertionPageAtTarget: (
         target: GraphBackend | StoreTransactionBackend,
         mode,
@@ -1880,118 +1946,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         seeds,
       ) => this.assertIdentityClassesConsistentAtTarget(target, seeds),
     };
-    this[STORE_RUNTIME] = withStoreStatementPort(runtime, statementPort);
     Object.defineProperty(this, STORE_RUNTIME, {
       configurable: false,
       enumerable: false,
       writable: false,
     });
-  }
-
-  /**
-   * The Store runtime members that take a statement target, as Store code
-   * calls them with one that has passed through an operation mint (see
-   * {@link StoreStatementPort}): each runs its statements on the target it is
-   * handed. The runtime's public members of the same names delegate here.
-   */
-  #createStatementPort(): StoreStatementPort &
-    Required<
-      Pick<StoreStatementPort, "interchangeIdentityAssertionsByIdsAtTarget">
-    > {
-    return {
-      // The query path's own construction, not a second spelling of it: a
-      // caller that could only rebuild this object could not observe the one
-      // the queries actually run on.
-      queryBackend: (target?: StatementBackend) =>
-        this.#createHookedQueryBackend(target ?? this[STORE_RUNTIME].backend),
-      applyResolvedNodeUniqueness: async (target, writes, apply) => {
-        const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
-        if (
-          upserts.every((upsert) => upsert.constraints.length === 0) &&
-          releases.length === 0
-        ) {
-          // Nothing is cleared, so nothing needs rebuilding, so the write set
-          // owes no set-wide preflight either. A kind with no uniqueness
-          // declaration may still owe DISJOINTNESS claims, and those are taken
-          // and released by the individual writes inside `apply()` exactly as
-          // they are outside a merge — this branch is what keeps that true.
-          return apply();
-        }
-        // The per-graph write lock, before any claim or sidecar work: the
-        // rebuild below writes claim rows, and the lock is what the claim
-        // discipline requires ahead of them. It is reentrant and memoized per
-        // transaction, so a merge that already took it pays no round trip.
-        const lock = await lockRecordedGraphWrite(target, this.graphId);
-        return applyResolvedNodeClaims(
-          {
-            graphId: this.graphId,
-            registry: this.#registry,
-            lock,
-            claimsVerdict: this.#claimsVerdict,
-            uniqueSidecarBatch: this.#uniqueSidecarBatch,
-          },
-          target,
-          upserts,
-          releases,
-          apply,
-        );
-      },
-      liveNodesSharingIds: async (ids, target) => {
-        const backend = target ?? this.#baseBackend;
-        const liveKindsById = await liveNodeKindsSharingIds(
-          this.#identityContext(backend),
-          backend,
-          ids,
-        );
-        const peers: Readonly<{ kind: string; id: string }>[] = [];
-        for (const [id, kinds] of liveKindsById) {
-          for (const kind of kinds) peers.push({ kind, id });
-        }
-        return peers;
-      },
-      identityAssertionRowsByIds: async (ids, target) => {
-        // An identity-disabled graph has no assertions table to read from.
-        if (this.#graph.identity === undefined) return new Map();
-        const backend = target ?? this.#baseBackend;
-        const ctx = this.#identityContext(backend);
-        const rows = await loadAssertionsByIds(
-          backend,
-          ctx.schema,
-          this.graphId,
-          ids,
-        );
-        return new Map(
-          [...rows].map(([id, row]) => [id, toTransferAssertion(row)]),
-        );
-      },
-      structuralIdentityClasses: async (references, target) => {
-        // An identity-disabled graph has no closure table to read from.
-        if (this.#graph.identity === undefined) return new Map();
-        const backend = target ?? this.#baseBackend;
-        const ctx = this.#identityContext(backend);
-        return loadCurrentStructuralClasses(
-          backend,
-          ctx.schema,
-          this.graphId,
-          references,
-        );
-      },
-      interchangeIdentityAssertionsByIdsAtTarget: async (
-        target,
-        ids,
-        mode,
-        options,
-      ) => {
-        if (this.#graph.identity === undefined || ids.length === 0) return [];
-        return readIdentityAssertionsByIdsAtTarget(
-          this.#identityContext(target),
-          target,
-          ids,
-          mode,
-          options,
-        );
-      },
-    };
   }
 
   // === Accessors ===
@@ -2030,7 +1989,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
     const existing = IDENTITY_FACADES.get(this);
     if (existing !== undefined) return existing as IdentityFacade<G>;
-    const facade = createIdentityFacade(this.#identityContext(this.#backend));
+    const facade = createIdentityFacade(
+      this.#identityFacadeSource(this.#backend, this.#backend),
+    );
     IDENTITY_FACADES.set(this, facade);
     return facade;
   }
@@ -2115,11 +2076,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#recordedReadBinding,
       "recorded-identity",
     );
-    return createIdentityReadFacade({
-      ...this.#identityContext(backend),
-      schema,
-      coordinate,
-    });
+    return createIdentityReadFacade(
+      this.#identityFacadeSource(backend, backend, { schema, coordinate }),
+    );
   }
 
   /** Rebuilds derived current identity closure without advancing revision. */
@@ -2135,6 +2094,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         revisionSchema: this.#sqlSchema(),
         statementExecution: this.#statementExecution,
       },
+      this.#baseBackend,
     );
   }
 
@@ -2179,26 +2139,26 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     options?: Readonly<{ repairClosure?: boolean }>,
   ): Promise<void> {
     const target = legacyTransactionOperation(transaction);
-    if (!this.#captureEnabled) {
-      await removeIdentityKindsForContext(
-        this.#identityContext(target),
-        kinds,
-        options,
-      );
-      return;
-    }
-    const scope = createRecordedTransactionScope(
-      target,
-      this.#batchPointRead,
-      this.#sqlSchema(),
-      transactionOwnsSqliteWriteLock(target),
-    );
+    const scope =
+      this.#captureEnabled ?
+        createRecordedTransactionScope(
+          target,
+          this.#batchPointRead,
+          this.#sqlSchema(),
+          transactionOwnsSqliteWriteLock(target),
+        )
+      : undefined;
+    const backend = scope?.backend ?? target;
+    // The schema-commit preflight hands this a bare handle and no session, so
+    // the cascade joins as a binding of its own until that family's
+    // conversion opens a session where the preflight's transaction opens.
     await removeIdentityKindsForContext(
-      this.#identityContext(scope.backend),
+      this.#identityContext(backend),
+      legacyWriteEntry(backend),
       kinds,
       options,
     );
-    await scope.flush();
+    await scope?.flush();
   }
 
   /**
@@ -2216,6 +2176,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     if (this.#graph.identity === undefined) return Promise.resolve([]);
     return readIdentityAssertionsForInterchange(
       this.#identityContext(this.#baseBackend),
+      this.#baseBackend,
       mode,
       options,
     );
@@ -2226,10 +2187,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     transaction: GraphBackend | StoreTransactionBackend,
     mode: "state" | "archival" = "state",
   ): Promise<readonly IdentityTransferAssertion[]> {
-    const target = legacyTransactionOperation(transaction);
     if (this.#graph.identity === undefined) return Promise.resolve([]);
+    const target = this.#identityTargetBackend(transaction);
     return readIdentityAssertionsForInterchange(
       this.#identityContext(target),
+      target,
       mode,
     );
   }
@@ -2241,10 +2203,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     mode: "state" | "archival" = "state",
     options?: Readonly<{ includeDeleted?: boolean }>,
   ): Promise<readonly IdentityTransferAssertion[]> {
-    const target = legacyTransactionOperation(transaction);
     if (this.#graph.identity === undefined || references.length === 0) {
       return Promise.resolve([]);
     }
+    const target = this.#identityTargetBackend(transaction);
     return readIdentityAssertionsTouchingAtTarget(
       this.#identityContext(target),
       target,
@@ -2265,10 +2227,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       limit: number;
     }>,
   ): ReturnType<typeof readIdentityAssertionPageAtTarget> {
-    const target = legacyTransactionOperation(transaction);
     if (this.#graph.identity === undefined) {
       return Promise.resolve({ assertions: [], done: true });
     }
+    const target = this.#identityTargetBackend(transaction);
     return readIdentityAssertionPageAtTarget(
       this.#identityContext(target),
       target,
@@ -2376,12 +2338,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       done: boolean;
     }>
   > {
-    const target = legacyTransactionOperation(transaction);
     if (this.#graph.identity === undefined) {
       return { transitions: [], done: true };
     }
     const page = await readIdentityTransitionPageForInterchange(
-      target,
+      this.#identityTargetBackend(transaction),
       this.#sqlSchema(),
       this.graphId,
       options,
@@ -2397,10 +2358,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   identityTransitionRetentionAtTarget(
     transaction: GraphBackend | StoreTransactionBackend,
   ): Promise<IdentityTransitionRetention> {
-    const target = legacyTransactionOperation(transaction);
     if (this.#graph.identity === undefined) return Promise.resolve({});
     return readIdentityTransitionRetention(
-      target,
+      this.#identityTargetBackend(transaction),
       this.#sqlSchema(),
       this.graphId,
     );
@@ -2463,10 +2423,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     transaction: GraphBackend | StoreTransactionBackend,
     seeds: readonly Readonly<{ kind: string; id: string }>[],
   ): Promise<void> {
-    const target = legacyTransactionOperation(transaction);
     if (this.#graph.identity === undefined || seeds.length === 0) {
       return Promise.resolve();
     }
+    const target = this.#identityTargetBackend(transaction);
     return assertAffectedIdentityClassesConsistent(
       this.#identityContext(target),
       target,
@@ -2481,7 +2441,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     assertions: readonly IdentityTransferAssertion[],
     decision?: IdentityDecisionProvenance,
   ): Promise<Readonly<{ created: number; retracted: number }>> {
-    const target = legacyTransactionOperation(transaction);
     if (retractions.length === 0 && assertions.length === 0) {
       return Promise.resolve({ created: 0, retracted: 0 });
     }
@@ -2491,8 +2450,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         { code: "IDENTITY_MERGE_REQUIRES_PROFILE", graphId: this.graphId },
       );
     }
+    const entry = enterTargetOperation(transaction);
     return applyIdentityChangesForContext(
-      this.#identityContext(target),
+      this.#identityContext(operationEntryBackend(entry)),
+      entry,
       retractions,
       assertions,
       decision,
@@ -5701,8 +5662,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           ),
         maybeRefreshStatisticsAfterBulk: undefined,
       };
-      const surface: TransactionWriteSurface<G> = {
+      return {
+        // The session travels with the runtime, so a privileged internal handed
+        // this context (provenance, a working copy's durable operation) enters
+        // its own statements' operation from it.
         runtime: {
+          ...transactionRuntimeSession(session),
           backend: txBackend,
           deleteNodeWithPolicy: (work, policy) =>
             executeNodeDelete(
@@ -5771,20 +5736,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           {}
         : {
             identity: createIdentityFacade(
-              this.#identityContext(txBackend),
-              session,
+              this.#identityFacadeSource(session, txBackend),
             ),
           }),
-      };
-      // Privileged internals that issue statements on this transaction
-      // directly (merge apply, a durable Store operation) enter their
-      // operation of this session through the runtime.
-      return {
-        ...surface,
-        runtime: withTransactionOperation(
-          surface.runtime,
-          () => enterOperation(session).backend,
-        ),
       };
     };
 
@@ -5912,7 +5866,39 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       : withSql;
   }
 
-  #identityContext(backend: StatementBackend): IdentityServiceContext<G> {
+  /**
+   * The source of an identity facade whose calls enter from `scope` (the
+   * root backend, or the session of the transaction the facade belongs to):
+   * `backend` supplies what a call reads before it enters (refusals,
+   * capabilities, compilation), and each call's context is built over the
+   * handle of the operation it entered. A pinned view's facade carries its
+   * `view` schema and coordinate on both.
+   */
+  #identityFacadeSource(
+    scope: EntryScope,
+    backend: StatementBackend,
+    view?: Readonly<{ schema: SqlSchema; coordinate: ReadCoordinate }>,
+  ): IdentityFacadeSource<G> {
+    const contextAt = (target: StatementBackend): IdentityCallContext<G> =>
+      view === undefined ?
+        this.#identityContext(target)
+      : { ...this.#identityContext(target), ...view };
+    return { context: contextAt(backend), scope, callContext: contextAt };
+  }
+
+  /**
+   * The statement target of one identity port call whose `target` arrives
+   * through a signature the public API spells, with no session: the root
+   * itself, or the handle of the first operation of a binding of its own
+   * (`enterTargetOperation`). Called once per call, after its refusals.
+   */
+  #identityTargetBackend(
+    target: GraphBackend | StoreTransactionBackend,
+  ): StatementBackend {
+    return operationEntryBackend(enterTargetOperation(target));
+  }
+
+  #identityContext(backend: StatementBackend): IdentityCallContext<G> {
     // `store.identity` memoizes its facade for the life of the store, so the
     // context it captures must resolve the schema version at mutation time
     // rather than snapshotting it here: `clear()` resets this store to the
@@ -7495,7 +7481,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       graphId,
       scope,
       async (transaction: StoreTransactionBackend) => {
-        const target = legacyTransactionOperation(transaction);
         // This callback only knows how to reconstruct fulltext content, and
         // the port's contract is that implementations refuse `"vector"`
         // before reaching it. Restate that here rather than trusting it: a
@@ -7508,9 +7493,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             { graphId, contribution: scope, backend: backend.dialect },
           );
         }
+        // The engine opened this transaction for the rebuild: its session
+        // opens here, and the refill is its one operation.
         const result = await repopulateFulltextInTransaction(
           { graphId, registry },
-          target,
+          enterOperation(openTransactionSession(transaction)).backend,
           options?.pageSize === undefined ? {} : { pageSize: options.pageSize },
         );
         return {
@@ -9391,12 +9378,15 @@ function identityMigrationRequiredError(
 
 /** One fenced, revision-neutral entry for public and startup identity repair. */
 function rebuildIdentityClosureWithSchemaFence<G extends GraphDef>(
-  identityContext: IdentityRebuildContext<G>,
+  identityContext: Omit<IdentityRebuildContext<G>, "backend">,
   writeContext: WriteTransactionContext,
+  // The pooled root (public and startup repair), or the entry of the
+  // transaction the caller is recomputing inside.
+  entry: OperationEntry,
 ): Promise<void> {
   return runInWriteTransaction(
     writeContext,
-    legacyWriteEntry(legacyTransactionOperation(identityContext.backend)),
+    entry,
     async (target) =>
       rebuildIdentityClosureForContext({ ...identityContext, backend: target }),
     { didWrite: () => false },
@@ -9518,10 +9508,9 @@ async function prepareStoreWithSchema<G extends GraphDef>(
             // version before taking the identity lock: a concurrent migration
             // may already have rebuilt under different semantics, and a stale
             // startup must not overwrite that closure even if boot later fails.
-            recomputeDerivedRelations: (target) =>
+            recomputeDerivedRelations: (entry) =>
               rebuildIdentityClosureWithSchemaFence(
                 {
-                  backend: target,
                   graphId: merged.id,
                   registry: identityRegistry,
                   schema: resolvedIdentitySchema,
@@ -9534,6 +9523,7 @@ async function prepareStoreWithSchema<G extends GraphDef>(
                   revisionTrackingEnabled: false,
                   revisionSchema: resolvedIdentitySchema,
                 },
+                entry,
               ),
           }
         : {}),

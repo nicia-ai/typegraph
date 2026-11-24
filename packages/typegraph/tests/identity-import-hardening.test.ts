@@ -653,6 +653,7 @@ describe("archival identity import window bounds", () => {
       await source.nodes.Person.create({ name: "Bob" }, { id: "bob" });
       await applyIdentityChangesForContext(
         storeRuntime(source).identityContext(),
+        storeRuntime(source).backend,
         [],
         [
           {

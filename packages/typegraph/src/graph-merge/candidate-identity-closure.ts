@@ -13,11 +13,7 @@
 import type { GraphDef } from "../core/define-graph";
 import type { IdentityTransferAssertion } from "../identity/service";
 import type { StatementBackend } from "../store/operation-scope";
-import {
-  hasScopedIdentityReads,
-  storeRuntime,
-  storeStatementPort,
-} from "../store/runtime-port";
+import { hasScopedIdentityReads, storeRuntime } from "../store/runtime-port";
 import type { Store } from "../store/store";
 import { compareCodePoints } from "../utils/compare";
 import { CandidateWriteSetError } from "./errors";
@@ -68,12 +64,6 @@ export async function readCandidateIdentityClosure<G extends GraphDef>(
       { details: { reason: "scoped-identity-reads-unavailable" } },
     );
   }
-  // The reads take `target` as Store code holds it (the root, or an operation
-  // handle), so a handle is read on rather than joined as a new binding.
-  const reads = storeStatementPort(store);
-  const interchangeAssertionsByIds =
-    reads.interchangeIdentityAssertionsByIdsAtTarget ??
-    runtime.interchangeIdentityAssertionsByIdsAtTarget;
   const references = new Map<string, CandidateIdentityReference>();
   const assertions = new Map<string, IdentityTransferAssertion>();
   const addReference = (reference: CandidateIdentityReference): boolean => {
@@ -94,12 +84,13 @@ export async function readCandidateIdentityClosure<G extends GraphDef>(
   const assertionIds =
     input.assertionIds === undefined ? [] : [...new Set(input.assertionIds)];
   if (input.includeArchival !== false && assertionIds.length > 0) {
-    const collidingAssertions = await interchangeAssertionsByIds(
-      target,
-      assertionIds,
-      "archival",
-      { includeDeleted: false },
-    );
+    const collidingAssertions =
+      await runtime.interchangeIdentityAssertionsByIdsAtTarget(
+        target,
+        assertionIds,
+        "archival",
+        { includeDeleted: false },
+      );
     for (const assertion of collidingAssertions) {
       addAssertion(assertion);
     }
@@ -118,7 +109,7 @@ export async function readCandidateIdentityClosure<G extends GraphDef>(
     ];
     for (const id of pendingIds) expandedIds.add(id);
     if (pendingIds.length > 0) {
-      const sameIdPeers = await reads.liveNodesSharingIds(pendingIds, target);
+      const sameIdPeers = await runtime.liveNodesSharingIds(pendingIds, target);
       for (const peer of sameIdPeers) addReference(peer);
     }
 
@@ -196,12 +187,6 @@ async function readStateIdentityProjection<G extends GraphDef>(
       { details: { reason: "scoped-identity-reads-unavailable" } },
     );
   }
-  // The reads take `target` as Store code holds it (the root, or an operation
-  // handle), so a handle is read on rather than joined as a new binding.
-  const reads = storeStatementPort(store);
-  const interchangeAssertionsByIds =
-    reads.interchangeIdentityAssertionsByIdsAtTarget ??
-    runtime.interchangeIdentityAssertionsByIdsAtTarget;
   const references = new Map<string, CandidateIdentityReference>();
   const assertions = new Map<string, IdentityTransferAssertion>();
   const addReference = (reference: CandidateIdentityReference): void => {
@@ -215,12 +200,13 @@ async function readStateIdentityProjection<G extends GraphDef>(
   for (const reference of initialReferences) addReference(reference);
 
   if (assertionIds.length > 0) {
-    const collidingAssertions = await interchangeAssertionsByIds(
-      target,
-      assertionIds,
-      "state",
-      includeDeletedEndpoints ? undefined : { includeDeleted: false },
-    );
+    const collidingAssertions =
+      await runtime.interchangeIdentityAssertionsByIdsAtTarget(
+        target,
+        assertionIds,
+        "state",
+        includeDeletedEndpoints ? undefined : { includeDeleted: false },
+      );
     for (const assertion of collidingAssertions) addAssertion(assertion);
   }
 
@@ -239,7 +225,7 @@ async function readStateIdentityProjection<G extends GraphDef>(
     ];
     for (const id of pendingIds) expandedIds.add(id);
     if (pendingIds.length > 0) {
-      const sameIdPeers = await reads.liveNodesSharingIds(pendingIds, target);
+      const sameIdPeers = await runtime.liveNodesSharingIds(pendingIds, target);
       for (const peer of sameIdPeers) addReference(peer);
     }
 

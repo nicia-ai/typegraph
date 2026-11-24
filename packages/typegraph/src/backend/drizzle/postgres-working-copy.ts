@@ -52,7 +52,10 @@ import type {
 } from "../../query/dialect/vector-strategy";
 import { sql } from "../../query/sql-fragment";
 import { markFixedSchemaWorkingCopyBackend } from "../../store/fixed-schema-working-copy";
-import { legacyTransactionOperation } from "../../store/operation-scope";
+import {
+  enterOperation,
+  openTransactionSession,
+} from "../../store/operation-scope";
 import {
   createStore,
   createStoreWithSchema,
@@ -838,8 +841,8 @@ async function applyCloneAction(
   );
 }
 
-async function cloneRelations(
-  transaction: TransactionBackend,
+async function cloneRelations<Transaction extends TransactionBackend>(
+  transaction: Transaction,
   sourceTables: PostgresTables,
   targetTables: PostgresTables,
   targetSchema: string,
@@ -847,7 +850,7 @@ async function cloneRelations(
   vectorSlots: readonly VectorSlot[],
   sourceVectorStrategy: VectorStrategy | undefined,
   targetVectorStrategy: VectorStrategy | undefined,
-  assertSourceVersion: (transaction: TransactionBackend) => Promise<void>,
+  assertSourceVersion: (transaction: Transaction) => Promise<void>,
 ): Promise<void> {
   const source = postgresContributions(sourceTables);
   const target = postgresContributions(targetTables);
@@ -1567,7 +1570,12 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         );
       }
       await assertAllocationSession(backend, allocationId, ownershipToken);
-      await sourceBackend.transaction(async (transaction) => {
+      await sourceBackend.transaction(async (sourceTransaction) => {
+        // The clone opened this transaction on the source: its session opens
+        // here, and the clone is its one operation.
+        const transaction = enterOperation(
+          openTransactionSession(sourceTransaction),
+        ).backend;
         await assertAllocationSession(
           transaction,
           allocationId,
@@ -1585,7 +1593,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           async (lockedTransaction) => {
             const comparison = await compareBaseVersionAtTarget(
               source,
-              legacyTransactionOperation(lockedTransaction),
+              lockedTransaction,
               base,
             );
             if (!comparison.matches) {

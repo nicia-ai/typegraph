@@ -17,6 +17,7 @@ import { storeOperationsTableName } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import {
+  enterTransactionOperation,
   type OperationBackend,
   type StatementBackend,
 } from "../store/operation-scope";
@@ -54,7 +55,6 @@ import {
 } from "./errors";
 import { err, ok, type Result } from "./result";
 import {
-  enterTransactionOperation,
   type GraphDef,
   sha256Hex,
   type Store,
@@ -515,7 +515,7 @@ export async function operateStore<G extends GraphDef>(
       // One operation of the session of the transaction this call opened,
       // for its fences and evidence reads; the callback's writes enter their
       // own.
-      const backend: OperationBackend = enterTransactionOperation(tx);
+      const backend: OperationBackend = enterTransactionOperation(tx).backend;
       requireOperationStatementMembers(backend);
       await lockStoreWriteFence(backend, {
         graphId: store.graphId,

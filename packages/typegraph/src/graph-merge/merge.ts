@@ -9,6 +9,7 @@ import { parseRecordedInstant } from "../core/temporal";
 import { IdentityEndpointValidityError } from "../errors";
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import {
+  enterTransactionOperation,
   type OperationBackend,
   type StatementBackend,
 } from "../store/operation-scope";
@@ -298,7 +299,6 @@ import {
   batchPointReadVerdict,
   bindExtraIfReachable,
   compositionEdgeAttachesPart,
-  enterTransactionOperation,
   findLiveCompositionAttachment,
   findLiveCompositionWhole,
   forceRecordedGraphRevision,
@@ -315,7 +315,6 @@ import {
   storeBackend,
   storeCaptureEnabled,
   storeRuntime,
-  storeStatementPort,
   transactionAssertWritable,
   transactionDeleteNodeWithPolicy,
   TypeGraphError,
@@ -2430,7 +2429,7 @@ async function applyNodeRows<G extends GraphDef>(
       afterImages.set(mergeKey(kind, item.id), props);
     }
   }
-  return storeStatementPort(target).applyResolvedNodeUniqueness(
+  return storeRuntime(target).applyResolvedNodeUniqueness(
     txBackend,
     {
       upserts: upserts.map((upsert) => ({
@@ -2980,7 +2979,7 @@ export async function commitPlan<G extends GraphDef>(
         target.transaction(async (tx) => {
           // The commit is one operation of the session of the transaction
           // it opened; the collection writes it drives enter their own.
-          const txBackend = enterTransactionOperation(tx);
+          const txBackend = enterTransactionOperation(tx).backend;
           await lockMergeCommitFence(txBackend, target, expectedBaseVersion);
           // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
           // transaction, so the target may have been written between the base@V
@@ -6213,7 +6212,7 @@ export async function applyMergePlan<G extends GraphDef>(
             applyValidatedMergePlanInTransaction(
               target,
               tx,
-              enterTransactionOperation(tx),
+              enterTransactionOperation(tx).backend,
               artifact,
               options,
               composed,
@@ -6322,7 +6321,7 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
     }
     // One operation of the caller's transaction's session for the whole
     // apply: its fences, savepoint and direct statements.
-    const txBackend = enterTransactionOperation(tx);
+    const txBackend = enterTransactionOperation(tx).backend;
     await assertMergeTransactionPristine(effectiveTarget, txBackend);
     const decision = mergeIdentityDecisionFromArtifact(artifact, options);
     const merged = await withAdoptedMergeApplySavepoint(
@@ -7546,7 +7545,7 @@ async function commitIncrementalPlan<G extends GraphDef>(
         target.transaction(async (tx) => {
           // The commit is one operation of the session of the transaction
           // it opened; the collection writes it drives enter their own.
-          const txBackend = enterTransactionOperation(tx);
+          const txBackend = enterTransactionOperation(tx).backend;
           // The fork point carries no target base version to anchor on.
           await lockMergeCommitFence(txBackend, target, undefined);
           // Fork-point TOCTOU guard: the ancestor the whole plan was diffed

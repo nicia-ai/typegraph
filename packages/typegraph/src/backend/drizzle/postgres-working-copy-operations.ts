@@ -60,11 +60,13 @@ import {
 import {
   type EngineRevision,
   resolveLineage,
-  transactionBackend,
 } from "../../graph-merge/typegraph-internal";
 import { asBaseVersion } from "../../graph-merge/types";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
-import { legacyTransactionOperation } from "../../store/operation-scope";
+import {
+  enterTransactionOperation,
+  type OperationBackend,
+} from "../../store/operation-scope";
 import {
   lockRecordedGraphWrite,
   withTransactionPreCommitHook,
@@ -332,12 +334,9 @@ function toEvidence(row: EvidenceRow): DurableBranchOperationEvidence {
  */
 async function coordinatesAt<G extends GraphDef>(
   store: Store<G>,
-  target: TransactionBackend,
+  target: OperationBackend,
 ): Promise<DurableBranchCoordinates> {
-  const base = await computeBaseVersionAtTarget(
-    store,
-    legacyTransactionOperation(target),
-  );
+  const base = await computeBaseVersionAtTarget(store, target);
   const lineage = resolveLineage(store);
   return lineage === undefined ?
       { base }
@@ -410,7 +409,9 @@ async function operateInAllocation<G extends GraphDef>(
   // read the `before` or `outcome` a rolled-back run left behind.
   const attempts: OperationAttempt[] = [];
 
-  const recordEvidence = async (target: TransactionBackend): Promise<void> => {
+  // The pre-commit hook is handed the handle its statements go through by the
+  // Store that fires it.
+  const recordEvidence = async (target: OperationBackend): Promise<void> => {
     const attempt = attempts.at(-1);
     if (attempt?.before === undefined) return;
     const after = await coordinatesAt(store, target);
@@ -427,7 +428,10 @@ async function operateInAllocation<G extends GraphDef>(
   const run = async (transaction: TransactionContext<G>): Promise<void> => {
     const attempt: OperationAttempt = { before: undefined, outcome: undefined };
     attempts.push(attempt);
-    const target = legacyTransactionOperation(transactionBackend(transaction));
+    // One operation of the session `store.transaction` opened, for this
+    // run's own statements; `operations.apply` writes through `transaction`,
+    // whose members enter their own.
+    const target = enterTransactionOperation(transaction).backend;
     await allocation.lockSealed(target, expectedOrigin);
     const existing = await readEvidence(
       target,
