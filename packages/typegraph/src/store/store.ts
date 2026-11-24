@@ -8356,7 +8356,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * belongs to: each of its executions enters one operation of that session
    * and runs its statements through the operation's handle, hook-observed like
    * any other query statement. `backend` still supplies what the builder
-   * reads before execution (dialect, capabilities, compilation, provenance).
+   * reads before execution (dialect, capabilities, compilation, provenance),
+   * and its hook-observed form is what an operation of the session whose
+   * handle is that same transaction runs its statements through.
    */
   #createQueryForBackend<CoordinateState extends QueryCoordinateState = "open">(
     backend: StatementBackend,
@@ -8385,11 +8387,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         ...(sealedCoordinate !== undefined && { sealedCoordinate }),
         ...(expectedSchemaVersion !== undefined && { expectedSchemaVersion }),
         ...(session !== undefined && {
-          operationSource: () =>
-            this.#createHookedQueryBackend(
-              operationEntryBackend(enterOperation(session)),
-              attempt,
-            ),
+          operationSource: () => {
+            const handle = operationEntryBackend(enterOperation(session));
+            // The operation's handle is the transaction it was entered from
+            // (the brand is a phantom), so the decoration already built for
+            // that transaction above serves it; a handle that is a different
+            // object is decorated on its own. Rebuilding the same decoration
+            // per execution costs a hooked read tens of microseconds.
+            return handle === backend ? queryBackend : (
+                this.#createHookedQueryBackend(handle, attempt)
+              );
+          },
         }),
       },
     );
