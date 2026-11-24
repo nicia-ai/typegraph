@@ -4793,6 +4793,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             );
           const output = await withWriteTransactionSession(
             writeTarget,
+            txBackend,
             {
               graphId: this.graphId,
               schemaVersion: this.#schemaMetadata.schemaVersion,
