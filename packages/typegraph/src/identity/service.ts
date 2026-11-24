@@ -58,7 +58,6 @@ export {
 export type {
   IdentityCallContext,
   IdentityImportSummary,
-  IdentityServiceContext,
   IdentityTransferAssertion,
 } from "./service-types";
 export type {
