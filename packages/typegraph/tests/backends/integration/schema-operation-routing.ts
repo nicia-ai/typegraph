@@ -14,8 +14,8 @@
  * transaction, and each statement the transaction receives is attributed to
  * the operation handle it came through. Each case checks, on every backend,
  * that every transaction the engine handed the Store got exactly one session
- * (by identity), and that every statement it received came through a handle
- * of an operation of that session.
+ * (by identity), that ONE operation was entered from that session, and that
+ * every statement it received came through that operation's handle.
  */
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -31,9 +31,11 @@ import {
   type ExactBackendOverlay,
 } from "../../../src/backend/derive-backend";
 import type { AdapterBackend } from "../../../src/backend/types";
+import type { IdentityTableNames } from "../../../src/backend/types";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import { rollbackSchema } from "../../../src/schema/manager";
 import * as operationScope from "../../../src/store/operation-scope";
+import { requireDefined } from "../../../src/utils/presence";
 import type { IntegrationTestContext } from "./test-context";
 
 /** One statement member call a transaction the engine handed out received. */
@@ -42,6 +44,14 @@ type ReceivedCall = Readonly<{
   member: string;
   /** The session of the operation handle the call came through, if any. */
   session: operationScope.TransactionSession | undefined;
+  /** The operation whose handle the call came through, if any. */
+  operation: object | undefined;
+}>;
+
+/** One operation the Store entered from a session. */
+type EnteredOperation = Readonly<{
+  session: operationScope.TransactionSession;
+  operation: object;
 }>;
 
 /** One session the Store opened, and the transaction it was opened over. */
@@ -55,6 +65,7 @@ type Recording = Readonly<{
   handed: object[];
   received: ReceivedCall[];
   opened: OpenedSession[];
+  entered: EnteredOperation[];
 }>;
 
 /** Members a Store transaction may read: identity and SQL compilation. */
@@ -95,11 +106,17 @@ function deriveWithWrappedMembers<T extends object>(
  * the returned `restore()`.
  */
 function recordSchemaChannel(base: AdapterBackend<unknown>) {
-  const recording: Recording = { handed: [], received: [], opened: [] };
-  // The session of the operation handle a call is passing through right now.
-  // A handle tags synchronously around its call into the transaction, so no
-  // await separates the tag from the call it attributes.
+  const recording: Recording = {
+    handed: [],
+    received: [],
+    opened: [],
+    entered: [],
+  };
+  // The operation handle a call is passing through right now, and its
+  // session. A handle tags synchronously around its call into the
+  // transaction, so no await separates the tag from the call it attributes.
   let throughSession: operationScope.TransactionSession | undefined;
+  let throughOperation: object | undefined;
 
   function handOut<T extends object>(transaction: T): T {
     const recorded = deriveWithWrappedMembers(
@@ -110,6 +127,7 @@ function recordSchemaChannel(base: AdapterBackend<unknown>) {
             transaction: recorded,
             member,
             session: throughSession,
+            operation: throughOperation,
           });
           return call(...args);
         },
@@ -177,20 +195,25 @@ function recordSchemaChannel(base: AdapterBackend<unknown>) {
     const entry = enterOperation(scope);
     const session = operationScope.operationEntrySession(entry);
     if (session === undefined) return entry;
+    const routed: { backend?: unknown } = { ...(entry as object) };
     const handle = deriveWithWrappedMembers(
       operationScope.operationEntryBackend(entry),
       (_member, call) =>
         (...args) => {
-          const outer = throughSession;
+          const outerSession = throughSession;
+          const outerOperation = throughOperation;
           throughSession = session;
+          throughOperation = routed;
           try {
             return call(...args);
           } finally {
-            throughSession = outer;
+            throughSession = outerSession;
+            throughOperation = outerOperation;
           }
         },
     );
-    const routed: object = { ...entry, backend: handle };
+    routed.backend = handle;
+    recording.entered.push({ session, operation: routed });
     return routed as operationScope.OperationEntry;
   }
   const entered = vi
@@ -208,11 +231,12 @@ function recordSchemaChannel(base: AdapterBackend<unknown>) {
 }
 
 /**
- * Every transaction the engine handed the Store got exactly one session, and
- * every statement it received came through a handle of an operation of that
- * session. Returns the number of statements so checked.
+ * Every transaction the engine handed the Store got exactly one session, one
+ * operation was entered from that session, and every statement the
+ * transaction received came through that operation's handle. Returns the
+ * number of statements so checked.
  */
-function expectOneSessionPerHandedTransaction(recording: Recording): number {
+function expectOneOperationPerHandedTransaction(recording: Recording): number {
   expect(recording.handed.length).toBeGreaterThan(0);
   let checked = 0;
   for (const transaction of recording.handed) {
@@ -223,9 +247,15 @@ function expectOneSessionPerHandedTransaction(recording: Recording): number {
     const [only] = sessions;
     if (only === undefined) continue;
     expect(only.transaction).toBe(transaction);
+    const operations = recording.entered.filter(
+      (entered) => entered.session === only.session,
+    );
+    expect(operations).toHaveLength(1);
+    const [operation] = operations;
     for (const call of recording.received) {
       if (call.transaction !== transaction) continue;
       expect(call.session).toBe(only.session);
+      expect(call.operation).toBe(operation?.operation);
       checked += 1;
     }
   }
@@ -266,6 +296,51 @@ const disjointExtension = defineGraphExtension({
 const widgetExtension = defineGraphExtension({
   nodes: { RoutedWidget: { properties: { label: { type: "string" } } } },
 });
+
+const embeddingExtension = defineGraphExtension({
+  nodes: {
+    RoutedDocument: {
+      properties: {
+        title: { type: "string" },
+        embedding: {
+          type: "array",
+          items: { type: "number" },
+          embedding: { dimensions: 3 },
+        },
+      },
+    },
+  },
+});
+
+/** The same kind with the embedding modifier dropped: the field is orphaned. */
+const plainArrayExtension = defineGraphExtension({
+  nodes: {
+    RoutedDocument: {
+      properties: {
+        title: { type: "string" },
+        embedding: { type: "array", items: { type: "number" } },
+      },
+    },
+  },
+});
+
+function identityTablesOf(
+  backend: AdapterBackend<unknown>,
+): IdentityTableNames {
+  const names = requireDefined(backend.tableNames);
+  return {
+    identityAssertions: requireDefined(names.identityAssertions),
+    recordedIdentityAssertions: requireDefined(
+      names.recordedIdentityAssertions,
+    ),
+    identityClosure: requireDefined(names.identityClosure),
+    identitySeparation: requireDefined(names.identitySeparation),
+    identityTransitions: requireDefined(names.identityTransitions),
+    identityTransitionRetention: requireDefined(
+      names.identityTransitionRetention,
+    ),
+  };
+}
 
 function acyclicGraph(id: string, acyclic: boolean) {
   return defineGraph({
@@ -316,7 +391,7 @@ export function registerSchemaOperationRoutingIntegrationTests(
         await store.evolve(disjointExtension);
         expect(channel.recording.handed).toHaveLength(initialized + 1);
         expect(
-          expectOneSessionPerHandedTransaction(channel.recording),
+          expectOneOperationPerHandedTransaction(channel.recording),
         ).toBeGreaterThan(0);
       } finally {
         channel.restore();
@@ -334,7 +409,7 @@ export function registerSchemaOperationRoutingIntegrationTests(
         );
         expect(channel.recording.handed).toHaveLength(1);
         expect(
-          expectOneSessionPerHandedTransaction(channel.recording),
+          expectOneOperationPerHandedTransaction(channel.recording),
         ).toBeGreaterThan(0);
       } finally {
         channel.restore();
@@ -366,7 +441,7 @@ export function registerSchemaOperationRoutingIntegrationTests(
         const active = await base.getActiveSchema(id);
         expect(active?.version).toBe(2);
         expect(
-          expectOneSessionPerHandedTransaction(channel.recording),
+          expectOneOperationPerHandedTransaction(channel.recording),
         ).toBeGreaterThan(0);
       } finally {
         channel.restore();
@@ -404,7 +479,87 @@ export function registerSchemaOperationRoutingIntegrationTests(
         // One schema-write transaction per removed kind.
         expect(channel.recording.handed).toHaveLength(committed + 1);
         expect(
-          expectOneSessionPerHandedTransaction(channel.recording),
+          expectOneOperationPerHandedTransaction(channel.recording),
+        ).toBeGreaterThan(0);
+      } finally {
+        channel.restore();
+      }
+    });
+
+    it("a derived identity storage repair runs its schema-write transaction through one session", async () => {
+      const base = context.getBackend();
+      if (
+        base.schemaWriteTransaction === undefined ||
+        base.identityTableDdl === undefined ||
+        base.executeDdl === undefined ||
+        base.ensureIdentityTables === undefined
+      ) {
+        return;
+      }
+      const graph = identityGraph("schema_routing_separation_repair");
+      const identityTables = identityTablesOf(base);
+      const [seeded] = await createAdapterStoreWithSchema(graph, base);
+      const alice = await seeded.nodes.RoutedPerson.create({ name: "Alice" });
+      const bob = await seeded.nodes.RoutedPerson.create({ name: "Bob" });
+      await seeded.identity.assertDifferent(alice, bob);
+      // A deployment provisioned before the separation relation existed,
+      // whose ledger already records a separation: reopening owes the
+      // CREATE and its fill in one schema-write transaction.
+      await base.executeDdl(
+        `DROP TABLE "${identityTables.identitySeparation.replaceAll('"', '""')}"`,
+      );
+      const channel = recordSchemaChannel(base);
+      try {
+        const [reopened] = await createAdapterStoreWithSchema(
+          graph,
+          channel.backend,
+        );
+        expect(channel.recording.handed).toHaveLength(1);
+        expect(await reopened.identity.areDifferent(alice, bob)).toBe(true);
+        expect(
+          expectOneOperationPerHandedTransaction(channel.recording),
+        ).toBeGreaterThan(0);
+      } finally {
+        channel.restore();
+        await base.ensureIdentityTables(identityTables, {
+          provisionMissing: true,
+        });
+      }
+    });
+
+    it("a removed vector field's reclamation runs through one session", async () => {
+      const base = context.getBackend();
+      if (
+        base.capabilities.vector?.supported !== true ||
+        base.vectorStrategy === undefined ||
+        base.schemaWriteTransaction === undefined
+      ) {
+        return;
+      }
+      const channel = recordSchemaChannel(base);
+      try {
+        const [store] = await createAdapterStoreWithSchema(
+          defineGraph({ id: "schema_routing_vector", nodes: {}, edges: {} }),
+          channel.backend,
+        );
+        const withField = await store.evolve(embeddingExtension);
+        await withField
+          .getNodeCollectionOrThrow("RoutedDocument")
+          .create({ title: "a", embedding: [1, 0, 0] });
+        const evolved = await withField.evolve(plainArrayExtension);
+        const before = channel.recording.handed.length;
+        const result = await evolved.materializeRemovals();
+        expect(result.reclaimedVectorFields).toEqual([
+          {
+            kind: "RoutedDocument",
+            fieldPath: "embedding",
+            status: "reclaimed",
+          },
+        ]);
+        // One schema-write transaction per orphaned field.
+        expect(channel.recording.handed).toHaveLength(before + 1);
+        expect(
+          expectOneOperationPerHandedTransaction(channel.recording),
         ).toBeGreaterThan(0);
       } finally {
         channel.restore();
@@ -444,7 +599,7 @@ export function registerSchemaOperationRoutingIntegrationTests(
         );
         expect(channel.recording.handed).toHaveLength(settled + 1);
         expect(
-          expectOneSessionPerHandedTransaction(channel.recording),
+          expectOneOperationPerHandedTransaction(channel.recording),
         ).toBeGreaterThan(0);
       } finally {
         channel.restore();
