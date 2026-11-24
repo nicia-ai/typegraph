@@ -596,9 +596,13 @@ describe("identity transition log", () => {
     await store.nodes.Person.create({ name: "C" }, { id: "c" });
     const recordedNow = requireRecordedNow(await store.recordedNow());
     const revisionBeforePrune = recordedInstantRevision(recordedNow);
-    const pruneResult = await pruneIdentityTransitionsForContext(ctx, {
-      beforeRecorded: recordedNow,
-    });
+    const pruneResult = await pruneIdentityTransitionsForContext(
+      ctx,
+      storeRuntime(store).backend,
+      {
+        beforeRecorded: recordedNow,
+      },
+    );
     expect(pruneResult.pruned).toBe(before.length);
     const afterPrune = await readTransitions(ctx);
     expect(afterPrune.length).toBe(0);
@@ -1028,6 +1032,7 @@ describe("identity transition log", () => {
     const now = new Date().toISOString();
     await applyIdentityChangesForContext(
       ctx,
+      storeRuntime(store).backend,
       [],
       [
         {

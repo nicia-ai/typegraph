@@ -30,7 +30,6 @@ import {
   MigrationError,
   StaleVersionError,
 } from "../src";
-import type { TransactionBackend } from "../src/backend";
 import { projectBackendWithout } from "../src/backend/derive-backend";
 import {
   createLocalSqliteBackend,
@@ -50,6 +49,10 @@ import {
   initializeSchema,
   migrateSchema,
 } from "../src/schema";
+import {
+  type OperationEntry,
+  operationEntryBackend,
+} from "../src/store/operation-scope";
 import { storeRuntime } from "../src/store/runtime-port";
 import { requireDefined } from "../src/utils/presence";
 import { matchingObject } from "./test-utils";
@@ -163,10 +166,10 @@ function identitySchema(result: LocalSqliteBackendResult): SqlSchema {
  */
 async function rebuildSeparationFromLedger(
   result: LocalSqliteBackendResult,
-  target: GraphBackend | TransactionBackend,
+  entry: OperationEntry,
 ): Promise<void> {
   await rebuildIdentityClosureForContext<typeof enabledGraph>({
-    backend: target,
+    backend: operationEntryBackend(entry),
     graphId: GRAPH_ID,
     registry: buildKindRegistry(enabledGraph),
     schema: identitySchema(result),
@@ -525,8 +528,8 @@ describe("Operational Identity provisioning + enablement gating", () => {
           graphId: GRAPH_ID,
           enablement: false,
           registry: buildKindRegistry(enabledGraph),
-          recomputeDerivedRelations: (target) =>
-            rebuildSeparationFromLedger(result, target),
+          recomputeDerivedRelations: (entry) =>
+            rebuildSeparationFromLedger(result, entry),
         },
       );
 
@@ -577,8 +580,8 @@ describe("Operational Identity provisioning + enablement gating", () => {
             graphId: GRAPH_ID,
             enablement: false,
             registry: buildKindRegistry(enabledGraph),
-            recomputeDerivedRelations: (target) =>
-              rebuildSeparationFromLedger(result, target),
+            recomputeDerivedRelations: (entry) =>
+              rebuildSeparationFromLedger(result, entry),
           }),
         ).rejects.toThrow(
           expect.objectContaining({
@@ -623,8 +626,8 @@ describe("Operational Identity provisioning + enablement gating", () => {
           graphId: GRAPH_ID,
           enablement: false,
           registry: buildKindRegistry(enabledGraph),
-          recomputeDerivedRelations: (target) =>
-            rebuildSeparationFromLedger(result, target),
+          recomputeDerivedRelations: (entry) =>
+            rebuildSeparationFromLedger(result, entry),
         },
       );
 

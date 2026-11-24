@@ -9,7 +9,9 @@ import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
+  type OperationEntry,
   type StatementBackend,
   type StoreTransactionBackend,
 } from "../store/operation-scope";
@@ -61,7 +63,10 @@ import {
   lockIdentityGraph,
   refKey,
 } from "./service-read";
-import { type IdentityServiceContext } from "./service-types";
+import {
+  type IdentityCallContext,
+  type IdentityServiceContext,
+} from "./service-types";
 import {
   executeIdentityStatement,
   identityChunkSize,
@@ -81,7 +86,7 @@ import {
  * offer — can drive the same rebuild the Store drives.
  */
 export type IdentityRebuildContext<G extends GraphDef> = Pick<
-  IdentityServiceContext<G>,
+  IdentityCallContext<G>,
   "backend" | "graphId" | "registry" | "schema" | "sameIdAcrossKinds"
 >;
 
@@ -112,16 +117,17 @@ function requireAtomicIdentityBackend(backend: Backend, graphId: string): void {
 
 /**
  * Runs `fn` against a transactional target. A top-level `GraphBackend` opens
- * one; a `TransactionBackend` is already inside the caller's transaction and
- * has no `transaction` method to nest with, so it runs as-is.
+ * one, and opens its session where it opens it: `fn` is that session's one
+ * operation. An operation's handle is already inside the caller's transaction
+ * and has no `transaction` method to nest with, so it runs as-is.
  */
 async function runOnTransactionIfSupported(
   backend: StatementBackend,
   fn: (target: Backend) => Promise<void>,
 ): Promise<void> {
   if ("transaction" in backend) {
-    await backend.transaction(async (target: StoreTransactionBackend) =>
-      fn(legacyTransactionOperation(target)),
+    await backend.transaction(async (transaction: StoreTransactionBackend) =>
+      fn(enterOperation(openTransactionSession(transaction)).backend),
     );
     return;
   }
@@ -137,10 +143,7 @@ async function runOnTransactionIfSupported(
 export async function rebuildIdentityClosureForContext<G extends GraphDef>(
   ctx: IdentityRebuildContext<G>,
 ): Promise<void> {
-  requireAtomicIdentityBackend(
-    legacyTransactionOperation(ctx.backend),
-    ctx.graphId,
-  );
+  requireAtomicIdentityBackend(ctx.backend, ctx.graphId);
 
   async function rebuildAtTarget(target: Backend): Promise<void> {
     await lockIdentityGraph(target, ctx.graphId);
@@ -165,19 +168,15 @@ export async function rebuildIdentityClosureForContext<G extends GraphDef>(
     });
   }
 
-  await runOnTransactionIfSupported(
-    legacyTransactionOperation(ctx.backend),
-    async (target) => rebuildAtTarget(target),
+  await runOnTransactionIfSupported(ctx.backend, async (target) =>
+    rebuildAtTarget(target),
   );
 }
 
 export async function validateIdentityForContext<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
 ): Promise<void> {
-  requireAtomicIdentityBackend(
-    legacyTransactionOperation(ctx.backend),
-    ctx.graphId,
-  );
+  requireAtomicIdentityBackend(ctx.backend, ctx.graphId);
 
   async function validateAtTarget(target: Backend): Promise<void> {
     await lockIdentityGraph(target, ctx.graphId);
@@ -206,9 +205,8 @@ export async function validateIdentityForContext<G extends GraphDef>(
     );
   }
 
-  await runOnTransactionIfSupported(
-    legacyTransactionOperation(ctx.backend),
-    async (target) => validateAtTarget(target),
+  await runOnTransactionIfSupported(ctx.backend, async (target) =>
+    validateAtTarget(target),
   );
 }
 
@@ -758,6 +756,8 @@ export async function diffFullRebuildTransitions(
  */
 export async function removeIdentityKindsForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
+  // Where the cascade enters the write executor; see `runIdentityMutation`.
+  entry: OperationEntry,
   kinds: readonly string[],
   options?: Readonly<{ repairClosure?: boolean }>,
 ): Promise<void> {
@@ -808,6 +808,7 @@ export async function removeIdentityKindsForContext<G extends GraphDef>(
         validAt: nowIso(),
       });
     },
+    entry,
   );
 }
 
