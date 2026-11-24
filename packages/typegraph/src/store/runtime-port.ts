@@ -42,9 +42,10 @@ import type { EvolutionPlan } from "../schema/evolution-plan";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { requireDefined } from "../utils/presence";
 import { type InternalGraphAlgorithms } from "./algorithms";
-import type {
-  StatementBackend,
-  StoreTransactionBackend,
+import {
+  requireTransactionRuntime,
+  type StatementBackend,
+  type StoreTransactionBackend,
 } from "./operation-scope";
 import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
 import type { Store } from "./store";
@@ -770,18 +771,6 @@ export async function runInTransactionContext<
   } finally {
     activeTransactionContexts.delete(runtime);
   }
-}
-
-function requireTransactionRuntime(
-  transaction: TransactionRuntimePort,
-): TransactionRuntime {
-  const runtime = transaction[TRANSACTION_RUNTIME];
-  if (runtime === undefined) {
-    throw new TypeError(
-      "Cannot access this transaction's runtime port. The transaction may come from an incompatible TypeGraph version.",
-    );
-  }
-  return runtime;
 }
 
 /**

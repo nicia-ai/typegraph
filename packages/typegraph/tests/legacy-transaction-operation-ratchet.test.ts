@@ -60,8 +60,8 @@ const FAMILY_BASELINE = {
   "capture and flush": 10,
   "schema and evolution": 12,
   "merge and durable operations": 31,
-  "provenance and interchange": 7,
-  "working copies": 3,
+  "provenance and interchange": 0,
+  "working copies": 0,
 } as const satisfies Record<Family, number>;
 
 type InventoryEntry = Readonly<{ count: number; family: Family }>;
@@ -226,48 +226,14 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
     family: "merge and durable operations",
   },
 
-  // --- provenance and interchange
-  "src/graph-merge/provenance-store.ts#claimSidecarOwnership": {
-    count: 1,
-    family: "provenance and interchange",
-  },
-  "src/provenance/holds.ts#readBelievedFacts": {
-    count: 1,
-    family: "provenance and interchange",
-  },
-  "src/provenance/holds.ts#assertFactsHold": {
-    count: 1,
-    family: "provenance and interchange",
-  },
-  "src/provenance/locks.ts#acquireCapabilityReadLock": {
-    count: 1,
-    family: "provenance and interchange",
-  },
-  "src/provenance/transition.ts#runTransition": {
-    count: 1,
-    family: "provenance and interchange",
-  },
-  "src/interchange/export.ts#exportGraphStreamFromBackend": {
-    count: 1,
-    family: "provenance and interchange",
-  },
-  "src/identity/interchange-read.ts#readIdentityAssertionsForInterchange": {
-    count: 1,
-    family: "provenance and interchange",
-  },
+  // --- provenance and interchange: none. Provenance enters an operation of
+  // the session its transaction context carries (`enterTransactionOperation`);
+  // the sidecar claim and the export open the session of the transaction they
+  // open; the interchange identity read is handed its caller's target.
 
-  // --- working copies: engine-layer code that consumes the Store's
-  // transaction port and Store functions.
-  "src/backend/drizzle/postgres-working-copy-operations.ts#coordinatesAt": {
-    count: 1,
-    family: "working copies",
-  },
-  "src/backend/drizzle/postgres-working-copy-operations.ts#operateInAllocation":
-    { count: 1, family: "working copies" },
-  "src/backend/drizzle/postgres-working-copy.ts#allocate": {
-    count: 1,
-    family: "working copies",
-  },
+  // --- working copies: none. A durable operation enters an operation of the
+  // session its transaction context carries, and the clone opens the session
+  // of the source transaction it opens.
 };
 
 /**

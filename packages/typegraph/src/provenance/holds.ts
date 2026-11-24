@@ -15,8 +15,10 @@ import {
   type FactNotHoldingPremise,
   type FactNotHoldingReason,
 } from "../errors";
-import { legacyTransactionOperation } from "../store/operation-scope";
-import { transactionBackend } from "../store/runtime-port";
+import {
+  enterTransactionOperation,
+  type Operation,
+} from "../store/operation-scope";
 import { type TransactionContext } from "../store/types";
 import { compareStrings } from "../utils/compare";
 import { type NormalizedConfig } from "./config";
@@ -61,8 +63,9 @@ export async function believedFactsInOwnTransaction<
   scope: CapabilityScope,
   tx: TransactionContext<G>,
 ): Promise<readonly ProvenanceFactRef<G, FactKind>[]> {
-  await acquireCapabilityReadLock(tx, scope.graphId);
-  return readBelievedFacts<G, FactKind>(scope, tx);
+  const operation = enterTransactionOperation(tx);
+  await acquireCapabilityReadLock(operation, scope.graphId);
+  return readBelievedFacts<G, FactKind>(scope, operation);
 }
 
 /**
@@ -79,7 +82,7 @@ export async function believedFactsInCallerTransaction<
   tx: TransactionContext<G>,
 ): Promise<readonly ProvenanceFactRef<G, FactKind>[]> {
   await acquireCallerTransactionReadLocks(tx);
-  return readBelievedFacts<G, FactKind>(scope, tx);
+  return readBelievedFacts<G, FactKind>(scope, enterTransactionOperation(tx));
 }
 
 async function readBelievedFacts<
@@ -87,10 +90,10 @@ async function readBelievedFacts<
   FactKind extends NodeKind<G>,
 >(
   scope: CapabilityScope,
-  tx: TransactionContext<G>,
+  operation: Operation,
 ): Promise<readonly ProvenanceFactRef<G, FactKind>[]> {
   const graph = await loadSupportGraph(
-    legacyTransactionOperation(transactionBackend(tx)),
+    operation.backend,
     scope.registry,
     scope.graphId,
     scope.config,
@@ -135,7 +138,7 @@ export async function assertFactsHold<
 
   await acquireCapabilityWriteLocks(tx, ASSERT_HOLDS_OPERATION);
   const graph = await loadSupportClosure(
-    legacyTransactionOperation(transactionBackend(tx)),
+    enterTransactionOperation(tx).backend,
     scope.registry,
     scope.graphId,
     scope.config,
