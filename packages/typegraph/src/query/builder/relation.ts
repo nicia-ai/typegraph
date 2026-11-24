@@ -1,4 +1,5 @@
 import { backendDerivationRoot } from "../../backend/derive-backend";
+import { executesOnExecutionTarget } from "../../backend/transaction-origin";
 import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import {
   ConfigurationError,
@@ -1055,9 +1056,10 @@ export class ExecutableRelationQuery<
       throw new ConfigurationError(
         "Derived relations are unavailable inside withCheckedReads().",
       );
+    const executionTarget = this.#definition.provenance.executionTarget;
     if (
-      backendDerivationRoot(target) !==
-      this.#definition.provenance.executionTarget
+      executionTarget === undefined ||
+      !executesOnExecutionTarget(target, executionTarget)
     )
       throw new ConfigurationError(
         "A relation cannot execute on a different database or transaction target.",

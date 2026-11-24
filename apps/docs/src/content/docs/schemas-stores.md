@@ -3038,8 +3038,14 @@ contract. Use `batch()` when those queued collection reads or sequential executi
 
 Runs several independent queries in sequence and returns a typed tuple of results preserving input
 order — N query executions, never one round trip. Accepts two or more queries (from `.select()`,
-set operations, or edge collection `batchFind*` methods), each keeping its own projection,
-filtering, sorting, and pagination.
+`.project()`, `.aggregate()`, relations, set operations, or edge collection `batchFind*`
+methods), each keeping its own projection, filtering, sorting, and pagination.
+
+A relation-backed read — a relation, or an aggregate, which runs as one — executes on the backend it
+was built on or in a transaction that backend opened, so it runs in the transaction `batch()`
+opens, and `executeOn()` accepts a transaction the caller opened on the same backend. One built on
+a different database, or inside a transaction it has left, is refused with `ConfigurationError`
+before its statement.
 
 **Cost.** At least one statement per query. Whole-node, whole-edge, and spread selections detected
 during planning use a full fetch from the start. A selector branch that depends on actual row

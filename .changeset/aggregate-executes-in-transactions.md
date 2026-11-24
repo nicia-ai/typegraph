@@ -1,0 +1,5 @@
+---
+"@nicia-ai/typegraph": patch
+---
+
+An aggregate query, and any relation (`asRelation()`, derived relations, a bound prepared relation), now executes through `store.batch()` and through `executeOn()` with a transaction opened on the backend it was built on, returning what `execute()` returns. Both entry points accepted these reads by type and then refused them with `ConfigurationError: A relation cannot execute on a different database or transaction target.`, because the relation's target check compared derivation roots and a transaction backend is not a derivation of the backend that opened it. The bundled backends now record which backend opened or adopted each transaction, and the relation's target check accepts that backend's own transactions. A relation-backed read built against a different database, or inside a transaction and run outside it, is still refused before any statement. A hand-written `GraphBackend` records no transaction origin, so on such a backend these reads keep refusing a transaction target as before.
