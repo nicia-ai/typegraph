@@ -88,21 +88,19 @@ const PREFLIGHT_HANDLE_ANNOTATION: Edit = {
 };
 
 /**
- * P2: a statement on an allowlisted public parameter, before the shim the
+ * P2: a statement on an allowlisted public parameter, before the mint the
  * body already calls.
  */
 const STATEMENT_ON_PUBLIC_PARAMETER: Edit = {
   file: "src/query/builder/executable-projection-query.ts",
   replacements: [
     [
-      `    const rows = await this.#fetchRows(
-      legacyTransactionOperation(backend),
-      this.toAst(),
+      `    return this.#executeOnStatementBackend(() =>
+      operationEntryBackend(enterTargetOperation(backend)),
     );`,
-      `    await backend.getNode("graph", "Kind", "id");
-    const rows = await this.#fetchRows(
-      legacyTransactionOperation(backend),
-      this.toAst(),
+      `    void backend.getNode("graph", "Kind", "id");
+    return this.#executeOnStatementBackend(() =>
+      operationEntryBackend(enterTargetOperation(backend)),
     );`,
     ],
   ],
