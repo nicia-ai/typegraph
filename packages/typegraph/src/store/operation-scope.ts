@@ -104,7 +104,7 @@ export type StatementBackend = GraphBackend | OperationBackend;
  * ({@link SchemaWriteTransactionBackend}) or the schema-commit preflight
  * target ({@link SchemaCommitPreflightBackend}). A mint hands back a handle to
  * THAT type, so a specialisation is a privilege: it reaches DDL. It is
- * therefore recorded in a REQUIRED phantom ({@link EngineRecordOf}) under a
+ * therefore recorded in a REQUIRED phantom ({@link EngineEvidence}) under a
  * module-private key that no value has and no other module can spell. No
  * engine transaction is assignable to a specialised form, so annotating an
  * ordinary transaction callback with one is a type error. The only callbacks
@@ -117,7 +117,7 @@ export type StatementBackend = GraphBackend | OperationBackend;
  */
 export type StoreTransactionBackend<
   Engine extends TransactionBackend = TransactionBackend,
-> = Readonly<BackendIdentity & SqlCompilationBackend & EngineRecordOf<Engine>>;
+> = Readonly<BackendIdentity & SqlCompilationBackend & EngineEvidence<Engine>>;
 
 /**
  * The phantom a specialised {@link StoreTransactionBackend}, or a handle to a
@@ -141,6 +141,25 @@ type EngineRecordOf<T> =
       unknown
     : EngineRecord<T>
   : unknown;
+
+/**
+ * The {@link EngineRecord} a Store transaction must carry to be named as
+ * `Engine`: none for the plain {@link TransactionBackend} alone, and one for
+ * every other engine type — one with a member the plain transaction lacks,
+ * one that only narrows a member, and the pooled root's type, whose
+ * `transaction` member no transaction has. Every session and operation
+ * specialisation is opened from a Store transaction of its engine type
+ * ({@link openTransactionSession}), so an engine type exempt here could be
+ * named onto an ordinary transaction through that mint's type argument.
+ * Stricter than {@link EngineRecordOf}, which describes a handle, where the
+ * root (or a root-or-handle union) is honestly what the value is.
+ */
+type EngineEvidence<Engine extends TransactionBackend> =
+  [TransactionBackend] extends [Engine] ?
+    [Exclude<keyof Engine, keyof TransactionBackend>] extends [never] ?
+      unknown
+    : EngineRecord<Engine>
+  : EngineRecord<Engine>;
 
 /**
  * TRANSITIONAL: the handle for Store code not yet converted to mint one

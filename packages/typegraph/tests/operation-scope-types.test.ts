@@ -13,6 +13,7 @@ import {
   enterTargetOperation,
   type EntryScope,
   legacyTransactionOperation,
+  openTransactionSession,
   type Operation,
   type OperationBackend,
   type OperationEntry,
@@ -30,6 +31,36 @@ import {
 import type { executeEdgeCreate } from "../src/store/operations/edge-operations";
 
 type EdgeCreateBackend = Parameters<typeof executeEdgeCreate>[2];
+
+/**
+ * An engine transaction that adds no member but narrows one: a specialisation
+ * all the same, since its handle promises what an ordinary one does not.
+ */
+type NarrowedTransactionBackend = TransactionBackend &
+  Readonly<{
+    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+  }>;
+
+/**
+ * Never called: an ordinary Store transaction cannot open a session, and an
+ * ordinary session cannot enter an operation, of any engine type beyond the
+ * ordinary one. `tsc` reports a `@ts-expect-error` that has no error.
+ */
+function fabricateSpecialisations(
+  transaction: StoreTransactionBackend,
+  session: TransactionSession,
+) {
+  return [
+    // @ts-expect-error -- the pooled backend's `transaction` is not this transaction's
+    openTransactionSession<GraphBackend>(transaction),
+    // @ts-expect-error -- a narrowed member is a specialisation too
+    openTransactionSession<NarrowedTransactionBackend>(transaction),
+    // @ts-expect-error -- only its boundary mint grants the schema-write transaction
+    openTransactionSession<SchemaWriteTransactionBackend>(transaction),
+    // @ts-expect-error -- an ordinary session enters ordinary operations only
+    enterOperation<GraphBackend>(session),
+  ] as const;
+}
 
 /** Never called: resolves the session overload of the mint. */
 function enteredFromSession(session: TransactionSession) {
@@ -111,6 +142,30 @@ describe("a specialised Store transaction", () => {
     expectTypeOf<StoreTransactionBackend>().not.toExtend<
       StoreTransactionBackend<SchemaCommitPreflightBackend>
     >();
+  });
+
+  // The second review's edit: `openTransactionSession<GraphBackend>(tx)` over
+  // an ordinary transaction, whose operation's handle then promised the pooled
+  // backend's `transaction` member. Every engine type beyond the ordinary
+  // transaction, one that only narrows a member included, needs the record.
+  it("is never named onto an ordinary transaction, the pooled backend included", () => {
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<
+      StoreTransactionBackend<GraphBackend>
+    >();
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<
+      StoreTransactionBackend<NarrowedTransactionBackend>
+    >();
+    expectTypeOf<OperationBackend>().not.toExtend<
+      OperationScoped<GraphBackend>
+    >();
+    expectTypeOf<OperationBackend>().not.toExtend<
+      OperationScoped<NarrowedTransactionBackend>
+    >();
+    expectTypeOf<TransactionSession>().not.toExtend<
+      TransactionSession<GraphBackend>
+    >();
+    expectTypeOf<Operation>().not.toExtend<Operation<GraphBackend>>();
+    expectTypeOf(fabricateSpecialisations).toBeFunction();
   });
 
   it("is claimed by no ordinary handle either", () => {
