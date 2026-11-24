@@ -98,6 +98,10 @@ import {
 } from "../src/query/sql-fragment";
 import { buildKindRegistry } from "../src/registry/builders";
 import {
+  type OperationEntry,
+  operationEntryBackend,
+} from "../src/store/operation-scope";
+import {
   allocateRecordedCommit,
   lockRecordedGraphWrite,
 } from "../src/store/recorded-capture/clock";
@@ -851,11 +855,9 @@ function identityProvisioningOptions(
     graphId: identityGraph.id,
     enablement: false as const,
     registry,
-    recomputeDerivedRelations: (
-      target: Parameters<typeof rebuildIdentityClosureForContext>[0]["backend"],
-    ) =>
+    recomputeDerivedRelations: (entry: OperationEntry) =>
       rebuildIdentityClosureForContext({
-        backend: target,
+        backend: operationEntryBackend(entry),
         graphId: identityGraph.id,
         registry,
         schema,

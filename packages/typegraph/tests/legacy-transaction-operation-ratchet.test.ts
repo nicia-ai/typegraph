@@ -56,7 +56,7 @@ const FAMILY_BASELINE = {
   "node writes": 0,
   "edge writes": 0,
   "query terminals and tx.backend": 0,
-  "identity and search facades": 40,
+  "identity and search facades": 0,
   "capture and flush": 10,
   "schema and evolution": 12,
   "merge and durable operations": 31,
@@ -88,111 +88,14 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
   // batch finders) enters through `enterTargetOperation`, and an iterative
   // algorithm opens the session of the read transaction it opens.
 
-  // --- identity and search facades
-  "src/identity/replay.ts#currentClassMembers": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/identity/replay.ts#everConnectedReferences": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/identity/replay.ts#uncapturedClassMembers": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/identity/replay.ts#unattributedRestoredTransitions": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/identity/replay.ts#walkClassLineage": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/identity/replay.ts#reconstructAt": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/identity/replay.ts#walkedTransitionsFor": {
-    count: 3,
-    family: "identity and search facades",
-  },
-  "src/identity/service-facade.ts#runIdentityMutation": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/identity/service-facade.ts#loadCurrentIdentityClassPage": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/identity/service-facade.ts#classes": {
-    count: 2,
-    family: "identity and search facades",
-  },
-  "src/identity/service-facade.ts#areDifferent": {
-    count: 6,
-    family: "identity and search facades",
-  },
-  "src/identity/service-facade.ts#assertionsOf": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/identity/service-facade.ts#explainSame": {
-    count: 3,
-    family: "identity and search facades",
-  },
-  "src/identity/service-maintenance.ts#runOnTransactionIfSupported": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/identity/service-maintenance.ts#rebuildIdentityClosureForContext": {
-    count: 2,
-    family: "identity and search facades",
-  },
-  "src/identity/service-maintenance.ts#validateIdentityForContext": {
-    count: 2,
-    family: "identity and search facades",
-  },
-  "src/identity/service-read.ts#visibleMembersAtCoordinate": {
-    count: 2,
-    family: "identity and search facades",
-  },
-  "src/store/store.ts#StoreImplementation.identityAssertionsAtTarget": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/store/store.ts#StoreImplementation.identityAssertionsTouchingAtTarget": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/store/store.ts#StoreImplementation.readIdentityAssertionPageAtTarget": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/store/store.ts#StoreImplementation.readIdentityTransitionPageAtTarget": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/store/store.ts#StoreImplementation.identityTransitionRetentionAtTarget":
-    { count: 1, family: "identity and search facades" },
-  "src/store/store.ts#StoreImplementation.assertIdentityClassesConsistentAtTarget":
-    { count: 1, family: "identity and search facades" },
-  "src/store/store.ts#StoreImplementation.applyIdentityMergeAtTarget": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/store/store.ts#rebuildIdentityClosureWithSchemaFence": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/store/fulltext-rebuild.ts#rebuildFulltextIndex": {
-    count: 1,
-    family: "identity and search facades",
-  },
-  "src/store/store.ts#StoreImplementation.rebuildContribution": {
-    count: 1,
-    family: "identity and search facades",
-  },
+  // --- identity and search facades: none. Each call of an identity facade
+  // enters one operation of the facade's scope (the root, or the session of
+  // the transaction context that offers it) after its refusals, and runs under
+  // a context built over that operation's handle; a Store identity port call
+  // whose target arrives through a signature the public API spells enters
+  // through `enterTargetOperation`; and identity maintenance, the fulltext
+  // rebuild and the contribution rebuild open a session where they open their
+  // transaction.
 
   // --- capture and flush: session-level work, and the places the three
   // transaction kinds open or join the native transaction. The end state
@@ -381,17 +284,19 @@ const LEGACY_WRITE_ENTRY = {
 } as const;
 
 const LEGACY_WRITE_ENTRY_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
-  // An identity mutation with no transaction context: a maintenance or
-  // schema-preflight removal, an interchange or merge apply, a prune. The
-  // facade a transaction context offers passes its session instead.
-  "src/identity/service-facade.ts#runIdentityMutation": {
+  // RAISED from 0 by the identity and search facades conversion, which
+  // moved these two here from `runIdentityMutation` and
+  // `rebuildIdentityClosureWithSchemaFence`: an identity mutation and the
+  // closure recompute now take their write entry from their caller, and these
+  // two callers hold a bare handle and no session (the kind-removal cascade
+  // the schema-commit preflight runs, and the derived-relation fence that
+  // hands the recompute port its transaction). That family's conversion
+  // opens a session where those transactions open and removes both.
+  "src/store/store.ts#StoreImplementation.removeIdentityKindsInSchemaPreflight":
+    { count: 1, family: "schema and evolution" },
+  "src/identity/schema-transition.ts#provisionDerivedRelations": {
     count: 1,
-    family: "identity and search facades",
-  },
-  // Startup repair and the schema-transition recompute.
-  "src/store/store.ts#rebuildIdentityClosureWithSchemaFence": {
-    count: 1,
-    family: "identity and search facades",
+    family: "schema and evolution",
   },
   // The privileged runtime port's `deleteNodeWithPolicy(target, …)`, whose
   // `target` parameter the public API report spells.
@@ -406,9 +311,9 @@ const LEGACY_WRITE_ENTRY_FAMILY_BASELINE = {
   "node writes": 0,
   "edge writes": 0,
   "query terminals and tx.backend": 0,
-  "identity and search facades": 2,
+  "identity and search facades": 0,
   "capture and flush": 0,
-  "schema and evolution": 0,
+  "schema and evolution": 2,
   "merge and durable operations": 1,
   "provenance and interchange": 0,
   "working copies": 0,

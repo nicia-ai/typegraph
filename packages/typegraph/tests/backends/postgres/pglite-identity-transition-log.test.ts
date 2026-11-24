@@ -24,10 +24,12 @@ import {
   asRecordedInstant,
   recordedInstantWallTime,
 } from "../../../src/core/temporal";
-import { identityTransitionsOf } from "../../../src/identity/replay";
 import { createStore } from "../../../src/store";
-import { storeRuntime } from "../../../src/store/runtime-port";
 import { isCanonicalIsoDate } from "../../../src/utils/date";
+import {
+  rootIdentityCallContext,
+  transitionsOfAt,
+} from "../../helpers/identity-call";
 import {
   expectTransitionLogRefusesMissingRelations,
   TRANSITION_LOG_RELATIONS,
@@ -54,8 +56,8 @@ describe("identity transition log on PGlite (PostgreSQL dialect)", () => {
         { kind: "Person", id: bob.id },
       );
 
-      const ctx = storeRuntime(store).identityContext();
-      const { transitions } = await identityTransitionsOf(ctx, {
+      const ctx = rootIdentityCallContext(store);
+      const { transitions } = await transitionsOfAt(ctx, {
         kind: "Person",
         id: alice.id,
       });
