@@ -28,8 +28,10 @@ import { IdentityMergeConflictError } from "../../src/graph-merge/errors";
 import { applyMergePlan, merge, planMerge } from "../../src/graph-merge/merge";
 import { isErr, isOk, unwrap } from "../../src/graph-merge/result";
 import { asBranchId } from "../../src/graph-merge/types";
-import { identityTransitionsOf } from "../../src/identity/replay";
-import { storeRuntime } from "../../src/store/runtime-port";
+import {
+  rootIdentityCallContext,
+  transitionsOfAt,
+} from "../helpers/identity-call";
 import { backendMatrix } from "./test-utils";
 
 const Person = defineNode("Person", { schema: z.object({ name: z.string() }) });
@@ -118,8 +120,8 @@ describe.each(backendMatrix())(
       if (isErr(applied)) throw applied.error;
       expect(applied.data.merged.identity.asserted).toBe(1);
 
-      const ctx = storeRuntime(target).identityContext();
-      const { transitions } = await identityTransitionsOf(ctx, {
+      const ctx = rootIdentityCallContext(target);
+      const { transitions } = await transitionsOfAt(ctx, {
         kind: "Person",
         id: "ada",
       });
@@ -184,8 +186,8 @@ describe.each(backendMatrix())(
           if (isErr(applied)) throw applied.error;
         }
 
-        const ctx = storeRuntime(target).identityContext();
-        const { transitions } = await identityTransitionsOf(ctx, {
+        const ctx = rootIdentityCallContext(target);
+        const { transitions } = await transitionsOfAt(ctx, {
           kind: "Person",
           id: "ada",
         });

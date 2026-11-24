@@ -72,18 +72,18 @@ import {
   recordedInstantRevision,
 } from "../../src/core/temporal";
 import {
-  identityReplay,
-  identityTransitionsOf,
-} from "../../src/identity/replay";
-import {
   IdentityContradictionError,
   IdentityEndpointValidityError,
   IdentityValidityWindowError,
   type TransitionPageCursor,
 } from "../../src/identity-entry";
-import { storeRuntime } from "../../src/store/runtime-port";
 import { nowIso } from "../../src/utils/date";
 import { requireDefined } from "../../src/utils/presence";
+import {
+  replayAt,
+  rootIdentityCallContext,
+  transitionsOfAt,
+} from "../helpers/identity-call";
 import { createTestBackend } from "../test-utils";
 import { propertyRuns } from "./run-budget";
 
@@ -394,7 +394,7 @@ async function expectExhaustiveLineage(
   const bornAt = run.bornAt.get(key);
   if (bornAt === undefined) return;
   const born: number = bornAt;
-  const ctx = storeRuntime(store).identityContext();
+  const ctx = rootIdentityCallContext(store);
   const revisions = [...recordedByRevision.keys()]
     .filter((revision) => revision >= born)
     .toSorted((left, right) => left - right);
@@ -449,7 +449,7 @@ async function expectExhaustiveLineage(
   // read cannot see the change yet: a revision touched ONLY by such rows is
   // exempt from "changed", and the positive check below confirms the note
   // still fires where it must.
-  const { transitions } = await identityTransitionsOf(ctx, ref, {
+  const { transitions } = await transitionsOfAt(ctx, ref, {
     limit: 2000,
   });
   // `transitionsOf` and `replay` answer ascending by recorded revision.
@@ -517,7 +517,7 @@ async function expectExhaustiveLineage(
     ).toBe(true);
   }
 
-  const replay = await identityReplay(ctx, ref, { limit: 2000 });
+  const replay = await replayAt(ctx, ref, { limit: 2000 });
   const stepRevisions = replay.steps.map((step) =>
     revisionOf(step.transition.recorded),
   );

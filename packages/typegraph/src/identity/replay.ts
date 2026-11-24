@@ -28,7 +28,6 @@ import {
   ValidationError,
 } from "../errors";
 import { readGraphAllocationOwner } from "../store/allocation-owner";
-import { legacyTransactionOperation } from "../store/operation-scope";
 import { hasPendingIdentityTransitionNotes } from "../store/recorded-capture";
 import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
@@ -45,7 +44,10 @@ import {
   refKey,
   registeredPlainRef,
 } from "./service-read";
-import { type IdentityServiceContext } from "./service-types";
+import {
+  type IdentityCallContext,
+  type IdentityServiceContext,
+} from "./service-types";
 import { type PlainNodeRef } from "./sql-target";
 import {
   countRestoredIdentityTransitions,
@@ -474,11 +476,11 @@ function publicTransition<G extends GraphDef>(
  * original `ref`) is checked against.
  */
 async function currentClassMembers<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   ref: PlainNodeRef,
 ): Promise<readonly PlainNodeRef[]> {
   const classes = await loadCurrentStructuralClasses(
-    legacyTransactionOperation(ctx.backend),
+    ctx.backend,
     ctx.schema,
     ctx.graphId,
     [ref],
@@ -503,14 +505,14 @@ async function currentClassMembers<G extends GraphDef>(
  * alternative to refusing is an unbounded read.
  */
 async function everConnectedReferences<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   ref: PlainNodeRef,
 ): Promise<readonly PlainNodeRef[]> {
   const connected = new Map<string, PlainNodeRef>([[refKey(ref), ref]]);
   let frontier: readonly PlainNodeRef[] = [ref];
   while (frontier.length > 0) {
     const neighbours = await readIdentityEvidenceNeighbours(
-      legacyTransactionOperation(ctx.backend),
+      ctx.backend,
       ctx.schema,
       ctx.graphId,
       frontier,
@@ -546,7 +548,7 @@ type LineageWalkStart = Readonly<{
  * of ({@link uncapturedClassMembers}).
  */
 async function lineageWalkStart<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   ref: PlainNodeRef,
 ): Promise<LineageWalkStart> {
   const members = await currentClassMembers(ctx, ref);
@@ -573,13 +575,13 @@ async function lineageWalkStart<G extends GraphDef>(
  * `history: true` was enabled, or one that bypassed capture.
  */
 async function uncapturedClassMembers<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   members: readonly PlainNodeRef[],
   connected: readonly PlainNodeRef[],
 ): Promise<number> {
   if (members.length < 2) return 0;
   const recorded = await readEverRecordedReferences(
-    legacyTransactionOperation(ctx.backend),
+    ctx.backend,
     ctx.schema,
     ctx.graphId,
     members,
@@ -607,11 +609,11 @@ async function uncapturedClassMembers<G extends GraphDef>(
  * simply about another class, so it is reported rather than silently omitted.
  */
 async function unattributedRestoredTransitions<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   discovered: readonly IdentityTransitionRow[],
 ): Promise<number> {
   const restored = await countRestoredIdentityTransitions(
-    legacyTransactionOperation(ctx.backend),
+    ctx.backend,
     ctx.schema,
     ctx.graphId,
   );
@@ -673,7 +675,7 @@ const IDENTITY_REPLAY_WALK_ROW_CEILING = 2_000_000;
  * pathologically large or corrupted log, can still refuse.
  */
 async function walkClassLineage<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   walkSeeds: readonly PlainNodeRef[],
 ): Promise<readonly IdentityTransitionRow[]> {
   const seeds = new Map<string, PlainNodeRef>(
@@ -686,7 +688,7 @@ async function walkClassLineage<G extends GraphDef>(
     let after: IdentityTransitionCursor | undefined;
     for (;;) {
       const page = await readIdentityTransitions(
-        legacyTransactionOperation(ctx.backend),
+        ctx.backend,
         ctx.schema,
         ctx.graphId,
         {
@@ -738,7 +740,7 @@ type IdentityReading = Readonly<{
 }>;
 
 function currentReading<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
 ): IdentityReading {
   return {
     sameIdAcrossKinds: ctx.sameIdAcrossKinds,
@@ -763,13 +765,13 @@ function currentReading<G extends GraphDef>(
  * force did.
  */
 async function reconstructAt<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   seed: PlainNodeRef,
   recordedAsOf: RecordedInstant,
   reading: IdentityReading = currentReading(ctx),
 ): Promise<HistoricalClass> {
   const classes = await loadHistoricalClasses(
-    legacyTransactionOperation(ctx.backend),
+    ctx.backend,
     ctx.schema,
     ctx.graphId,
     [seed],
@@ -793,7 +795,7 @@ const NO_HISTORICAL_CLASS: HistoricalClass = {
  * was recorded before revision 1.
  */
 async function reconstructBefore<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   seed: PlainNodeRef,
   boundary: RecordedInstant,
   reading?: IdentityReading,
@@ -832,7 +834,7 @@ type BoundaryClasses = Readonly<{
  * other same-id profile.
  */
 function membershipReadings<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   lineage: readonly IdentityTransitionRow[],
 ): readonly IdentityReading[] {
   const current = currentReading(ctx);
@@ -882,7 +884,7 @@ function namesBoundaryClass(
 
 /** Every reference `seed`'s class held on either side of a boundary under `reading`. */
 async function structuralMembersAround<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   seed: PlainNodeRef,
   recordedAsOf: RecordedInstant,
   reading: IdentityReading,
@@ -999,7 +1001,7 @@ type MemberBoundaryPage = Readonly<{
  * `completeness` (`unattributed-restored`) when discovery cannot vouch for it.
  */
 async function memberBoundary<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   seed: PlainNodeRef,
   readings: readonly IdentityReading[],
   rows: readonly IdentityTransitionRow[],
@@ -1059,7 +1061,7 @@ async function memberBoundary<G extends GraphDef>(
  * see the two disagree about where the page ended.
  */
 async function pageMemberBoundaries<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   seed: PlainNodeRef,
   readings: readonly IdentityReading[],
   rows: readonly IdentityTransitionRow[],
@@ -1203,9 +1205,41 @@ type WalkedTransitions = Readonly<{
 }>;
 
 /**
+ * What a `transitionsOf` or `replay` call asks for once its statement-free
+ * refusals have passed: the registered reference the walk is seeded from and
+ * the page size. Produced by {@link identityTransitionWalkRequest} BEFORE the
+ * call enters its operation, so a refused call enters nothing.
+ */
+export type IdentityTransitionWalkRequest = Readonly<{
+  seed: PlainNodeRef;
+  limit: number;
+}>;
+
+/**
+ * The refusals of a `transitionsOf` or `replay` call that need no
+ * statement: `history: true`, the requested limit, and the reference's kind.
+ * The facade calls it before it enters the call's operation.
+ */
+export function identityTransitionWalkRequest<G extends GraphDef>(
+  ctx: Pick<
+    IdentityServiceContext<G>,
+    "graphId" | "historyEnabled" | "recordedTimeOwnership" | "registry"
+  >,
+  ref: IdentityNodeRefInput<G>,
+  options: IdentityReplayOptions | undefined,
+  operation: IdentityTransitionLogOperation,
+): IdentityTransitionWalkRequest {
+  requireIdentityTransitionLog(ctx, operation);
+  const limit = resolveLimit(options?.limit);
+  const seed = registeredPlainRef(ctx, ref);
+  return { seed, limit };
+}
+
+/**
  * The shared setup both `identityTransitionsOf` and `identityReplay` need
- * before they diverge: enforce `history: true`, resolve the requested limit
- * and revision bounds (each refused unless this graph allocated it), seed and
+ * before they diverge, once {@link identityTransitionWalkRequest} has
+ * enforced `history: true` and resolved the limit: resolve the requested
+ * revision bounds (each refused unless this graph allocated it), seed and
  * run the lineage walk, narrow the converged
  * result to the requested window, cut one page of at most `limit` boundaries
  * of the reference's own history from it, and gather the facts the page's
@@ -1218,16 +1252,13 @@ type WalkedTransitions = Readonly<{
  * from what the window kept.
  */
 async function walkedTransitionsFor<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
-  ref: IdentityNodeRefInput<G>,
+  ctx: IdentityCallContext<G>,
+  request: IdentityTransitionWalkRequest,
   options: IdentityReplayOptions | undefined,
-  operation: IdentityTransitionLogOperation,
 ): Promise<WalkedTransitions> {
-  requireIdentityTransitionLog(ctx, operation);
-  const limit = resolveLimit(options?.limit);
-  const seed = registeredPlainRef(ctx, ref);
+  const { seed, limit } = request;
   const owner = await readGraphAllocationOwner(
-    legacyTransactionOperation(ctx.backend),
+    ctx.backend,
     ctx.schema,
     ctx.graphId,
   );
@@ -1269,7 +1300,7 @@ async function walkedTransitionsFor<G extends GraphDef>(
     owner,
   );
   const retention = await readIdentityTransitionRetention(
-    legacyTransactionOperation(ctx.backend),
+    ctx.backend,
     ctx.schema,
     ctx.graphId,
   );
@@ -1294,7 +1325,7 @@ async function walkedTransitionsFor<G extends GraphDef>(
       unattributedRestored,
       uncapturedMembers: start.uncapturedMembers,
       pendingTransactionNotes: hasPendingIdentityTransitionNotes(
-        legacyTransactionOperation(ctx.backend),
+        ctx.backend,
         ctx.graphId,
       ),
     },
@@ -1310,15 +1341,14 @@ async function walkedTransitionsFor<G extends GraphDef>(
  * `store.identity.transitionsOf` is a thin wrapper over this.
  */
 export async function identityTransitionsOf<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
-  ref: IdentityNodeRefInput<G>,
+  ctx: IdentityCallContext<G>,
+  request: IdentityTransitionWalkRequest,
   options?: IdentityReplayOptions,
 ): Promise<IdentityTransitionHistory<G>> {
   const { owner, boundaries, completenessFacts } = await walkedTransitionsFor(
     ctx,
-    ref,
+    request,
     options,
-    "transitionsOf",
   );
   const { nextCursor } = completenessFacts;
   return {
@@ -1356,12 +1386,12 @@ export async function identityTransitionsOf<G extends GraphDef>(
  * completeness reason.
  */
 export async function identityReplay<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
-  ref: IdentityNodeRefInput<G>,
+  ctx: IdentityCallContext<G>,
+  request: IdentityTransitionWalkRequest,
   options?: IdentityReplayOptions,
 ): Promise<IdentityReplay<G>> {
   const { owner, toRevision, retention, boundaries, completenessFacts } =
-    await walkedTransitionsFor(ctx, ref, options, "replay");
+    await walkedTransitionsFor(ctx, request, options);
 
   // "Entirely below the watermark" is a property of the REQUESTED range, not
   // of what came back: only a range bounded on both ends (`toRecorded` given)

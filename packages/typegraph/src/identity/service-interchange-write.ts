@@ -6,6 +6,7 @@ import {
   ValidationError,
 } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
+import { type OperationEntry } from "../store/operation-scope";
 import {
   withRecordedIdentityDecision,
   withRecordedIdentityMutationTarget,
@@ -694,6 +695,8 @@ export async function importIdentityTransitionsIntoTarget(
 
 export async function applyIdentityChangesForContext<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
+  // Where the apply enters the write executor; see `runIdentityMutation`.
+  entry: OperationEntry,
   retractions: readonly IdentityTransferAssertion[],
   assertions: readonly IdentityTransferAssertion[],
   // The governing merge decision, when this apply runs under a reviewed
@@ -756,5 +759,6 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
       if (decision === undefined) return applyBody();
       return withRecordedIdentityDecision(target, decision, applyBody);
     },
+    entry,
   );
 }

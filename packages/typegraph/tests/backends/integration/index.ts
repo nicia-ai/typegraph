@@ -68,6 +68,7 @@ export { registerIdentityIntegrationTests } from "./identity";
 export { registerCurrentIdentityTraversalTests } from "./identity-current-traversal";
 export { registerHistoricalIdentityTraversalTests } from "./identity-historical-traversal";
 export { registerIdentityImportIntegrationTests } from "./identity-import";
+export { registerIdentityOperationRoutingIntegrationTests } from "./identity-operation-routing";
 export { registerIdentityReplayIntegrationTests } from "./identity-replay";
 export { registerIdentitySeparationIntegrationTests } from "./identity-separation";
 export { registerImportCompositionMoveIntegrationTests } from "./import-composition-moves";
