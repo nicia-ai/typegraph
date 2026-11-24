@@ -223,20 +223,6 @@ const LEGACY_WRITE_ENTRY = {
 } as const;
 
 const LEGACY_WRITE_ENTRY_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
-  // RAISED from 0 by the identity and search facades conversion, which
-  // moved these two here from `runIdentityMutation` and
-  // `rebuildIdentityClosureWithSchemaFence`: an identity mutation and the
-  // closure recompute now take their write entry from their caller, and these
-  // two callers hold a bare handle and no session (the kind-removal cascade
-  // the schema-commit preflight runs, and the derived-relation fence that
-  // hands the recompute port its transaction). That family's conversion
-  // opens a session where those transactions open and removes both.
-  "src/store/store.ts#StoreImplementation.removeIdentityKindsInSchemaPreflight":
-    { count: 1, family: "schema and evolution" },
-  "src/identity/schema-transition.ts#provisionDerivedRelations": {
-    count: 1,
-    family: "schema and evolution",
-  },
   // The privileged runtime port's `deleteNodeWithPolicy(target, …)`, whose
   // `target` parameter the public API report spells.
   "src/store/store.ts#StoreImplementation.constructor": {
@@ -252,7 +238,7 @@ const LEGACY_WRITE_ENTRY_FAMILY_BASELINE = {
   "query terminals and tx.backend": 0,
   "identity and search facades": 0,
   "capture and flush": 0,
-  "schema and evolution": 2,
+  "schema and evolution": 0,
   "merge and durable operations": 1,
   "provenance and interchange": 0,
   "working copies": 0,

@@ -29,7 +29,6 @@ import {
   storeSchemaWriteTransaction,
   type StoreTransactionBackend,
 } from "../store/operation-scope";
-import { legacyWriteEntry } from "../store/operations/write-transaction";
 import {
   createRecordedTransactionScope,
   graphCapturesRecordedHistory,
@@ -349,18 +348,14 @@ async function provisionDerivedRelations(
       async (
         transaction: StoreTransactionBackend<SchemaWriteTransactionBackend>,
       ) => {
-        const target = enterOperation(
-          openTransactionSession(transaction),
-        ).backend;
+        const operation = enterOperation(openTransactionSession(transaction));
+        const target = operation.backend;
         await lockIdentityDdl(target);
         await executeIdentityDdl(
           (ddl) => target.executeSchemaDdl(ddl),
           identityTableDdl(tableNames),
         );
-        // A bare handle and no session yet: the recompute joins this
-        // transaction as a binding of its own until this family's conversion
-        // opens a session where the fence's transaction opens.
-        await ports.recompute(legacyWriteEntry(target));
+        await ports.recompute(operation);
       },
       ownSchemaDdl(),
     ),

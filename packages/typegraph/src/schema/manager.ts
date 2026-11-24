@@ -54,6 +54,7 @@ import { buildKindRegistry } from "../registry";
 import {
   enterOperation,
   openTransactionSession,
+  type Operation,
   type OperationBackend,
   type OperationScoped,
   type StoreCommitSchemaVersionWithPreflight,
@@ -974,8 +975,14 @@ type SchemaCommitPreflightStep =
   | ((target: OperationScoped<SchemaCommitPreflightBackend>) => Promise<void>)
   | undefined;
 
+/**
+ * A composed schema-commit preflight, and its identity step: run under the
+ * operation the preflight's transaction entered. The other steps receive that
+ * operation's handle; the identity step may enter the write executor, so it
+ * receives the operation itself.
+ */
 type SchemaCommitPreflightFunction = (
-  target: OperationScoped<SchemaCommitPreflightBackend>,
+  operation: Operation<SchemaCommitPreflightBackend>,
 ) => Promise<void>;
 
 /**
@@ -984,7 +991,7 @@ type SchemaCommitPreflightFunction = (
  * a backend that cannot run it atomically, naming those kinds.
  */
 type EdgeMatchIdentityPreflight = Readonly<{
-  run: SchemaCommitPreflightFunction;
+  run: NonNullable<SchemaCommitPreflightStep>;
   capabilityError: AtomicPreflightCapabilityError;
 }>;
 
@@ -999,7 +1006,7 @@ export type SchemaCommitPreflightSteps = Readonly<{
   structural: SchemaCommitPreflightStep;
   edgeMatchIdentity: EdgeMatchIdentityPreflight | undefined;
   tightening: SchemaTighteningPreflight | undefined;
-  identity: SchemaCommitPreflightStep;
+  identity: SchemaCommitPreflightFunction | undefined;
 }>;
 
 /**
@@ -1078,15 +1085,17 @@ export function composeSchemaCommitPreflight(
     steps.structural,
     steps.edgeMatchIdentity?.run,
     steps.tightening?.run,
-    steps.identity,
   ];
   const defined = ordered.filter(
-    (step): step is SchemaCommitPreflightFunction => step !== undefined,
+    (step): step is NonNullable<SchemaCommitPreflightStep> =>
+      step !== undefined,
   );
+  const identity = steps.identity;
   return async (
-    target: OperationScoped<SchemaCommitPreflightBackend>,
+    operation: Operation<SchemaCommitPreflightBackend>,
   ): Promise<void> => {
-    for (const step of defined) await step(target);
+    for (const step of defined) await step(operation.backend);
+    await identity?.(operation);
   };
 }
 
@@ -1271,11 +1280,9 @@ async function initializeSchemaImpl<G extends GraphDef>(
       async (
         transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>,
       ) => {
-        const transactionBackend = enterOperation(
-          openTransactionSession(transaction),
-        ).backend;
-        await edgeMatchIdentityPreflight?.run(transactionBackend);
-        await preflight(transactionBackend);
+        const operation = enterOperation(openTransactionSession(transaction));
+        await edgeMatchIdentityPreflight?.run(operation.backend);
+        await preflight(operation);
       },
     ),
   );
@@ -1652,9 +1659,7 @@ async function prepareIdentityKindCascade<G extends GraphDef>(
     // probe is not sound and the locked cascade must always run.
     probeBeforeCascade: boolean;
   }>,
-): Promise<
-  ((transactionBackend: OperationBackend) => Promise<void>) | undefined
-> {
+): Promise<SchemaCommitPreflightFunction | undefined> {
   if (options.droppedNodeKinds.length === 0) return undefined;
   const schema =
     options.schema === undefined ?
@@ -1669,11 +1674,12 @@ async function prepareIdentityKindCascade<G extends GraphDef>(
     );
     if (!needed) return undefined;
   }
-  return identityKindCascadePreflight(
+  const cascade = identityKindCascadePreflight(
     { graphId: target.id, schema },
     options.droppedNodeKinds,
     resolveSchemaCommitCapture(backend, undefined),
   );
+  return (operation) => cascade(operation.backend);
 }
 
 /**
@@ -1696,11 +1702,7 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
     /** See {@link EnsureSchemaInternalOptions.historyEnabled}. */
     historyEnabled?: boolean;
   }>,
-): Promise<
-  (
-    transactionBackend: OperationScoped<SchemaCommitPreflightBackend>,
-  ) => Promise<void>
-> {
+): Promise<SchemaCommitPreflightFunction> {
   // Brand-validate before any DDL or commit: a schema-shaped plain object
   // from an untyped caller can expose custom names to provisioning while its
   // SQL fragments target the default tables, landing the closure where the
@@ -1727,7 +1729,7 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
     enablement: options.enablement,
     registry,
   });
-  return identitySchemaCommitPreflight(
+  const preflight = identitySchemaCommitPreflight(
     {
       graphId: target.id,
       registry,
@@ -1744,6 +1746,7 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
       capture: resolveSchemaCommitCapture(backend, options.historyEnabled),
     },
   );
+  return (operation) => preflight(operation.backend);
 }
 
 /**
@@ -1981,7 +1984,7 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
     commitWithPreflight(
       commit,
       (transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>) =>
-        plan.run(enterOperation(openTransactionSession(transaction)).backend),
+        plan.run(enterOperation(openTransactionSession(transaction))),
     ),
   );
 }
@@ -2060,9 +2063,7 @@ export async function rollbackSchema(
   await setActiveWithPreflight(
     params,
     (transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>) =>
-      preflight.run(
-        enterOperation(openTransactionSession(transaction)).backend,
-      ),
+      preflight.run(enterOperation(openTransactionSession(transaction))),
   );
 }
 
@@ -2091,9 +2092,7 @@ function prepareRollbackPreflight(
   target: Readonly<{ version: number; schemaDoc: string }>,
 ):
   | Readonly<{
-      run: (
-        target: OperationScoped<SchemaCommitPreflightBackend>,
-      ) => Promise<void>;
+      run: SchemaCommitPreflightFunction;
       /**
        * What a backend without `setActiveVersionWithPreflight` is refused
        * with. When the identity refusal is owed, that refusal itself: it
