@@ -10,7 +10,6 @@ import { KindNotFoundError } from "../errors";
 import { type SqlSchema } from "../query/compiler/schema";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
-import { legacyTransactionOperation } from "../store/operation-scope";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
 import { nowIso } from "../utils/date";
@@ -37,7 +36,10 @@ import {
   type RawIdentityAssertionRow,
   toCanonicalIdentityTimestamp,
 } from "./row-codec";
-import { type IdentityServiceContext } from "./service-types";
+import {
+  type IdentityCallContext,
+  type IdentityServiceContext,
+} from "./service-types";
 import {
   executeIdentityStatement,
   identityChunkSize,
@@ -705,21 +707,16 @@ export async function loadHistoricalClasses(
 }
 
 export function visibleMembersAtCoordinate<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   ref: PlainNodeRef,
   allowedKinds: ReadonlySet<string>,
 ): Promise<readonly PlainNodeRef[]> {
   const { coordinate } = ctx;
   if (coordinate === undefined || isCurrentClosureCoordinate(coordinate)) {
-    return loadCurrentVisibleMembers(
-      legacyTransactionOperation(ctx.backend),
-      ctx.schema,
-      ctx.graphId,
-      ref,
-    );
+    return loadCurrentVisibleMembers(ctx.backend, ctx.schema, ctx.graphId, ref);
   }
   return loadHistoricalVisibleMembers(
-    legacyTransactionOperation(ctx.backend),
+    ctx.backend,
     ctx.schema,
     ctx.graphId,
     ref,

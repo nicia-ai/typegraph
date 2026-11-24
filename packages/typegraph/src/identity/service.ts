@@ -12,6 +12,7 @@ export {
 } from "./interchange-read";
 export { toTransferAssertion } from "./row-codec";
 export { UnionFind } from "./service-components";
+export type { IdentityFacadeSource } from "./service-facade";
 export {
   createIdentityFacade,
   createIdentityReadFacade,
@@ -55,8 +56,8 @@ export {
   refKey,
 } from "./service-read";
 export type {
+  IdentityCallContext,
   IdentityImportSummary,
-  IdentityServiceContext,
   IdentityTransferAssertion,
 } from "./service-types";
 export type {

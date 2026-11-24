@@ -10,13 +10,12 @@ import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import {
   enterOperation,
-  legacyTransactionOperation,
-  type TransactionSession,
+  type EntryScope,
+  type OperationEntry,
+  operationEntryBackend,
+  type StatementBackend,
 } from "../store/operation-scope";
-import {
-  legacyWriteEntry,
-  runInWriteTransaction,
-} from "../store/operations/write-transaction";
+import { runInWriteTransaction } from "../store/operations/write-transaction";
 import {
   type IdentityTransitionNoteFunction,
   withRecordedIdentityMutationTarget,
@@ -36,7 +35,11 @@ import {
   identityNodeVisibilitySql,
   identitySqlCoordinate,
 } from "./historical-sql";
-import { identityReplay, identityTransitionsOf } from "./replay";
+import {
+  identityReplay,
+  identityTransitionsOf,
+  identityTransitionWalkRequest,
+} from "./replay";
 import {
   normalizeIdentityAssertionRow,
   type RawIdentityAssertionRow,
@@ -88,6 +91,7 @@ import {
   visibleMembersAtCoordinate,
 } from "./service-read";
 import {
+  type IdentityCallContext,
   type IdentityServiceContext,
   type IdentityTransferAssertion,
 } from "./service-types";
@@ -581,18 +585,21 @@ export async function retractPlannedAssertions(
   );
 }
 
+/** The body of an identity mutation: its statements go through `target`. */
+type IdentityMutationBody<T> = (
+  target: Backend,
+  touch: IdentityTouch,
+  markWritten: () => void,
+  noteTransition: IdentityTransitionNoteFunction,
+) => Promise<T>;
+
 export async function runIdentityMutation<G extends GraphDef, T>(
   ctx: IdentityServiceContext<G>,
-  fn: (
-    target: Backend,
-    touch: IdentityTouch,
-    markWritten: () => void,
-    noteTransition: IdentityTransitionNoteFunction,
-  ) => Promise<T>,
-  // The session `ctx.backend` belongs to, when the caller holds one: the
-  // mutation enters an operation of it. Without one, `ctx.backend` joins as
-  // a binding of its own (`legacyWriteEntry`).
-  session?: TransactionSession,
+  fn: IdentityMutationBody<T>,
+  // Where the mutation enters the write executor: the pooled root, or the
+  // operation of a transaction session the caller entered for this call. The
+  // caller decides it; nothing here derives it from `ctx.backend`.
+  entry: OperationEntry,
 ): Promise<T> {
   // Track whether the mutation actually touched a row: a successful no-op
   // (retracting an unknown id, an idempotent reassert) must not advance the
@@ -618,9 +625,7 @@ export async function runIdentityMutation<G extends GraphDef, T>(
       revisionTrackingEnabled: ctx.revisionTrackingEnabled,
       revisionSchema: ctx.schema,
     },
-    session === undefined ?
-      legacyWriteEntry(legacyTransactionOperation(ctx.backend))
-    : enterOperation(session),
+    entry,
     async (target) => {
       touchedBox.touched = false;
       await lockIdentityGraph(target, ctx.graphId);
@@ -656,7 +661,7 @@ type CurrentIdentityClassPageRow = Readonly<{
 }>;
 
 async function loadCurrentIdentityClassPage<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  ctx: IdentityCallContext<G>,
   allKinds: readonly string[],
   kinds: readonly string[],
   limit: number,
@@ -693,9 +698,7 @@ async function loadCurrentIdentityClassPage<G extends GraphDef>(
   // Ranking, kind eligibility, and page expansion all consume class_members.
   // Without MATERIALIZED, SQLite may inline its node scan into the correlated
   // eligibility check for every representative.
-  const rows = await legacyTransactionOperation(
-    ctx.backend,
-  ).execute<CurrentIdentityClassPageRow>(
+  const rows = await ctx.backend.execute<CurrentIdentityClassPageRow>(
     asCompiledRowsSql(sql`
       WITH node_snapshot AS (${nodeSource}), visible_nodes AS (
         SELECT n.kind, n.id
@@ -812,9 +815,50 @@ async function loadCurrentIdentityClassPage<G extends GraphDef>(
   };
 }
 
+/**
+ * Where an identity facade's calls enter, and the context each call runs
+ * under. The Store builds one for each facade it offers: the root facade, a
+ * pinned view's read facade, and the facade of each transaction context.
+ */
+export type IdentityFacadeSource<G extends GraphDef> = Readonly<{
+  /**
+   * What a call reads BEFORE it enters its operation: its refusals, its
+   * capability checks and its SQL compilation. Never a statement target.
+   */
+  context: IdentityServiceContext<G>;
+  /**
+   * The pooled root backend, or the session of the transaction the facade
+   * belongs to: each call enters one operation of it.
+   */
+  scope: EntryScope;
+  /** The context of one call whose statements go through `backend`. */
+  callContext: (backend: StatementBackend) => IdentityCallContext<G>;
+}>;
+
+/** One facade call, entered: where it enters, and the context it runs under. */
+type IdentityCall<G extends GraphDef> = Readonly<{
+  entry: OperationEntry;
+  ctx: IdentityCallContext<G>;
+}>;
+
+/**
+ * THE entry of one identity facade call: one operation of the facade's
+ * session (the root itself for a root facade), and the context whose
+ * statements go through it. Called once per public call, after the call's
+ * statement-free refusals, so a refused call enters nothing; everything the
+ * call composes runs under the one operation it entered.
+ */
+function enterIdentityCall<G extends GraphDef>(
+  source: IdentityFacadeSource<G>,
+): IdentityCall<G> {
+  const entry = enterOperation(source.scope);
+  return { entry, ctx: source.callContext(operationEntryBackend(entry)) };
+}
+
 export function createIdentityReadFacade<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
+  source: IdentityFacadeSource<G>,
 ): IdentityReadFacade<G> {
+  const ctx = source.context;
   const activeKinds = identityActiveKinds(ctx.registry);
   return {
     async classes(options: IdentityClassPageOptions) {
@@ -857,13 +901,14 @@ export function createIdentityReadFacade<G extends GraphDef>(
             },
           );
         return loadCurrentIdentityClassPage(
-          ctx,
+          enterIdentityCall(source).ctx,
           allKinds,
           kinds,
           options.limit,
           after,
         );
       }
+      const call = enterIdentityCall(source).ctx;
       const coordinate = identitySqlCoordinate(ctx.coordinate, nowIso());
       const kindValues = sql.join(
         allKinds.map((kind) => sql`${kind}`),
@@ -874,9 +919,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         ctx.graphId,
         coordinate,
       );
-      const rows = await legacyTransactionOperation(
-        ctx.backend,
-      ).execute<PlainNodeRef>(
+      const rows = await call.backend.execute<PlainNodeRef>(
         asCompiledRowsSql(sql`
           WITH node_snapshot AS (${nodeSource})
           SELECT n.kind, n.id
@@ -889,7 +932,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
       const seeds = rows.map((row) => ({ kind: row.kind, id: row.id }));
       const grouped = new Map<string, Map<string, PlainNodeRef>>();
       const historical = await loadHistoricalClasses(
-        legacyTransactionOperation(ctx.backend),
+        call.backend,
         ctx.schema,
         ctx.graphId,
         seeds,
@@ -946,54 +989,59 @@ export function createIdentityReadFacade<G extends GraphDef>(
       };
     },
     async representativeOf(input) {
+      const ref = registeredPlainRef(ctx, input);
       const members = await visibleMembersAtCoordinate(
-        ctx,
-        registeredPlainRef(ctx, input),
+        enterIdentityCall(source).ctx,
+        ref,
         activeKinds,
       );
       return members[0] === undefined ? undefined : publicNodeRef(members[0]);
     },
 
     async membersOf(input) {
+      const ref = registeredPlainRef(ctx, input);
       const members = await visibleMembersAtCoordinate(
-        ctx,
-        registeredPlainRef(ctx, input),
+        enterIdentityCall(source).ctx,
+        ref,
         activeKinds,
       );
       return members.map((member) => publicNodeRef<G>(member));
     },
 
     async nodesOf(input) {
-      const members = await visibleMembersAtCoordinate(
-        ctx,
-        registeredPlainRef(ctx, input),
-        activeKinds,
-      );
-      const nodes = await ctx.loadNodes(members, ctx.coordinate);
+      const ref = registeredPlainRef(ctx, input);
+      const call = enterIdentityCall(source).ctx;
+      const members = await visibleMembersAtCoordinate(call, ref, activeKinds);
+      const nodes = await call.loadNodes(members, call.coordinate);
       return nodes.filter((node) => node !== undefined);
     },
 
     async areSame(firstInput, secondInput) {
       const first = registeredPlainRef(ctx, firstInput);
       const second = registeredPlainRef(ctx, secondInput);
-      const members = await visibleMembersAtCoordinate(ctx, first, activeKinds);
+      const members = await visibleMembersAtCoordinate(
+        enterIdentityCall(source).ctx,
+        first,
+        activeKinds,
+      );
       return containsRef(members, second);
     },
 
     async areDifferent(firstInput, secondInput) {
       const first = registeredPlainRef(ctx, firstInput);
       const second = registeredPlainRef(ctx, secondInput);
+      const call = enterIdentityCall(source).ctx;
       const { coordinate } = ctx;
       if (coordinate === undefined || isCurrentClosureCoordinate(coordinate)) {
         const [firstVisible, secondVisible] = await Promise.all([
           loadCurrentVisibleMembers(
-            legacyTransactionOperation(ctx.backend),
+            call.backend,
             ctx.schema,
             ctx.graphId,
             first,
           ),
           loadCurrentVisibleMembers(
-            legacyTransactionOperation(ctx.backend),
+            call.backend,
             ctx.schema,
             ctx.graphId,
             second,
@@ -1002,7 +1050,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         if (firstVisible.length === 0 || secondVisible.length === 0)
           return false;
         const classes = await loadCurrentStructuralClasses(
-          legacyTransactionOperation(ctx.backend),
+          call.backend,
           ctx.schema,
           ctx.graphId,
           [first, second],
@@ -1013,7 +1061,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         // exactly that boolean for a pair of current classes — no assertion has
         // to be named, so the ledger is not read at all.
         const separated = await isSeparated(
-          legacyTransactionOperation(ctx.backend),
+          call.backend,
           ctx.schema,
           ctx.graphId,
           currentClassKey(firstClass),
@@ -1027,7 +1075,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         );
       }
       const classes = await loadHistoricalClasses(
-        legacyTransactionOperation(ctx.backend),
+        call.backend,
         ctx.schema,
         ctx.graphId,
         [first, second],
@@ -1040,7 +1088,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
       if (firstClass.visible.length === 0 || secondClass.visible.length === 0)
         return false;
       const different = await loadSpanningDifferentAssertion(
-        legacyTransactionOperation(ctx.backend),
+        call.backend,
         ctx.schema,
         ctx.graphId,
         firstClass.structural,
@@ -1059,10 +1107,11 @@ export function createIdentityReadFacade<G extends GraphDef>(
 
     async assertionsOf(input) {
       const ref = registeredPlainRef(ctx, input);
-      const members = await visibleMembersAtCoordinate(ctx, ref, activeKinds);
+      const call = enterIdentityCall(source).ctx;
+      const members = await visibleMembersAtCoordinate(call, ref, activeKinds);
       if (members.length === 0) return [];
       const assertions = await loadAssertionsTouching(
-        legacyTransactionOperation(ctx.backend),
+        call.backend,
         ctx.schema,
         ctx.graphId,
         [ref],
@@ -1081,6 +1130,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
     async explainSame(firstInput, secondInput) {
       const first = registeredPlainRef(ctx, firstInput);
       const second = registeredPlainRef(ctx, secondInput);
+      const call = enterIdentityCall(source).ctx;
       let structuralMembers: readonly PlainNodeRef[];
       let foldEligibleMembers: readonly PlainNodeRef[];
       if (
@@ -1088,14 +1138,14 @@ export function createIdentityReadFacade<G extends GraphDef>(
         isCurrentClosureCoordinate(ctx.coordinate)
       ) {
         const visibleMembers = await visibleMembersAtCoordinate(
-          ctx,
+          call,
           first,
           activeKinds,
         );
         if (!containsRef(visibleMembers, second)) return;
         if (refKey(first) === refKey(second)) return [];
         const classes = await loadCurrentStructuralClassComponents(
-          legacyTransactionOperation(ctx.backend),
+          call.backend,
           ctx.schema,
           ctx.graphId,
           [first],
@@ -1106,7 +1156,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         foldEligibleMembers = structuralMembers;
       } else {
         const classes = await loadHistoricalClasses(
-          legacyTransactionOperation(ctx.backend),
+          call.backend,
           ctx.schema,
           ctx.graphId,
           [first],
@@ -1135,7 +1185,7 @@ export function createIdentityReadFacade<G extends GraphDef>(
         structuralMembers.map((member) => refKey(member)),
       );
       const classAssertions = await loadAssertionsTouching(
-        legacyTransactionOperation(ctx.backend),
+        call.backend,
         ctx.schema,
         ctx.graphId,
         structuralMembers,
@@ -1340,226 +1390,212 @@ export async function applyRetractionAftermath<G extends GraphDef>(
   );
 }
 
+/**
+ * The identity facade over `source`. Each call, a read or a mutation, enters
+ * one operation of `source.scope` (see {@link enterIdentityCall}); a facade a
+ * transaction context offers therefore shares the write executor's
+ * per-session state with the node and edge writes of that transaction.
+ */
 export function createIdentityFacade<G extends GraphDef>(
-  ctx: IdentityServiceContext<G>,
-  /**
-   * The session of the transaction `ctx.backend` belongs to, for a facade a
-   * transaction context offers: each mutation enters its own operation from
-   * it, so it shares the write executor's per-session state with the node and
-   * edge writes of that transaction. Absent for the root facade.
-   */
-  session?: TransactionSession,
+  source: IdentityFacadeSource<G>,
 ): IdentityFacade<G> {
+  const ctx = source.context;
+  /** One mutation call: its operation, entered, runs `fn` in the write executor. */
+  function mutate<T>(fn: IdentityMutationBody<T>): Promise<T> {
+    const call = enterIdentityCall(source);
+    return runIdentityMutation(call.ctx, fn, call.entry);
+  }
   return {
-    ...createIdentityReadFacade(ctx),
+    ...createIdentityReadFacade(source),
 
     assertSame(a, b, window) {
-      return runIdentityMutation(
-        ctx,
-        (target, touch, _markWritten, noteTransition) => {
-          const operationInstant = nowIso();
-          return assertPair(
-            ctx,
-            target,
-            "same",
-            a,
-            b,
-            touch,
-            noteTransition,
-            hasExplicitIdentityValidityWindow(window) ? window : undefined,
-            operationInstant,
-          );
-        },
-        session,
-      );
+      return mutate((target, touch, _markWritten, noteTransition) => {
+        const operationInstant = nowIso();
+        return assertPair(
+          ctx,
+          target,
+          "same",
+          a,
+          b,
+          touch,
+          noteTransition,
+          hasExplicitIdentityValidityWindow(window) ? window : undefined,
+          operationInstant,
+        );
+      });
     },
 
     assertDifferent(a, b, window) {
-      return runIdentityMutation(
-        ctx,
-        (target, touch, _markWritten, noteTransition) => {
-          const operationInstant = nowIso();
-          return assertPair(
-            ctx,
-            target,
-            "different",
-            a,
-            b,
-            touch,
-            noteTransition,
-            hasExplicitIdentityValidityWindow(window) ? window : undefined,
-            operationInstant,
-          );
-        },
-        session,
-      );
+      return mutate((target, touch, _markWritten, noteTransition) => {
+        const operationInstant = nowIso();
+        return assertPair(
+          ctx,
+          target,
+          "different",
+          a,
+          b,
+          touch,
+          noteTransition,
+          hasExplicitIdentityValidityWindow(window) ? window : undefined,
+          operationInstant,
+        );
+      });
     },
 
     bulkAssertSame(pairs) {
-      return runIdentityMutation(
-        ctx,
-        (target, touch, _markWritten, noteTransition) => {
-          if (!pairs.some((pair) => hasExplicitIdentityValidityWindow(pair))) {
-            return bulkAssertPairs(
-              ctx,
-              target,
-              "same",
-              pairs,
-              touch,
-              noteTransition,
-            );
-          }
-          return bulkAssertWindowedPairs(
+      return mutate((target, touch, _markWritten, noteTransition) => {
+        if (!pairs.some((pair) => hasExplicitIdentityValidityWindow(pair))) {
+          return bulkAssertPairs(
             ctx,
             target,
             "same",
             pairs,
             touch,
             noteTransition,
-            nowIso(),
           );
-        },
-        session,
-      );
+        }
+        return bulkAssertWindowedPairs(
+          ctx,
+          target,
+          "same",
+          pairs,
+          touch,
+          noteTransition,
+          nowIso(),
+        );
+      });
     },
 
     bulkAssertDifferent(pairs) {
-      return runIdentityMutation(
-        ctx,
-        (target, touch, _markWritten, noteTransition) => {
-          if (!pairs.some((pair) => hasExplicitIdentityValidityWindow(pair))) {
-            return bulkAssertPairs(
-              ctx,
-              target,
-              "different",
-              pairs,
-              touch,
-              noteTransition,
-            );
-          }
-          return bulkAssertWindowedPairs(
+      return mutate((target, touch, _markWritten, noteTransition) => {
+        if (!pairs.some((pair) => hasExplicitIdentityValidityWindow(pair))) {
+          return bulkAssertPairs(
             ctx,
             target,
             "different",
             pairs,
             touch,
             noteTransition,
-            nowIso(),
           );
-        },
-        session,
-      );
+        }
+        return bulkAssertWindowedPairs(
+          ctx,
+          target,
+          "different",
+          pairs,
+          touch,
+          noteTransition,
+          nowIso(),
+        );
+      });
     },
 
     retractAssertion(id) {
-      return runIdentityMutation(
-        ctx,
-        async (target, touch, _markWritten, noteTransition) => {
-          const operationInstant = nowIso();
-          const ended = await retractById(ctx, target, id, touch);
-          if (ended === undefined) return;
-          await applyRetractionAftermath(ctx, target, [ended], noteTransition, {
-            cause: "retract",
-            validAt: operationInstant,
-          });
-          return publicAssertion<G>(ended);
-        },
-        session,
-      );
+      return mutate(async (target, touch, _markWritten, noteTransition) => {
+        const operationInstant = nowIso();
+        const ended = await retractById(ctx, target, id, touch);
+        if (ended === undefined) return;
+        await applyRetractionAftermath(ctx, target, [ended], noteTransition, {
+          cause: "retract",
+          validAt: operationInstant,
+        });
+        return publicAssertion<G>(ended);
+      });
     },
 
     retractSameAssertion(firstInput, secondInput) {
-      return runIdentityMutation(
-        ctx,
-        async (target, touch, _markWritten, noteTransition) => {
-          const operationInstant = nowIso();
-          const [a, b] = normalizePair(
-            registeredPlainRef(ctx, firstInput),
-            registeredPlainRef(ctx, secondInput),
-          );
-          const existing = await currentAssertionForPair(
-            target,
-            ctx.schema,
-            ctx.graphId,
-            "same",
-            a,
-            b,
-          );
-          if (existing === undefined) return;
-          const ended = await retractById(ctx, target, existing.id, touch);
-          // The row the lookup found, never `ended`: the closure must be
-          // repaired even for an id another writer ended first, and both carry
-          // the same endpoints.
-          await applyRetractionAftermath(
-            ctx,
-            target,
-            [existing],
-            noteTransition,
-            { cause: "retract", validAt: operationInstant },
-          );
-          return ended === undefined ? undefined : publicAssertion<G>(ended);
-        },
-        session,
-      );
+      return mutate(async (target, touch, _markWritten, noteTransition) => {
+        const operationInstant = nowIso();
+        const [a, b] = normalizePair(
+          registeredPlainRef(ctx, firstInput),
+          registeredPlainRef(ctx, secondInput),
+        );
+        const existing = await currentAssertionForPair(
+          target,
+          ctx.schema,
+          ctx.graphId,
+          "same",
+          a,
+          b,
+        );
+        if (existing === undefined) return;
+        const ended = await retractById(ctx, target, existing.id, touch);
+        // The row the lookup found, never `ended`: the closure must be
+        // repaired even for an id another writer ended first, and both carry
+        // the same endpoints.
+        await applyRetractionAftermath(
+          ctx,
+          target,
+          [existing],
+          noteTransition,
+          { cause: "retract", validAt: operationInstant },
+        );
+        return ended === undefined ? undefined : publicAssertion<G>(ended);
+      });
     },
 
     retractDifferentAssertion(firstInput, secondInput) {
-      return runIdentityMutation(
-        ctx,
-        async (target, touch, _markWritten, noteTransition) => {
-          const operationInstant = nowIso();
-          const [a, b] = normalizePair(
-            registeredPlainRef(ctx, firstInput),
-            registeredPlainRef(ctx, secondInput),
-          );
-          const existing = await currentAssertionForPair(
-            target,
-            ctx.schema,
-            ctx.graphId,
-            "different",
-            a,
-            b,
-          );
-          if (existing === undefined) return;
-          const ended = await retractById(ctx, target, existing.id, touch);
-          await applyRetractionAftermath(
-            ctx,
-            target,
-            [existing],
-            noteTransition,
-            { cause: "retract", validAt: operationInstant },
-          );
-          return ended === undefined ? undefined : publicAssertion<G>(ended);
-        },
-        session,
-      );
+      return mutate(async (target, touch, _markWritten, noteTransition) => {
+        const operationInstant = nowIso();
+        const [a, b] = normalizePair(
+          registeredPlainRef(ctx, firstInput),
+          registeredPlainRef(ctx, secondInput),
+        );
+        const existing = await currentAssertionForPair(
+          target,
+          ctx.schema,
+          ctx.graphId,
+          "different",
+          a,
+          b,
+        );
+        if (existing === undefined) return;
+        const ended = await retractById(ctx, target, existing.id, touch);
+        await applyRetractionAftermath(
+          ctx,
+          target,
+          [existing],
+          noteTransition,
+          { cause: "retract", validAt: operationInstant },
+        );
+        return ended === undefined ? undefined : publicAssertion<G>(ended);
+      });
     },
 
     bulkRetractAssertions(ids) {
-      return runIdentityMutation(
+      return mutate(async (target, touch, _markWritten, noteTransition) => {
+        const operationInstant = nowIso();
+        const retracted = await retractByIds(ctx, target, ids, touch);
+        await applyRetractionAftermath(ctx, target, retracted, noteTransition, {
+          cause: "retract",
+          validAt: operationInstant,
+        });
+        return retracted.map((assertion) => publicAssertion<G>(assertion));
+      });
+    },
+
+    async transitionsOf(ref, options) {
+      const request = identityTransitionWalkRequest(
         ctx,
-        async (target, touch, _markWritten, noteTransition) => {
-          const operationInstant = nowIso();
-          const retracted = await retractByIds(ctx, target, ids, touch);
-          await applyRetractionAftermath(
-            ctx,
-            target,
-            retracted,
-            noteTransition,
-            { cause: "retract", validAt: operationInstant },
-          );
-          return retracted.map((assertion) => publicAssertion<G>(assertion));
-        },
-        session,
+        ref,
+        options,
+        "transitionsOf",
+      );
+      return identityTransitionsOf(
+        enterIdentityCall(source).ctx,
+        request,
+        options,
       );
     },
 
-    transitionsOf(ref, options) {
-      return identityTransitionsOf(ctx, ref, options);
-    },
-
-    replay(ref, options) {
-      return identityReplay(ctx, ref, options);
+    async replay(ref, options) {
+      const request = identityTransitionWalkRequest(
+        ctx,
+        ref,
+        options,
+        "replay",
+      );
+      return identityReplay(enterIdentityCall(source).ctx, request, options);
     },
   };
 }
