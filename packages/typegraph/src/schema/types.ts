@@ -12,14 +12,12 @@ import { z } from "zod";
 import { type GraphIdentityConfig } from "../core/define-graph";
 import {
   CARDINALITY_VALUES,
-  ENDPOINT_EXISTENCE_VALUES,
   TARGET_CARDINALITY_VALUES,
 } from "../core/edge-integrity-options";
 import {
   type Cardinality,
   type Collation,
   type DeleteBehavior,
-  type EndpointExistence,
   type GraphAnnotations,
   type KindAnnotations,
   type TargetCardinality,
@@ -66,8 +64,6 @@ const deleteBehaviorZod = z.enum(["restrict", "cascade", "disconnect"]);
 const cardinalityZod = z.enum(CARDINALITY_VALUES);
 
 const targetCardinalityZod = z.enum(TARGET_CARDINALITY_VALUES);
-
-const endpointExistenceZod = z.enum(ENDPOINT_EXISTENCE_VALUES);
 
 const temporalModeZod = z.enum([
   "current",
@@ -570,7 +566,6 @@ export type SerializedEdgeDef = Readonly<{
   // equal to the default `"many"`, so a graph that never uses this option
   // keeps its pre-existing document shape and schema hash.
   targetCardinality?: TargetCardinality;
-  endpointExistence: EndpointExistence;
   matchIdentity?: Readonly<{
     name: string;
     fields: readonly string[];
@@ -680,7 +675,12 @@ export const serializedSchemaZod = z
             // without the default a persisted declaration on a NEWER document
             // read by this schema would be silently dropped instead of kept.
             targetCardinality: targetCardinalityZod.default("many"),
-            endpointExistence: endpointExistenceZod,
+            // No `endpointExistence`: every edge carries the field of that
+            // removed option (see `REMOVED_ENDPOINT_EXISTENCE_FIELD` in
+            // `serializer.ts`), whatever value an earlier release recorded.
+            // It parses through `.loose()` unread, and
+            // `canonicalStoredSchemaDocument` fixes its value before the
+            // document is hashed.
             matchIdentity: z
               .object({
                 name: z.string().min(1),

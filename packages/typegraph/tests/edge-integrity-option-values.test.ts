@@ -1,13 +1,14 @@
 /**
- * `cardinality`, `targetCardinality`, `endpointExistence` and `acyclic` are refused at
- * `defineGraph` when stated outside their domain.
+ * `cardinality`, `targetCardinality` and `acyclic` are refused at `defineGraph`
+ * when stated outside their domain, and the removed `endpointExistence` is
+ * refused whatever value it states.
  *
  * Every reader of these options compares by string or strict boolean and
  * treats an unrecognized value as "undeclared", so an untyped caller's typo
  * would otherwise produce a graph whose declared constraint silently does not
  * hold, and a stored schema the loader's own enum rejects.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 
 import {
@@ -17,13 +18,15 @@ import {
   defineGraph,
   defineNode,
 } from "../src";
+import type { EdgeRegistration } from "../src/core";
 import {
   CARDINALITY_VALUES,
-  ENDPOINT_EXISTENCE_VALUES,
   TARGET_CARDINALITY_VALUES,
 } from "../src/core/edge-integrity-options";
 import { serializeSchema } from "../src/schema";
 import { parseSerializedSchema } from "../src/schema/manager";
+import type { SerializedEdgeDef } from "../src/schema/types";
+import type { EdgeIntrospection } from "../src/store/introspect";
 import { createTestBackend } from "./test-utils";
 
 const Item = defineNode("Item", { schema: z.object({}) });
@@ -57,9 +60,6 @@ const INVALID_STATEMENTS = [
   { option: "targetCardinality", value: "unique" },
   { option: "targetCardinality", value: "bogus" },
   { option: "targetCardinality", value: true },
-  { option: "endpointExistence", value: "bogus" },
-  { option: "endpointExistence", value: "Ever" },
-  { option: "endpointExistence", value: true },
   { option: "acyclic", value: "yes" },
   { option: "acyclic", value: "true" },
   { option: "acyclic", value: 1 },
@@ -82,15 +82,69 @@ describe("edge integrity option values", () => {
     },
   );
 
+  // Every value the removed option ever accepted, plus ones it never did: a
+  // stated `endpointExistence` is refused, never silently dropped.
+  it.each([
+    "notDeleted",
+    "currentlyValid",
+    "ever",
+    "bogus",
+    false,
+    // eslint-disable-next-line unicorn/no-null -- an untyped caller can state null
+    null,
+  ])("refuses the removed endpointExistence: %s at defineGraph", (value) => {
+    const refusal = refusalOf({ endpointExistence: value });
+
+    expect(refusal).toBeInstanceOf(ConfigurationError);
+    expect((refusal as ConfigurationError).message).toBe(
+      'Edge "linksTo" declares `endpointExistence`, which is no longer an edge option.',
+    );
+    expect((refusal as ConfigurationError).details).toEqual({
+      code: "EDGE_INTEGRITY_OPTION_INVALID",
+      edgeKind: "linksTo",
+      option: "endpointExistence",
+      value,
+    });
+  });
+
+  it("has no endpointExistence in the registration, serialized or introspected edge types", () => {
+    expectTypeOf<EdgeRegistration>().not.toHaveProperty("endpointExistence");
+    expectTypeOf<SerializedEdgeDef>().not.toHaveProperty("endpointExistence");
+    expectTypeOf<EdgeIntrospection>().not.toHaveProperty("endpointExistence");
+
+    const registration: EdgeRegistration = {
+      type: linksTo,
+      from: [Item],
+      to: [Item],
+      // @ts-expect-error -- the option was removed from EdgeRegistration
+      endpointExistence: "ever",
+    };
+    expect(() =>
+      defineGraph({
+        id: "edge_integrity_option_values_typed",
+        nodes: { Item: { type: Item } },
+        edges: { linksTo: registration },
+      }),
+    ).toThrow(ConfigurationError);
+  });
+
+  it("serializes the fixed endpointExistence field for every edge, whatever else is declared", () => {
+    for (const statement of [{}, { cardinality: "one" }, { acyclic: true }]) {
+      const document = serializeSchema(graphDeclaring(statement), 1);
+
+      expect(document.edges["linksTo"]).toHaveProperty(
+        "endpointExistence",
+        "notDeleted",
+      );
+    }
+  });
+
   it("accepts every declared value, and the schema it serializes loads again", () => {
     const statements = [
       {},
       ...CARDINALITY_VALUES.map((cardinality) => ({ cardinality })),
       ...TARGET_CARDINALITY_VALUES.map((targetCardinality) => ({
         targetCardinality,
-      })),
-      ...ENDPOINT_EXISTENCE_VALUES.map((endpointExistence) => ({
-        endpointExistence,
       })),
       { acyclic: true },
       { acyclic: false },
@@ -103,7 +157,6 @@ describe("edge integrity option values", () => {
       return {
         cardinality: edge?.cardinality,
         targetCardinality: edge?.targetCardinality,
-        endpointExistence: edge?.endpointExistence,
         acyclic: edge?.acyclic ?? false,
       };
     });
@@ -112,7 +165,6 @@ describe("edge integrity option values", () => {
       statements.map((statement) => ({
         cardinality: "many",
         targetCardinality: "many",
-        endpointExistence: "notDeleted",
         acyclic: false,
         ...statement,
       })),

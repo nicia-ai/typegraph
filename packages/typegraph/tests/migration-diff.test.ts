@@ -12,6 +12,7 @@ import {
   isBackwardsCompatible,
 } from "../src/schema/migration";
 import {
+  type SerializedEdgeDef,
   type SerializedOntology,
   type SerializedSchema,
 } from "../src/schema/types";
@@ -85,16 +86,28 @@ function createSchema(
 // computeSchemaDiff - Empty/No Changes
 // ============================================================
 
-function worksAtEdge(endpointExistence: "notDeleted" | "ever") {
-  return {
+/**
+ * The `worksAt` edge, optionally carrying the `endpointExistence` field an
+ * earlier release wrote on every stored edge.
+ */
+function worksAtEdge(
+  legacyEndpointExistence?: "notDeleted" | "currentlyValid" | "ever",
+): SerializedEdgeDef {
+  const edge: SerializedEdgeDef = {
     kind: "worksAt",
     fromKinds: ["Person"],
     toKinds: ["Company"],
     properties: { type: "object" as const, properties: {} },
     cardinality: "many" as const,
-    endpointExistence,
     description: undefined,
   };
+  if (legacyEndpointExistence === undefined) return edge;
+  const stored: SerializedEdgeDef &
+    Readonly<{ endpointExistence: typeof legacyEndpointExistence }> = {
+    ...edge,
+    endpointExistence: legacyEndpointExistence,
+  };
+  return stored;
 }
 
 describe("computeSchemaDiff", () => {
@@ -771,7 +784,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -800,7 +812,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -830,7 +841,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -845,7 +855,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -874,7 +883,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -889,7 +897,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -916,7 +923,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -931,7 +937,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "one",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -949,30 +954,24 @@ describe("computeSchemaDiff", () => {
       expect(requireDefined(diff.edges[0]).details).toContain("one");
     });
 
-    it("detects endpointExistence change as warning", () => {
-      const before = createSchema({
-        version: 1,
-        edges: { worksAt: worksAtEdge("notDeleted") },
-      });
-      const after = createSchema({
-        version: 2,
-        edges: { worksAt: worksAtEdge("ever") },
-      });
+    it.each(["notDeleted", "currentlyValid", "ever"] as const)(
+      "reports no change for a stored edge's removed endpointExistence %s",
+      (legacyValue) => {
+        const stored = createSchema({
+          version: 1,
+          edges: { worksAt: worksAtEdge(legacyValue) },
+        });
+        const current = createSchema({
+          version: 2,
+          edges: { worksAt: worksAtEdge() },
+        });
 
-      const diff = computeSchemaDiff(before, after);
+        const diff = computeSchemaDiff(stored, current);
 
-      expect(diff.hasChanges).toBe(true);
-      expect(diff.isBackwardsCompatible).toBe(true);
-      expect(diff.edges).toHaveLength(1);
-      expect(diff.edges[0]).toMatchObject({
-        type: "modified",
-        severity: "warning",
-      });
-      expect(requireDefined(diff.edges[0]).details).toContain(
-        'endpointExistence changed from "notDeleted" to "ever"',
-      );
-      expect(computeSchemaDiff(before, before).hasChanges).toBe(false);
-    });
+        expect(diff.hasChanges).toBe(false);
+        expect(diff.edges).toEqual([]);
+      },
+    );
 
     it("detects edge property change as safe", () => {
       const before = createSchema({
@@ -985,7 +984,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -1003,7 +1001,6 @@ describe("computeSchemaDiff", () => {
             },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -1030,7 +1027,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
             annotations: {
               ui: { showInTimeline: true },
@@ -1048,7 +1044,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
             annotations: {
               ui: { showInTimeline: false },
@@ -1081,7 +1076,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -1096,7 +1090,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "one", // cardinality changed
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -1417,7 +1410,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -1455,7 +1447,6 @@ describe("computeSchemaDiff", () => {
         properties: { type: "object", properties: {} },
         cardinality: "many",
         targetCardinality: "many",
-        endpointExistence: "notDeleted",
         description: undefined,
       } as const;
       const before = createSchema({ version: 1, edges: { follows } });
@@ -1524,7 +1515,6 @@ describe("computeSchemaDiff", () => {
             properties: { type: "object", properties: {} },
             cardinality: "many",
             targetCardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -1855,7 +1845,6 @@ describe("getMigrationActions", () => {
           properties: { type: "object", properties: {} },
           cardinality: "many",
           targetCardinality: "many",
-          endpointExistence: "notDeleted",
           description: undefined,
         },
       },
@@ -1942,7 +1931,6 @@ describe("getMigrationActions", () => {
           properties: { type: "object", properties: {} },
           cardinality: "many",
           targetCardinality: "many",
-          endpointExistence: "notDeleted",
           description: undefined,
         },
       },

@@ -2210,9 +2210,6 @@ export const ENDPOINT_SET_READ: {
     }];
 };
 
-// @public
-export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
-
 // @public (undocumented)
 export class EndpointSetReadConformanceError extends TypeGraphError {
     constructor(message: string, details?: Readonly<Record<string, unknown>>);
@@ -4009,7 +4006,6 @@ export type SerializedEdgeDef = Readonly<{
     properties: JsonSchema;
     cardinality: Cardinality;
     targetCardinality?: TargetCardinality;
-    endpointExistence: EndpointExistence;
     matchIdentity?: Readonly<{
         name: string;
         fields: readonly string[];

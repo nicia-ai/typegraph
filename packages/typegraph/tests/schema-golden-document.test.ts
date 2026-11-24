@@ -31,7 +31,7 @@ import type { UniqueConstraint } from "../src/core";
 import { defineGraphExtension } from "../src/graph-extension";
 import { mergeGraphExtension } from "../src/graph-extension/merge";
 import { defineNodeIndex } from "../src/indexes";
-import { applyDeprecatedKinds } from "../src/schema/manager";
+import { activeSchemaHash, applyDeprecatedKinds } from "../src/schema/manager";
 import { computeSchemaHash, serializeSchema } from "../src/schema/serializer";
 import { type SerializedSchema } from "../src/schema/types";
 import { createAdapterStoreWithSchema } from "../src/store/store";
@@ -46,8 +46,27 @@ const FIXTURE_PATH = path.join(
 /** The fixture's `generatedAt`, the one field read off the clock. */
 const GOLDEN_GENERATED_AT = "2026-11-03T00:00:00.000Z";
 
-/** `computeSchemaHash` of the fixture, as committed with it. */
-const GOLDEN_SCHEMA_HASH = "9aa79a42455e4821";
+/**
+ * `computeSchemaHash` of the fixture, as committed with it. It moved when the
+ * edge option `endpointExistence` was removed: `goldenCites` could no longer
+ * declare `"currentlyValid"`, so its edge now carries the fixed `"notDeleted"`
+ * every edge carries. A row an earlier release wrote with the old value keeps
+ * its document and hash and still compares equal (the last test below).
+ */
+const GOLDEN_SCHEMA_HASH = "ee04100673f06b53";
+
+/**
+ * The golden document as an earlier release wrote it, before the edge option
+ * `endpointExistence` was removed: committed once, never regenerated.
+ */
+const EARLIER_FIXTURE_PATH = path.join(
+  import.meta.dirname,
+  "fixtures",
+  "golden-schema-document-with-endpoint-existence.json",
+);
+
+/** `computeSchemaHash` of the earlier fixture, as committed with it. */
+const EARLIER_GOLDEN_SCHEMA_HASH = "9aa79a42455e4821";
 
 const Library = defineNode("GoldenLibrary", {
   schema: z.object({ name: z.string(), code: z.string() }),
@@ -141,7 +160,6 @@ const baseGraph = defineGraph({
       from: [Book],
       to: [Book],
       acyclic: true,
-      endpointExistence: "currentlyValid",
     },
     goldenNests: {
       type: nests,
@@ -208,6 +226,11 @@ function fixtureBytes(): string {
   return JSON.stringify(JSON.parse(readFileSync(FIXTURE_PATH, "utf8")));
 }
 
+/** The earlier fixture's bytes, compact as a schema row stores them. */
+function earlierFixtureBytes(): string {
+  return JSON.stringify(JSON.parse(readFileSync(EARLIER_FIXTURE_PATH, "utf8")));
+}
+
 const backends: ReturnType<typeof createLocalSqliteBackend>["backend"][] = [];
 afterEach(async () => {
   for (const backend of backends.splice(0)) await backend.close();
@@ -241,5 +264,34 @@ describe("the golden schema document", () => {
     expect(row.version).toBe(1);
     expect(row.schema_doc).toBe(golden);
     expect(row.schema_hash).toBe(GOLDEN_SCHEMA_HASH);
+  });
+
+  it("reopens unchanged from a row an earlier release wrote with a non-default endpointExistence", async () => {
+    // The fixture as committed before `endpointExistence` was removed, with
+    // the hash committed beside it then: `goldenCites` recorded
+    // `"currentlyValid"`.
+    const { backend, db } = createLocalSqliteBackend();
+    backends.push(backend);
+    await createAdapterStoreWithSchema(goldenGraph, backend);
+    const client = (db as unknown as Readonly<{ $client: Database.Database }>)
+      .$client;
+    const earlier = earlierFixtureBytes();
+    expect(
+      await computeSchemaHash(JSON.parse(earlier) as SerializedSchema),
+    ).toBe(EARLIER_GOLDEN_SCHEMA_HASH);
+    client
+      .prepare(
+        "UPDATE typegraph_schema_versions SET schema_doc = ?, schema_hash = ? WHERE graph_id = ? AND version = 1",
+      )
+      .run(earlier, EARLIER_GOLDEN_SCHEMA_HASH, goldenGraph.id);
+
+    const [, result] = await createAdapterStoreWithSchema(goldenGraph, backend);
+    const row = requireDefined(await backend.getActiveSchema(goldenGraph.id));
+
+    expect(result.status).toBe("unchanged");
+    expect(row.version).toBe(1);
+    expect(row.schema_doc).toBe(earlier);
+    expect(row.schema_hash).toBe(EARLIER_GOLDEN_SCHEMA_HASH);
+    expect(await activeSchemaHash(row)).toBe(GOLDEN_SCHEMA_HASH);
   });
 });

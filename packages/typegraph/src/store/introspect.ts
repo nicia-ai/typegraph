@@ -26,7 +26,6 @@ import {
   type Cardinality,
   type Collation,
   type EdgeType,
-  type EndpointExistence,
   type GraphAnnotations,
   type KindAnnotations,
   type NodeRegistration,
@@ -100,7 +99,6 @@ export type EdgeIntrospection = Readonly<{
   to: readonly string[];
   cardinality: Cardinality;
   targetCardinality: TargetCardinality;
-  endpointExistence: EndpointExistence;
   /**
    * Whether this edge kind's rows are enforced acyclic: declared
    * `acyclic: true`, or a composition-realizing kind (a `partOf`/`hasPart`
@@ -189,7 +187,6 @@ export function introspectSchema<G extends GraphDef>(
       to: projectTargetKinds(reg.to),
       cardinality: reg.cardinality ?? "many",
       targetCardinality: effectiveTargetCardinality(reg.targetCardinality),
-      endpointExistence: reg.endpointExistence ?? "notDeleted",
       acyclic: edgeKindIsInAcyclicRelation(graph, context.registry, name),
       properties: serializeSchemaProperties(edgeType.schema),
       annotations: edgeType.annotations,

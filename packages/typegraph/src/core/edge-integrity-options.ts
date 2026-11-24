@@ -2,7 +2,7 @@
  * The values an edge registration's integrity options may take, and the one
  * check that refuses anything else.
  *
- * `cardinality`, `targetCardinality`, `endpointExistence` and `acyclic` are read by string and
+ * `cardinality`, `targetCardinality` and `acyclic` are read by string and
  * strict-boolean comparison all over the store (the claim axes, the
  * acyclicity relation, the serializer, introspection), and every one of those
  * readers treats a value it does not recognize as "undeclared". So an
@@ -17,11 +17,7 @@
  * (`src/graph-extension/validation.ts`).
  */
 import { ConfigurationError } from "../errors/index";
-import {
-  type Cardinality,
-  type EndpointExistence,
-  type TargetCardinality,
-} from "./types";
+import { type Cardinality, type TargetCardinality } from "./types";
 
 export const CARDINALITY_VALUES = [
   "many",
@@ -62,12 +58,6 @@ export function serializedTargetCardinalityField(
     : { targetCardinality: declared };
 }
 
-export const ENDPOINT_EXISTENCE_VALUES = [
-  "notDeleted",
-  "currentlyValid",
-  "ever",
-] as const satisfies readonly EndpointExistence[];
-
 /** The integrity options of one edge registration, as an untyped caller may state them. */
 type StatedEdgeIntegrityOptions = Readonly<{
   cardinality?: unknown;
@@ -78,7 +68,7 @@ type StatedEdgeIntegrityOptions = Readonly<{
 
 function assertStatedLiteral(
   edgeName: string,
-  option: "cardinality" | "targetCardinality" | "endpointExistence",
+  option: "cardinality" | "targetCardinality",
   value: unknown,
   allowed: readonly string[],
 ): void {
@@ -98,8 +88,36 @@ function assertStatedLiteral(
 }
 
 /**
- * Refuses an edge registration whose `cardinality`, `targetCardinality`,
- * `endpointExistence` or `acyclic` is stated with a value outside its domain.
+ * `endpointExistence` was accepted, stored and reported but never read by any
+ * edge write, and was removed. A registration that still states it (an
+ * untyped caller, or code written against an earlier release) is refused
+ * rather than having the value silently dropped. The edge writes check their
+ * endpoints exactly as they did when it was accepted.
+ */
+function assertRemovedEndpointExistenceNotStated(
+  edgeName: string,
+  value: unknown,
+): void {
+  if (value === undefined) return;
+  throw new ConfigurationError(
+    `Edge "${edgeName}" declares \`endpointExistence\`, which is no longer an edge option.`,
+    {
+      code: "EDGE_INTEGRITY_OPTION_INVALID",
+      edgeKind: edgeName,
+      option: "endpointExistence",
+      value,
+    },
+    {
+      suggestion:
+        "Delete `endpointExistence` from the edge registration. It never changed how any edge write checks its endpoints.",
+    },
+  );
+}
+
+/**
+ * Refuses an edge registration whose `cardinality`, `targetCardinality` or
+ * `acyclic` is stated with a value outside its domain, or that states the
+ * removed `endpointExistence` option at all.
  *
  * @throws ConfigurationError (`EDGE_INTEGRITY_OPTION_INVALID`)
  */
@@ -119,12 +137,7 @@ export function assertEdgeIntegrityOptions(
     stated.targetCardinality,
     TARGET_CARDINALITY_VALUES,
   );
-  assertStatedLiteral(
-    edgeName,
-    "endpointExistence",
-    stated.endpointExistence,
-    ENDPOINT_EXISTENCE_VALUES,
-  );
+  assertRemovedEndpointExistenceNotStated(edgeName, stated.endpointExistence);
   if (stated.acyclic !== undefined && typeof stated.acyclic !== "boolean") {
     throw new ConfigurationError(
       `Edge "${edgeName}" declares \`acyclic\` with a value that is not a boolean.`,

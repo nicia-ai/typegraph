@@ -307,14 +307,6 @@ export type Cardinality =
 export type TargetCardinality = Exclude<Cardinality, "unique">;
 
 /**
- * Endpoint existence modes for edge validation.
- */
-export type EndpointExistence =
-  | "notDeleted" // Endpoint deleted_at IS NULL (default)
-  | "currentlyValid" // Endpoint not deleted AND temporally valid
-  | "ever"; // Endpoint exists in any state
-
-/**
  * Temporal query modes.
  */
 export type TemporalMode =
@@ -421,7 +413,6 @@ export type EdgeRegistration<
    * source may point at many targets, a target may be pointed at once.
    */
   targetCardinality?: TargetCardinality;
-  endpointExistence?: EndpointExistence;
   matchIdentity?: EdgeMatchIdentity<E>;
   /**
    * When true, the live relation formed by this edge kind is a DAG: no write
@@ -429,8 +420,8 @@ export type EdgeRegistration<
    * endpoint, and a self-loop is a cycle of length one. Enforced under the
    * per-graph write fence; refused on a backend that cannot hold one.
    *
-   * Orthogonal to `cardinality`, `matchIdentity`, `endpointExistence` and
-   * `onDelete` — `cardinality: "many", acyclic: true` (a dependency graph)
+   * Orthogonal to `cardinality`, `matchIdentity` and `onDelete` —
+   * `cardinality: "many", acyclic: true` (a dependency graph)
    * is the common case and still takes the fence even though its
    * cardinality does not.
    */

@@ -94,7 +94,6 @@ export {
   type EdgeTargets,
   type EdgeType,
   type EdgeTypeWithEndpoints,
-  type EndpointExistence,
   type GraphAnnotations,
   type GraphDefaults,
   type IndexEntity,
