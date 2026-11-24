@@ -70,7 +70,6 @@ function edgeDef(
     properties: { type: "object", properties: {} },
     cardinality: "many",
     targetCardinality: "many",
-    endpointExistence: "notDeleted",
     description: undefined,
   };
 }

@@ -9,7 +9,6 @@ import {
   type AnyEdgeType,
   type Cardinality,
   type DeleteBehavior,
-  type EndpointExistence,
   type KindAnnotations,
   type TemporalMode,
 } from "../../src/core/types";
@@ -167,15 +166,6 @@ const cardinalityArb: fc.Arbitrary<Cardinality> = fc.constantFrom(
   "one",
   "unique",
   "oneActive",
-);
-
-/**
- * Generate endpoint existence modes.
- */
-const endpointExistenceArb: fc.Arbitrary<EndpointExistence> = fc.constantFrom(
-  "notDeleted",
-  "currentlyValid",
-  "ever",
 );
 
 // Note: UniquenessScope and Collation types are imported but the arbitraries
@@ -366,18 +356,14 @@ const graphDefArb = fc
               fromIndex: fc.integer({ min: 0, max: nodeTypes.length - 1 }),
               toIndex: fc.integer({ min: 0, max: nodeTypes.length - 1 }),
               cardinality: fc.option(cardinalityArb, { nil: undefined }),
-              endpointExistence: fc.option(endpointExistenceArb, {
-                nil: undefined,
-              }),
             })
-            .map(({ fromIndex, toIndex, cardinality, endpointExistence }) => ({
+            .map(({ fromIndex, toIndex, cardinality }) => ({
               key: edge.kind,
               value: {
                 type: edge,
                 from: [requireDefined(nodeTypes[fromIndex])],
                 to: [requireDefined(nodeTypes[toIndex])],
                 cardinality,
-                endpointExistence,
               },
             })),
         )

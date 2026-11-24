@@ -14,6 +14,7 @@ export { registerCapabilityBundleNoThrowIntegrationTests } from "./capability-bu
 export { registerCapabilityMemberDropMatrixIntegrationTests } from "./capability-member-drop-matrix";
 export { registerCapabilityPortBindingIntegrationTests } from "./capability-port-binding";
 export { registerCapabilityRefusalIntegrationTests } from "./capability-refusals";
+export { registerCaptureFlushOperationRoutingIntegrationTests } from "./capture-flush-operation-routing";
 export { registerClaimCompensationIntegrationTests } from "./claim-compensation";
 export { registerClaimLookupPreferenceIntegrationTests } from "./claim-lookup-preference";
 export { registerClaimOwnerIdentityIntegrationTests } from "./claim-owner-identity";
@@ -68,6 +69,7 @@ export { registerIdentityIntegrationTests } from "./identity";
 export { registerCurrentIdentityTraversalTests } from "./identity-current-traversal";
 export { registerHistoricalIdentityTraversalTests } from "./identity-historical-traversal";
 export { registerIdentityImportIntegrationTests } from "./identity-import";
+export { registerIdentityOperationRoutingIntegrationTests } from "./identity-operation-routing";
 export { registerIdentityReplayIntegrationTests } from "./identity-replay";
 export { registerIdentitySeparationIntegrationTests } from "./identity-separation";
 export { registerImportCompositionMoveIntegrationTests } from "./import-composition-moves";
@@ -98,6 +100,7 @@ export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-prope
 export { registerPaginationSystemColumnIntegrationTests } from "./pagination-system-columns";
 export { registerPredicateIntegrationTests } from "./predicates";
 export { registerProvenanceIntegrationTests } from "./provenance";
+export { registerProvenanceInterchangeOperationRoutingIntegrationTests } from "./provenance-interchange-operation-routing";
 export { registerProvenanceRelationshipFactRecipeTests } from "./provenance-relationship-fact-recipe";
 export { registerQueryFragmentIntegrationTests } from "./query-fragments";
 export { registerQueryHookIntegrationTests } from "./query-hooks";
@@ -120,9 +123,11 @@ export { registerRefusedCreateClaimIntegrationTests } from "./refused-create-cla
 export { registerRelationalCompositionIntegrationTests } from "./relational-composition";
 export { registerReleasedClaimLookupIntegrationTests } from "./released-claim-lookup";
 export { registerRemovalMaterializationIntegrationTests } from "./removal-materialization";
+export { registerRemovedEndpointExistenceIntegrationTests } from "./removed-endpoint-existence";
 export { registerReservedAliasPrefixIntegrationTests } from "./reserved-alias-prefix";
 export { registerSavepointRecoveryIntegrationTests } from "./savepoint-recovery";
 export { registerSchemaCheckedReadIntegrationTests } from "./schema-checked-read";
+export { registerSchemaOperationRoutingIntegrationTests } from "./schema-operation-routing";
 export { registerSelectiveRetryIntegrationTests } from "./selective-retry";
 export { registerSetNodeMutationIntegrationTests } from "./set-node-mutation";
 export { registerSetOperationIntegrationTests } from "./set-operations";

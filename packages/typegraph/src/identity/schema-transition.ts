@@ -21,10 +21,11 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
   type OperationBackend,
+  type OperationEntry,
   type OperationScoped,
-  type StatementBackend,
   storeSchemaWriteTransaction,
   type StoreTransactionBackend,
 } from "../store/operation-scope";
@@ -88,12 +89,13 @@ const UPGRADEABLE_DERIVED_RELATIONS: ReadonlySet<string> = new Set([
  * transaction when the CREATE has to be published with the fill, the top-level
  * backend when the relation already exists and only its rows are owed.
  *
- * The full backend union rather than {@link IdentityTarget}: the rebuild opens
- * its own write frame on whatever it is handed, so it needs the top-level
- * `transaction` member to tell "open one" from "already inside one" apart.
+ * A write entry rather than {@link IdentityTarget}: the rebuild opens its own
+ * write frame on whatever it is handed, so it needs the pooled root to tell
+ * "open one" from "already inside one" apart, and the session of a
+ * transaction it is handed.
  */
 export type RecomputeDerivedRelations = (
-  target: StatementBackend,
+  entry: OperationEntry,
 ) => Promise<void>;
 
 /**
@@ -346,13 +348,14 @@ async function provisionDerivedRelations(
       async (
         transaction: StoreTransactionBackend<SchemaWriteTransactionBackend>,
       ) => {
-        const target = legacyTransactionOperation(transaction);
+        const operation = enterOperation(openTransactionSession(transaction));
+        const target = operation.backend;
         await lockIdentityDdl(target);
         await executeIdentityDdl(
           (ddl) => target.executeSchemaDdl(ddl),
           identityTableDdl(tableNames),
         );
-        await ports.recompute(target);
+        await ports.recompute(operation);
       },
       ownSchemaDdl(),
     ),

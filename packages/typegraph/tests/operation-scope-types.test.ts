@@ -13,6 +13,7 @@ import {
   enterTargetOperation,
   type EntryScope,
   legacyTransactionOperation,
+  openTransactionSession,
   type Operation,
   type OperationBackend,
   type OperationEntry,
@@ -31,9 +32,62 @@ import type { executeEdgeCreate } from "../src/store/operations/edge-operations"
 
 type EdgeCreateBackend = Parameters<typeof executeEdgeCreate>[2];
 
+/**
+ * An engine transaction that adds no member but narrows one: a specialisation
+ * all the same, since its handle promises what an ordinary one does not.
+ */
+type NarrowedTransactionBackend = TransactionBackend &
+  Readonly<{
+    executeStatement: NonNullable<TransactionBackend["executeStatement"]>;
+  }>;
+
+/**
+ * Never called: an ordinary Store transaction cannot open a session, and an
+ * ordinary session cannot enter an operation, of any engine type beyond the
+ * ordinary one. `tsc` reports a `@ts-expect-error` that has no error.
+ */
+function fabricateSpecialisations(
+  transaction: StoreTransactionBackend,
+  engineTransaction: TransactionBackend,
+  session: TransactionSession,
+) {
+  // The first review's second edit: `never` names no engine type, and a
+  // session of it would be assignable to every specialised session.
+  const schemaWrite: TransactionSession<SchemaWriteTransactionBackend> =
+    // @ts-expect-error -- `never` is a specialisation, not the ordinary transaction
+    openTransactionSession<never>(transaction);
+  return [
+    schemaWrite,
+    // @ts-expect-error -- the pooled backend's `transaction` is not this transaction's
+    openTransactionSession<GraphBackend>(transaction),
+    // @ts-expect-error -- nor is it a raw engine transaction's, an adopted one's included
+    openTransactionSession<GraphBackend>(engineTransaction),
+    // @ts-expect-error -- `never` grants nothing over a raw engine transaction either
+    openTransactionSession<never>(engineTransaction),
+    // @ts-expect-error -- a narrowed member is a specialisation too
+    openTransactionSession<NarrowedTransactionBackend>(transaction),
+    // @ts-expect-error -- only its boundary mint grants the schema-write transaction
+    openTransactionSession<SchemaWriteTransactionBackend>(transaction),
+    // @ts-expect-error -- an ordinary session enters ordinary operations only
+    enterOperation<GraphBackend>(session),
+  ] as const;
+}
+
 /** Never called: resolves the session overload of the mint. */
 function enteredFromSession(session: TransactionSession) {
   return enterOperation(session);
+}
+
+/** Never called: the operation of a session opened over `transaction`. */
+function enteredFromOpenedSession<Engine extends TransactionBackend>(
+  transaction: StoreTransactionBackend<Engine>,
+) {
+  return enterOperation(openTransactionSession(transaction));
+}
+
+/** Never called: the operation of a session opened over a raw transaction. */
+function enteredFromEngineTransaction(transaction: TransactionBackend) {
+  return enterOperation(openTransactionSession(transaction));
 }
 
 describe("operation-scoped statement targets", () => {
@@ -113,6 +167,36 @@ describe("a specialised Store transaction", () => {
     >();
   });
 
+  // The second review's edit: `openTransactionSession<GraphBackend>(tx)` over
+  // an ordinary transaction, whose operation's handle then promised the pooled
+  // backend's `transaction` member. Every engine type beyond the ordinary
+  // transaction, one that only narrows a member included, needs the record.
+  it("is never named onto an ordinary transaction, the pooled backend included", () => {
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<
+      StoreTransactionBackend<GraphBackend>
+    >();
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<
+      StoreTransactionBackend<NarrowedTransactionBackend>
+    >();
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<
+      StoreTransactionBackend<never>
+    >();
+    expectTypeOf<TransactionBackend>().not.toExtend<
+      StoreTransactionBackend<never>
+    >();
+    expectTypeOf<OperationBackend>().not.toExtend<
+      OperationScoped<GraphBackend>
+    >();
+    expectTypeOf<OperationBackend>().not.toExtend<
+      OperationScoped<NarrowedTransactionBackend>
+    >();
+    expectTypeOf<TransactionSession>().not.toExtend<
+      TransactionSession<GraphBackend>
+    >();
+    expectTypeOf<Operation>().not.toExtend<Operation<GraphBackend>>();
+    expectTypeOf(fabricateSpecialisations).toBeFunction();
+  });
+
   it("is claimed by no ordinary handle either", () => {
     // Member for member, the preflight target IS an ordinary transaction:
     // without the engine record a plain handle would satisfy it.
@@ -153,6 +237,50 @@ describe("a specialised Store transaction", () => {
     expectTypeOf<
       Parameters<Parameters<StoreSetActiveVersionWithPreflight>[1]>[0]
     >().toEqualTypeOf<StoreTransactionBackend<SchemaCommitPreflightBackend>>();
+  });
+
+  // The schema-write and preflight callbacks open their session over the
+  // specialised transaction they are handed, and their statements (DDL among
+  // them) go through that session's operation. The specialisation therefore
+  // survives the session, and an ordinary transaction never gains it.
+  it("keeps a specialised transaction's privilege through its session and operation", () => {
+    expectTypeOf(
+      openTransactionSession<SchemaCommitPreflightBackend>,
+    ).returns.toEqualTypeOf<TransactionSession<SchemaCommitPreflightBackend>>();
+    expectTypeOf(
+      enteredFromOpenedSession<SchemaCommitPreflightBackend>,
+    ).returns.toEqualTypeOf<Operation<SchemaCommitPreflightBackend>>();
+    expectTypeOf<
+      ReturnType<
+        typeof enteredFromOpenedSession<SchemaWriteTransactionBackend>
+      >["backend"]
+    >().toEqualTypeOf<OperationScoped<SchemaWriteTransactionBackend>>();
+    // A specialised session and its operation are still a session and an
+    // operation: they enter wherever the plain ones do.
+    expectTypeOf<
+      TransactionSession<SchemaCommitPreflightBackend>
+    >().toExtend<EntryScope>();
+    expectTypeOf<
+      Operation<SchemaCommitPreflightBackend>
+    >().toExtend<OperationEntry>();
+  });
+
+  it("opens a plain session over any other transaction", () => {
+    expectTypeOf(
+      enteredFromEngineTransaction,
+    ).returns.toEqualTypeOf<Operation>();
+    expectTypeOf(
+      enteredFromOpenedSession<TransactionBackend>,
+    ).returns.toEqualTypeOf<Operation>();
+    expectTypeOf<Operation["backend"]>().not.toExtend<
+      OperationScoped<SchemaCommitPreflightBackend>
+    >();
+    expectTypeOf<Operation["backend"]>().not.toExtend<
+      OperationScoped<SchemaWriteTransactionBackend>
+    >();
+    expectTypeOf<TransactionSession>().not.toExtend<
+      TransactionSession<SchemaCommitPreflightBackend>
+    >();
   });
 
   it("keeps the engine member's own parameters and result", () => {

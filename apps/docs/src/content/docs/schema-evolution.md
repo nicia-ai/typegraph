@@ -189,7 +189,7 @@ transaction, which TypeGraph cannot move to `READ COMMITTED`, is refused with
 Where a change is reported follows one rule: `SchemaDiff.ontology` carries
 ontology relations (the meta-edge rows above), and `SchemaDiff.edges` carries
 everything about an edge kind's own registration — its endpoints, `cardinality`,
-`targetCardinality`, `endpointExistence` and `acyclic`. A tightening that
+`targetCardinality` and `acyclic`. A tightening that
 needs a data check never appears under a category whose list is empty:
 declaring `acyclic: true` shows as a `warning` entry in `diff.edges` and
 leaves `diff.ontology` empty, and a narrowed `from`/`to` is the one existing

@@ -22,7 +22,8 @@ import {
 } from "../identity/transition-log";
 import { activeOnlyAxisReferences } from "../store/claims/edge-claims";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
   type StatementBackend,
   type StoreTransactionBackend,
 } from "../store/operation-scope";
@@ -406,8 +407,12 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
         const started =
           backend.capabilities.execution.interactiveTransactions ?
             backend.transaction(
+              // The export opened this snapshot transaction: its session opens
+              // here, and the whole stream is its one operation. Nothing else
+              // holds the transaction, so no other call interleaves with the
+              // pages it produces.
               (target: StoreTransactionBackend) =>
-                produce(legacyTransactionOperation(target)),
+                produce(enterOperation(openTransactionSession(target)).backend),
               {
                 isolationLevel: "repeatable_read",
                 accessMode: "read_only",

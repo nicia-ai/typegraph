@@ -84,7 +84,6 @@ describe("serializedSchemaZod", () => {
             toKinds: ["Person"],
             properties: { type: "object" },
             cardinality: "many",
-            endpointExistence: "notDeleted",
             description: undefined,
             annotations: {
               ui: { showInTimeline: true },
@@ -275,7 +274,6 @@ describe("serializedSchemaZod", () => {
             toKinds: ["Person"],
             properties: {},
             cardinality: "many",
-            endpointExistence: "notDeleted",
           },
         },
       };
@@ -410,7 +408,6 @@ describe("serializedSchemaZod", () => {
             toKinds: ["Person"],
             properties: {},
             cardinality: "exactlyTwo",
-            endpointExistence: "notDeleted",
             description: undefined,
           },
         },
@@ -484,7 +481,6 @@ describe("serializedSchemaZod", () => {
             toKinds: ["Person"],
             properties: {},
             cardinality: "many",
-            endpointExistence: "notDeleted",
           },
         },
       };
@@ -535,7 +531,6 @@ describe("serializedSchemaZod", () => {
             toKinds: ["Person"],
             properties: {},
             cardinality: "many",
-            endpointExistence: "notDeleted",
           },
         },
       };

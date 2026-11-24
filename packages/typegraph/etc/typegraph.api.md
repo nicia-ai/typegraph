@@ -2354,7 +2354,6 @@ type EdgeIntrospection = Readonly<{
     to: readonly string[];
     cardinality: Cardinality;
     targetCardinality: TargetCardinality;
-    endpointExistence: EndpointExistence;
     acyclic: boolean;
     properties: JsonSchema;
     annotations: KindAnnotations | undefined;
@@ -2442,9 +2441,9 @@ type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends Nod
     to: ToDef;
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
-    endpointExistence?: EndpointExistence;
     matchIdentity?: EdgeMatchIdentity<E>;
     acyclic?: boolean;
+    endpointExistence?: never;
 }>;
 
 // @public
@@ -2623,9 +2622,6 @@ type EndpointErrorDetails = Readonly<{
     actualKind: string;
     expectedKinds: readonly string[];
 }>;
-
-// @public
-type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public
 type EndpointKindErased<Endpoint> = Endpoint extends string ? false : Endpoint extends {
@@ -3378,6 +3374,7 @@ export type ExtensionEdgeDef = Readonly<{
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
     acyclic?: boolean;
+    endpointExistence?: never;
 }>;
 
 // @public
@@ -7758,7 +7755,6 @@ type SerializedEdgeDef = Readonly<{
     properties: JsonSchema;
     cardinality: Cardinality;
     targetCardinality?: TargetCardinality;
-    endpointExistence: EndpointExistence;
     matchIdentity?: Readonly<{
         name: string;
         fields: readonly string[];

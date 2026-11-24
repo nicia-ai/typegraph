@@ -294,6 +294,14 @@ export type ExtensionEdgeDef = Readonly<{
   targetCardinality?: TargetCardinality;
   /** See `EdgeRegistration.acyclic`. A runtime-authored edge may declare it. */
   acyclic?: boolean;
+  /**
+   * Not an edge option: the compile-time `EdgeRegistration` option of this
+   * name was removed, and an extension edge never had it. Declared `never`
+   * so a document carried over from a registration is refused at compile
+   * time even where it is inferred (`defineGraphExtension`), which no
+   * excess-property check reaches; strict validation refuses it at runtime.
+   */
+  endpointExistence?: never;
 }>;
 
 // ============================================================

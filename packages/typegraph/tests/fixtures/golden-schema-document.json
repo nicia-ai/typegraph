@@ -177,7 +177,7 @@
         "additionalProperties": false
       },
       "cardinality": "many",
-      "endpointExistence": "currentlyValid",
+      "endpointExistence": "notDeleted",
       "acyclic": true
     },
     "goldenNests": {

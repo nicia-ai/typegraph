@@ -24,7 +24,8 @@ import { validateCanonicalIsoDate } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
   type StoreTransactionBackend,
 } from "./operation-scope";
 import {
@@ -282,7 +283,11 @@ export async function pruneRecordedAnchors(
     },
     () =>
       backend.transaction(async (transaction: StoreTransactionBackend) => {
-        const target = legacyTransactionOperation(transaction);
+        // This unit opened the transaction: its session opens here, and
+        // the unit runs as one operation of it.
+        const target = enterOperation(
+          openTransactionSession(transaction),
+        ).backend;
         // The same transaction-scoped graph fence used by writers, clear, and owner rotation.
         await lockRecordedGraphWrite(target, graphId);
         const row = await readRecordedAnchorSnapshot(

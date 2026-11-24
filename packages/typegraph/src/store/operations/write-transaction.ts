@@ -475,9 +475,15 @@ async function ensureAdoptedConstraintWriterSlot(
  * and owns every reuse of fence evidence across those mutations:
  * `fenceEvidence` decides both whether the session remembers the per-graph
  * write fence and whether it leases the schema fence.
+ *
+ * `target` is what the mutations' statements go through, and what the
+ * session is keyed on; `opener` is the operation of the transaction's opener
+ * that this function's own statements (the recovery probe, the revision
+ * advance) go through.
  */
 export async function withWriteTransactionSession<T>(
   target: OperationBackend,
+  opener: OperationBackend,
   ctx: WriteTransactionContext,
   fenceEvidence: WriteTransactionFenceEvidence,
   fn: () => Promise<T>,
@@ -506,14 +512,14 @@ export async function withWriteTransactionSession<T>(
       // catching the error. Check the pinned session itself: 25P02 means the
       // transaction is still doomed, while a successful read proves recovery.
       try {
-        await target.execute(asCompiledRowsSql(sql`SELECT 1`));
+        await opener.execute(asCompiledRowsSql(sql`SELECT 1`));
       } catch (probeError) {
         if (!isPostgresFailedTransactionError(probeError)) throw probeError;
         throw session.aborted.error;
       }
     }
     if (session.wrote && ctx.revisionTrackingEnabled && !ctx.historyEnabled) {
-      await advanceRevisionClock(target, ctx.revisionSchema, ctx.graphId, true);
+      await advanceRevisionClock(opener, ctx.revisionSchema, ctx.graphId, true);
     }
     return result;
   } finally {

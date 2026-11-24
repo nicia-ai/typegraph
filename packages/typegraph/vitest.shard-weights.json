@@ -615,7 +615,6 @@
     "tests/schema-diff-ordering.test.ts": 46,
     "tests/schema-diff-projection-spelling.test.ts": 151,
     "tests/schema-diff-subsumption-gate.test.ts": 240,
-    "tests/schema-endpoint-existence-ensure.test.ts": 163,
     "tests/schema-fence-plan.test.ts": 11538,
     "tests/schema-fused-insert.test.ts": 19241,
     "tests/schema-golden-document.test.ts": 219,

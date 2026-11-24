@@ -171,10 +171,11 @@ import {
   createIdentityReadFacade,
   detachIdentityForNode,
   foldIdentityForCreatedNodes,
+  type IdentityCallContext,
+  type IdentityFacadeSource,
   type IdentityFoldPlan,
   type IdentityImportSummary,
   type IdentityRebuildContext,
-  type IdentityServiceContext,
   type IdentityTransferAssertion,
   type IdentityTransitionCursor,
   type IdentityTransitionTransfer,
@@ -366,17 +367,22 @@ import {
 } from "./neighbors";
 import { readNodeByReference } from "./node-reference-read";
 import {
+  decorateOperation,
   enterOperation,
   enterTargetOperation,
+  type EntryScope,
   legacyTransactionOperation,
+  openBoundTransactionSession,
   openTransactionSession,
   type Operation,
   type OperationBackend,
+  type OperationEntry,
   operationEntryBackend,
   type OperationScoped,
   type StatementBackend,
   storeAdoptSchemaWriteTransaction,
   type StoreTransactionBackend,
+  transactionRuntimeSession,
   type TransactionSession,
 } from "./operation-scope";
 import {
@@ -469,6 +475,7 @@ import {
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
+  registeredRecordedGraphLockMemo,
   registerRecordedIdentityMutationWitness,
   resetRevisionOrigin,
   resolveLineage,
@@ -1966,7 +1973,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     );
     const existing = IDENTITY_FACADES.get(this);
     if (existing !== undefined) return existing as IdentityFacade<G>;
-    const facade = createIdentityFacade(this.#identityContext(this.#backend));
+    const facade = createIdentityFacade(
+      this.#identityFacadeSource(this.#backend, this.#backend),
+    );
     IDENTITY_FACADES.set(this, facade);
     return facade;
   }
@@ -2051,11 +2060,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#recordedReadBinding,
       "recorded-identity",
     );
-    return createIdentityReadFacade({
-      ...this.#identityContext(backend),
-      schema,
-      coordinate,
-    });
+    return createIdentityReadFacade(
+      this.#identityFacadeSource(backend, backend, { schema, coordinate }),
+    );
   }
 
   /** Rebuilds derived current identity closure without advancing revision. */
@@ -2071,6 +2078,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         revisionSchema: this.#sqlSchema(),
         statementExecution: this.#statementExecution,
       },
+      this.#baseBackend,
     );
   }
 
@@ -2080,12 +2088,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * `provisionDerivedRelations` carries the DDL `ensureIdentitySchemaStorage`
    * deliberately did not run outside this transaction, so an evolution that
    * fails leaves no half-published derived relation behind.
+   *
+   * A step of a composed schema-commit preflight: `target` is the handle of
+   * the operation the commit's preflight runs under, and this step runs under
+   * that same operation.
    */
   async identitySchemaPreflight(
-    transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>,
+    target: OperationScoped<SchemaCommitPreflightBackend>,
     provisionDerivedRelations: readonly string[],
   ): Promise<void> {
-    const target = legacyTransactionOperation(transaction);
     await identitySchemaCommitPreflight(this.#identityContext(this.#backend), {
       enablement: false,
       provisionDerivedRelations,
@@ -2108,33 +2119,39 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     await validateIdentityForContext(this.#identityContext(this.#baseBackend));
   }
 
-  /** @internal Cascades removed kinds in the schema-commit transaction. */
+  /**
+   * @internal Cascades removed kinds in the schema-commit transaction, as a
+   * step of its preflight: `operation` is the operation the preflight runs
+   * under, and the cascade's write frames enter the write executor from it.
+   */
   async removeIdentityKindsInSchemaPreflight(
-    transaction: StoreTransactionBackend,
+    operation: Operation<SchemaCommitPreflightBackend>,
     kinds: readonly string[],
     options?: Readonly<{ repairClosure?: boolean }>,
   ): Promise<void> {
-    const target = legacyTransactionOperation(transaction);
-    if (!this.#captureEnabled) {
-      await removeIdentityKindsForContext(
-        this.#identityContext(target),
-        kinds,
-        options,
+    const target = operation.backend;
+    const scope =
+      this.#captureEnabled ?
+        createRecordedTransactionScope(
+          target,
+          this.#batchPointRead,
+          this.#sqlSchema(),
+          transactionOwnsSqliteWriteLock(target),
+        )
+      : undefined;
+    // The cascade's write frames join the preflight's operation, through the
+    // capture overlay when this Store records.
+    const entry =
+      scope === undefined ? operation : (
+        decorateOperation(operation, scope.backend)
       );
-      return;
-    }
-    const scope = createRecordedTransactionScope(
-      target,
-      this.#batchPointRead,
-      this.#sqlSchema(),
-      transactionOwnsSqliteWriteLock(target),
-    );
     await removeIdentityKindsForContext(
-      this.#identityContext(scope.backend),
+      this.#identityContext(entry.backend),
+      entry,
       kinds,
       options,
     );
-    await scope.flush();
+    await scope?.flush();
   }
 
   /**
@@ -2152,6 +2169,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     if (this.#graph.identity === undefined) return Promise.resolve([]);
     return readIdentityAssertionsForInterchange(
       this.#identityContext(this.#baseBackend),
+      this.#baseBackend,
       mode,
       options,
     );
@@ -2162,10 +2180,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     transaction: GraphBackend | StoreTransactionBackend,
     mode: "state" | "archival" = "state",
   ): Promise<readonly IdentityTransferAssertion[]> {
-    const target = legacyTransactionOperation(transaction);
     if (this.#graph.identity === undefined) return Promise.resolve([]);
+    const target = this.#identityTargetBackend(transaction);
     return readIdentityAssertionsForInterchange(
       this.#identityContext(target),
+      target,
       mode,
     );
   }
@@ -2177,10 +2196,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     mode: "state" | "archival" = "state",
     options?: Readonly<{ includeDeleted?: boolean }>,
   ): Promise<readonly IdentityTransferAssertion[]> {
-    const target = legacyTransactionOperation(transaction);
     if (this.#graph.identity === undefined || references.length === 0) {
       return Promise.resolve([]);
     }
+    const target = this.#identityTargetBackend(transaction);
     return readIdentityAssertionsTouchingAtTarget(
       this.#identityContext(target),
       target,
@@ -2201,10 +2220,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       limit: number;
     }>,
   ): ReturnType<typeof readIdentityAssertionPageAtTarget> {
-    const target = legacyTransactionOperation(transaction);
     if (this.#graph.identity === undefined) {
       return Promise.resolve({ assertions: [], done: true });
     }
+    const target = this.#identityTargetBackend(transaction);
     return readIdentityAssertionPageAtTarget(
       this.#identityContext(target),
       target,
@@ -2312,12 +2331,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       done: boolean;
     }>
   > {
-    const target = legacyTransactionOperation(transaction);
     if (this.#graph.identity === undefined) {
       return { transitions: [], done: true };
     }
     const page = await readIdentityTransitionPageForInterchange(
-      target,
+      this.#identityTargetBackend(transaction),
       this.#sqlSchema(),
       this.graphId,
       options,
@@ -2333,10 +2351,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   identityTransitionRetentionAtTarget(
     transaction: GraphBackend | StoreTransactionBackend,
   ): Promise<IdentityTransitionRetention> {
-    const target = legacyTransactionOperation(transaction);
     if (this.#graph.identity === undefined) return Promise.resolve({});
     return readIdentityTransitionRetention(
-      target,
+      this.#identityTargetBackend(transaction),
       this.#sqlSchema(),
       this.graphId,
     );
@@ -2399,10 +2416,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     transaction: GraphBackend | StoreTransactionBackend,
     seeds: readonly Readonly<{ kind: string; id: string }>[],
   ): Promise<void> {
-    const target = legacyTransactionOperation(transaction);
     if (this.#graph.identity === undefined || seeds.length === 0) {
       return Promise.resolve();
     }
+    const target = this.#identityTargetBackend(transaction);
     return assertAffectedIdentityClassesConsistent(
       this.#identityContext(target),
       target,
@@ -2417,7 +2434,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     assertions: readonly IdentityTransferAssertion[],
     decision?: IdentityDecisionProvenance,
   ): Promise<Readonly<{ created: number; retracted: number }>> {
-    const target = legacyTransactionOperation(transaction);
     if (retractions.length === 0 && assertions.length === 0) {
       return Promise.resolve({ created: 0, retracted: 0 });
     }
@@ -2427,8 +2443,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         { code: "IDENTITY_MERGE_REQUIRES_PROFILE", graphId: this.graphId },
       );
     }
+    const entry = enterTargetOperation(transaction);
     return applyIdentityChangesForContext(
-      this.#identityContext(target),
+      this.#identityContext(operationEntryBackend(entry)),
+      entry,
       retractions,
       assertions,
       decision,
@@ -4718,9 +4736,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       );
       try {
         const run = async (
-          txBackend: OperationBackend,
+          transaction: StoreTransactionBackend,
           nativeTransaction: TNativeTransaction | undefined,
         ): Promise<T> => {
+          // This attempt opened the transaction, so its session opens here,
+          // once. The statements the attempt issues itself (the pre-commit
+          // hook, the engine instant read) go through one operation of it;
+          // every later operation hands out `writeTarget`, built over the
+          // transaction the session holds.
+          //
           // A receipt was requested AND this store is engine-native: wrap the
           // committing session so every write member this transaction body
           // calls is observed at the point it either changed a row or did
@@ -4737,26 +4761,34 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // maps below key on object identity, so leasing and wrapping must
           // share the identical target or a write issued through the wrapper
           // resolves a session/lease the raw `txBackend` registered under.
-          const mutationWitness =
-            this.#engineNativeHistory && receiptRequested ?
-              createMutationWitness()
-            : undefined;
-          const writeTarget =
-            mutationWitness === undefined ? txBackend : (
-              mutationWitness.wrap(txBackend)
-            );
-          if (mutationWitness !== undefined) {
-            // Identity assertions run through a wholly separate seam
-            // (`withRecordedIdentityMutationTarget`) that `wrap`'s overlay
-            // does not cover — register the witness's sink against both
-            // object identities `writeTarget` can be reached through, the
-            // same binding capture uses for its own session-backed sink.
-            registerRecordedIdentityMutationWitness(
-              writeTarget,
-              txBackend,
-              mutationWitness.sink,
-            );
-          }
+          const {
+            session,
+            binding: { txBackend, mutationWitness, writeTarget },
+          } = await openBoundTransactionSession(transaction, (opened, held) => {
+            const txBackend = enterOperation(opened).backend;
+            const mutationWitness =
+              this.#engineNativeHistory && receiptRequested ?
+                createMutationWitness()
+              : undefined;
+            const writeTarget =
+              mutationWitness === undefined ? held : mutationWitness.wrap(held);
+            if (mutationWitness !== undefined) {
+              // Identity assertions run through a wholly separate seam
+              // (`withRecordedIdentityMutationTarget`) that `wrap`'s overlay
+              // does not cover — register the witness's sink against both
+              // object identities `writeTarget` can be reached through, the
+              // same binding capture uses for its own session-backed sink.
+              registerRecordedIdentityMutationWitness(
+                writeTarget,
+                held,
+                mutationWitness.sink,
+              );
+            }
+            return {
+              statements: writeTarget,
+              binding: { txBackend, mutationWitness, writeTarget },
+            };
+          });
           const runHooks = this.#createBufferedHookRunner(pending, writeTarget);
           const runBulkHooks = this.#createBufferedBulkHookRunner(
             pending,
@@ -4765,7 +4797,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           const invokeTransaction = (): Promise<T> =>
             runInTransactionContext(
               this.#buildTransactionContext(
-                writeTarget,
+                session,
                 nativeTransaction,
                 runHooks,
                 receiptRecorder,
@@ -4784,6 +4816,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             );
           const output = await withWriteTransactionSession(
             writeTarget,
+            txBackend,
             {
               graphId: this.graphId,
               schemaVersion: this.#schemaMetadata.schemaVersion,
@@ -4822,13 +4855,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         const result =
           this.#captureEnabled || this.#adapterBackend === undefined ?
             await this.#backend.transaction(
-              (txBackend: StoreTransactionBackend) =>
-                run(legacyTransactionOperation(txBackend), undefined),
+              (txBackend: StoreTransactionBackend) => run(txBackend, undefined),
               transactionOptions,
             )
           : await this.#adapterBackend.transactionWithNative(
               (txBackend: StoreTransactionBackend, nativeTransaction) =>
-                run(legacyTransactionOperation(txBackend), nativeTransaction),
+                run(txBackend, nativeTransaction),
               deferNativeHandle(transactionOptions),
             );
         // The COMMIT above already succeeded: flushing `onOperationEnd` is
@@ -4979,8 +5011,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // The caller already owns the boundary, so `externalTx` *is* the
     // bound handle — surface it as `tx.sql` for symmetry with the
     // graph-owned `transaction()` path.
+    // The Store joins the caller's transaction here: its session opens here.
     return this.#buildTransactionContext(
-      legacyTransactionOperation(adopt(externalTx)),
+      openTransactionSession(adopt(externalTx)),
       externalTx,
     );
   }
@@ -5079,16 +5112,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       );
     }
     return withAdoptedTransactionScope(externalTx, () =>
-      this.#runAdoptedRecordedTransaction(
-        legacyTransactionOperation(adopt(externalTx)),
-        externalTx,
-        fn,
-      ),
+      this.#runAdoptedRecordedTransaction(adopt(externalTx), externalTx, fn),
     );
   }
 
   async #runAdoptedRecordedTransaction<T>(
-    txBackend: OperationBackend,
+    transaction: StoreTransactionBackend,
     externalTx: TNativeTransaction,
     fn:
       | ((
@@ -5099,66 +5128,110 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         ) => Promise<T>),
     originalStore?: StoreImplementation<G, TNativeTransaction>,
   ): Promise<TransactionOutcome<T>> {
-    if (this.#captureEnabled) {
-      await assertRecordedCaptureTransactionIsolation(txBackend);
-      await lockSchemaVersionForStoreWrite(
-        {
-          graphId: this.graphId,
-          schemaVersion: this.#schemaMetadata.schemaVersion,
-        },
+    // The Store joins the caller's transaction here, so its session opens
+    // here, once. The statements this method issues itself (the isolation
+    // check and schema lock before capture, the flush or engine instant
+    // read after the callback) go through one
+    // operation of it; the surface every later operation hands out is the
+    // capture, witness and execution-lifetime decoration built over the
+    // transaction the session holds. The recorded graph lock is taken
+    // through the same operation, into the capture surface's graph-lock memo.
+    const {
+      session,
+      binding: {
         txBackend,
-      );
-    }
-    // A uniform `flush → RecordedFlushInstants` shape on both branches keeps the
-    // outcome-building path identical; the non-history branch has no recorded
-    // rows to close, so it flushes to an empty instant map.
-    const scope =
-      this.#captureEnabled ?
-        createRecordedTransactionScope(
-          txBackend,
-          this.#batchPointRead,
-          this.#sqlSchema(),
-        )
-      : {
-          backend: txBackend,
-          flush: (): Promise<RecordedFlushInstants> =>
-            Promise.resolve(EMPTY_RECORDED_FLUSH_INSTANTS),
-        };
-    if (this.#captureEnabled) {
-      await lockRecordedGraphWrite(scope.backend, this.graphId);
-    }
-    const receiptRecorder = createTransactionReceiptRecorder();
-    // See the matching comment at the other engine-native receipt site
-    // (`runAttempt` above): the witness observes real per-member mutations
-    // on the adopted session, not write intents, so a delete of a missing
-    // row or a coalesced no-op upsert through this context leaves
-    // `receipt.recorded` undefined.
-    const mutationWitness =
-      this.#engineNativeHistory ? createMutationWitness() : undefined;
-    const writeTarget =
-      mutationWitness === undefined ?
-        scope.backend
-      : mutationWitness.wrap(scope.backend);
-    if (mutationWitness !== undefined) {
-      // Same registration as the other engine-native receipt site: identity
-      // assertions bypass `wrap`'s overlay entirely, so the witness's sink
-      // needs its own binding to see one.
-      registerRecordedIdentityMutationWitness(
+        held,
+        scope,
+        mutationWitness,
         writeTarget,
-        scope.backend,
-        mutationWitness.sink,
-      );
-    }
+        executionScope,
+        contextBackend,
+      },
+    } = await openBoundTransactionSession(transaction, async (opened, held) => {
+      const txBackend = enterOperation(opened).backend;
+      if (this.#captureEnabled) {
+        await assertRecordedCaptureTransactionIsolation(txBackend);
+        await lockSchemaVersionForStoreWrite(
+          {
+            graphId: this.graphId,
+            schemaVersion: this.#schemaMetadata.schemaVersion,
+          },
+          txBackend,
+        );
+      }
+      // A uniform `flush → RecordedFlushInstants` shape on both branches
+      // keeps the outcome-building path identical; the non-history branch has
+      // no recorded rows to close, so it flushes to an empty instant map.
+      // The capture surface decorates the session's holding; its flush is
+      // bound here to this operation.
+      const scope =
+        this.#captureEnabled ?
+          createRecordedTransactionScope(
+            held,
+            this.#batchPointRead,
+            this.#sqlSchema(),
+            false,
+            txBackend,
+          )
+        : {
+            backend: held,
+            flush: (): Promise<RecordedFlushInstants> =>
+              Promise.resolve(EMPTY_RECORDED_FLUSH_INSTANTS),
+          };
+      if (this.#captureEnabled) {
+        // Through this operation, into the capture surface's own lock memo,
+        // so the surface's writes find the graph lock already held.
+        await lockRecordedGraphWrite(
+          txBackend,
+          this.graphId,
+          registeredRecordedGraphLockMemo(scope.backend),
+        );
+      }
+      // See the matching comment at the other engine-native receipt site
+      // (`runAttempt` above): the witness observes real per-member mutations
+      // on the adopted session, not write intents, so a delete of a missing
+      // row or a coalesced no-op upsert through this context leaves
+      // `receipt.recorded` undefined.
+      const mutationWitness =
+        this.#engineNativeHistory ? createMutationWitness() : undefined;
+      const writeTarget =
+        mutationWitness === undefined ?
+          scope.backend
+        : mutationWitness.wrap(scope.backend);
+      if (mutationWitness !== undefined) {
+        // Same registration as the other engine-native receipt site: identity
+        // assertions bypass `wrap`'s overlay entirely, so the witness's sink
+        // needs its own binding to see one.
+        registerRecordedIdentityMutationWitness(
+          writeTarget,
+          scope.backend,
+          mutationWitness.sink,
+        );
+      }
+      const executionScope =
+        originalStore === undefined ? undefined : (
+          scopeBackendExecution(writeTarget)
+        );
+      const contextBackend = executionScope?.backend ?? writeTarget;
+      return {
+        statements: contextBackend,
+        binding: {
+          txBackend,
+          held,
+          scope,
+          mutationWitness,
+          writeTarget,
+          executionScope,
+          contextBackend,
+        },
+      };
+    });
+    const receiptRecorder = createTransactionReceiptRecorder();
     const invoke = fn as (
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>;
-    const executionScope =
-      originalStore === undefined ? undefined : (
-        scopeBackendExecution(writeTarget)
-      );
-    const contextBackend = executionScope?.backend ?? writeTarget;
     const context = this.#buildTransactionContext(
-      contextBackend,
+      session,
       externalTx,
       undefined,
       receiptRecorder,
@@ -5220,7 +5293,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             graphId: this.graphId,
             schemaVersion: this.#schemaMetadata.schemaVersion,
           },
-          [txBackend, scope.backend, writeTarget, contextBackend],
+          [held, scope.backend, writeTarget, contextBackend],
           finish,
         )
       : finish();
@@ -5572,15 +5645,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * is disabled, `sql` is the raw Drizzle handle bound to the same transaction
    * (#140); when history capture is enabled it is replaced with a fail-loud
    * guard because raw graph writes would bypass recorded-time capture.
+   *
+   * `session` is the one the caller opened where it opened or joined the
+   * native transaction (store-owned, adopted, recorded, evolved): the session
+   * every public write and read this context offers enters its operation
+   * from, `tx.measure` scopes and hooks re-entering through a captured `tx`
+   * included.
    */
   #buildTransactionContext(
-    txBackend: OperationBackend,
+    session: TransactionSession,
     sql?: TNativeTransaction,
-    runHooks: OperationHookRunner = this.#immediateHookRunner(txBackend),
+    bufferedHooks?: OperationHookRunner,
     receiptRecorder?: TransactionReceiptRecorder,
-    runBulkHooks: BulkOperationHookRunner = this.#immediateBulkHookRunner(
-      txBackend,
-    ),
+    bufferedBulkHooks?: BulkOperationHookRunner,
     // 1 outside a retried `store.transaction`; the retry owner's attempt
     // factory is the only caller that supplies anything else.
     attempt = 1,
@@ -5588,15 +5665,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     readOnly = false,
     measurable = receiptRecorder !== undefined,
   ): AdapterTransactionContext<G, TNativeTransaction> {
+    // The context's own operation of the session: what the parts of this
+    // context that do not yet enter an operation per call (the transaction
+    // runtime port, the identity facade's context, the read-set fence, the
+    // read fences, the immediate hook runners) hold for the life of the
+    // transaction.
+    const txBackend = enterOperation(session).backend;
+    const runHooks = bufferedHooks ?? this.#immediateHookRunner(txBackend);
+    const runBulkHooks =
+      bufferedBulkHooks ?? this.#immediateBulkHookRunner(txBackend);
     if (receiptRecorder !== undefined) {
       registerSavepointState(txBackend, receiptRecorder.checkpoint);
     }
-    // Every kind of transaction (store-owned, adopted, recorded, evolved)
-    // reaches its context through this one builder, right where it opened or
-    // joined the native transaction: the session every public write this
-    // context offers enters its operation from, `tx.measure` scopes and hooks
-    // re-entering through a captured `tx` included.
-    const session = openTransactionSession(txBackend);
     // No statistics auto-refresh inside a caller-provided transaction:
     // ANALYZE from another connection cannot see the uncommitted rows,
     // so it would only reset the counter without fixing the estimates.
@@ -5644,7 +5724,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         maybeRefreshStatisticsAfterBulk: undefined,
       };
       return {
+        // The session travels with the runtime, so a privileged internal handed
+        // this context (provenance, a working copy's durable operation) enters
+        // its own statements' operation from it.
         runtime: {
+          ...transactionRuntimeSession(session),
           backend: txBackend,
           deleteNodeWithPolicy: (work, policy) =>
             executeNodeDelete(
@@ -5713,8 +5797,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           {}
         : {
             identity: createIdentityFacade(
-              this.#identityContext(txBackend),
-              session,
+              this.#identityFacadeSource(session, txBackend),
             ),
           }),
       };
@@ -5844,7 +5927,39 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       : withSql;
   }
 
-  #identityContext(backend: StatementBackend): IdentityServiceContext<G> {
+  /**
+   * The source of an identity facade whose calls enter from `scope` (the
+   * root backend, or the session of the transaction the facade belongs to):
+   * `backend` supplies what a call reads before it enters (refusals,
+   * capabilities, compilation), and each call's context is built over the
+   * handle of the operation it entered. A pinned view's facade carries its
+   * `view` schema and coordinate on both.
+   */
+  #identityFacadeSource(
+    scope: EntryScope,
+    backend: StatementBackend,
+    view?: Readonly<{ schema: SqlSchema; coordinate: ReadCoordinate }>,
+  ): IdentityFacadeSource<G> {
+    const contextAt = (target: StatementBackend): IdentityCallContext<G> =>
+      view === undefined ?
+        this.#identityContext(target)
+      : { ...this.#identityContext(target), ...view };
+    return { context: contextAt(backend), scope, callContext: contextAt };
+  }
+
+  /**
+   * The statement target of one identity port call whose `target` arrives
+   * through a signature the public API spells, with no session: the root
+   * itself, or the handle of the first operation of a binding of its own
+   * (`enterTargetOperation`). Called once per call, after its refusals.
+   */
+  #identityTargetBackend(
+    target: GraphBackend | StoreTransactionBackend,
+  ): StatementBackend {
+    return operationEntryBackend(enterTargetOperation(target));
+  }
+
+  #identityContext(backend: StatementBackend): IdentityCallContext<G> {
     // `store.identity` memoizes its facade for the life of the store, so the
     // context it captures must resolve the schema version at mutation time
     // rather than snapshotting it here: `clear()` resets this store to the
@@ -6027,8 +6142,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     };
 
     await (this.#baseBackend.capabilities.execution.interactiveTransactions ?
+      // `clear` opened this transaction: its session opens here, and the
+      // clear runs as one operation of it.
       this.#baseBackend.transaction(async (tx: StoreTransactionBackend) =>
-        doClear(legacyTransactionOperation(tx)),
+        doClear(enterOperation(openTransactionSession(tx)).backend),
       )
     : doClear(this.#baseBackend));
 
@@ -6219,7 +6336,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           "adoptTransaction",
           { graphId: this.graphId },
         );
-      const target = legacyTransactionOperation(adopt(externalTx));
+      // The Store joins the caller's transaction here: the session for this
+      // adoption, and the one operation the baseline check runs under. The
+      // recorded transaction below receives that operation's handle.
+      const target = enterOperation(
+        openTransactionSession(adopt(externalTx)),
+      ).backend;
       await lockSchemaVersionForStoreWrite(
         {
           graphId: this.graphId,
@@ -6293,11 +6415,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const ordinaryAdopt = requireDefined(
       this.#adapterBackend?.adoptTransaction,
     );
+    // The probe runs before the schema-write adoption takes the fence, on an
+    // ordinary adoption of its own: a binding of its own, with one operation.
     await assertRecordedCaptureTransactionIsolation(
-      legacyTransactionOperation(ordinaryAdopt(externalTx)),
+      enterOperation(openTransactionSession(ordinaryAdopt(externalTx))).backend,
     );
     const adopted = await adopt(externalTx, this.graphId, { waitBudgetMs });
-    const adoptedBackend = legacyTransactionOperation(adopted.backend);
+    // The Store joins the caller's transaction as a schema writer here: the
+    // session for this adoption, and the one operation the baseline check,
+    // the preflight, provisioning and the commit run under. The recorded
+    // transaction below receives that operation's handle.
+    const adoptedOperation = enterOperation(
+      openTransactionSession(adopted.backend),
+    );
+    const adoptedBackend = adoptedOperation.backend;
     const active = adopted.activeSchema;
     await assertEvolutionPlanBaseline(plan, active);
     await this.#assertNoPendingRemovalFor(
@@ -6319,7 +6450,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       identity:
         requirements.identityAffectedKinds.length === 0 ?
           undefined
-        : async (target: OperationScoped<SchemaCommitPreflightBackend>) => {
+        : async (operation: Operation<SchemaCommitPreflightBackend>) => {
             const storage = await inspectAdoptedIdentityStorage(
               adoptedBackend,
               this.#sqlSchema(),
@@ -6329,11 +6460,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               },
             );
             await candidate.identitySchemaPreflight(
-              target,
+              operation.backend,
               storage.provisionInCommit,
             );
           },
-    })(adoptedBackend);
+    })(adoptedOperation);
     if (requirements.vectorSlots.length > 0) {
       const provision = adoptedBackend.ensureVectorSlotContributions;
       if (provision === undefined) {
@@ -6704,9 +6835,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       tightening: schemaTighteningPreflight,
       identity:
         identityCandidate === undefined ? undefined : (
-          (target: OperationScoped<SchemaCommitPreflightBackend>) =>
+          (operation: Operation<SchemaCommitPreflightBackend>) =>
             identityCandidate.identitySchemaPreflight(
-              target,
+              operation.backend,
               identityProvisioning?.provisionInCommit ?? [],
             )
         ),
@@ -7427,7 +7558,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       graphId,
       scope,
       async (transaction: StoreTransactionBackend) => {
-        const target = legacyTransactionOperation(transaction);
         // This callback only knows how to reconstruct fulltext content, and
         // the port's contract is that implementations refuse `"vector"`
         // before reaching it. Restate that here rather than trusting it: a
@@ -7440,9 +7570,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             { graphId, contribution: scope, backend: backend.dialect },
           );
         }
+        // The engine opened this transaction for the rebuild: its session
+        // opens here, and the refill is its one operation.
         const result = await repopulateFulltextInTransaction(
           { graphId, registry },
-          target,
+          enterOperation(openTransactionSession(transaction)).backend,
           options?.pageSize === undefined ? {} : { pageSize: options.pageSize },
         );
         return {
@@ -7653,7 +7785,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async #identityRemovalPreflight(
     finalGraph: G,
     removedNodeKinds: readonly string[],
-  ): Promise<((target: OperationBackend) => Promise<void>) | undefined> {
+  ): Promise<
+    | ((operation: Operation<SchemaCommitPreflightBackend>) => Promise<void>)
+    | undefined
+  > {
     if (removedNodeKinds.length === 0) return undefined;
     const repairClosure = finalGraph.identity !== undefined;
     if (
@@ -7668,10 +7803,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       return undefined;
     }
     const candidate = this.#cloneWithGraph(finalGraph, undefined);
-    return async (target: OperationBackend) =>
-      candidate.removeIdentityKindsInSchemaPreflight(target, removedNodeKinds, {
-        repairClosure,
-      });
+    return async (operation: Operation<SchemaCommitPreflightBackend>) =>
+      candidate.removeIdentityKindsInSchemaPreflight(
+        operation,
+        removedNodeKinds,
+        { repairClosure },
+      );
   }
 
   /**
@@ -9323,12 +9460,15 @@ function identityMigrationRequiredError(
 
 /** One fenced, revision-neutral entry for public and startup identity repair. */
 function rebuildIdentityClosureWithSchemaFence<G extends GraphDef>(
-  identityContext: IdentityRebuildContext<G>,
+  identityContext: Omit<IdentityRebuildContext<G>, "backend">,
   writeContext: WriteTransactionContext,
+  // The pooled root (public and startup repair), or the entry of the
+  // transaction the caller is recomputing inside.
+  entry: OperationEntry,
 ): Promise<void> {
   return runInWriteTransaction(
     writeContext,
-    legacyWriteEntry(legacyTransactionOperation(identityContext.backend)),
+    entry,
     async (target) =>
       rebuildIdentityClosureForContext({ ...identityContext, backend: target }),
     { didWrite: () => false },
@@ -9450,10 +9590,9 @@ async function prepareStoreWithSchema<G extends GraphDef>(
             // version before taking the identity lock: a concurrent migration
             // may already have rebuilt under different semantics, and a stale
             // startup must not overwrite that closure even if boot later fails.
-            recomputeDerivedRelations: (target) =>
+            recomputeDerivedRelations: (entry) =>
               rebuildIdentityClosureWithSchemaFence(
                 {
-                  backend: target,
                   graphId: merged.id,
                   registry: identityRegistry,
                   schema: resolvedIdentitySchema,
@@ -9466,6 +9605,7 @@ async function prepareStoreWithSchema<G extends GraphDef>(
                   revisionTrackingEnabled: false,
                   revisionSchema: resolvedIdentitySchema,
                 },
+                entry,
               ),
           }
         : {}),

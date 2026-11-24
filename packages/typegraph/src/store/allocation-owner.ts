@@ -15,7 +15,8 @@ import { recordedAnchorsTable, type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
 import { generateId } from "../utils/id";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
   type StatementBackend,
   type StoreTransactionBackend,
 } from "./operation-scope";
@@ -85,7 +86,11 @@ export async function rotateGraphAllocationOwner(
       { target: backend, operation: "rotateGraphAllocationOwner", attempts: 3 },
       () =>
         backend.transaction(async (transaction: StoreTransactionBackend) => {
-          const target = legacyTransactionOperation(transaction);
+          // This unit opened the transaction: its session opens here, and
+          // the unit runs as one operation of it.
+          const target = enterOperation(
+            openTransactionSession(transaction),
+          ).backend;
           await lockSchemaVersionForStoreWrite(
             { graphId, schemaVersion },
             target,

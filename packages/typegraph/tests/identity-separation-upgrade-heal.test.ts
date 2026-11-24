@@ -47,6 +47,7 @@ import {
 import { createSqlSchema } from "../src/query/compiler/schema";
 import { buildKindRegistry } from "../src/registry/builders";
 import { getActiveSchema, migrateSchema } from "../src/schema";
+import { operationEntryBackend } from "../src/store/operation-scope";
 import { storeRuntime } from "../src/store/runtime-port";
 import { requireDefined } from "../src/utils/presence";
 import { expectAuditedBackend, matchingObject } from "./test-utils";
@@ -299,9 +300,9 @@ describe("fenced upgrade against a concurrent creator", () => {
           graphId: GRAPH_ID,
           enablement: false,
           registry: buildKindRegistry(foldGraph),
-          recomputeDerivedRelations: (target) =>
+          recomputeDerivedRelations: (entry) =>
             rebuildIdentityClosureForContext<typeof foldGraph>({
-              backend: target,
+              backend: operationEntryBackend(entry),
               graphId: GRAPH_ID,
               registry: buildKindRegistry(foldGraph),
               schema: createSqlSchema(result.backend.tableNames),

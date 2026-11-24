@@ -498,6 +498,27 @@ function serializeEdges<G extends GraphDef>(
 }
 
 /**
+ * The field every serialized edge has always carried for the removed edge
+ * option `endpointExistence`, fixed at the value every registration that did
+ * not state the option wrote. It is a document-format constant, not an
+ * option: no registration can state it, nothing reads it, and the schema
+ * types do not declare it.
+ *
+ * It stays in the document because a schema hash is taken over the whole
+ * serialized graph and some of those hashes are persisted: the stored version
+ * hash, the fork-time definition hash a durable working copy is attested
+ * with, merge base versions and graph-template registrations. Dropping the
+ * field would move every one of them for every graph that has an edge; kept,
+ * a graph that never stated the option hashes exactly as before, and an
+ * earlier release, whose loader requires the field, can still load a
+ * document this release writes. A stored document that recorded another
+ * value is read through {@link canonicalStoredSchemaDocument}.
+ */
+const REMOVED_ENDPOINT_EXISTENCE_FIELD = Object.freeze({
+  endpointExistence: "notDeleted",
+} as const);
+
+/**
  * Serializes a single edge registration.
  */
 function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
@@ -533,7 +554,7 @@ function serializeEdgeDef(registration: EdgeRegistration): SerializedEdgeDef {
     // existed — the deserializer's `.default("many")` (`src/schema/types.ts`)
     // is what reads an absent key back as unconstrained.
     ...serializedTargetCardinalityField(registration.targetCardinality),
-    endpointExistence: registration.endpointExistence ?? "notDeleted",
+    ...REMOVED_ENDPOINT_EXISTENCE_FIELD,
     ...(registration.matchIdentity === undefined ?
       {}
     : {
@@ -887,6 +908,21 @@ export async function getGraphDefinitionHash(
 }
 
 /**
+ * A stored edge with the removed option's field at the fixed value this
+ * release writes ({@link REMOVED_ENDPOINT_EXISTENCE_FIELD}), whatever value,
+ * if any, the stored document recorded.
+ */
+function withFixedEndpointExistenceField(
+  edge: SerializedEdgeDef,
+): SerializedEdgeDef {
+  const {
+    endpointExistence: _recordedEndpointExistence,
+    ...current
+  }: SerializedEdgeDef & Readonly<{ endpointExistence?: unknown }> = edge;
+  return { ...current, ...REMOVED_ENDPOINT_EXISTENCE_FIELD };
+}
+
+/**
  * A stored schema document in the form this release's serializer writes for
  * the schema it describes, so its {@link computeSchemaHash} is comparable with
  * the hash of a graph serialized today.
@@ -902,6 +938,11 @@ export async function getGraphDefinitionHash(
  *   They are recomputed from the document's own relations.
  * - An absent edge `targetCardinality` means `"many"`, which the serializer
  *   omits.
+ * - Every edge carries `endpointExistence`, the field of an option no edge
+ *   write ever read, which this release no longer accepts and writes only as
+ *   the fixed `"notDeleted"`. Whatever value a stored edge recorded is read
+ *   as that constant, so a stored `"ever"` or `"currentlyValid"` compares
+ *   equal to the same graph declared today without the option.
  * - An absent unique-constraint `scope` or `collation` means what
  *   `NODE_UNIQUE_CONSTRAINT_DEFAULTS` says, which `defineGraph` writes into
  *   the declaration an untyped caller left them out of, so the serializer
@@ -932,7 +973,8 @@ export function canonicalStoredSchemaDocument(
   }
   const edges = createDataKeyedBag<SerializedEdgeDef>();
   for (const [kind, edge] of Object.entries(document.edges)) {
-    const { targetCardinality, ...rest } = edge;
+    const { targetCardinality, ...rest } =
+      withFixedEndpointExistenceField(edge);
     edges[kind] = {
       ...rest,
       ...serializedTargetCardinalityField(targetCardinality),
