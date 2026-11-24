@@ -10,7 +10,8 @@
  * call itself, with the handle it was given) through the one operation of the
  * session of the source transaction it opens; a durable operation must read
  * its evidence through an operation of the session its own host write enters
- * from (by identity).
+ * from (by identity). Its evidence INSERT at pre-commit is pinned as known
+ * defect #984: it goes through the target the Store hands its pre-commit hook.
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
@@ -30,6 +31,7 @@ import { asBranchId } from "../../../src/graph-merge/types";
 import { renderPostgres } from "../../../src/query/sql-fragment";
 import * as operationScope from "../../../src/store/operation-scope";
 import { createStoreWithSchema } from "../../../src/store/store";
+import { expectObservation } from "../../helpers/known-defect";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
@@ -293,6 +295,26 @@ describe.runIf(process.env["POSTGRES_URL"])(
           sessions: 1,
         });
         expect(recording.entered.length).toBeGreaterThanOrEqual(2);
+        // The evidence row is written at pre-commit through the target the
+        // Store hands its pre-commit hook, which belongs to the capture-and-
+        // flush family: until that family converts (#984) the INSERT goes
+        // through no operation handle at all.
+        expectObservation({
+          lane: { driver: "node-postgres" },
+          observed: {
+            evidenceInserts: recording.statements
+              .filter(
+                (statement) =>
+                  statement.sql.startsWith("INSERT INTO ") &&
+                  statement.sql.includes("op_evidence"),
+              )
+              .map((statement) => ({
+                ofTheHostSession: statement.session === session,
+              })),
+          },
+          correct: { evidenceInserts: [{ ofTheHostSession: true }] },
+          defects: [{ label: "#984", on: {}, today: { evidenceInserts: [] } }],
+        });
       } finally {
         recording.restore();
         await created.branch.close();
