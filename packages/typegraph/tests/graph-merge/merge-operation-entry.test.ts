@@ -51,6 +51,7 @@ import {
   enterOperation,
   enterTargetOperation,
   enterTransactionOperation,
+  openBoundTransactionSession,
   openTransactionSession,
   operationEntrySession,
   type TransactionSession,
@@ -65,6 +66,7 @@ vi.mock("../../src/store/operation-scope", async (importOriginal) => {
     enterOperation: vi.fn(actual.enterOperation),
     enterTargetOperation: vi.fn(actual.enterTargetOperation),
     enterTransactionOperation: vi.fn(actual.enterTransactionOperation),
+    openBoundTransactionSession: vi.fn(actual.openBoundTransactionSession),
     openTransactionSession: vi.fn(actual.openTransactionSession),
   };
 });
@@ -73,6 +75,7 @@ const enterOperationSpy = vi.mocked(enterOperation);
 const enterTargetOperationSpy = vi.mocked(enterTargetOperation);
 const openTransactionSessionSpy = vi.mocked(openTransactionSession);
 const enterTransactionOperationSpy = vi.mocked(enterTransactionOperation);
+const openBoundTransactionSessionSpy = vi.mocked(openBoundTransactionSession);
 
 const Item = defineNode("Item", { schema: z.object({ name: z.string() }) });
 const graph = defineGraph({
@@ -88,6 +91,7 @@ function clearMints(): void {
   enterTargetOperationSpy.mockClear();
   openTransactionSessionSpy.mockClear();
   enterTransactionOperationSpy.mockClear();
+  openBoundTransactionSessionSpy.mockClear();
 }
 
 /** The session a read inside `tx` enters its operation from. */
@@ -135,6 +139,22 @@ function openedSessions(): readonly TransactionSession[] {
 }
 
 /**
+ * The session each `openBoundTransactionSession` call since the last clear
+ * opened: where `store.transaction` opens its session over the transaction
+ * whose writes go through a surface it binds (inside the mint module, where
+ * the `openTransactionSession` spy cannot see).
+ */
+async function boundSessions(): Promise<readonly TransactionSession[]> {
+  return Promise.all(
+    openBoundTransactionSessionSpy.mock.results.map(async (result) => {
+      if (result.type !== "return") throw new Error("mint threw");
+      const { session } = await result.value;
+      return session;
+    }),
+  );
+}
+
+/**
  * The session of the operation each `enterTransactionOperation` call since
  * the last clear entered (it enters inside the mint module, so its
  * `enterOperation` is not among the spied calls).
@@ -153,16 +173,26 @@ function runtimeEntrySessions(): readonly TransactionSession[] {
  * Asserts that, since the last clear, the call entered exactly one operation
  * through its context's runtime, and that it and every collection write it
  * drove entered `session` itself (`toBe`: a fresh session over the same
- * transaction deep-equals the real one).
+ * transaction deep-equals the real one). On a history store the recorded
+ * capture overlay opens the native transaction with a session of its own
+ * (`overlays`) and runs its own work as one operation of it.
  */
-function expectOneOperationOf(session: TransactionSession): void {
+function expectOneOperationOf(
+  session: TransactionSession,
+  overlays: readonly TransactionSession[] = [],
+): void {
   const runtime = runtimeEntrySessions();
   expect(runtime).toHaveLength(1);
   expect(runtime[0]).toBe(session);
   const sessions = enteredSessions();
   // The merge drives at least one collection write of its own.
   expect(sessions.length).toBeGreaterThan(0);
-  for (const entered of sessions) expect(entered).toBe(session);
+  const own = sessions.filter((entered) => entered === session);
+  expect(own.length).toBeGreaterThan(0);
+  for (const overlay of overlays) {
+    expect(sessions.filter((entered) => entered === overlay)).toHaveLength(1);
+  }
+  expect(own.length + overlays.length).toBe(sessions.length);
 }
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -252,13 +282,13 @@ describe("merge apply enters one operation of its transaction's session", () => 
           break;
         }
       }
-      // The commit transaction's own session: the one every operation of the
-      // call entered. Planning a merge opens no transaction of its own.
-      const sessions = enteredSessions();
-      const session = sessions[0];
+      // The commit transaction's own session, opened with it: the one every
+      // operation of the call entered. Planning a merge opens no transaction
+      // of its own.
+      const [session] = runtimeEntrySessions();
       if (session === undefined) throw new Error("no session entered");
-      expect(openedSessions()).toContain(session);
-      expectOneOperationOf(session);
+      expect(await boundSessions()).toEqual([session]);
+      expectOneOperationOf(session, openedSessions());
       expect(await target.nodes.Item.getById(asNodeId("added"))).toBeDefined();
     },
   );
@@ -280,10 +310,10 @@ describe("merge apply enters one operation of its transaction's session", () => 
         return { ok: true };
       }),
     );
-    const session = enteredSessions()[0];
+    const [session] = runtimeEntrySessions();
     if (session === undefined) throw new Error("no session entered");
-    expect(openedSessions()).toContain(session);
-    expectOneOperationOf(session);
+    expect(await boundSessions()).toEqual([session]);
+    expectOneOperationOf(session, openedSessions());
 
     // A replay reads the evidence under its own operation and applies nothing.
     clearMints();
@@ -294,7 +324,7 @@ describe("merge apply enters one operation of its transaction's session", () => 
     );
     expect(replayed.outcome).toBe("replayed");
     expect(runtimeEntrySessions()).toHaveLength(1);
-    expect(openedSessions()).toContain(runtimeEntrySessions()[0]);
+    expect(await boundSessions()).toEqual(runtimeEntrySessions());
   });
 });
 

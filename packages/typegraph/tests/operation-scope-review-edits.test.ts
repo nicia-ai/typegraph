@@ -41,8 +41,19 @@ function applied(edit: Edit): string {
 }
 
 const ALLOCATION_OWNER = "src/store/allocation-owner.ts";
-const ALLOCATION_OWNER_CALLBACK = `backend.transaction(async (transaction: StoreTransactionBackend) => {
-          const target = legacyTransactionOperation(transaction);`;
+const ALLOCATION_OWNER_CALLBACK = `backend.transaction(async (transaction: StoreTransactionBackend) => {`;
+
+/**
+ * The module no longer calls the shim; each edit below imports it again, so
+ * that a specialisation the callback annotation claims reaches the handle.
+ */
+const ALLOCATION_OWNER_SHIM_IMPORT = [
+  `  enterOperation,
+  openTransactionSession,`,
+  `  enterOperation,
+  legacyTransactionOperation,
+  openTransactionSession,`,
+] as const;
 
 /**
  * P2: an ordinary transaction callback annotated as the schema-write
@@ -51,11 +62,11 @@ const ALLOCATION_OWNER_CALLBACK = `backend.transaction(async (transaction: Store
 const SCHEMA_WRITE_ANNOTATION: Edit = {
   file: ALLOCATION_OWNER,
   replacements: [
+    ALLOCATION_OWNER_SHIM_IMPORT,
     [
       ALLOCATION_OWNER_CALLBACK,
       `backend.transaction(async (transaction: StoreTransactionBackend<import("../backend/types").SchemaWriteTransactionBackend>) => {
-          const target = legacyTransactionOperation(transaction);
-          await target.executeSchemaDdl("SELECT 1");`,
+          await legacyTransactionOperation(transaction).executeSchemaDdl("SELECT 1");`,
     ],
   ],
 };
@@ -64,11 +75,11 @@ const SCHEMA_WRITE_ANNOTATION: Edit = {
 const PREFLIGHT_ANNOTATION: Edit = {
   file: ALLOCATION_OWNER,
   replacements: [
+    ALLOCATION_OWNER_SHIM_IMPORT,
     [
       ALLOCATION_OWNER_CALLBACK,
       `backend.transaction(async (transaction: StoreTransactionBackend<import("../backend/types").SchemaCommitPreflightBackend>) => {
-          const target = legacyTransactionOperation(transaction);
-          await target.executeSchemaDdl?.("SELECT 1");`,
+          await legacyTransactionOperation(transaction).executeSchemaDdl?.("SELECT 1");`,
     ],
   ],
 };
@@ -77,12 +88,12 @@ const PREFLIGHT_ANNOTATION: Edit = {
 const PREFLIGHT_HANDLE_ANNOTATION: Edit = {
   file: ALLOCATION_OWNER,
   replacements: [
+    ALLOCATION_OWNER_SHIM_IMPORT,
     [
       ALLOCATION_OWNER_CALLBACK,
       `backend.transaction(async (transaction: StoreTransactionBackend) => {
           const preflight: import("./operation-scope").OperationScoped<import("../backend/types").SchemaCommitPreflightBackend> = legacyTransactionOperation(transaction);
-          await preflight.executeSchemaDdl?.("SELECT 1");
-          const target = legacyTransactionOperation(transaction);`,
+          await preflight.executeSchemaDdl?.("SELECT 1");`,
     ],
   ],
 };

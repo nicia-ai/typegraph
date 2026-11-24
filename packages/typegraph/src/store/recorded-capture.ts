@@ -59,7 +59,8 @@ import {
   runInsertNoReturn,
 } from "./insert-dispatch";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
   type OperationBackend,
   type StatementBackend,
   type StoreTransactionBackend,
@@ -111,6 +112,7 @@ export {
   readRevisionOrigin,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
+  registeredRecordedGraphLockMemo,
   resetRevisionOrigin,
 } from "./recorded-capture/clock";
 export { closeRecordedHardDeletedKind } from "./recorded-capture/flush";
@@ -383,6 +385,10 @@ export function withTransactionPreCommitHook(
 
 export type RecordedTransactionScope = Readonly<{
   backend: OperationBackend;
+  /**
+   * Flushes capture through the flush target bound when the scope was
+   * created (see {@link createRecordedTransactionScope}).
+   */
   flush: () => Promise<RecordedFlushInstants>;
 }>;
 
@@ -1075,7 +1081,19 @@ export function createRecordedTransactionScope(
   // redundant seed-UPSERT. Defaults to false so an adopted (possibly deferred)
   // external transaction still seeds the lock — the safe choice.
   ownsWriteLock = false,
+  // What the flush's statements go through: `target` itself, or an operation
+  // handle of the transaction `target` is (the caller built the surface over
+  // its session's holding but flushes as its own operation). Anything else is
+  // refused here, before any statement, so a scope can never write history
+  // into a transaction other than the one whose writes it captured.
+  flushTarget: OperationBackend = target,
 ): RecordedTransactionScope {
+  if (flushTarget !== target && !isBackendDerivedFrom(flushTarget, target)) {
+    throw new ConfigurationError(
+      "A recorded-time capture scope's flush target is not of the transaction whose writes it captures.",
+      { surface: "capture-flush" },
+    );
+  }
   // Fail fast — before any write runs in the adopted/opened transaction — if
   // the transaction target cannot execute the statements capture flush needs,
   // rather than throwing mid-flush after the live write has already happened.
@@ -1093,8 +1111,13 @@ export function createRecordedTransactionScope(
       // missing-table error can only be a recorded relation — surface it as the
       // typed precondition the constructor gate could not check.
       return withRecordedRelationsPrecondition(
-        session.flush(target, batchPointRead, resolvedSchema, ownsWriteLock),
-        { dialect: target.dialect, surface: "capture-flush" },
+        session.flush(
+          flushTarget,
+          batchPointRead,
+          resolvedSchema,
+          ownsWriteLock,
+        ),
+        { dialect: flushTarget.dialect, surface: "capture-flush" },
       );
     },
   };
@@ -1109,7 +1132,9 @@ async function runCapturedAutocommit<T>(
 ): Promise<T> {
   assertRequestedRecordedIsolation(backend, options);
   return backend.transaction(async (transaction: StoreTransactionBackend) => {
-    const target = legacyTransactionOperation(transaction);
+    // The capture unit opened this transaction: its session opens here, and
+    // the write and the flush run as one operation of it.
+    const target = enterOperation(openTransactionSession(transaction)).backend;
     await assertRecordedCaptureTransactionIsolation(target);
     // The bundled transaction opened BEGIN IMMEDIATE, so the write lock is held.
     const scope = createRecordedTransactionScope(
@@ -1428,7 +1453,13 @@ export function createRecordedBackend(
       assertRequestedRecordedIsolation(backend, backendOptions);
       return backend.transaction(
         async (transaction: StoreTransactionBackend) => {
-          const target = legacyTransactionOperation(transaction);
+          // This overlay opened the transaction: its session opens here, and
+          // the isolation check, the capture flush and the pre-commit hook
+          // run as one operation of it. The Store the callback belongs to
+          // joins the transaction it is handed as a binding of its own.
+          const target = enterOperation(
+            openTransactionSession(transaction),
+          ).backend;
           await assertRecordedCaptureTransactionIsolation(
             target,
             backendOptions,

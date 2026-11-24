@@ -229,8 +229,15 @@ const OPERATION_SESSION: unique symbol = Symbol("typegraph.operation");
 export type TransactionSession<
   Engine extends TransactionBackend = TransactionBackend,
 > = OperationScoped<
-  Readonly<{
+  {
+    /**
+     * What the session's operations hand out: the transaction, or the
+     * statement surface {@link openBoundTransactionSession} bound over it.
+     * Written only by this module (the key is module-private), and only
+     * before the session reaches anyone but its binder.
+     */
     [SESSION_TRANSACTION]: OperationScoped<Engine>;
+  } & Readonly<{
     /**
      * Graph write locks a still-running write frame on this session holds or
      * is still acquiring, by graph id: owned by `write-transaction.ts`.
@@ -288,6 +295,63 @@ export function openTransactionSession<
     heldGraphWriteLocks: new Map<string, Promise<GraphWriteLock>>(),
   } as TransactionSession<Engine>;
   /* eslint-enable no-restricted-syntax */
+}
+
+/**
+ * What a binder hands {@link openBoundTransactionSession}: the statement
+ * surface the session's later operations hand out, and whatever else the
+ * binder built while binding, returned to its caller untouched.
+ */
+export type TransactionSessionBinding<
+  Binding,
+  Engine extends TransactionBackend = TransactionBackend,
+> = Readonly<{
+  statements: OperationScoped<Engine>;
+  binding: Binding;
+}>;
+
+/**
+ * Where a Store opens or joins a transaction whose writes go through a
+ * statement surface it builds over that transaction (recorded capture's write
+ * decorator, the engine-native mutation witness, an evolved transaction's
+ * execution lifetime): the session, opened ONCE, for the transaction as this
+ * binding holds it.
+ *
+ * `bind` receives the new session and the transaction the session holds.
+ * An operation it enters hands out the transaction itself, so the opener's
+ * own statements (those that must precede the surface, such as an isolation
+ * check or a lock, and those it issues later on the undecorated transaction,
+ * such as a capture flush or a pre-commit hook) go through that operation of
+ * THIS session. It builds the surface over `transaction` — the session's
+ * own holding, not an operation's handle, so a later operation's
+ * statements go through that operation alone — and returns it; from then on
+ * every operation entered from the session hands out that surface. The
+ * session reaches no one but `bind` before it is bound, and is never
+ * rebound.
+ *
+ * `Engine` is as for {@link openTransactionSession}: the session it opens is
+ * that mint's, specialised only when `transaction` carries the evidence of
+ * its specialisation, and the surface `bind` returns is a handle to the same
+ * engine type.
+ */
+export async function openBoundTransactionSession<
+  Binding,
+  Engine extends TransactionBackend = TransactionBackend,
+>(
+  transaction: StoreTransactionBackend<Engine>,
+  bind: (
+    session: TransactionSession<Engine>,
+    transaction: OperationScoped<Engine>,
+  ) =>
+    | TransactionSessionBinding<Binding, Engine>
+    | Promise<TransactionSessionBinding<Binding, Engine>>,
+): Promise<
+  Readonly<{ session: TransactionSession<Engine>; binding: Binding }>
+> {
+  const session = openTransactionSession(transaction);
+  const bound = await bind(session, session[SESSION_TRANSACTION]);
+  session[SESSION_TRANSACTION] = bound.statements;
+  return { session, binding: bound.binding };
 }
 
 /**

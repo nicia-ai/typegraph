@@ -74,16 +74,24 @@ function statementText(
  * the session's transaction, and labels the operations
  * `enterTransactionOperation` enters. Restore with the returned function.
  */
-function routeOperationsThroughRecordingHandles(calls: RoutedCall[]) {
+function routeOperationsThroughRecordingHandles(
+  calls: RoutedCall[],
+  entered: operationScope.TransactionSession[] = [],
+) {
   const enterOperation = operationScope.enterOperation;
   const enterTransactionOperation = operationScope.enterTransactionOperation;
+  // How many recorded calls are on the stack: a handle forwards to the handle
+  // beneath it synchronously, so a call made while one is already running is
+  // that call passing through a lower operation's handle, not a new one.
+  let forwarding = 0;
   function recordingEntry(
     entry: operationScope.OperationEntry,
     runtime: boolean,
   ): operationScope.OperationEntry {
-    const entered = operationScope.operationEntrySession(entry);
-    if (entered === undefined) return entry;
-    const session: operationScope.TransactionSession = entered;
+    const enteredFrom = operationScope.operationEntrySession(entry);
+    if (enteredFrom === undefined) return entry;
+    const session: operationScope.TransactionSession = enteredFrom;
+    entered.push(session);
     const transaction = operationScope.operationEntryBackend(
       entry,
     ) as GraphBackend;
@@ -92,13 +100,20 @@ function routeOperationsThroughRecordingHandles(calls: RoutedCall[]) {
       call: (...args: Arguments) => Result,
     ): (...args: Arguments) => Result {
       return (...args) => {
-        calls.push({
-          session,
-          member,
-          runtime,
-          sql: statementText(member, args, transaction.dialect),
-        });
-        return call.apply(transaction, args);
+        if (forwarding === 0) {
+          calls.push({
+            session,
+            member,
+            runtime,
+            sql: statementText(member, args, transaction.dialect),
+          });
+        }
+        forwarding += 1;
+        try {
+          return call.apply(transaction, args);
+        } finally {
+          forwarding -= 1;
+        }
       };
     }
     const { executeRaw, executeStatement } = transaction;
@@ -143,18 +158,54 @@ function routeOperationsThroughRecordingHandles(calls: RoutedCall[]) {
   };
 }
 
+/**
+ * The session the recorded capture overlay of a history store opened for the
+ * native transaction it opens: the first session entered, when it is not the
+ * call's own. The overlay runs its own work (isolation check, capture flush,
+ * pre-commit hook) as an operation of it and hands the Store a surface over
+ * that operation's handle.
+ */
+function overlaySession(
+  entered: readonly operationScope.TransactionSession[],
+  session: operationScope.TransactionSession,
+): operationScope.TransactionSession | undefined {
+  const [first] = entered;
+  return first === session ? undefined : first;
+}
+
+/** Where one recorded statement went, relative to the call's own session. */
+function routeOf(
+  call: RoutedCall,
+  session: operationScope.TransactionSession,
+  overlay: operationScope.TransactionSession | undefined,
+): string {
+  if (call.session === session) {
+    return call.runtime ? "its operation" : "another operation of its session";
+  }
+  return call.session === overlay ?
+      "the capture overlay's operation"
+    : "an operation of another session";
+}
+
 /** What the recorded calls say about one call's routing. */
 function routing(
   calls: readonly RoutedCall[],
+  entered: readonly operationScope.TransactionSession[],
   session: operationScope.TransactionSession,
 ) {
-  const runtime = calls.filter((call) => call.runtime);
+  const overlay = overlaySession(entered, session);
   return {
     // The call's own statements went through the operation it entered...
-    routedThroughItsOperation: runtime.length > 0,
+    routedThroughItsOperation: calls.some(
+      (call) => routeOf(call, session, overlay) === "its operation",
+    ),
     // ...of this transaction's own session: the same object, not a session
-    // over the same transaction.
-    ofThisSession: calls.every((call) => call.session === session),
+    // over the same transaction. A history store's capture overlay runs its
+    // own work in a session of its own.
+    ofThisSession: calls.every(
+      (call) =>
+        routeOf(call, session, overlay) !== "an operation of another session",
+    ),
   };
 }
 
@@ -181,7 +232,8 @@ export function registerMergeOperationRoutingIntegrationTests(
       const artifact = unwrap(await planMerge(target, [source]));
 
       const calls: RoutedCall[] = [];
-      const restore = routeOperationsThroughRecordingHandles(calls);
+      const entered: operationScope.TransactionSession[] = [];
+      const restore = routeOperationsThroughRecordingHandles(calls, entered);
       try {
         const observed = await target.transaction(async (tx) => {
           // A read learns the session: the apply refuses a transaction that
@@ -205,7 +257,7 @@ export function registerMergeOperationRoutingIntegrationTests(
           return {
             nodes: report.merged.nodes,
             edges: report.merged.edges,
-            ...routing(calls, session),
+            ...routing(calls, entered, session),
           };
         });
         expect(observed).toEqual({
@@ -237,7 +289,8 @@ export function registerMergeOperationRoutingIntegrationTests(
       };
 
       const calls: RoutedCall[] = [];
-      const restore = routeOperationsThroughRecordingHandles(calls);
+      const entered: operationScope.TransactionSession[] = [];
+      const restore = routeOperationsThroughRecordingHandles(calls, entered);
       let observed: unknown;
       let hostSession: operationScope.TransactionSession | undefined;
       try {
@@ -255,7 +308,7 @@ export function registerMergeOperationRoutingIntegrationTests(
               throw new Error("the read entered no operation of a session");
             hostSession = session;
             await tx.nodes.Item.create({ name: "created" }, { id: "created" });
-            observed = routing(calls, session);
+            observed = routing(calls, entered, session);
             return { id: "created" };
           }),
         );
@@ -267,10 +320,9 @@ export function registerMergeOperationRoutingIntegrationTests(
         routedThroughItsOperation: true,
         ofThisSession: true,
       });
-      // The evidence row is written at pre-commit through the target the
-      // Store hands its pre-commit hook: the capture channel, which belongs
-      // to the capture-and-flush family. Until that family converts (#984)
-      // the INSERT goes through no operation handle at all.
+      // The evidence row is written at pre-commit by the hook the capture
+      // overlay runs through its own operation: the capture channel. It goes
+      // through no operation of the session the durable operation entered.
       const ledger = storeOperationsTableName(store.revisionSchema);
       expectObservation({
         lane: { dialect: store.backend.dialect },
@@ -278,18 +330,25 @@ export function registerMergeOperationRoutingIntegrationTests(
           evidenceInserts: calls
             .filter(
               (call) =>
-                call.sql?.startsWith("INSERT INTO ") === true &&
+                call.sql?.trimStart().startsWith("INSERT INTO ") === true &&
                 call.sql.includes(ledger),
             )
-            .map((call) => ({
-              throughItsOperation: call.runtime,
-              ofThisSession: call.session === hostSession,
-            })),
+            .map((call) =>
+              hostSession === undefined ? "no session" : (
+                routeOf(call, hostSession, overlaySession(entered, hostSession))
+              ),
+            ),
         },
         correct: {
-          evidenceInserts: [{ throughItsOperation: true, ofThisSession: true }],
+          evidenceInserts: ["its operation"],
         },
-        defects: [{ label: "#984", on: {}, today: { evidenceInserts: [] } }],
+        defects: [
+          {
+            label: "capture channel",
+            on: {},
+            today: { evidenceInserts: ["the capture overlay's operation"] },
+          },
+        ],
       });
     });
 
@@ -308,6 +367,7 @@ export function registerMergeOperationRoutingIntegrationTests(
       const savepointStatements = (
         calls: readonly RoutedCall[],
         session: operationScope.TransactionSession,
+        overlay: operationScope.TransactionSession | undefined,
       ) =>
         calls
           .filter(
@@ -315,8 +375,7 @@ export function registerMergeOperationRoutingIntegrationTests(
           )
           .map((call) => ({
             statement: call.sql?.split(" ")[0],
-            throughItsOperation: call.runtime,
-            ofThisSession: call.session === session,
+            through: routeOf(call, session, overlay),
           }));
 
       /** The session a read inside `tx` enters its operation from. */
@@ -338,7 +397,8 @@ export function registerMergeOperationRoutingIntegrationTests(
       };
 
       const calls: RoutedCall[] = [];
-      const restore = routeOperationsThroughRecordingHandles(calls);
+      const entered: operationScope.TransactionSession[] = [];
+      const restore = routeOperationsThroughRecordingHandles(calls, entered);
       try {
         // Applied: the savepoint is taken and released.
         const applied = await target.transaction(async (tx) => {
@@ -350,29 +410,40 @@ export function registerMergeOperationRoutingIntegrationTests(
           );
           return {
             nodes: report.merged.nodes,
-            savepoint: savepointStatements(calls, session),
+            savepoint: savepointStatements(
+              calls,
+              session,
+              overlaySession(entered, session),
+            ),
           };
         });
         expect(applied.nodes).toBe(1);
-        // SAVEPOINT and RELEASE run on the raw target beneath the capture
-        // binding, the capture channel of the capture-and-flush family:
-        // until it converts (#984) they go through no operation handle.
+        // SAVEPOINT and RELEASE run on the target beneath the capture
+        // binding, the capture overlay's operation: the capture channel. They
+        // go through no operation of the session the apply entered.
         expectObservation({
           lane: { dialect: target.backend.dialect },
           observed: applied.savepoint,
           correct: [
+            { statement: "SAVEPOINT", through: "its operation" },
+            { statement: "RELEASE", through: "its operation" },
+          ],
+          defects: [
             {
-              statement: "SAVEPOINT",
-              throughItsOperation: true,
-              ofThisSession: true,
-            },
-            {
-              statement: "RELEASE",
-              throughItsOperation: true,
-              ofThisSession: true,
+              label: "capture channel",
+              on: {},
+              today: [
+                {
+                  statement: "SAVEPOINT",
+                  through: "the capture overlay's operation",
+                },
+                {
+                  statement: "RELEASE",
+                  through: "the capture overlay's operation",
+                },
+              ],
             },
           ],
-          defects: [{ label: "#984", on: {}, today: [] }],
         });
       } finally {
         restore();
