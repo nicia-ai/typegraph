@@ -199,11 +199,15 @@ export class ExecutableProjectionQuery<
       operationEntryBackend(enterTargetOperation(backend)),
     );
   }
-  /** One row read: `enter` supplies its statement target, once. */
+  /**
+   * One row read: refuses an unbound query, then `enter` supplies its
+   * statement target, once; a read that refuses enters no operation.
+   */
   async #executeOnStatementBackend(
     enter: () => StatementBackend,
   ): Promise<readonly Result[]> {
     const ast = this.toAst();
+    this.#assertBound(ast);
     const rows = await this.#fetchRows(enter(), ast);
     return rows.map((row) => this.#decodeRow(row));
   }
@@ -314,12 +318,12 @@ export class ExecutableProjectionQuery<
           surface: "recorded-projection",
         });
   }
+  /** Sends the row statement; the caller has already refused an unbound read. */
   #fetchRows(
     backend: StatementBackend,
     ast: QueryAst,
     bindings?: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {
-    if (bindings === undefined) this.#assertBound(ast);
     const checked = getQueryBuilderInternalContext(
       this.#config,
     ).expectedSchemaVersion;

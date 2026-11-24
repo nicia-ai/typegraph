@@ -71,7 +71,11 @@ import {
 } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
 import { assertComparedOperand } from "./order-by-field";
-import { enterQueryExecution } from "./query-operation";
+import {
+  enterQueryExecution,
+  queryOperationSourceOf,
+  withQueryOperationSource,
+} from "./query-operation";
 import {
   assertListBinding,
   buildQueryTemplate,
@@ -541,9 +545,12 @@ export class PreparedQuery<R> {
   readonly #unoptimizedAst: QueryAst;
   readonly #backend: GraphBackend;
   /**
-   * The configuration this query was prepared with, as {@link enterQueryExecution}
-   * reads it: a query prepared inside a transaction carries that
-   * transaction's operation source, entered once per `execute()`.
+   * What {@link enterQueryExecution} reads at each `execute()`: the backend
+   * and the operation source (a query prepared inside a transaction enters one
+   * operation of that transaction's session per execution), both copied out
+   * of the configuration at construction. A prepared query is fixed when it is
+   * built; the caller's configuration object is not retained, so changing it
+   * afterwards changes nothing.
    */
   readonly #execution: Readonly<{ backend: GraphBackend }>;
   readonly #dialect: SqlDialect;
@@ -568,7 +575,10 @@ export class PreparedQuery<R> {
     this.#ast = config.ast;
     this.#unoptimizedAst = config.unoptimizedAst;
     this.#backend = config.backend;
-    this.#execution = config;
+    this.#execution = withQueryOperationSource(
+      { backend: config.backend },
+      queryOperationSourceOf(config),
+    );
     this.#dialect = config.dialect;
     this.#graphId = config.graphId;
     this.#compileOptions = config.compileOptions;
@@ -617,7 +627,7 @@ export class PreparedQuery<R> {
     bindings: Readonly<Record<string, unknown>> = {},
   ): Promise<readonly R[]> {
     validateBindings(bindings, this.#parameterMetadata);
-    const backend = enterQueryExecution(this.#execution) ?? this.#backend;
+    const backend = enterQueryExecution(this.#execution);
 
     if (
       this.#selectiveFields !== undefined &&

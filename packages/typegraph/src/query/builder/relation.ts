@@ -989,7 +989,8 @@ export class ExecutableRelationQuery<
       execute: async (bindings: Readonly<Record<string, unknown>>) => {
         validateQueryBindings(queries, bindings, expressions);
         const rows = await this.#fetchRows(
-          this.#enterExecution(),
+          this.#requireBackend(),
+          () => this.#enterExecution(),
           definition.ast,
           bindings,
         );
@@ -1009,7 +1010,8 @@ export class ExecutableRelationQuery<
   async #executeConfigured(backend: GraphBackend): Promise<readonly Result[]> {
     this.#assertExecutableOn(backend);
     const rows = await this.#fetchRows(
-      this.#enterExecution(),
+      backend,
+      () => this.#enterExecution(),
       this.#materialize(),
     );
     return rows.map((row) => this.#definition.decodeRow(row));
@@ -1040,7 +1042,8 @@ export class ExecutableRelationQuery<
   ): Promise<readonly Result[]> {
     this.#assertExecutableOn(target);
     const rows = await this.#fetchRows(
-      operationEntryBackend(enterTargetOperation(target)),
+      target,
+      () => operationEntryBackend(enterTargetOperation(target)),
       this.#materialize(),
     );
     return rows.map((row) => this.#definition.decodeRow(row));
@@ -1308,17 +1311,24 @@ export class ExecutableRelationQuery<
    * the raw path retains user placeholders so one prepared relation serves
    * every binding set and receives a fresh current-time instant per call.
    */
+  /**
+   * One row read. Its refusals are checked against `target` (the configured
+   * backend or the `executeOn` target) before `enter` supplies the statement
+   * target, so a read that refuses enters no operation.
+   */
   async #fetchRows(
-    backend: StatementBackend,
+    target: Pick<GraphBackend, "capabilities">,
+    enter: () => StatementBackend,
     relation: RelationAst,
     bindings?: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {
-    this.#assertWindowFunctionsSupported(backend, relation);
+    this.#assertWindowFunctionsSupported(target, relation);
     const metadata = collectParameterMetadata(
       relationQueries(relation),
       relationExpressions(relation),
     );
     if (bindings === undefined) this.#assertRelationBound(relation, metadata);
+    const backend = enter();
 
     const executeRaw = backend.executeRaw;
     const template =
@@ -1364,7 +1374,8 @@ export class ExecutableRelationQuery<
   }
 
   #assertWindowFunctionsSupported(
-    backend: StatementBackend | undefined = this.#definition.config.backend,
+    backend: Pick<GraphBackend, "capabilities"> | undefined = this.#definition
+      .config.backend,
     relation = this.#materialize(),
   ): void {
     if (
