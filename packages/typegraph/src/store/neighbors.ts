@@ -7,6 +7,7 @@ import type { GraphBackend, RowProps } from "../backend/types";
 import type { AllNodeTypes, EdgeKinds, GraphDef } from "../core/define-graph";
 import type { TemporalMode } from "../core/types";
 import { ValidationError } from "../errors";
+import { enterQueryExecution } from "../query/builder/query-operation";
 import type { ExecutableOneStatementRead } from "../query/builder/types";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
 import type { SqlSchema } from "../query/compiler/schema";
@@ -147,7 +148,9 @@ export function createNeighborRead<G extends GraphDef, K extends EdgeKinds<G>>(
     execute: async () => {
       if (options.edges.length === 0) return [];
       return mapRows(
-        await ctx.backend.execute<NeighborRow>(asCompiledRowsSql(query)),
+        await enterQueryExecution(ctx).execute<NeighborRow>(
+          asCompiledRowsSql(query),
+        ),
       );
     },
     compileOneStatementBatchItem: () => ({
@@ -196,7 +199,9 @@ export function createNeighborCountRead<
     execute: async () => {
       if (options.edges.length === 0) return 0;
       return mapNeighborCountRows(
-        await ctx.backend.execute<NeighborRow>(asCompiledRowsSql(query)),
+        await enterQueryExecution(ctx).execute<NeighborRow>(
+          asCompiledRowsSql(query),
+        ),
       );
     },
     compileOneStatementBatchItem: () => ({

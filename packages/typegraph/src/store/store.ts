@@ -237,6 +237,10 @@ import {
 } from "../query/builder/alias-expansion";
 import type { BatchOnceOptions } from "../query/builder/one-statement-batch";
 import {
+  type QueryOperationSource,
+  withQueryOperationSource,
+} from "../query/builder/query-operation";
+import {
   createEngineRecordedReadBinding,
   createRecordedReadBinding,
   createSqlSchema,
@@ -3000,19 +3004,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return validateStoreImpl(this.#analysisContext(), options);
   }
 
+  /**
+   * What `describe` and `validateStore` read through. Inside a transaction
+   * (`session` given) each call enters one operation of the session, after
+   * its refusals, and every statement of the call goes through it.
+   */
   #analysisContext(
-    backend: Pick<
-      GraphBackend,
-      "dialect" | "execute" | "getActiveSchema"
-    > = this.#baseBackend,
+    backend: StatementBackend = this.#baseBackend,
+    session?: TransactionSession,
   ) {
-    return {
-      graph: this.#graph,
-      graphId: this.graphId,
-      backend,
-      schema: this.#sqlSchema(),
-      introspect: () => this.introspect(),
-    };
+    return withQueryOperationSource(
+      {
+        graph: this.#graph,
+        graphId: this.graphId,
+        backend,
+        schema: this.#sqlSchema(),
+        introspect: () => this.introspect(),
+      },
+      session === undefined ? undefined : (
+        this.#readOperationSource(session, backend, backend, (handle) => handle)
+      ),
+    );
   }
 
   /**
@@ -3952,15 +3964,34 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     };
   }
 
+  /**
+   * One `batchOnce` call: one statement. Inside a transaction (`session`
+   * given) the call enters one operation of the session for that statement,
+   * after the batch's refusals; the reads it combines are compiled into it
+   * (the builder's reads are compile-only), so they enter nothing of their
+   * own.
+   */
   async #batchOnceForBackend<const Queries extends OneStatementBatchReads>(
     backend: StatementBackend,
     attempt: number,
     build: (read: BatchReadBuilder<G>) => Queries,
     options?: BatchOnceOptions,
+    session?: TransactionSession,
   ): Promise<OneStatementBatchResults<Queries>> {
+    const queryBackend = this.#createHookedQueryBackend(backend, attempt);
     return withPinnedReadInstant(() =>
       executeOneStatementBatch(
-        this.#createHookedQueryBackend(backend, attempt),
+        withQueryOperationSource(
+          { backend: queryBackend },
+          session === undefined ? undefined : (
+            this.#hookedReadOperationSource(
+              session,
+              backend,
+              queryBackend,
+              attempt,
+            )
+          ),
+        ),
         this.graphId,
         build(this.#createBatchReadBuilder(backend, attempt)),
         options,
@@ -3986,17 +4017,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return countNeighborsImpl(this.#neighborContext(), source, options);
   }
 
+  /**
+   * What a neighbor read reads through. Inside a transaction (`session`
+   * given) each execution enters one operation of the session.
+   */
   #neighborContext(
     backend: StatementBackend = this.#backend,
     attempt = 1,
+    session?: TransactionSession,
   ): Parameters<typeof readNeighbors<G, EdgeKinds<G>>>[0] {
-    return {
-      graphId: this.graphId,
-      backend: this.#createHookedQueryBackend(backend, attempt),
-      schema: this.#sqlSchema(),
-      defaultTemporalMode: this.#graph.defaults.temporalMode,
-      registry: this.#registry,
-    };
+    const queryBackend = this.#createHookedQueryBackend(backend, attempt);
+    return withQueryOperationSource(
+      {
+        graphId: this.graphId,
+        backend: queryBackend,
+        schema: this.#sqlSchema(),
+        defaultTemporalMode: this.#graph.defaults.temporalMode,
+        registry: this.#registry,
+      },
+      session === undefined ? undefined : (
+        this.#hookedReadOperationSource(session, backend, queryBackend, attempt)
+      ),
+    );
   }
 
   #assertNeighborKinds(
@@ -4248,10 +4290,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     options: SubgraphOptions<G, EK, NK, P, C>,
     txBackend: OperationBackend,
     attempt: number,
+    session: TransactionSession,
   ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
     this.#assertPublicSubgraphOptions(options);
     return executeSessionSubgraph(
-      this.#sessionSubgraphParams(root, options, txBackend, attempt),
+      this.#sessionSubgraphParams(root, options, txBackend, attempt, session),
     );
   }
 
@@ -4265,18 +4308,32 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     options: InternalSubgraphOptions<G, EK, NK, P, C>,
     backend: StatementBackend,
     attempt?: number,
+    session?: TransactionSession,
   ) {
-    return {
-      graph: this.#graph,
-      graphId: this.graphId,
-      root,
-      backend: this.#createHookedQueryBackend(backend, attempt),
-      dialect: getDialect(backend.dialect),
-      schema: this.#schema,
-      recordedReadBinding: this.#recordedReadBinding,
-      registry: this.#registry,
-      options,
-    };
+    const queryBackend = this.#createHookedQueryBackend(backend, attempt);
+    // Inside a transaction (`session` given) each execution enters one
+    // operation of the session, after the subgraph's refusals.
+    return withQueryOperationSource(
+      {
+        graph: this.#graph,
+        graphId: this.graphId,
+        root,
+        backend: queryBackend,
+        dialect: getDialect(backend.dialect),
+        schema: this.#schema,
+        recordedReadBinding: this.#recordedReadBinding,
+        registry: this.#registry,
+        options,
+      },
+      session === undefined ? undefined : (
+        this.#hookedReadOperationSource(
+          session,
+          backend,
+          queryBackend,
+          attempt ?? 1,
+        )
+      ),
+    );
   }
 
   #assertPublicSubgraphOptions(options: unknown): void {
@@ -5288,15 +5345,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           undefined,
           session,
         ),
-      describe: () => describeStore(this.#analysisContext(txBackend)),
+      // Each read below is one public call: it enters one operation of the
+      // session when it executes, after its refusals.
+      describe: () => describeStore(this.#analysisContext(txBackend, session)),
       validateStore: (options) =>
-        validateStoreImpl(this.#analysisContext(txBackend), options),
+        validateStoreImpl(this.#analysisContext(txBackend, session), options),
       batchOnce: (build, options) =>
-        this.#batchOnceForBackend(txBackend, attempt, build, options),
+        this.#batchOnceForBackend(txBackend, attempt, build, options, session),
       neighbors: (source, options) => {
         this.#assertNeighborKinds(source, options.edges);
         return readNeighbors(
-          this.#neighborContext(txBackend, attempt),
+          this.#neighborContext(txBackend, attempt, session),
           source,
           options,
         );
@@ -5304,13 +5363,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       countNeighbors: (source, options) => {
         this.#assertNeighborKinds(source, options.edges);
         return countNeighborsImpl(
-          this.#neighborContext(txBackend, attempt),
+          this.#neighborContext(txBackend, attempt, session),
           source,
           options,
         );
       },
       subgraph: (root, options) =>
-        this.#executeSessionSubgraph(root, options, txBackend, attempt),
+        this.#executeSessionSubgraph(
+          root,
+          options,
+          txBackend,
+          attempt,
+          session,
+        ),
     };
   }
 
@@ -8352,6 +8417,41 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
+   * The operation source a read built inside a transaction carries: each call
+   * enters one operation of `session` and returns what that operation's
+   * statements go through, `decorate`d as the read decorates `backend`.
+   *
+   * The operation's handle is the transaction it was entered from (the brand
+   * is a phantom), so `decorated` (the decoration already built for
+   * `backend`) serves it; a handle that is a different object is decorated on
+   * its own. Rebuilding the same decoration per execution costs a hooked read
+   * tens of microseconds.
+   */
+  #readOperationSource<Backend extends StatementBackend>(
+    session: TransactionSession,
+    backend: StatementBackend,
+    decorated: Backend,
+    decorate: (handle: StatementBackend) => Backend,
+  ): QueryOperationSource<Backend> {
+    return () => {
+      const handle = operationEntryBackend(enterOperation(session));
+      return handle === backend ? decorated : decorate(handle);
+    };
+  }
+
+  /** {@link #readOperationSource} for a read whose statements are hook-observed. */
+  #hookedReadOperationSource(
+    session: TransactionSession,
+    backend: StatementBackend,
+    queryBackend: GraphBackend,
+    attempt: number,
+  ): QueryOperationSource {
+    return this.#readOperationSource(session, backend, queryBackend, (handle) =>
+      this.#createHookedQueryBackend(handle, attempt),
+    );
+  }
+
+  /**
    * `session` is the transaction session a query built inside a transaction
    * belongs to: each of its executions enters one operation of that session
    * and runs its statements through the operation's handle, hook-observed like
@@ -8387,17 +8487,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         ...(sealedCoordinate !== undefined && { sealedCoordinate }),
         ...(expectedSchemaVersion !== undefined && { expectedSchemaVersion }),
         ...(session !== undefined && {
-          operationSource: () => {
-            const handle = operationEntryBackend(enterOperation(session));
-            // The operation's handle is the transaction it was entered from
-            // (the brand is a phantom), so the decoration already built for
-            // that transaction above serves it; a handle that is a different
-            // object is decorated on its own. Rebuilding the same decoration
-            // per execution costs a hooked read tens of microseconds.
-            return handle === backend ? queryBackend : (
-                this.#createHookedQueryBackend(handle, attempt)
-              );
-          },
+          operationSource: this.#hookedReadOperationSource(
+            session,
+            backend,
+            queryBackend,
+            attempt,
+          ),
         }),
       },
     );

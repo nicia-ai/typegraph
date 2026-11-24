@@ -10,6 +10,7 @@ import {
 } from "../sql-fragment";
 import { asCompiledRowsSql, recursivePlanCount } from "../sql-intent";
 import { groupOneStatementBatchItems } from "./one-statement-sharing";
+import { enterQueryExecution } from "./query-operation";
 import type {
   EmbeddableOneStatementRead,
   OneStatementBatchableQuery,
@@ -53,15 +54,21 @@ type BatchEnvelopeRow = Readonly<{
   payload: unknown;
 }>;
 
-/** Executes independent relational reads through one database statement. */
+/**
+ * Executes independent relational reads through one database statement.
+ * `execution.backend` is what the batch is checked and compiled against; the
+ * statement goes through {@link enterQueryExecution}'s target, entered once
+ * every refusal has run.
+ */
 export async function executeOneStatementBatch<
   const Queries extends readonly EmbeddableOneStatementRead<unknown>[],
 >(
-  backend: StatementBackend,
+  execution: Readonly<{ backend: StatementBackend }>,
   graphId: string,
   queries: Queries,
   options: BatchOnceOptions = {},
 ): Promise<OneStatementBatchResults<Queries>> {
+  const { backend } = execution;
   if (
     options.shareSubgraphs !== undefined &&
     typeof options.shareSubgraphs !== "boolean"
@@ -222,7 +229,8 @@ export async function executeOneStatementBatch<
       },
     );
   }
-  const envelopes = await backend.execute<BatchEnvelopeRow>(statement);
+  const envelopes =
+    await enterQueryExecution(execution).execute<BatchEnvelopeRow>(statement);
   const payloads = new Map<number, Record<string, unknown>[]>();
   for (const envelope of envelopes) {
     const index = Number(envelope.batch_index);

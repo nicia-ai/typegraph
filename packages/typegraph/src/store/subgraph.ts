@@ -31,6 +31,7 @@ import {
   type OneStatementCombinedItem,
   registerOneStatementSharing,
 } from "../query/builder/one-statement-sharing";
+import { enterQueryExecution } from "../query/builder/query-operation";
 import type { ExecutableOneStatementRead } from "../query/builder/types";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../query/compiler/recursive";
@@ -949,6 +950,14 @@ function buildSubgraphReachableCte(
   });
 }
 
+/** `context` sending its statements through `backend`; itself when it already does. */
+function subgraphContextOn(
+  context: SubgraphContext,
+  backend: GraphBackend,
+): SubgraphContext {
+  return context.backend === backend ? context : { ...context, backend };
+}
+
 // ============================================================
 // Public API
 // ============================================================
@@ -962,15 +971,23 @@ export async function executeSubgraph<
 >(
   params: SubgraphExecutionParams<G, EK, NK, P, C>,
 ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
+  const plan = buildSubgraphPlan(params, "subgraph");
   const {
-    ctx,
-    readContext,
     reachableCte,
     includedIdsCte,
     nodeProjectionPlan,
     edgeProjectionPlan,
     baseSchema,
-  } = buildSubgraphPlan(params, "subgraph");
+  } = plan;
+  // Entered once the plan's refusals have run: every statement below (the
+  // closure fetch, the composition walk, the node and edge fetches) goes
+  // through this one execution's target.
+  const backend = enterQueryExecution(params);
+  const ctx = subgraphContextOn(plan.ctx, backend);
+  const readContext =
+    plan.readContext === plan.ctx ?
+      ctx
+    : subgraphContextOn(plan.readContext, backend);
 
   // The node and edge fetches both need the traversal closure. Embedding
   // the recursive CTE in each statement runs the BFS twice; on Postgres
@@ -1212,7 +1229,7 @@ export function createSubgraphRead<
   return {
     execute: async () =>
       mapRows(
-        await params.backend.execute<OneStatementSubgraphRow>(
+        await enterQueryExecution(params).execute<OneStatementSubgraphRow>(
           asCompiledRowsSql(query),
         ),
       ),
