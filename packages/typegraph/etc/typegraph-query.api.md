@@ -1269,9 +1269,9 @@ type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes extends Nod
     to: ToDef;
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
-    endpointExistence?: EndpointExistence;
     matchIdentity?: EdgeMatchIdentity<E>;
     acyclic?: boolean;
+    endpointExistence?: never;
 }>;
 
 // @public
@@ -1355,9 +1355,6 @@ export type EncodeSlash<S extends string> = S extends `${infer Head}/${infer Tai
 
 // @public (undocumented)
 export type EncodeTilde<S extends string> = S extends `${infer Head}~${infer Tail}` ? `${EncodeTilde<Head>}~0${EncodeTilde<Tail>}` : S;
-
-// @public
-type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
 
 // @public
 export type EndpointKindErased<Endpoint> = Endpoint extends string ? false : Endpoint extends {
@@ -1794,6 +1791,7 @@ type ExtensionEdgeDef = Readonly<{
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
     acyclic?: boolean;
+    endpointExistence?: never;
 }>;
 
 // @public
@@ -4359,7 +4357,6 @@ type SerializedEdgeDef = Readonly<{
     properties: JsonSchema;
     cardinality: Cardinality;
     targetCardinality?: TargetCardinality;
-    endpointExistence: EndpointExistence;
     matchIdentity?: Readonly<{
         name: string;
         fields: readonly string[];

@@ -618,9 +618,6 @@ export type EndpointErrorDetails = Readonly<{
 }>;
 
 // @public
-type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
-
-// @public
 export class EndpointNotFoundError extends TypeGraphError {
     constructor(details: EndpointNotFoundErrorDetails, options?: {
         cause?: unknown;
@@ -1392,7 +1389,6 @@ type SerializedEdgeDef = Readonly<{
     properties: JsonSchema;
     cardinality: Cardinality;
     targetCardinality?: TargetCardinality;
-    endpointExistence: EndpointExistence;
     matchIdentity?: Readonly<{
         name: string;
         fields: readonly string[];

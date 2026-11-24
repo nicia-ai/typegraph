@@ -506,7 +506,6 @@ export type {
   Cardinality,
   Collation,
   DeleteBehavior,
-  EndpointExistence,
   IndexEntity,
   JsonScalar,
   JsonValue,

@@ -280,9 +280,9 @@ export type EdgeRegistration<E extends AnyEdgeType = AnyEdgeType, FromTypes exte
     to: ToDef;
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
-    endpointExistence?: EndpointExistence;
     matchIdentity?: EdgeMatchIdentity<E>;
     acyclic?: boolean;
+    endpointExistence?: never;
 }>;
 
 // @public
@@ -353,9 +353,6 @@ const EMPTY_SCHEMA: z.ZodObject<{}, z.core.$strip>;
 export type EmptySchema = typeof EMPTY_SCHEMA;
 
 // @public
-export type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
-
-// @public
 export type EndpointPair = Readonly<{
     from: string;
     to: string;
@@ -408,6 +405,7 @@ type ExtensionEdgeDef = Readonly<{
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
     acyclic?: boolean;
+    endpointExistence?: never;
 }>;
 
 // @public

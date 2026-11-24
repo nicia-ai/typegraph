@@ -1,1 +1,266 @@
-[]
+[
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "EdgeIntrospection",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "`store.introspect()` no longer reports the removed edge option `endpointExistence` (#945): it never changed edge-write behaviour, and reporting it would describe an option a registration can no longer state.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "EdgeIntrospection",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "`store.introspect()` no longer reports the removed edge option `endpointExistence` (#945): it never changed edge-write behaviour, and reporting it would describe an option a registration can no longer state.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-errors.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "EdgeIntrospection",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "`store.introspect()` no longer reports the removed edge option `endpointExistence` (#945): it never changed edge-write behaviour, and reporting it would describe an option a registration can no longer state.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "EdgeIntrospection",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "`store.introspect()` no longer reports the removed edge option `endpointExistence` (#945): it never changed edge-write behaviour, and reporting it would describe an option a registration can no longer state.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "EdgeIntrospection",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "`store.introspect()` no longer reports the removed edge option `endpointExistence` (#945): it never changed edge-write behaviour, and reporting it would describe an option a registration can no longer state.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "EdgeIntrospection",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "`store.introspect()` no longer reports the removed edge option `endpointExistence` (#945): it never changed edge-write behaviour, and reporting it would describe an option a registration can no longer state.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "EdgeIntrospection",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "`store.introspect()` no longer reports the removed edge option `endpointExistence` (#945): it never changed edge-write behaviour, and reporting it would describe an option a registration can no longer state.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "EdgeIntrospection",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "`store.introspect()` no longer reports the removed edge option `endpointExistence` (#945): it never changed edge-write behaviour, and reporting it would describe an option a registration can no longer state.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "EdgeIntrospection",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "`store.introspect()` no longer reports the removed edge option `endpointExistence` (#945): it never changed edge-write behaviour, and reporting it would describe an option a registration can no longer state.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-query.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "EdgeIntrospection",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "`store.introspect()` no longer reports the removed edge option `endpointExistence` (#945): it never changed edge-write behaviour, and reporting it would describe an option a registration can no longer state.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "EdgeIntrospection",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "`store.introspect()` no longer reports the removed edge option `endpointExistence` (#945): it never changed edge-write behaviour, and reporting it would describe an option a registration can no longer state.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "EdgeIntrospection",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "`store.introspect()` no longer reports the removed edge option `endpointExistence` (#945): it never changed edge-write behaviour, and reporting it would describe an option a registration can no longer state.",
+    "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "SerializedEdgeDef",
+    "member": "endpointExistence",
+    "kind": "member-removed",
+    "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
+    "issue": "#945"
+  }
+]

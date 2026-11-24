@@ -1305,7 +1305,7 @@
     "symbol": "EndpointExistence",
     "kind": "type",
     "from": "@nicia-ai/typegraph",
-    "to": "@nicia-ai/typegraph/core"
+    "to": null
   },
   {
     "symbol": "EndpointNotFoundErrorDetails",

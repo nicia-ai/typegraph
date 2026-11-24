@@ -18,7 +18,10 @@ import {
   projectTargetNodes,
   validateTargetMapEntries,
 } from "./edge-endpoints";
-import { assertEdgeIntegrityOptions } from "./edge-integrity-options";
+import {
+  assertEdgeIntegrityOptions,
+  withoutRemovedEdgeOptionKeys,
+} from "./edge-integrity-options";
 import { isPortableEdgeMatchIdentityValue } from "./edge-match-identity-value";
 import {
   assertGraphAnnotations,
@@ -196,10 +199,14 @@ function normalizeEdgeEntry(
 
   assertEdgeIntegrityOptions(name, entry);
 
-  let normalizedRegistration: AnyEdgeRegistration = entry;
+  let normalizedRegistration: AnyEdgeRegistration =
+    withoutRemovedEdgeOptionKeys(entry);
   if (!Array.isArray(entry.to)) {
     validateTargetMapEntries(name, entry.from, entry.to);
-    normalizedRegistration = { ...entry, to: normalizeTargetMap(entry.to) };
+    normalizedRegistration = {
+      ...normalizedRegistration,
+      to: normalizeTargetMap(entry.to),
+    };
   }
 
   // Validate narrowing if edge has built-in constraints

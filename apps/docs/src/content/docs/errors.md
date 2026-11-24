@@ -1713,7 +1713,7 @@ check is for untyped callers:
 
 | `details.code` | Raised when |
 | --- | --- |
-| `EDGE_INTEGRITY_OPTION_INVALID` | `cardinality` is not `"many"`, `"one"`, `"unique"` or `"oneActive"`; `targetCardinality` is not `"many"`, `"one"` or `"oneActive"`; `endpointExistence` is not `"notDeleted"`, `"currentlyValid"` or `"ever"`; or `acyclic` is not a boolean. `details.option` names the option, `details.value` is what was stated and `details.edgeKind` is the registration. |
+| `EDGE_INTEGRITY_OPTION_INVALID` | `cardinality` is not `"many"`, `"one"`, `"unique"` or `"oneActive"`; `targetCardinality` is not `"many"`, `"one"` or `"oneActive"`; `acyclic` is not a boolean; or the registration states `endpointExistence`, an option that was removed (it never changed how edge writes check their endpoints; delete it from the registration). An explicit `undefined` states nothing, for every one of these options. `details.option` names the option, `details.value` is what was stated and `details.edgeKind` is the registration. |
 | `EDGE_ENDPOINT_KIND_NOT_REGISTERED` | An edge's `from` or `to` (an explicit registration, a value of a source-to-target map, or an `EdgeType`'s own endpoints) names a node kind that is not registered in `nodes`. No row could ever be written through such an edge. `details.edge`, `details.endpoint` (`"from"` or `"to"`), `details.kind` and `details.availableKinds` name the registration, the side, the kind and the registered kinds. Register the kind in `nodes`, or remove it from the edge. |
 
 #### Structural subsumption codes

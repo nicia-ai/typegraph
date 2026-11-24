@@ -4394,9 +4394,6 @@ type EdgeRow = Readonly<{
     deleted_at: string | undefined;
 }>;
 
-// @public
-type EndpointExistence = "notDeleted" | "currentlyValid" | "ever";
-
 // @public (undocumented)
 const ENGINE_REVISION_BRAND: unique symbol;
 
@@ -4447,6 +4444,7 @@ type ExtensionEdgeDef = Readonly<{
     cardinality?: Cardinality;
     targetCardinality?: TargetCardinality;
     acyclic?: boolean;
+    endpointExistence?: never;
 }>;
 
 // @public
@@ -5772,7 +5770,6 @@ type SerializedEdgeDef = Readonly<{
     properties: JsonSchema;
     cardinality: Cardinality;
     targetCardinality?: TargetCardinality;
-    endpointExistence: EndpointExistence;
     matchIdentity?: Readonly<{
         name: string;
         fields: readonly string[];
