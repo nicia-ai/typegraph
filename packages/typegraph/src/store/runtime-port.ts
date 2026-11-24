@@ -739,7 +739,8 @@ export function storeQueryBackend<G extends GraphDef>(
   store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
   target?: StatementBackend,
 ): GraphBackend {
-  return storeRuntime(store).queryBackend(target);
+  // A target Store code holds has passed through a mint: run on it.
+  return storeStatementPort(store).queryBackend(target);
 }
 
 type TransactionRuntimePort = Readonly<{

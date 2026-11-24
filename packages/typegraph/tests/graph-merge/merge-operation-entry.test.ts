@@ -58,6 +58,7 @@ import {
 import type * as RuntimePortModule from "../../src/store/runtime-port";
 import {
   enterTransactionOperation,
+  storeQueryBackend,
   storeRuntime,
   storeStatementPort,
   transactionBackend,
@@ -347,6 +348,17 @@ describe("the Store runtime port's statement targets", () => {
       const [joined] = targetEntrySessions();
       expect(joined).toBeDefined();
       expect(joined).not.toBe(session);
+    });
+  });
+
+  it("storeQueryBackend runs on the handle it is given, minting nothing", async () => {
+    const target = await createTarget();
+    await target.transaction(async (tx) => {
+      const handle = enterTransactionOperation(tx);
+      clearMints();
+      expect(storeQueryBackend(target, handle)).toBeDefined();
+      expect(enterTargetOperationSpy).not.toHaveBeenCalled();
+      expect(openTransactionSessionSpy).not.toHaveBeenCalled();
     });
   });
 
