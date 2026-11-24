@@ -363,14 +363,17 @@ import {
 import { readNodeByReference } from "./node-reference-read";
 import {
   enterOperation,
+  enterTargetOperation,
   legacyTransactionOperation,
   openTransactionSession,
   type Operation,
   type OperationBackend,
+  operationEntryBackend,
   type OperationScoped,
   type StatementBackend,
   storeAdoptSchemaWriteTransaction,
   type StoreTransactionBackend,
+  type TransactionSession,
 } from "./operation-scope";
 import {
   applyIdentityWindowEnd,
@@ -3884,11 +3887,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // through the capture wrapper would open a recorded-capture transaction
     // scope — which demands executeStatement on the transaction target — for a
     // path that performs no writes and needs no capture.
+    //
+    // The transaction batch() opens is where its session is opened: the batch
+    // is one operation of it. Each item receives that operation's handle
+    // through the public `executeOn`, whose type carries no session, so an
+    // item joins as a binding of its own (`enterTargetOperation`).
     return runOptionallyInTransaction(
       this.#baseBackend,
       async (target: GraphBackend | StoreTransactionBackend) => {
         const queryBackend = this.#createHookedQueryBackend(
-          legacyTransactionOperation(target),
+          operationEntryBackend(enterTargetOperation(target)),
         );
         const results: unknown[] = [];
         for (const query of queries) {
@@ -5268,10 +5276,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /** Builds graph reads that execute through one already-open transaction. */
   #createTransactionReadSurface(
     txBackend: OperationBackend,
+    session: TransactionSession,
     attempt: number,
   ): TransactionReadMethods<G> {
     return {
-      query: () => this.#createQueryForBackend(txBackend, undefined, attempt),
+      query: () =>
+        this.#createQueryForBackend(
+          txBackend,
+          undefined,
+          attempt,
+          undefined,
+          session,
+        ),
       describe: () => describeStore(this.#analysisContext(txBackend)),
       validateStore: (options) =>
         validateStoreImpl(this.#analysisContext(txBackend), options),
@@ -5533,7 +5549,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const nodeOperations: NodeOperations = {
         ...this.#buildNodeOperations(nodeOperationContext),
         createQuery: () =>
-          this.#createQueryForBackend(txBackend, undefined, attempt),
+          this.#createQueryForBackend(
+            txBackend,
+            undefined,
+            attempt,
+            undefined,
+            session,
+          ),
         maybeRefreshStatisticsAfterBulk: undefined,
       };
       const edgeOperations: EdgeOperations = {
@@ -5541,7 +5563,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#createEdgeOperationContext(runHooks, attempt),
         ),
         createQuery: () =>
-          this.#createQueryForBackend(txBackend, undefined, attempt),
+          this.#createQueryForBackend(
+            txBackend,
+            undefined,
+            attempt,
+            undefined,
+            session,
+          ),
         maybeRefreshStatisticsAfterBulk: undefined,
       };
       return {
@@ -5648,7 +5676,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           entries,
           receiptRecorder,
         ),
-      ...this.#createTransactionReadSurface(txBackend, attempt),
+      ...this.#createTransactionReadSurface(txBackend, session, attempt),
       assertUnchangedSince: (
         anchor: EngineRevision,
         scopes: readonly ReadSetScope<G>[],
@@ -5660,7 +5688,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           scopes,
         ),
       ...(receiptIdentity === undefined ? {} : { identity: receiptIdentity }),
-      backend: createTransactionReadBackend(txBackend),
+      // Each read member is a call of its own: one operation of the session.
+      backend: createTransactionReadBackend(
+        txBackend,
+        () => enterOperation(session).backend,
+      ),
       [TRANSACTION_RUNTIME]: outerSurface.runtime,
       ...this.#nodeCollectionAccess(nodes),
       ...this.#edgeCollectionAccess(edges),
@@ -8319,11 +8351,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     };
   }
 
+  /**
+   * `session` is the transaction session a query built inside a transaction
+   * belongs to: each of its executions enters one operation of that session
+   * and runs its statements through the operation's handle, hook-observed like
+   * any other query statement. `backend` still supplies what the builder
+   * reads before execution (dialect, capabilities, compilation, provenance).
+   */
   #createQueryForBackend<CoordinateState extends QueryCoordinateState = "open">(
     backend: StatementBackend,
     sealedCoordinate?: ReadCoordinate,
     attempt = 1,
     expectedSchemaVersion?: Readonly<{ value: number | undefined }>,
+    session?: TransactionSession,
   ): InitialQueryBuilder<G, CoordinateState> {
     const queryBackend = this.#createHookedQueryBackend(backend, attempt);
     return createInternalQueryBuilder<G, CoordinateState>(
@@ -8344,6 +8384,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         }),
         ...(sealedCoordinate !== undefined && { sealedCoordinate }),
         ...(expectedSchemaVersion !== undefined && { expectedSchemaVersion }),
+        ...(session !== undefined && {
+          operationSource: () =>
+            this.#createHookedQueryBackend(
+              operationEntryBackend(enterOperation(session)),
+              attempt,
+            ),
+        }),
       },
     );
   }

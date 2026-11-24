@@ -5,9 +5,12 @@ import type {
   SchemaCommitPreflightBackend,
   SchemaWriteTransactionBackend,
   TransactionBackend,
+  TransactionReadBackend,
 } from "../src/backend/types";
+import type { BatchableQuery } from "../src/query/builder/types";
 import {
   enterOperation,
+  enterTargetOperation,
   type EntryScope,
   legacyTransactionOperation,
   type Operation,
@@ -198,5 +201,21 @@ describe("a specialised Store transaction", () => {
     expectTypeOf(
       legacyTransactionOperation<GraphBackend>,
     ).returns.toEqualTypeOf<GraphBackend>();
+  });
+
+  // `executeOn` takes an outside target: the root, or an engine transaction
+  // (this Store's, another Store's, or one the caller opened), which
+  // `enterTargetOperation` enters as a binding of its own. A transaction
+  // context's `tx.backend` is a read projection with no statement
+  // execution, so it is not a target at all.
+  it("takes a root or an engine transaction as an executeOn target, never tx.backend", () => {
+    type ExecuteOnTarget = Parameters<BatchableQuery["executeOn"]>[0];
+    expectTypeOf<GraphBackend>().toExtend<ExecuteOnTarget>();
+    expectTypeOf<TransactionBackend>().toExtend<ExecuteOnTarget>();
+    expectTypeOf<TransactionReadBackend>().not.toExtend<ExecuteOnTarget>();
+    expectTypeOf(enterTargetOperation).returns.toEqualTypeOf<OperationEntry>();
+    expectTypeOf<ExecuteOnTarget>().toExtend<
+      Parameters<typeof enterTargetOperation>[0]
+    >();
   });
 });

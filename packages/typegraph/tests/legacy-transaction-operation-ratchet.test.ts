@@ -55,7 +55,7 @@ type Family =
 const FAMILY_BASELINE = {
   "node writes": 0,
   "edge writes": 0,
-  "query terminals and tx.backend": 11,
+  "query terminals and tx.backend": 0,
   "identity and search facades": 40,
   "capture and flush": 10,
   "schema and evolution": 12,
@@ -81,47 +81,12 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
   // context carries; see LEGACY_WRITE_ENTRY_INVENTORY for the callers outside
   // those families that still hold no session.
 
-  // --- query terminals: `executeOn` and `store.batch()` receive an outside
-  // target through the public signature.
-  "src/query/builder/executable-query.ts#ExecutableQuery.executeOn": {
-    count: 1,
-    family: "query terminals and tx.backend",
-  },
-  "src/query/builder/executable-projection-query.ts#ExecutableProjectionQuery.executeOn":
-    { count: 1, family: "query terminals and tx.backend" },
-  "src/query/builder/relation.ts#ExecutableRelationQuery.executeOn": {
-    count: 1,
-    family: "query terminals and tx.backend",
-  },
-  "src/query/builder/unionable-query.ts#UnionableQuery.executeOn": {
-    count: 1,
-    family: "query terminals and tx.backend",
-  },
-  // Raised from none: the implementation behind the public signature now
-  // receives the Store-facing transaction, so the value it hands the
-  // relation's public `executeOn` is the counted handle, not the raw type.
-  "src/query/builder/executable-aggregate-query.ts#ExecutableAggregateQuery.executeOn":
-    { count: 1, family: "query terminals and tx.backend" },
-  "src/store/collections/edge-collection.ts#batchFindFrom": {
-    count: 1,
-    family: "query terminals and tx.backend",
-  },
-  "src/store/collections/edge-collection.ts#batchFindTo": {
-    count: 1,
-    family: "query terminals and tx.backend",
-  },
-  "src/store/collections/edge-collection.ts#batchFindByEndpoints": {
-    count: 1,
-    family: "query terminals and tx.backend",
-  },
-  "src/store/store.ts#StoreImplementation.batch": {
-    count: 1,
-    family: "query terminals and tx.backend",
-  },
-  "src/store/algorithms/iterative-graph-operation.ts#withInlineIterativeGraphOperation":
-    { count: 1, family: "query terminals and tx.backend" },
-  "src/store/algorithms/iterative-graph-operation.ts#runIterativeGraphOperation":
-    { count: 1, family: "query terminals and tx.backend" },
+  // --- query terminals and tx.backend: none. A query built inside a
+  // transaction carries its session (`query-operation.ts`) and enters one
+  // operation of it per execution, as does each `tx.backend` read member; a
+  // target arriving through `executeOn` (and so `store.batch()` and the edge
+  // batch finders) enters through `enterTargetOperation`, and an iterative
+  // algorithm opens the session of the read transaction it opens.
 
   // --- identity and search facades
   "src/identity/replay.ts#currentClassMembers": {

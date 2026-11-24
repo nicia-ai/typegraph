@@ -11,6 +11,7 @@ import { buildQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import { getQueryBuilderInternalContext } from "./internal-context";
 import { hasParameterReferences } from "./prepared-query";
+import { enterQueryExecution } from "./query-operation";
 import type { QueryBuilderConfig, QueryBuilderState } from "./types";
 
 /** COUNT operates on groups when grouping is present, otherwise on match rows. */
@@ -72,11 +73,14 @@ export async function executeQueryTerminal(
   );
   const checked = getQueryBuilderInternalContext(config).expectedSchemaVersion;
   const { orderBy: _orderBy, ...unorderedAst } = ast;
+  // Entered once the terminal can no longer refuse: its one statement runs on
+  // it. `backend` is what the configuration names, defined here.
+  const target = enterQueryExecution(config) ?? backend;
   const rowsPromise =
     checked === undefined ?
-      backend.execute<Record<string, unknown>>(statement)
+      target.execute<Record<string, unknown>>(statement)
     : executeSchemaCheckedRead({
-        backend,
+        backend: target,
         ast: unorderedAst,
         graphId: config.graphId,
         expectedVersion: checked.value,
@@ -86,7 +90,7 @@ export async function executeQueryTerminal(
   const rows = await (state.recordedAsOf === undefined ?
     rowsPromise
   : withRecordedRelationsPrecondition(rowsPromise, {
-      dialect: backend.dialect,
+      dialect: target.dialect,
       surface: `recorded-query-${operation}`,
     }));
   return Number(rows[0]?.[column] ?? 0);

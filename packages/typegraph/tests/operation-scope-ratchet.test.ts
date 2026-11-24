@@ -801,33 +801,33 @@ const RAW_TRANSACTION_DECLARATIONS: Readonly<
     sites: 1,
     route: "signature",
     reason:
-      "The public overload of `executeOn`. The implementation receives the Store-facing transaction, so a statement on it is a type error; the body shims once.",
+      "The public overload of `executeOn`. The implementation receives the Store-facing transaction, so a statement on it is a type error; the body enters the target's operation once (`enterTargetOperation`).",
   },
   "src/query/builder/executable-projection-query.ts#ExecutableProjectionQuery.executeOn":
     {
       sites: 1,
       route: "signature",
       reason:
-        "The public overload of `executeOn`. The implementation receives the Store-facing transaction, so a statement on it is a type error; the body shims once.",
+        "The public overload of `executeOn`. The implementation receives the Store-facing transaction, so a statement on it is a type error; the body enters the target's operation once (`enterTargetOperation`).",
     },
   "src/query/builder/relation.ts#ExecutableRelationQuery.executeOn": {
     sites: 1,
     route: "signature",
     reason:
-      "The public overload of `executeOn`. The implementation receives the Store-facing transaction, so a statement on it is a type error; the body shims once.",
+      "The public overload of `executeOn`. The implementation receives the Store-facing transaction, so a statement on it is a type error; the body enters the target's operation once (`enterTargetOperation`).",
   },
   "src/query/builder/unionable-query.ts#UnionableQuery.executeOn": {
     sites: 1,
     route: "signature",
     reason:
-      "The public overload of `executeOn`. The implementation receives the Store-facing transaction, so a statement on it is a type error; the body shims once.",
+      "The public overload of `executeOn`. The implementation receives the Store-facing transaction, so a statement on it is a type error; the body enters the target's operation once (`enterTargetOperation`).",
   },
   "src/query/builder/executable-aggregate-query.ts#ExecutableAggregateQuery.executeOn":
     {
       sites: 1,
       route: "signature",
       reason:
-        "The public overload of `executeOn`. The implementation receives the Store-facing transaction and hands the relation's `executeOn` the shimmed handle.",
+        "The public overload of `executeOn`. The implementation receives the Store-facing transaction and runs the relation's `executeOn` work on it (`executeRelationOn`), which enters the target's operation once.",
     },
   "src/store/types.ts#TransactionRuntime": {
     sites: 1,

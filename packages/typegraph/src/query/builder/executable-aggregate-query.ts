@@ -8,10 +8,7 @@ import { backendDerivationRoot } from "../../backend/derive-backend";
 import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
-import {
-  legacyTransactionOperation,
-  type StoreTransactionBackend,
-} from "../../store/operation-scope";
+import { type StoreTransactionBackend } from "../../store/operation-scope";
 import { createDataKeyedBag } from "../../utils/object";
 import {
   type AggregateExpr,
@@ -36,6 +33,7 @@ import type {
   PreparedParameterDeclaration,
 } from "./prepared-bindings";
 import { hasParameterReferences } from "./prepared-query";
+import { enterQueryExecution } from "./query-operation";
 import {
   buildQueryTemplate,
   type CompiledTemplate,
@@ -44,6 +42,7 @@ import {
 import {
   createExecutableRelation,
   type ExecutableRelationQuery,
+  executeRelationOn,
 } from "./relation";
 import { type QueryBuilderConfig, type QueryBuilderState } from "./types";
 import { validateQueryRange, validateSortDirection } from "./validation";
@@ -360,7 +359,7 @@ export class ExecutableAggregateQuery<
   executeOn(
     backend: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly AggregateResult<R, Aliases>[]> {
-    return this.asRelation().executeOn(legacyTransactionOperation(backend));
+    return executeRelationOn(this.asRelation(), backend);
   }
 
   first(): Promise<AggregateResult<R, Aliases> | undefined> {
@@ -505,7 +504,8 @@ export class ExecutableAggregateQuery<
       );
     }
 
-    const executeRaw = backend.executeRaw;
+    const target = enterQueryExecution(this.#config) ?? backend;
+    const executeRaw = target.executeRaw;
     const template =
       executeRaw === undefined ? undefined : this.#resolveTemplate(ast);
     const rows =
@@ -518,7 +518,7 @@ export class ExecutableAggregateQuery<
             this.#config.dialect ?? "sqlite",
           ),
         )
-      : await backend.execute<Record<string, unknown>>(
+      : await target.execute<Record<string, unknown>>(
           compileNameCheckedQuery(
             ast,
             this.#config.graphId,

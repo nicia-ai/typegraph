@@ -4304,16 +4304,18 @@ export type SchemaCommitPreflightBackend = TransactionBackend &
  * callers cannot discover write or statement-execution methods on the
  * underlying transaction backend at runtime.
  *
+ * `backend` supplies what the projection exposes without a statement: its
+ * identity, its compiler, and which optional read members it implements.
+ * Every read member's call goes through the transaction `reads()` returns at
+ * that call — the Store hands one operation of the transaction's session per
+ * call — which is the same transaction `backend` is.
+ *
  * @internal
  */
 export function createTransactionReadBackend(
   backend: TransactionBackend,
+  reads: () => TransactionBackend,
 ): TransactionReadBackend {
-  const getNodes = backend.getNodes;
-  const getEdges = backend.getEdges;
-  const findNodesAcrossKinds = backend.findNodesAcrossKinds;
-  const findEdgesAcrossKinds = backend.findEdgesAcrossKinds;
-  const findActiveEdgesBySourceV1 = backend.findActiveEdgesBySourceV1;
   const compileSql = backend.compileSql;
 
   return Object.freeze({
@@ -4328,52 +4330,76 @@ export function createTransactionReadBackend(
     ...(backend.vectorStrategy === undefined ?
       {}
     : { vectorStrategy: backend.vectorStrategy }),
-    getNode: (graphId, kind, id) => backend.getNode(graphId, kind, id),
-    ...(getNodes === undefined ?
+    getNode: (graphId, kind, id) => reads().getNode(graphId, kind, id),
+    ...(backend.getNodes === undefined ?
       {}
     : {
         getNodes: (graphId: string, kind: string, ids: readonly string[]) =>
-          getNodes(graphId, kind, ids),
+          presentReadMember(reads(), "getNodes")(graphId, kind, ids),
       }),
-    getEdge: (graphId, id) => backend.getEdge(graphId, id),
-    ...(getEdges === undefined ?
+    getEdge: (graphId, id) => reads().getEdge(graphId, id),
+    ...(backend.getEdges === undefined ?
       {}
     : {
         getEdges: (graphId: string, ids: readonly string[]) =>
-          getEdges(graphId, ids),
+          presentReadMember(reads(), "getEdges")(graphId, ids),
       }),
-    countEdgesAtEndpoint: (params) => backend.countEdgesAtEndpoint(params),
-    edgeExistsBetween: (params) => backend.edgeExistsBetween(params),
-    findEdgesConnectedTo: (params) => backend.findEdgesConnectedTo(params),
-    findNodesByKind: (params) => backend.findNodesByKind(params),
-    ...(findNodesAcrossKinds === undefined ?
+    countEdgesAtEndpoint: (params) => reads().countEdgesAtEndpoint(params),
+    edgeExistsBetween: (params) => reads().edgeExistsBetween(params),
+    findEdgesConnectedTo: (params) => reads().findEdgesConnectedTo(params),
+    findNodesByKind: (params) => reads().findNodesByKind(params),
+    ...(backend.findNodesAcrossKinds === undefined ?
       {}
     : {
         findNodesAcrossKinds: (params: FindRowsAcrossKindsParams) =>
-          findNodesAcrossKinds(params),
+          presentReadMember(reads(), "findNodesAcrossKinds")(params),
       }),
-    countNodesByKind: (params) => backend.countNodesByKind(params),
-    findEdgesByKind: (params) => backend.findEdgesByKind(params),
-    ...(findActiveEdgesBySourceV1 === undefined ?
+    countNodesByKind: (params) => reads().countNodesByKind(params),
+    findEdgesByKind: (params) => reads().findEdgesByKind(params),
+    ...(backend.findActiveEdgesBySourceV1 === undefined ?
       {}
     : {
         findActiveEdgesBySourceV1: (params: FindActiveEdgesBySourceV1Params) =>
-          findActiveEdgesBySourceV1(params),
+          presentReadMember(reads(), "findActiveEdgesBySourceV1")(params),
       }),
-    ...(findEdgesAcrossKinds === undefined ?
+    ...(backend.findEdgesAcrossKinds === undefined ?
       {}
     : {
         findEdgesAcrossKinds: (params: FindRowsAcrossKindsParams) =>
-          findEdgesAcrossKinds(params),
+          presentReadMember(reads(), "findEdgesAcrossKinds")(params),
       }),
-    countEdgesByKind: (params) => backend.countEdgesByKind(params),
-    getActiveSchema: (graphId) => backend.getActiveSchema(graphId),
+    countEdgesByKind: (params) => reads().countEdgesByKind(params),
+    getActiveSchema: (graphId) => reads().getActiveSchema(graphId),
     getSchemaVersion: (graphId, version) =>
-      backend.getSchemaVersion(graphId, version),
+      reads().getSchemaVersion(graphId, version),
     ...(compileSql === undefined ?
       {}
     : { compileSql: (query: SqlFragment) => compileSql(query) }),
   });
+}
+
+/**
+ * `transaction`'s optional read member `key`, which
+ * {@link createTransactionReadBackend} offers only when the transaction
+ * implements it — and the transaction a read goes through is that same
+ * transaction. Returned detached, as the projection always called it, so a
+ * member's own synchronous throw stays synchronous.
+ */
+function presentReadMember<
+  Key extends
+    | "getNodes"
+    | "getEdges"
+    | "findNodesAcrossKinds"
+    | "findActiveEdgesBySourceV1"
+    | "findEdgesAcrossKinds",
+>(
+  transaction: TransactionBackend,
+  key: Key,
+): NonNullable<TransactionBackend[Key]> {
+  const member = transaction[key];
+  if (member === undefined)
+    throw new Error(`The transaction backend does not implement ${key}.`);
+  return member;
 }
 
 /**

@@ -32,8 +32,8 @@ import { encodeTupleKey } from "../../utils/tuple-key";
 import { getEdgeRowsByIds, groupEndpointIdsByKind } from "../edge-fetch";
 import {
   enterOperation,
+  enterTargetOperation,
   type EntryScope,
-  legacyTransactionOperation,
   type OperationEntry,
   operationEntryBackend,
   type StatementBackend,
@@ -723,15 +723,23 @@ export function createEdgeCollection<
       options?: QueryOptions,
     ): BatchableQuery<Edge<E>> {
       return {
-        executeOn: (target: GraphBackend | StoreTransactionBackend) =>
-          findEdgesFrom(from, legacyTransactionOperation(target), options),
+        executeOn: async (target: GraphBackend | StoreTransactionBackend) =>
+          findEdgesFrom(
+            from,
+            operationEntryBackend(enterTargetOperation(target)),
+            options,
+          ),
       };
     },
 
     batchFindTo(to: NodeRef, options?: QueryOptions): BatchableQuery<Edge<E>> {
       return {
-        executeOn: (target: GraphBackend | StoreTransactionBackend) =>
-          findEdgesTo(to, legacyTransactionOperation(target), options),
+        executeOn: async (target: GraphBackend | StoreTransactionBackend) =>
+          findEdgesTo(
+            to,
+            operationEntryBackend(enterTargetOperation(target)),
+            options,
+          ),
       };
     },
 
@@ -749,7 +757,7 @@ export function createEdgeCollection<
             from.id,
             to.kind,
             to.id,
-            legacyTransactionOperation(target),
+            operationEntryBackend(enterTargetOperation(target)),
             buildFindByEndpointsOptions(options, temporal),
           );
           return result === undefined ? [] : [narrowEdge<E>(result)];

@@ -71,6 +71,7 @@ import {
 } from "../predicates";
 import { type SchemaIntrospector } from "../schema-introspector";
 import { assertComparedOperand } from "./order-by-field";
+import { enterQueryExecution } from "./query-operation";
 import {
   assertListBinding,
   buildQueryTemplate,
@@ -539,6 +540,12 @@ export class PreparedQuery<R> {
   readonly #ast: QueryAst;
   readonly #unoptimizedAst: QueryAst;
   readonly #backend: GraphBackend;
+  /**
+   * The configuration this query was prepared with, as {@link enterQueryExecution}
+   * reads it: a query prepared inside a transaction carries that
+   * transaction's operation source, entered once per `execute()`.
+   */
+  readonly #execution: Readonly<{ backend: GraphBackend }>;
   readonly #dialect: SqlDialect;
   readonly #graphId: string;
   readonly #compileOptions: CompileQueryOptions;
@@ -561,6 +568,7 @@ export class PreparedQuery<R> {
     this.#ast = config.ast;
     this.#unoptimizedAst = config.unoptimizedAst;
     this.#backend = config.backend;
+    this.#execution = config;
     this.#dialect = config.dialect;
     this.#graphId = config.graphId;
     this.#compileOptions = config.compileOptions;
@@ -609,13 +617,14 @@ export class PreparedQuery<R> {
     bindings: Readonly<Record<string, unknown>> = {},
   ): Promise<readonly R[]> {
     validateBindings(bindings, this.#parameterMetadata);
+    const backend = enterQueryExecution(this.#execution) ?? this.#backend;
 
     if (
       this.#selectiveFields !== undefined &&
       !this.#selectiveExecutionDisabled
     ) {
       try {
-        const rows = await this.#executeSelectiveRows(bindings);
+        const rows = await this.#executeRows(backend, this.#ast, bindings);
         return mapSelectiveResults<AliasMap, EdgeAliasMap, R>(
           rows,
           this.#state,
@@ -630,30 +639,29 @@ export class PreparedQuery<R> {
           // call's bindings, so retrying the same projection on every execute
           // would permanently double the statement count.
           this.#selectiveExecutionDisabled = true;
-          return this.#executeUnoptimized(bindings);
+          return this.#executeUnoptimized(backend, bindings);
         }
         if (error instanceof UnsupportedPredicateError) {
           // This failure can depend on the bound values. Keep the optimized
           // path available for a later execution with different bindings.
-          return this.#executeUnoptimized(bindings);
+          return this.#executeUnoptimized(backend, bindings);
         }
         throw error;
       }
     }
 
-    return this.#executeUnoptimized(bindings);
-  }
-
-  async #executeSelectiveRows(
-    bindings: Readonly<Record<string, unknown>>,
-  ): Promise<readonly Record<string, unknown>[]> {
-    return this.#executeRows(this.#ast, bindings);
+    return this.#executeUnoptimized(backend, bindings);
   }
 
   async #executeUnoptimized(
+    backend: GraphBackend,
     bindings: Readonly<Record<string, unknown>>,
   ): Promise<readonly R[]> {
-    const rows = await this.#executeUnoptimizedRows(bindings);
+    const rows = await this.#executeRows(
+      backend,
+      this.#unoptimizedAst,
+      bindings,
+    );
     return mapResults<AliasMap, EdgeAliasMap, R>(
       rows,
       this.#state.startAlias,
@@ -662,22 +670,17 @@ export class PreparedQuery<R> {
     );
   }
 
-  async #executeUnoptimizedRows(
-    bindings: Readonly<Record<string, unknown>>,
-  ): Promise<readonly Record<string, unknown>[]> {
-    return this.#executeRows(this.#unoptimizedAst, bindings);
-  }
-
   /**
    * Runs one AST variant with the given bindings. Prefers the cached template
    * + `executeRaw` fast path; falls back to substituting bindings into the AST
    * and compiling fresh when the backend cannot execute raw SQL text.
    */
   async #executeRows(
+    backend: GraphBackend,
     ast: QueryAst,
     bindings: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {
-    const executeRaw = this.#backend.executeRaw;
+    const executeRaw = backend.executeRaw;
     const template = executeRaw === undefined ? undefined : this.#template(ast);
     if (template !== undefined && executeRaw !== undefined) {
       const params = fillTemplateParams(
@@ -700,8 +703,7 @@ export class PreparedQuery<R> {
       this.#compileOptions,
       "decoded",
     );
-    const rawRows =
-      await this.#backend.execute<Record<string, unknown>>(compiled);
+    const rawRows = await backend.execute<Record<string, unknown>>(compiled);
     return transformPathColumns(rawRows, this.#state, this.#dialect);
   }
 }
