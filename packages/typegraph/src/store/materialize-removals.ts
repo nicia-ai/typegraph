@@ -40,7 +40,8 @@ import {
 } from "./claims/removal-sql";
 import { ensureFocusedStatusTable } from "./materialize-shared";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
   type OperationScoped,
   type StatementBackend,
   storeSchemaWriteTransaction,
@@ -496,7 +497,9 @@ async function materializeOne(
       async (
         transaction: StoreTransactionBackend<SchemaWriteTransactionBackend>,
       ): Promise<"removed" | "skipped"> => {
-        const target = legacyTransactionOperation(transaction);
+        const target = enterOperation(
+          openTransactionSession(transaction),
+        ).backend;
         const activeRow = await target.getActiveSchema(ctx.graphId);
         const activeSchema =
           activeRow === undefined ? undefined : (
@@ -924,7 +927,9 @@ async function reclaimRemovedVectorFieldTables(
         async (
           transaction: StoreTransactionBackend<SchemaWriteTransactionBackend>,
         ): Promise<boolean> => {
-          const target = legacyTransactionOperation(transaction);
+          const target = enterOperation(
+            openTransactionSession(transaction),
+          ).backend;
           const lockedActiveRow = await target.getActiveSchema(graphId);
           if (lockedActiveRow === undefined) return false;
           const lockedActiveSchema = parseSerializedSchema(

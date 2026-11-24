@@ -19,7 +19,13 @@
  * this binding holds it, handed down explicitly (never looked up from the
  * object a caller happens to hold). A public node or edge write made inside
  * the transaction enters its own {@link Operation} from that session, and the
- * write executor reads the session's state off the operation it was handed. `tests/operation-scope-ratchet.test.ts` also scans
+ * write executor reads the session's state off the operation it was handed.
+ * Where an engine member opens a schema-write or schema-commit transaction
+ * and hands the Store its callback, or the Store adopts a caller's
+ * transaction to evolve its schema, the session is opened there, over that
+ * transaction, and the schema work runs under one operation of it; a
+ * composed preflight step takes that operation's handle rather than entering
+ * another. `tests/operation-scope-ratchet.test.ts` also scans
  * Store code for any value still typed as the engine transaction: the
  * declarations whose type the public API spells are listed there, and
  * nothing else may appear.
@@ -205,10 +211,21 @@ const OPERATION_SESSION: unique symbol = Symbol("typegraph.operation");
  * write locks its frames hold or are acquiring
  * ({@link GraphWriteLock}, see `write-transaction.ts`). It never hands out
  * its transaction; an operation entered from it does.
+ *
+ * `Engine` is the engine transaction the session was opened over. A session
+ * opened over a specialised Store transaction (the schema-write transaction
+ * or schema-commit preflight target an engine member hands its callback, an
+ * adopted schema-write transaction) keeps that specialisation, so an
+ * operation entered from it hands out a handle that still reaches the
+ * specialised members. Only a specialised {@link StoreTransactionBackend}
+ * opens a specialised session, and only this module's boundary mints hand one
+ * out, so the privilege is not widened.
  */
-export type TransactionSession = OperationScoped<
+export type TransactionSession<
+  Engine extends TransactionBackend = TransactionBackend,
+> = OperationScoped<
   Readonly<{
-    [SESSION_TRANSACTION]: OperationBackend;
+    [SESSION_TRANSACTION]: OperationScoped<Engine>;
     /**
      * Graph write locks a still-running write frame on this session holds or
      * is still acquiring, by graph id: owned by `write-transaction.ts`.
@@ -225,12 +242,13 @@ export type TransactionSession = OperationScoped<
  * legs, a query's selective attempt and its fallback) runs under the same
  * operation rather than entering another.
  */
-export type Operation = OperationScoped<
-  Readonly<{
-    [OPERATION_SESSION]: TransactionSession;
-    backend: OperationBackend;
-  }>
->;
+export type Operation<Engine extends TransactionBackend = TransactionBackend> =
+  OperationScoped<
+    Readonly<{
+      [OPERATION_SESSION]: TransactionSession<Engine>;
+      backend: OperationScoped<Engine>;
+    }>
+  >;
 
 /**
  * Where a public Store call enters, a write (into the write executor) or a
@@ -248,24 +266,28 @@ export type EntryScope = GraphBackend | TransactionSession;
 
 /**
  * The mint where a Store opens or joins a transaction: a new session for
- * `transaction` as this binding holds it.
+ * `transaction` as this binding holds it. A specialised Store transaction
+ * opens a session of that specialisation; any other transaction, the plain
+ * one.
  */
-export function openTransactionSession(
-  transaction: StoreTransactionBackend,
-): TransactionSession {
+export function openTransactionSession<
+  Engine extends TransactionBackend = TransactionBackend,
+>(transaction: StoreTransactionBackend<Engine>): TransactionSession<Engine> {
   /* eslint-disable no-restricted-syntax -- This module is the mint: a session over a transaction the Store opened or joined is built here and nowhere else. */
   return {
     [SESSION_TRANSACTION]: transaction,
     heldGraphWriteLocks: new Map<string, Promise<GraphWriteLock>>(),
-  } as TransactionSession;
+  } as TransactionSession<Engine>;
   /* eslint-enable no-restricted-syntax */
 }
 
 /**
  * The mint at a public Store member: the root backend as itself, or a new
- * {@link Operation} of the session.
+ * {@link Operation} of the session, of the session's specialisation.
  */
-export function enterOperation(scope: TransactionSession): Operation;
+export function enterOperation<Engine extends TransactionBackend>(
+  scope: TransactionSession<Engine>,
+): Operation<Engine>;
 export function enterOperation(scope: EntryScope): OperationEntry;
 export function enterOperation(scope: EntryScope): OperationEntry {
   if (!(SESSION_TRANSACTION in scope)) return scope;

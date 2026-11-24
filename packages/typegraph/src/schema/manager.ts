@@ -52,7 +52,8 @@ import {
 } from "../query/compiler/schema";
 import { buildKindRegistry } from "../registry";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
   type OperationBackend,
   type OperationScoped,
   type StoreCommitSchemaVersionWithPreflight,
@@ -1229,7 +1230,7 @@ async function initializeSchemaImpl<G extends GraphDef>(
             transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>,
           ) =>
             edgeMatchIdentityPreflight.run(
-              legacyTransactionOperation(transaction),
+              enterOperation(openTransactionSession(transaction)).backend,
             ),
         );
   }
@@ -1270,7 +1271,9 @@ async function initializeSchemaImpl<G extends GraphDef>(
       async (
         transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>,
       ) => {
-        const transactionBackend = legacyTransactionOperation(transaction);
+        const transactionBackend = enterOperation(
+          openTransactionSession(transaction),
+        ).backend;
         await edgeMatchIdentityPreflight?.run(transactionBackend);
         await preflight(transactionBackend);
       },
@@ -1978,7 +1981,7 @@ export async function commitNewSchemaVersionWithPreflight<G extends GraphDef>(
     commitWithPreflight(
       commit,
       (transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>) =>
-        plan.run(legacyTransactionOperation(transaction)),
+        plan.run(enterOperation(openTransactionSession(transaction)).backend),
     ),
   );
 }
@@ -2057,7 +2060,9 @@ export async function rollbackSchema(
   await setActiveWithPreflight(
     params,
     (transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>) =>
-      preflight.run(legacyTransactionOperation(transaction)),
+      preflight.run(
+        enterOperation(openTransactionSession(transaction)).backend,
+      ),
   );
 }
 

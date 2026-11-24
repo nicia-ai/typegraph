@@ -21,7 +21,8 @@ import { type SqlSchema } from "../query/compiler/schema";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import { type KindRegistry } from "../registry/kind-registry";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
   type OperationBackend,
   type OperationScoped,
   type StatementBackend,
@@ -346,7 +347,9 @@ async function provisionDerivedRelations(
       async (
         transaction: StoreTransactionBackend<SchemaWriteTransactionBackend>,
       ) => {
-        const target = legacyTransactionOperation(transaction);
+        const target = enterOperation(
+          openTransactionSession(transaction),
+        ).backend;
         await lockIdentityDdl(target);
         await executeIdentityDdl(
           (ddl) => target.executeSchemaDdl(ddl),

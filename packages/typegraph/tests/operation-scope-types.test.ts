@@ -13,6 +13,7 @@ import {
   enterTargetOperation,
   type EntryScope,
   legacyTransactionOperation,
+  openTransactionSession,
   type Operation,
   type OperationBackend,
   type OperationEntry,
@@ -34,6 +35,18 @@ type EdgeCreateBackend = Parameters<typeof executeEdgeCreate>[2];
 /** Never called: resolves the session overload of the mint. */
 function enteredFromSession(session: TransactionSession) {
   return enterOperation(session);
+}
+
+/** Never called: the operation of a session opened over `transaction`. */
+function enteredFromOpenedSession<Engine extends TransactionBackend>(
+  transaction: StoreTransactionBackend<Engine>,
+) {
+  return enterOperation(openTransactionSession(transaction));
+}
+
+/** Never called: the operation of a session opened over a raw transaction. */
+function enteredFromEngineTransaction(transaction: TransactionBackend) {
+  return enterOperation(openTransactionSession(transaction));
 }
 
 describe("operation-scoped statement targets", () => {
@@ -153,6 +166,50 @@ describe("a specialised Store transaction", () => {
     expectTypeOf<
       Parameters<Parameters<StoreSetActiveVersionWithPreflight>[1]>[0]
     >().toEqualTypeOf<StoreTransactionBackend<SchemaCommitPreflightBackend>>();
+  });
+
+  // The schema-write and preflight callbacks open their session over the
+  // specialised transaction they are handed, and their statements (DDL among
+  // them) go through that session's operation. The specialisation therefore
+  // survives the session, and an ordinary transaction never gains it.
+  it("keeps a specialised transaction's privilege through its session and operation", () => {
+    expectTypeOf(
+      openTransactionSession<SchemaCommitPreflightBackend>,
+    ).returns.toEqualTypeOf<TransactionSession<SchemaCommitPreflightBackend>>();
+    expectTypeOf(
+      enteredFromOpenedSession<SchemaCommitPreflightBackend>,
+    ).returns.toEqualTypeOf<Operation<SchemaCommitPreflightBackend>>();
+    expectTypeOf<
+      ReturnType<
+        typeof enteredFromOpenedSession<SchemaWriteTransactionBackend>
+      >["backend"]
+    >().toEqualTypeOf<OperationScoped<SchemaWriteTransactionBackend>>();
+    // A specialised session and its operation are still a session and an
+    // operation: they enter wherever the plain ones do.
+    expectTypeOf<
+      TransactionSession<SchemaCommitPreflightBackend>
+    >().toExtend<EntryScope>();
+    expectTypeOf<
+      Operation<SchemaCommitPreflightBackend>
+    >().toExtend<OperationEntry>();
+  });
+
+  it("opens a plain session over any other transaction", () => {
+    expectTypeOf(
+      enteredFromEngineTransaction,
+    ).returns.toEqualTypeOf<Operation>();
+    expectTypeOf(
+      enteredFromOpenedSession<TransactionBackend>,
+    ).returns.toEqualTypeOf<Operation>();
+    expectTypeOf<Operation["backend"]>().not.toExtend<
+      OperationScoped<SchemaCommitPreflightBackend>
+    >();
+    expectTypeOf<Operation["backend"]>().not.toExtend<
+      OperationScoped<SchemaWriteTransactionBackend>
+    >();
+    expectTypeOf<TransactionSession>().not.toExtend<
+      TransactionSession<SchemaCommitPreflightBackend>
+    >();
   });
 
   it("keeps the engine member's own parameters and result", () => {

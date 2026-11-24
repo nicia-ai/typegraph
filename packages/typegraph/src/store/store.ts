@@ -2080,12 +2080,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * `provisionDerivedRelations` carries the DDL `ensureIdentitySchemaStorage`
    * deliberately did not run outside this transaction, so an evolution that
    * fails leaves no half-published derived relation behind.
+   *
+   * A step of a composed schema-commit preflight: `target` is the handle of
+   * the operation the commit's preflight runs under, and this step runs under
+   * that same operation.
    */
   async identitySchemaPreflight(
-    transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>,
+    target: OperationScoped<SchemaCommitPreflightBackend>,
     provisionDerivedRelations: readonly string[],
   ): Promise<void> {
-    const target = legacyTransactionOperation(transaction);
     await identitySchemaCommitPreflight(this.#identityContext(this.#backend), {
       enablement: false,
       provisionDerivedRelations,
@@ -2108,13 +2111,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     await validateIdentityForContext(this.#identityContext(this.#baseBackend));
   }
 
-  /** @internal Cascades removed kinds in the schema-commit transaction. */
+  /**
+   * @internal Cascades removed kinds in the schema-commit transaction, as a
+   * step of its preflight: `target` is the handle of the operation the
+   * preflight runs under, and this step runs under that same operation.
+   */
   async removeIdentityKindsInSchemaPreflight(
-    transaction: StoreTransactionBackend,
+    target: OperationBackend,
     kinds: readonly string[],
     options?: Readonly<{ repairClosure?: boolean }>,
   ): Promise<void> {
-    const target = legacyTransactionOperation(transaction);
     if (!this.#captureEnabled) {
       await removeIdentityKindsForContext(
         this.#identityContext(target),
@@ -6213,7 +6219,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           "adoptTransaction",
           { graphId: this.graphId },
         );
-      const target = legacyTransactionOperation(adopt(externalTx));
+      // The Store joins the caller's transaction here: the session for this
+      // adoption, and the one operation the baseline check runs under. The
+      // recorded transaction below receives that operation's handle.
+      const target = enterOperation(
+        openTransactionSession(adopt(externalTx)),
+      ).backend;
       await lockSchemaVersionForStoreWrite(
         {
           graphId: this.graphId,
@@ -6287,11 +6298,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const ordinaryAdopt = requireDefined(
       this.#adapterBackend?.adoptTransaction,
     );
+    // The probe runs before the schema-write adoption takes the fence, on an
+    // ordinary adoption of its own: a binding of its own, with one operation.
     await assertRecordedCaptureTransactionIsolation(
-      legacyTransactionOperation(ordinaryAdopt(externalTx)),
+      enterOperation(openTransactionSession(ordinaryAdopt(externalTx))).backend,
     );
     const adopted = await adopt(externalTx, this.graphId, { waitBudgetMs });
-    const adoptedBackend = legacyTransactionOperation(adopted.backend);
+    // The Store joins the caller's transaction as a schema writer here: the
+    // session for this adoption, and the one operation the baseline check,
+    // the preflight, provisioning and the commit run under. The recorded
+    // transaction below receives that operation's handle.
+    const adoptedBackend = enterOperation(
+      openTransactionSession(adopted.backend),
+    ).backend;
     const active = adopted.activeSchema;
     await assertEvolutionPlanBaseline(plan, active);
     await this.#assertNoPendingRemovalFor(
