@@ -95,13 +95,14 @@ import { CONSTRAINT_FENCE_DECIDES_UNDER_LOCK_ONLY } from "../claims/backing";
 import { type ConstraintFenceReason } from "../constraints";
 import {
   enterOperation,
+  enterTargetOperation,
   openTransactionSession,
   type OperationBackend,
+  type OperationEntry,
+  operationEntryBackend,
+  operationEntrySession,
   type StatementBackend,
   type StoreTransactionBackend,
-  type WriteEntry,
-  writeEntryBackend,
-  writeEntrySession,
 } from "../operation-scope";
 import {
   advanceRevisionClock,
@@ -763,13 +764,13 @@ type WriteEntryTransactionOptions = Readonly<{
  * rather than escaping synchronously.
  */
 export async function runInWriteEntryTransaction<T>(
-  entry: WriteEntry,
-  fn: (frame: WriteEntry) => Promise<T>,
+  entry: OperationEntry,
+  fn: (frame: OperationEntry) => Promise<T>,
   options?: WriteEntryTransactionOptions,
 ): Promise<T> {
   const boundary =
     options?.boundary ??
-    resolveWriteTransactionBoundary(writeEntryBackend(entry));
+    resolveWriteTransactionBoundary(operationEntryBackend(entry));
   if (boundary.mode !== "opened") return fn(entry);
   return boundary.root.transaction(
     (transaction: StoreTransactionBackend) =>
@@ -788,10 +789,8 @@ export async function runInWriteEntryTransaction<T>(
  * object overlaps theirs. Its call sites are pinned in
  * `tests/legacy-transaction-operation-ratchet.test.ts`.
  */
-export function legacyWriteEntry(backend: StatementBackend): WriteEntry {
-  return "transaction" in backend ? backend : (
-      enterOperation(openTransactionSession(backend))
-    );
+export function legacyWriteEntry(backend: StatementBackend): OperationEntry {
+  return enterTargetOperation(backend);
 }
 
 /**
@@ -982,11 +981,11 @@ export function constraintFenceRefusal(
  */
 export function runInWriteTransaction<T>(
   ctx: WriteTransactionContext,
-  entry: WriteEntry,
+  entry: OperationEntry,
   fn: WriteFrame<T>,
   options?: WriteTransactionOptions<T>,
 ): Promise<T> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   const boundary = resolveWriteTransactionBoundary(backend);
   const fenceReason = options?.fencesConstraintProbe;
   // Rejected rather than thrown: this function is promise-returning, and a
@@ -1018,7 +1017,7 @@ export type WriteFrame<T> = (
   target: StatementBackend,
   lock: GraphWriteLock,
   transactionMode: WriteTransactionMode,
-  frame: WriteEntry,
+  frame: OperationEntry,
 ) => Promise<T>;
 
 /**
@@ -1123,10 +1122,10 @@ function ownsSnapshotFencedUnit(
  * {@link runOptionallyInTransaction} always has.
  */
 export function runOwnedMutationSetTransaction<T>(
-  entry: WriteEntry,
-  fn: (frame: WriteEntry) => Promise<T>,
+  entry: OperationEntry,
+  fn: (frame: OperationEntry) => Promise<T>,
 ): Promise<T> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   return runMaybeRetried(
     backend,
     "runOwnedMutationSetTransaction",
@@ -1177,7 +1176,7 @@ function asRejection(error: unknown): Error {
  */
 function runInWriteTransactionAttempt<T>(
   ctx: WriteTransactionContext,
-  entry: WriteEntry,
+  entry: OperationEntry,
   fn: WriteFrame<T>,
   options: WriteTransactionOptions<T> | undefined,
   boundary: WriteTransactionBoundary,
@@ -1189,8 +1188,8 @@ function runInWriteTransactionAttempt<T>(
   const decidesUnderLockOnly = writeDecidesUnderLockOnly(fenceReason);
   return runInWriteEntryTransaction(
     entry,
-    async (frame: WriteEntry): Promise<T> => {
-      const target = writeEntryBackend(frame);
+    async (frame: OperationEntry): Promise<T> => {
+      const target = operationEntryBackend(frame);
       await ensureAdoptedConstraintWriterSlot(
         ctx,
         target,
@@ -1210,7 +1209,7 @@ function runInWriteTransactionAttempt<T>(
       // leaving the first frame's `finally` clearing a Set the map no longer
       // holds, and the graph marked held forever. Reading-and-registering with no
       // suspension point in between makes that interleaving unrepresentable.
-      const held = writeEntrySession(frame)?.heldGraphWriteLocks;
+      const held = operationEntrySession(frame)?.heldGraphWriteLocks;
       const heldLock = needsGraphWriteLock ? held?.get(ctx.graphId) : undefined;
       const acquiresLock =
         needsGraphWriteLock &&
@@ -1349,7 +1348,7 @@ function runInWriteTransactionAttempt<T>(
  */
 export function acquireManagedWriteFences(
   ctx: WriteTransactionContext,
-  entry: WriteEntry,
+  entry: OperationEntry,
 ): Promise<void> {
   return runInWriteTransaction(
     ctx,
@@ -1391,7 +1390,7 @@ export type HookedWriteOperationContext = WriteTransactionContext &
 export function runHookedWriteOperation<T>(
   ctx: HookedWriteOperationContext,
   opContext: OperationHookContext,
-  entry: WriteEntry,
+  entry: OperationEntry,
   body: WriteFrame<T>,
   options?: WriteTransactionOptions<T>,
   operationFacts?: (result: T) => OperationOutcomeFacts | undefined,

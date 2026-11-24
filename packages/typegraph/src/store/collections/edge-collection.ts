@@ -32,12 +32,12 @@ import { encodeTupleKey } from "../../utils/tuple-key";
 import { getEdgeRowsByIds, groupEndpointIdsByKind } from "../edge-fetch";
 import {
   enterOperation,
-  legacyTransactionOperation,
+  enterTargetOperation,
+  type EntryScope,
+  type OperationEntry,
+  operationEntryBackend,
   type StatementBackend,
   type StoreTransactionBackend,
-  type WriteEntry,
-  writeEntryBackend,
-  type WriteScope,
 } from "../operation-scope";
 import {
   assertEdgeIdentityMatches,
@@ -111,7 +111,7 @@ export type EdgeCollectionConfig = Readonly<{
    * transaction `backend` belongs to. Each write member enters its own
    * operation from it.
    */
-  writes: WriteScope;
+  writes: EntryScope;
   /** Threaded `batchPointRead` verdict — never re-resolved here. */
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   /** Threaded endpoint-set read verdict, resolved against the graph backend. */
@@ -121,14 +121,17 @@ export type EdgeCollectionConfig = Readonly<{
   /** See EdgeOperations.maybeRefreshStatisticsAfterBulk. */
   maybeRefreshStatisticsAfterBulk?:
     ((rowCount: number) => Promise<void>) | undefined;
-  executeCreate: (input: CreateEdgeInput, entry: WriteEntry) => Promise<Edge>;
+  executeCreate: (
+    input: CreateEdgeInput,
+    entry: OperationEntry,
+  ) => Promise<Edge>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateEdgeInput[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeCreateBatch: (
     inputs: readonly CreateEdgeInput[],
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: EdgeCreateBatchOptions,
   ) => Promise<readonly Edge[]>;
   executeUpdate: (
@@ -139,16 +142,16 @@ export type EdgeCollectionConfig = Readonly<{
       validTo?: string;
       clearValidTo?: true;
     },
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<Edge>;
   executeUpsertUpdateBatch: (
     entries: readonly EdgeUpsertUpdateBatchEntry[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<readonly Edge[]>;
   executeResolvedMutationSet: (
     creates: readonly CreateEdgeInput[],
     updates: readonly EdgeUpsertUpdateBatchEntry[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<
     ResolvedMutationSetAttempt<
       Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }>
@@ -156,21 +159,25 @@ export type EdgeCollectionConfig = Readonly<{
   >;
   /** See EdgeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
-  executeDelete: (kind: string, id: string, entry: WriteEntry) => Promise<void>;
+  executeDelete: (
+    kind: string,
+    id: string,
+    entry: OperationEntry,
+  ) => Promise<void>;
   executeDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeHardDelete: (
     kind: string,
     id: string,
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeHardDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   temporalRowMatcher: (options?: QueryOptions) => (row: EdgeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
@@ -181,7 +188,7 @@ export type EdgeCollectionConfig = Readonly<{
     toKind: string,
     toId: string,
     props: Record<string, unknown>,
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;
@@ -204,7 +211,7 @@ export type EdgeCollectionConfig = Readonly<{
       clearValidTo?: true;
       onImmutableLowerBound?: "preserve" | "refuse";
     }>[],
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;
@@ -716,15 +723,23 @@ export function createEdgeCollection<
       options?: QueryOptions,
     ): BatchableQuery<Edge<E>> {
       return {
-        executeOn: (target: GraphBackend | StoreTransactionBackend) =>
-          findEdgesFrom(from, legacyTransactionOperation(target), options),
+        executeOn: async (target: GraphBackend | StoreTransactionBackend) =>
+          findEdgesFrom(
+            from,
+            operationEntryBackend(enterTargetOperation(target)),
+            options,
+          ),
       };
     },
 
     batchFindTo(to: NodeRef, options?: QueryOptions): BatchableQuery<Edge<E>> {
       return {
-        executeOn: (target: GraphBackend | StoreTransactionBackend) =>
-          findEdgesTo(to, legacyTransactionOperation(target), options),
+        executeOn: async (target: GraphBackend | StoreTransactionBackend) =>
+          findEdgesTo(
+            to,
+            operationEntryBackend(enterTargetOperation(target)),
+            options,
+          ),
       };
     },
 
@@ -742,7 +757,7 @@ export function createEdgeCollection<
             from.id,
             to.kind,
             to.id,
-            legacyTransactionOperation(target),
+            operationEntryBackend(enterTargetOperation(target)),
             buildFindByEndpointsOptions(options, temporal),
           );
           return result === undefined ? [] : [narrowEdge<E>(result)];
@@ -872,9 +887,9 @@ export function createEdgeCollection<
       }
 
       const upsertAll = async (
-        frame: WriteEntry,
+        frame: OperationEntry,
       ): Promise<{ results: Edge<E>[]; mutations: number }> => {
-        const target = writeEntryBackend(frame);
+        const target = operationEntryBackend(frame);
         const ids = items.map((item) => item.id);
         const existingMap = await getEdgeRowsByIds(
           target,
@@ -1305,7 +1320,7 @@ export function createEdgeCollection<
       };
 
       const getOrCreateAll = async (
-        entry: WriteEntry,
+        entry: OperationEntry,
       ): Promise<EdgeGetOrCreateByEndpointsResult<E>[]> => {
         const results = await config.executeBulkGetOrCreateByEndpoints(
           kind,

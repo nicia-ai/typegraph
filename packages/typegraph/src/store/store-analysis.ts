@@ -14,6 +14,7 @@ import {
   TypeGraphError,
   ValidationError,
 } from "../errors";
+import { enterQueryExecution } from "../query/builder/query-operation";
 import type { SqlSchema } from "../query/compiler/schema";
 import { compileTemporalFilter } from "../query/compiler/temporal";
 import { decodeCursor, encodeCursor } from "../query/cursor";
@@ -155,6 +156,18 @@ type AnalysisContext<G extends GraphDef> = Readonly<{
   schema: SqlSchema;
   introspect: () => SchemaIntrospection;
 }>;
+
+/**
+ * `analysis` with its statement target for one call: a new operation of the
+ * session a transaction's analysis read was built in, or its backend. Call it
+ * once per public call, after the call's refusals.
+ */
+function enteredAnalysisContext<G extends GraphDef>(
+  analysis: AnalysisContext<G>,
+): AnalysisContext<G> {
+  const backend = enterQueryExecution(analysis);
+  return backend === analysis.backend ? analysis : { ...analysis, backend };
+}
 
 type ValidationCursor = Readonly<{
   entity: KindEntity;
@@ -526,8 +539,10 @@ async function readValidationRows<G extends GraphDef>(
 }
 
 export async function describeStore<G extends GraphDef>(
-  ctx: AnalysisContext<G>,
+  analysis: AnalysisContext<G>,
 ): Promise<StoreDescription> {
+  // Nothing to refuse: the call enters its execution before its first read.
+  const ctx = enteredAnalysisContext(analysis);
   const before = await schemaCoordinateFor(ctx);
   const currentTimestamp = nowIso();
   const nodePaths = declaredPathsForEntity(ctx.graph, "node");
@@ -555,7 +570,7 @@ export async function describeStore<G extends GraphDef>(
 }
 
 export async function validateStore<G extends GraphDef>(
-  ctx: AnalysisContext<G>,
+  analysis: AnalysisContext<G>,
   options: ValidateStoreOptions,
 ): Promise<StoreValidationPage> {
   const pageSize = normalizePageSize(options.pageSize);
@@ -581,8 +596,8 @@ export async function validateStore<G extends GraphDef>(
   }
   const registration =
     options.entity === "node" ?
-      ctx.graph.nodes[options.kind]
-    : ctx.graph.edges[options.kind];
+      analysis.graph.nodes[options.kind]
+    : analysis.graph.edges[options.kind];
   if (registration === undefined) {
     throw new ValidationError(
       `Unknown ${options.entity} kind "${options.kind}".`,
@@ -592,6 +607,9 @@ export async function validateStore<G extends GraphDef>(
     );
   }
 
+  // Every refusal above needs no statement: the call enters its execution
+  // here, and each read below goes through it.
+  const ctx = enteredAnalysisContext(analysis);
   const before = await schemaCoordinateFor(ctx);
   if (cursor !== undefined && cursor.schemaFence !== before.schemaFence) {
     throw new StoreAnalysisCursorStaleError({

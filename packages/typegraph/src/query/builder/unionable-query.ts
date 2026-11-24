@@ -9,7 +9,8 @@ import {
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
 import {
-  legacyTransactionOperation,
+  enterTargetOperation,
+  operationEntryBackend,
   type StatementBackend,
   type StoreTransactionBackend,
 } from "../../store/operation-scope";
@@ -32,6 +33,7 @@ import { buildCompileOptions } from "./compile-options";
 import { getQueryBuilderInternalContext } from "./internal-context";
 import { assertCompatibleSetOperationProvenance } from "./one-statement-provenance";
 import { composableQueryHasParameterReferences } from "./prepared-query";
+import { enterQueryExecution } from "./query-operation";
 import {
   buildReadInstantTemplate,
   type CompiledTemplate,
@@ -393,7 +395,13 @@ export class UnionableQuery<G extends GraphDef, R> {
       );
     }
 
-    return this.#mapRows(await this.#fetchRows(backend, ast, "recorded-query"));
+    return this.#mapRows(
+      await this.#fetchRows(
+        enterQueryExecution(this.#config) ?? backend,
+        ast,
+        "recorded-query",
+      ),
+    );
   }
 
   /**
@@ -419,7 +427,7 @@ export class UnionableQuery<G extends GraphDef, R> {
 
     return this.#mapRows(
       await this.#fetchRows(
-        legacyTransactionOperation(backend),
+        operationEntryBackend(enterTargetOperation(backend)),
         ast,
         "recorded-batch-query",
       ),

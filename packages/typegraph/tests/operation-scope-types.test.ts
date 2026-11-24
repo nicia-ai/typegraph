@@ -5,12 +5,17 @@ import type {
   SchemaCommitPreflightBackend,
   SchemaWriteTransactionBackend,
   TransactionBackend,
+  TransactionReadBackend,
 } from "../src/backend/types";
+import type { BatchableQuery } from "../src/query/builder/types";
 import {
   enterOperation,
+  enterTargetOperation,
+  type EntryScope,
   legacyTransactionOperation,
   type Operation,
   type OperationBackend,
+  type OperationEntry,
   type OperationScoped,
   type StatementBackend,
   type StoreCommitSchemaVersionWithPreflight,
@@ -21,8 +26,6 @@ import {
   storeSetActiveVersionWithPreflight,
   type StoreTransactionBackend,
   type TransactionSession,
-  type WriteEntry,
-  type WriteScope,
 } from "../src/store/operation-scope";
 import type { executeEdgeCreate } from "../src/store/operations/edge-operations";
 
@@ -46,15 +49,15 @@ describe("operation-scoped statement targets", () => {
     expectTypeOf<OperationBackend>().not.toExtend<EdgeCreateBackend>();
     expectTypeOf<StatementBackend>().not.toExtend<EdgeCreateBackend>();
     expectTypeOf<Operation>().toExtend<EdgeCreateBackend>();
-    expectTypeOf<EdgeCreateBackend>().toEqualTypeOf<WriteEntry>();
+    expectTypeOf<EdgeCreateBackend>().toEqualTypeOf<OperationEntry>();
   });
 
   it("enters an operation from a session, and passes the root through", () => {
-    expectTypeOf(enterOperation).returns.toEqualTypeOf<WriteEntry>();
-    expectTypeOf(enterOperation).parameter(0).toEqualTypeOf<WriteScope>();
+    expectTypeOf(enterOperation).returns.toEqualTypeOf<OperationEntry>();
+    expectTypeOf(enterOperation).parameter(0).toEqualTypeOf<EntryScope>();
     expectTypeOf(enteredFromSession).returns.toEqualTypeOf<Operation>();
-    expectTypeOf<TransactionBackend>().not.toExtend<WriteScope>();
-    expectTypeOf<StoreTransactionBackend>().not.toExtend<WriteScope>();
+    expectTypeOf<TransactionBackend>().not.toExtend<EntryScope>();
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<EntryScope>();
   });
 });
 
@@ -198,5 +201,21 @@ describe("a specialised Store transaction", () => {
     expectTypeOf(
       legacyTransactionOperation<GraphBackend>,
     ).returns.toEqualTypeOf<GraphBackend>();
+  });
+
+  // `executeOn` takes an outside target: the root, or an engine transaction
+  // (this Store's, another Store's, or one the caller opened), which
+  // `enterTargetOperation` enters as a binding of its own. A transaction
+  // context's `tx.backend` is a read projection with no statement
+  // execution, so it is not a target at all.
+  it("takes a root or an engine transaction as an executeOn target, never tx.backend", () => {
+    type ExecuteOnTarget = Parameters<BatchableQuery["executeOn"]>[0];
+    expectTypeOf<GraphBackend>().toExtend<ExecuteOnTarget>();
+    expectTypeOf<TransactionBackend>().toExtend<ExecuteOnTarget>();
+    expectTypeOf<TransactionReadBackend>().not.toExtend<ExecuteOnTarget>();
+    expectTypeOf(enterTargetOperation).returns.toEqualTypeOf<OperationEntry>();
+    expectTypeOf<ExecuteOnTarget>().toExtend<
+      Parameters<typeof enterTargetOperation>[0]
+    >();
   });
 });

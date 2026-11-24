@@ -39,10 +39,10 @@ import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
 import {
   enterOperation,
+  type EntryScope,
+  type OperationEntry,
+  operationEntryBackend,
   type StatementBackend,
-  type WriteEntry,
-  writeEntryBackend,
-  type WriteScope,
 } from "../operation-scope";
 import {
   readNodeDeleteOptions,
@@ -253,7 +253,7 @@ export type NodeCollectionConfig = Readonly<{
    * transaction `backend` belongs to. Each write member enters its own
    * operation from it.
    */
-  writes: WriteScope;
+  writes: EntryScope;
   /** Threaded `batchPointRead` verdict — never re-resolved here. */
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   defaultTemporalMode: TemporalMode;
@@ -261,19 +261,22 @@ export type NodeCollectionConfig = Readonly<{
   /** See NodeOperations.maybeRefreshStatisticsAfterBulk. */
   maybeRefreshStatisticsAfterBulk?:
     ((rowCount: number) => Promise<void>) | undefined;
-  executeCreate: (input: CreateNodeInput, entry: WriteEntry) => Promise<Node>;
+  executeCreate: (
+    input: CreateNodeInput,
+    entry: OperationEntry,
+  ) => Promise<Node>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateNodeInput[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeCreateBatch: (
     inputs: readonly CreateNodeInput[],
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: NodeCreateBatchOptions,
   ) => Promise<readonly Node[]>;
   executeUpdate: (
     input: UpsertUpdateNodeInput,
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
   executeNodeSetUpdate: (
@@ -281,17 +284,17 @@ export type NodeCollectionConfig = Readonly<{
     patch: Record<string, unknown>,
     candidateIds: CompiledSelectSql,
     candidateIdColumn: string,
-    entry: WriteEntry,
+    entry: OperationEntry,
     request: NodeSetUpdateRequest,
   ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdateBatch: (
     entries: readonly NodeUpsertUpdateBatchEntry[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<readonly Node[]>;
   executeResolvedMutationSet: (
     creates: readonly CreateNodeInput[],
     updates: readonly NodeUpsertUpdateBatchEntry[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<
     ResolvedMutationSetAttempt<
       Readonly<{ created: readonly Node[]; updated: readonly Node[] }>
@@ -307,7 +310,7 @@ export type NodeCollectionConfig = Readonly<{
       id: string;
       props: Record<string, unknown>;
     }>[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<ResolvedMutationSetAttempt<readonly Node[]>>;
   /** See NodeOperations.upsertDirtyCheck. */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
@@ -315,38 +318,38 @@ export type NodeCollectionConfig = Readonly<{
     kind: string,
     id: string,
     options: NodeReparentOptions,
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<NodeReparentResult>;
   executeReparentBatch: (
     kind: string,
     items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,
-    entry: WriteEntry,
+    entry: OperationEntry,
     expect: NodeDeletePlan | undefined,
   ) => Promise<void>;
   executeDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeHardDelete: (
     kind: string,
     id: string,
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeHardDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeDeletePlan: (
     kind: string,
     id: string,
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<NodeDeletePlan | undefined>;
   temporalRowMatcher: (options?: QueryOptions) => (row: NodeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
@@ -354,7 +357,7 @@ export type NodeCollectionConfig = Readonly<{
     kind: string,
     constraintName: string,
     props: Record<string, unknown>,
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: NodeGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>>;
   executeBulkGetOrCreateByConstraint: (
@@ -363,7 +366,7 @@ export type NodeCollectionConfig = Readonly<{
     items: readonly NodeBulkGetOrCreateByConstraintItem<
       Record<string, unknown>
     >[],
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: NodeBulkGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
   executeFindByConstraint: (
@@ -959,7 +962,7 @@ export function createNodeCollection<
           await runInWriteEntryTransaction(
             entry,
             async (frame): Promise<UpsertVerdict> => {
-              const confirmed = await writeEntryBackend(frame).getNode(
+              const confirmed = await operationEntryBackend(frame).getNode(
                 graphId,
                 kind,
                 id,
@@ -1043,7 +1046,7 @@ export function createNodeCollection<
         () =>
           runOwnedMutationSetTransaction(entry, async (frame) => {
             const rows = await getNodeRowsByIds(
-              writeEntryBackend(frame),
+              operationEntryBackend(frame),
               batchPointRead,
               graphId,
               kind,
@@ -1113,9 +1116,9 @@ export function createNodeCollection<
       }
 
       const upsertAll = async (
-        frame: WriteEntry,
+        frame: OperationEntry,
       ): Promise<{ results: Node<N>[]; mutations: number }> => {
-        const target = writeEntryBackend(frame);
+        const target = operationEntryBackend(frame);
         const ids = items.map((item) => item.id);
         // Full existing rows: the coalesce dirty-check needs their stored
         // props, not just deleted_at.

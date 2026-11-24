@@ -25,6 +25,10 @@ import {
   type QueryBuilderInternalContext,
   registerQueryBuilderInternalContext,
 } from "./builder/internal-context";
+import {
+  type QueryOperationSource,
+  withQueryOperationSource,
+} from "./builder/query-operation";
 import { schemaIntrospectorFor } from "./schema-introspector";
 
 // Re-export all classes
@@ -139,7 +143,14 @@ export type {
  * ```
  */
 type InternalCreateQueryBuilderOptions = CreateQueryBuilderOptions &
-  QueryBuilderInternalContext;
+  QueryBuilderInternalContext &
+  Readonly<{
+    /**
+     * Set by a Store building the query inside a transaction: each execution
+     * enters one operation of that transaction's session through it.
+     */
+    operationSource?: QueryOperationSource | undefined;
+  }>;
 
 export type InitialQueryBuilder<
   G extends GraphDef,
@@ -213,26 +224,32 @@ function createQueryBuilderWithContext<
     );
   }
 
-  // Build config, only including optional properties if defined
-  const config: QueryBuilderConfig = {
-    graphId,
-    registry,
-    schemaIntrospector,
-    defaultTraversalExpansion: options?.defaultTraversalExpansion ?? "inverse",
-    defaultExpansion: resolveDefaultAliasExpansion(
-      options?.defaultExpansion,
-      "defaultExpansion",
-    ),
-    identityEnabled:
-      options?.identityEnabled ?? registry.identity !== undefined,
-    identitySameIdAcrossKinds:
-      options?.identitySameIdAcrossKinds ??
-      registry.identity?.sameIdAcrossKinds ??
-      "fold",
-    ...(options?.backend !== undefined && { backend: options.backend }),
-    ...(options?.dialect !== undefined && { dialect: options.dialect }),
-    ...(options?.schema !== undefined && { schema: options.schema }),
-  };
+  // Build config, only including optional properties if defined. The
+  // operation source rides on the config itself, so every query built from it
+  // carries it; the internal context below is registered on that same object.
+  const config: QueryBuilderConfig = withQueryOperationSource(
+    {
+      graphId,
+      registry,
+      schemaIntrospector,
+      defaultTraversalExpansion:
+        options?.defaultTraversalExpansion ?? "inverse",
+      defaultExpansion: resolveDefaultAliasExpansion(
+        options?.defaultExpansion,
+        "defaultExpansion",
+      ),
+      identityEnabled:
+        options?.identityEnabled ?? registry.identity !== undefined,
+      identitySameIdAcrossKinds:
+        options?.identitySameIdAcrossKinds ??
+        registry.identity?.sameIdAcrossKinds ??
+        "fold",
+      ...(options?.backend !== undefined && { backend: options.backend }),
+      ...(options?.dialect !== undefined && { dialect: options.dialect }),
+      ...(options?.schema !== undefined && { schema: options.schema }),
+    },
+    options?.operationSource,
+  );
   registerQueryBuilderInternalContext(config, {
     ...(options?.recordedReadBinding !== undefined && {
       recordedReadBinding: options.recordedReadBinding,

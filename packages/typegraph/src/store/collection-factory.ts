@@ -28,9 +28,9 @@ import {
   type UpsertUpdateNodeInput,
 } from "./collections/node-collection";
 import type {
+  EntryScope,
+  OperationEntry,
   StatementBackend,
-  WriteEntry,
-  WriteScope,
 } from "./operation-scope";
 import type { ResolvedMutationSetAttempt } from "./resolved-mutation-set";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
@@ -66,19 +66,22 @@ export type NodeOperations = Readonly<{
    */
   maybeRefreshStatisticsAfterBulk?:
     ((rowCount: number) => Promise<void>) | undefined;
-  executeCreate: (input: CreateNodeInput, entry: WriteEntry) => Promise<Node>;
+  executeCreate: (
+    input: CreateNodeInput,
+    entry: OperationEntry,
+  ) => Promise<Node>;
   executeCreateBatch: (
     inputs: readonly CreateNodeInput[],
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: NodeCreateBatchOptions,
   ) => Promise<readonly Node[]>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateNodeInput[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeUpdate: (
     input: UpsertUpdateNodeInput,
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: Readonly<{ clearDeleted?: boolean }>,
   ) => Promise<Node>;
   executeNodeSetUpdate: (
@@ -86,17 +89,17 @@ export type NodeOperations = Readonly<{
     patch: Record<string, unknown>,
     candidateIds: CompiledSelectSql,
     candidateIdColumn: string,
-    entry: WriteEntry,
+    entry: OperationEntry,
     request: NodeSetUpdateRequest,
   ) => Promise<Readonly<{ affectedCount: number }>>;
   executeUpsertUpdateBatch: (
     entries: readonly NodeUpsertUpdateBatchEntry[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<readonly Node[]>;
   executeResolvedMutationSet: (
     creates: readonly CreateNodeInput[],
     updates: readonly NodeUpsertUpdateBatchEntry[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<
     ResolvedMutationSetAttempt<
       Readonly<{ created: readonly Node[]; updated: readonly Node[] }>
@@ -112,7 +115,7 @@ export type NodeOperations = Readonly<{
       id: string;
       props: Record<string, unknown>;
     }>[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<ResolvedMutationSetAttempt<readonly Node[]>>;
   /**
    * Coalesce dirty-check for `upsertById` / `bulkUpsertById`. Present only when
@@ -126,38 +129,38 @@ export type NodeOperations = Readonly<{
     kind: string,
     id: string,
     options: NodeReparentOptions,
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<NodeReparentResult>;
   executeReparentBatch: (
     kind: string,
     items: readonly Readonly<{ id: string; options: NodeReparentOptions }>[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<readonly NodeReparentResult[]>;
   executeDelete: (
     kind: string,
     id: string,
-    entry: WriteEntry,
+    entry: OperationEntry,
     expect: NodeDeletePlan | undefined,
   ) => Promise<void>;
   executeDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeHardDelete: (
     kind: string,
     id: string,
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeHardDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeDeletePlan: (
     kind: string,
     id: string,
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<NodeDeletePlan | undefined>;
   temporalRowMatcher: (options?: QueryOptions) => (row: NodeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
@@ -165,7 +168,7 @@ export type NodeOperations = Readonly<{
     kind: string,
     constraintName: string,
     props: Record<string, unknown>,
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: NodeGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>>;
   executeBulkGetOrCreateByConstraint: (
@@ -174,7 +177,7 @@ export type NodeOperations = Readonly<{
     items: readonly NodeBulkGetOrCreateByConstraintItem<
       Record<string, unknown>
     >[],
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: NodeBulkGetOrCreateByConstraintOptions,
   ) => Promise<Readonly<{ node: Node; action: GetOrCreateAction }>[]>;
   executeFindByConstraint: (
@@ -208,15 +211,18 @@ export type EdgeOperations = Readonly<{
    */
   maybeRefreshStatisticsAfterBulk?:
     ((rowCount: number) => Promise<void>) | undefined;
-  executeCreate: (input: CreateEdgeInput, entry: WriteEntry) => Promise<Edge>;
+  executeCreate: (
+    input: CreateEdgeInput,
+    entry: OperationEntry,
+  ) => Promise<Edge>;
   executeCreateBatch: (
     inputs: readonly CreateEdgeInput[],
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: EdgeCreateBatchOptions,
   ) => Promise<readonly Edge[]>;
   executeCreateNoReturnBatch: (
     inputs: readonly CreateEdgeInput[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeUpdate: (
     input: {
@@ -232,16 +238,16 @@ export type EdgeOperations = Readonly<{
       validTo?: string;
       clearValidTo?: true;
     },
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<Edge>;
   executeUpsertUpdateBatch: (
     entries: readonly EdgeUpsertUpdateBatchEntry[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<readonly Edge[]>;
   executeResolvedMutationSet: (
     creates: readonly CreateEdgeInput[],
     updates: readonly EdgeUpsertUpdateBatchEntry[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<
     ResolvedMutationSetAttempt<
       Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }>
@@ -253,21 +259,25 @@ export type EdgeOperations = Readonly<{
    * `coalesceUnchangedUpserts: true`; its absence is the off switch.
    */
   upsertDirtyCheck?: UpsertDirtyCheckFunction;
-  executeDelete: (kind: string, id: string, entry: WriteEntry) => Promise<void>;
+  executeDelete: (
+    kind: string,
+    id: string,
+    entry: OperationEntry,
+  ) => Promise<void>;
   executeDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeHardDelete: (
     kind: string,
     id: string,
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   executeHardDeleteBatch: (
     kind: string,
     ids: readonly string[],
-    entry: WriteEntry,
+    entry: OperationEntry,
   ) => Promise<void>;
   temporalRowMatcher: (options?: QueryOptions) => (row: EdgeRow) => boolean;
   createQuery?: () => QueryBuilder<GraphDef>;
@@ -278,7 +288,7 @@ export type EdgeOperations = Readonly<{
     toKind: string,
     toId: string,
     props: Record<string, unknown>,
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;
@@ -301,7 +311,7 @@ export type EdgeOperations = Readonly<{
       clearValidTo?: true;
       onImmutableLowerBound?: "preserve" | "refuse";
     }>[],
-    entry: WriteEntry,
+    entry: OperationEntry,
     options?: Readonly<{
       matchOn?: readonly string[];
       ifExists?: IfExistsMode;
@@ -332,7 +342,7 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
   graphId: string,
   registry: KindRegistry,
   backend: StatementBackend,
-  writes: WriteScope,
+  writes: EntryScope,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   operations: NodeOperations,
 ): GraphNodeCollections<G> {
@@ -377,7 +387,7 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
   graphId: string,
   registry: KindRegistry,
   backend: StatementBackend,
-  writes: WriteScope,
+  writes: EntryScope,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>,
   operations: EdgeOperations,

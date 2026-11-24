@@ -100,10 +100,10 @@ import {
   runInsertNoReturn,
 } from "../insert-dispatch";
 import type {
+  OperationEntry,
   OperationScoped,
   StatementBackend,
   StoreTransactionBackend,
-  WriteEntry,
 } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { AutocommitWriteRequiresTransaction } from "./autocommit-single-statement";
@@ -233,7 +233,9 @@ export function unfencedTarget(
  * transaction session rather than opening its own. Keeping this as one seam
  * prevents each fallback consumer from minting its own widening escape.
  */
-export function nestedManagedWriteTarget(frame: WriteEntry): WriteEntry {
+export function nestedManagedWriteTarget(
+  frame: OperationEntry,
+): OperationEntry {
   return frame;
 }
 

@@ -14,7 +14,8 @@ import {
   ValidationError,
 } from "../../errors";
 import {
-  legacyTransactionOperation,
+  enterTargetOperation,
+  operationEntryBackend,
   type StatementBackend,
   type StoreTransactionBackend,
 } from "../../store/operation-scope";
@@ -80,6 +81,11 @@ import {
   systemColumnSelectedPath,
 } from "./order-by-field";
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
+import {
+  enterQueryExecution,
+  queryOperationSourceOf,
+  withQueryOperationSource,
+} from "./query-operation";
 import {
   buildQueryTemplate,
   type CompiledTemplate,
@@ -514,19 +520,24 @@ export class ExecutableQuery<
         "decoded",
       );
 
-    return new PreparedQuery({
-      ast,
-      unoptimizedAst,
-      backend: this.#config.backend,
-      dialect: this.#config.dialect ?? "sqlite",
-      graphId: this.#config.graphId,
-      compileOptions: compileOptions,
-      state: this.#state,
-      selectiveFields,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Type erasure needed for PreparedQuery which uses AliasMap
-      selectFn: this.#selectFn as (context: SelectContext<any, any>) => R,
-      schemaIntrospector: this.#config.schemaIntrospector,
-    });
+    return new PreparedQuery(
+      withQueryOperationSource(
+        {
+          ast,
+          unoptimizedAst,
+          backend: this.#config.backend,
+          dialect: this.#config.dialect ?? "sqlite",
+          graphId: this.#config.graphId,
+          compileOptions: compileOptions,
+          state: this.#state,
+          selectiveFields,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Type erasure needed for PreparedQuery which uses AliasMap
+          selectFn: this.#selectFn as (context: SelectContext<any, any>) => R,
+          schemaIntrospector: this.#config.schemaIntrospector,
+        },
+        queryOperationSourceOf(this.#config),
+      ),
+    );
   }
 
   /**
@@ -536,8 +547,13 @@ export class ExecutableQuery<
     return buildCompileOptions(this.#config);
   }
 
-  #requireBackend(): GraphBackend {
-    const { backend } = this.#config;
+  /**
+   * The statement target of one execution (`enterQueryExecution`): call it
+   * once per public terminal call, after the call's synchronous refusals, and
+   * hand the result to every statement the call runs.
+   */
+  #enterExecution(): GraphBackend {
+    const backend = enterQueryExecution(this.#config);
     if (backend === undefined) {
       throw new Error(
         "Cannot execute query: no backend configured. " +
@@ -646,7 +662,6 @@ export class ExecutableQuery<
           "Use store.query() or pass a backend to createQueryBuilder().",
       );
     }
-    const backend = this.#config.backend;
 
     // Guard: reject queries with param() refs — must use .prepare().execute({...})
     const ast = this.toAst();
@@ -661,8 +676,13 @@ export class ExecutableQuery<
     ).expectedSchemaVersion;
     if (checked !== undefined) return this.executeChecked(checked.value);
 
+    const backend = this.#enterExecution();
+
     // Phase 1: Try optimized execution
-    const optimizedResult = await this.#tryOptimizedExecution();
+    const optimizedResult = await this.#tryOptimizedExecutionOn(
+      backend,
+      "recorded-query",
+    );
     if (optimizedResult !== undefined) {
       return optimizedResult;
     }
@@ -696,7 +716,7 @@ export class ExecutableQuery<
       return rows[0];
     }
     const rows = await query.#fetchRows(
-      query.#requireBackend(),
+      query.#enterExecution(),
       query.toAst(),
       "full",
       "recorded-query-first",
@@ -737,7 +757,7 @@ export class ExecutableQuery<
       );
     }
     const ast = this.toAst();
-    const backend = this.#requireBackend();
+    const backend = this.#enterExecution();
     const rows = await this.#executeOnBackend(
       backend,
       executeSchemaCheckedRead({
@@ -813,7 +833,6 @@ export class ExecutableQuery<
   async executeOn(
     backend: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly R[]> {
-    const target = legacyTransactionOperation(backend);
     const ast = this.toAst();
     // Guard: reject queries with param() refs — must use .prepare().execute({...})
     if (this.#hasParameterReferences()) {
@@ -821,6 +840,7 @@ export class ExecutableQuery<
         "Query contains param() references. Use .prepare().execute({...}) instead of .execute().",
       );
     }
+    const target = operationEntryBackend(enterTargetOperation(backend));
 
     const checked = getQueryBuilderInternalContext(
       this.#config,
@@ -842,7 +862,10 @@ export class ExecutableQuery<
     }
 
     // Try optimized execution with the provided backend
-    const optimizedResult = await this.#tryOptimizedExecutionOn(target);
+    const optimizedResult = await this.#tryOptimizedExecutionOn(
+      target,
+      "recorded-batch-query",
+    );
     if (optimizedResult !== undefined) {
       return optimizedResult;
     }
@@ -1065,12 +1088,16 @@ export class ExecutableQuery<
   }
 
   /**
-   * Attempts optimized execution by tracking which fields the select callback accesses.
+   * Attempts optimized execution by tracking which fields the select callback
+   * accesses, on the execution's statement target.
    *
    * Returns undefined if optimization is not possible (callback uses method calls,
    * computations, or returns whole nodes).
    */
-  async #tryOptimizedExecution(): Promise<readonly R[] | undefined> {
+  async #tryOptimizedExecutionOn(
+    backend: StatementBackend,
+    surface: string,
+  ): Promise<readonly R[] | undefined> {
     const selectiveFields = this.#getSelectiveFieldsForExecute();
     if (selectiveFields === undefined) {
       return undefined;
@@ -1082,58 +1109,11 @@ export class ExecutableQuery<
     const baseAst = this.toAst();
     const selectiveAst = { ...baseAst, selectiveFields };
 
-    const backend = this.#requireBackend();
     const rows = await this.#fetchRows(
       backend,
       selectiveAst,
       "selective",
-      "recorded-query",
-    );
-
-    try {
-      // RecursiveAliases are populated at runtime but erased in mapSelectiveResults' signature
-      return mapSelectiveResults<Aliases, EdgeAliases, R>(
-        rows,
-        this.#state,
-        selectiveFields,
-        this.#config.schemaIntrospector,
-        this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
-      );
-    } catch (error) {
-      if (error instanceof MissingSelectiveFieldError) {
-        this.#cachedSelectiveFieldsForExecute = undefined;
-        return undefined;
-      }
-      if (error instanceof UnsupportedPredicateError) {
-        this.#cachedSelectiveFieldsForExecute = undefined;
-        return undefined;
-      }
-      throw error;
-    }
-  }
-
-  /**
-   * Attempts optimized execution against a provided backend.
-   * Mirror of #tryOptimizedExecution but delegates to the given backend.
-   */
-  async #tryOptimizedExecutionOn(
-    backend: StatementBackend,
-  ): Promise<readonly R[] | undefined> {
-    const selectiveFields = this.#getSelectiveFieldsForExecute();
-    if (selectiveFields === undefined) {
-      return undefined;
-    }
-
-    // Cached template + executeRaw on the provided backend; see
-    // #tryOptimizedExecution.
-    const baseAst = this.toAst();
-    const selectiveAst = { ...baseAst, selectiveFields };
-
-    const rows = await this.#fetchRows(
-      backend,
-      selectiveAst,
-      "selective",
-      "recorded-batch-query",
+      surface,
     );
 
     try {
@@ -1295,6 +1275,7 @@ export class ExecutableQuery<
   }
 
   async #tryOptimizedPaginate(
+    backend: StatementBackend,
     cursorData: CursorData | undefined,
     direction: "forward" | "backward",
     pageLimit: number,
@@ -1309,9 +1290,13 @@ export class ExecutableQuery<
 
     let rows: readonly Record<string, unknown>[];
     try {
-      rows = await this.#executeWithCursor(cursorData, direction, fetchLimit, {
-        selectiveFields,
-      });
+      rows = await this.#executeWithCursor(
+        backend,
+        cursorData,
+        direction,
+        fetchLimit,
+        { selectiveFields },
+      );
     } catch (error) {
       if (error instanceof UnsupportedPredicateError) {
         this.#cachedSelectiveFieldsForPagination = undefined;
@@ -1726,7 +1711,9 @@ export class ExecutableQuery<
     const fetchLimit = limit + 1;
 
     const direction = isBackward ? "backward" : "forward";
+    const backend = this.#enterExecution();
     const optimized = await this.#tryOptimizedPaginate(
+      backend,
       cursorData,
       direction,
       limit,
@@ -1740,6 +1727,7 @@ export class ExecutableQuery<
 
     // Build and execute query with cursor condition
     const rows = await this.#executeWithCursor(
+      backend,
       cursorData,
       direction,
       fetchLimit,
@@ -1966,6 +1954,7 @@ export class ExecutableQuery<
    * Executes a query with cursor conditions applied.
    */
   async #executeWithCursor(
+    backend: StatementBackend,
     cursorData: CursorData | undefined,
     direction: "forward" | "backward",
     limit: number,
@@ -1997,8 +1986,7 @@ export class ExecutableQuery<
       this.#compileOptions(),
       "decoded",
     );
-    const rawRows =
-      await this.#requireBackend().execute<Record<string, unknown>>(compiled);
+    const rawRows = await backend.execute<Record<string, unknown>>(compiled);
     const dialect = this.#config.dialect ?? "sqlite";
     return transformPathColumns(rawRows, this.#state, dialect);
   }

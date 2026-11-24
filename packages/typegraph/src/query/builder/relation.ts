@@ -5,10 +5,12 @@ import {
   UnsupportedBackendCapabilityError,
 } from "../../errors";
 import {
-  legacyTransactionOperation,
+  enterTargetOperation,
+  operationEntryBackend,
   type StatementBackend,
   type StoreTransactionBackend,
 } from "../../store/operation-scope";
+import { requireDefined } from "../../utils/presence";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import { isPortableCountDistinctValueType } from "../aggregate-value-types";
 import type { QueryAst, SortDirection } from "../ast";
@@ -53,6 +55,7 @@ import {
   substituteDatabaseExpression,
   validateQueryBindings,
 } from "./prepared-query";
+import { enterQueryExecution } from "./query-operation";
 import {
   buildReadInstantTemplate,
   type CompiledTemplate,
@@ -495,10 +498,45 @@ function mergedSetColumns(
   return left.map(({ identity: _identity, ...column }) => column);
 }
 
+/** {@link executeRelationOn}'s work, as the relation class hands it out. */
+type RelationTargetExecution = <
+  Fields extends RelationProjection,
+  Result = RelationProjectionResult<Fields>,
+>(
+  relation: ExecutableRelationQuery<Fields, Result>,
+  target: GraphBackend | StoreTransactionBackend,
+) => Promise<readonly Result[]>;
+
+// Assigned once, by the class's static block: the one place with access to
+// a relation's private work.
+let relationTargetExecution: RelationTargetExecution | undefined;
+
+/**
+ * `relation.executeOn(target)` for a caller holding the target as the
+ * Store-facing type: the aggregate query, which adapts to a relation. The
+ * public overload names the engine transaction, which Store code never
+ * holds; this runs the same refusals and enters the target's operation once,
+ * as `executeOn` does, rather than entering one here and another there.
+ */
+export function executeRelationOn<
+  Fields extends RelationProjection,
+  Result = RelationProjectionResult<Fields>,
+>(
+  relation: ExecutableRelationQuery<Fields, Result>,
+  target: GraphBackend | StoreTransactionBackend,
+): Promise<readonly Result[]> {
+  return requireDefined(relationTargetExecution)(relation, target);
+}
+
 export class ExecutableRelationQuery<
   Fields extends RelationProjection,
   Result = RelationProjectionResult<Fields>,
 > {
+  static {
+    relationTargetExecution = (relation, target) =>
+      relation.#executeOnTarget(target);
+  }
+
   readonly #definition: RelationDefinition<Fields, Result>;
   readonly #scopeIdentity: symbol;
   readonly #state: RelationState;
@@ -952,6 +990,7 @@ export class ExecutableRelationQuery<
         validateQueryBindings(queries, bindings, expressions);
         const rows = await this.#fetchRows(
           this.#requireBackend(),
+          () => this.#enterExecution(),
           definition.ast,
           bindings,
         );
@@ -961,7 +1000,21 @@ export class ExecutableRelationQuery<
   }
 
   execute(): Promise<readonly Result[]> {
-    return this.executeOn(this.#requireBackend());
+    return this.#executeConfigured(this.#requireBackend());
+  }
+
+  /**
+   * `execute()`'s work: `executeOn`'s refusals against the configured
+   * backend, then one execution entered from the configuration.
+   */
+  async #executeConfigured(backend: GraphBackend): Promise<readonly Result[]> {
+    this.#assertExecutableOn(backend);
+    const rows = await this.#fetchRows(
+      backend,
+      () => this.#enterExecution(),
+      this.#materialize(),
+    );
+    return rows.map((row) => this.#definition.decodeRow(row));
   }
 
   /**
@@ -977,25 +1030,38 @@ export class ExecutableRelationQuery<
   executeOn(
     backend: GraphBackend | TransactionBackend,
   ): Promise<readonly Result[]>;
-  async executeOn(
+  executeOn(
     backend: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly Result[]> {
+    return this.#executeOnTarget(backend);
+  }
+
+  /** `executeOn`'s work, shared with {@link executeRelationOn}. */
+  async #executeOnTarget(
+    target: GraphBackend | StoreTransactionBackend,
+  ): Promise<readonly Result[]> {
+    this.#assertExecutableOn(target);
+    const rows = await this.#fetchRows(
+      target,
+      () => operationEntryBackend(enterTargetOperation(target)),
+      this.#materialize(),
+    );
+    return rows.map((row) => this.#definition.decodeRow(row));
+  }
+
+  /** Refuses, before any statement, a target this relation cannot run on. */
+  #assertExecutableOn(target: GraphBackend | StoreTransactionBackend): void {
     if (this.#definition.provenance.checked)
       throw new ConfigurationError(
         "Derived relations are unavailable inside withCheckedReads().",
       );
     if (
-      backendDerivationRoot(backend) !==
+      backendDerivationRoot(target) !==
       this.#definition.provenance.executionTarget
     )
       throw new ConfigurationError(
         "A relation cannot execute on a different database or transaction target.",
       );
-    const rows = await this.#fetchRows(
-      legacyTransactionOperation(backend),
-      this.#materialize(),
-    );
-    return rows.map((row) => this.#definition.decodeRow(row));
   }
 
   async first(): Promise<Result | undefined> {
@@ -1106,10 +1172,10 @@ export class ExecutableRelationQuery<
       throw new ConfigurationError(
         "Derived relation terminals are unavailable inside withCheckedReads().",
       );
-    const backend = this.#requireBackend();
     const relation = this.#materialize();
-    this.#assertWindowFunctionsSupported(backend, relation);
+    this.#assertWindowFunctionsSupported(this.#requireBackend(), relation);
     this.#assertRelationBound(relation);
+    const backend = this.#enterExecution();
     const executeRaw = backend.executeRaw;
     const template =
       executeRaw === undefined ? undefined : (
@@ -1207,6 +1273,19 @@ export class ExecutableRelationQuery<
     return this.#definition.config.backend;
   }
 
+  /**
+   * The statement target of one execution (`enterQueryExecution`): call it
+   * once per public terminal call, after the call's refusals.
+   */
+  #enterExecution(): GraphBackend {
+    const backend = enterQueryExecution(this.#definition.config);
+    if (backend === undefined)
+      throw new ConfigurationError(
+        "Relation execution requires a backend; use store.query().",
+      );
+    return backend;
+  }
+
   #dialect(): "sqlite" | "postgres" {
     return this.#definition.config.dialect ?? "sqlite";
   }
@@ -1232,17 +1311,24 @@ export class ExecutableRelationQuery<
    * the raw path retains user placeholders so one prepared relation serves
    * every binding set and receives a fresh current-time instant per call.
    */
+  /**
+   * One row read. Its refusals are checked against `target` (the configured
+   * backend or the `executeOn` target) before `enter` supplies the statement
+   * target, so a read that refuses enters no operation.
+   */
   async #fetchRows(
-    backend: StatementBackend,
+    target: Pick<GraphBackend, "capabilities">,
+    enter: () => StatementBackend,
     relation: RelationAst,
     bindings?: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {
-    this.#assertWindowFunctionsSupported(backend, relation);
+    this.#assertWindowFunctionsSupported(target, relation);
     const metadata = collectParameterMetadata(
       relationQueries(relation),
       relationExpressions(relation),
     );
     if (bindings === undefined) this.#assertRelationBound(relation, metadata);
+    const backend = enter();
 
     const executeRaw = backend.executeRaw;
     const template =
@@ -1288,7 +1374,8 @@ export class ExecutableRelationQuery<
   }
 
   #assertWindowFunctionsSupported(
-    backend: StatementBackend | undefined = this.#definition.config.backend,
+    backend: Pick<GraphBackend, "capabilities"> | undefined = this.#definition
+      .config.backend,
     relation = this.#materialize(),
   ): void {
     if (

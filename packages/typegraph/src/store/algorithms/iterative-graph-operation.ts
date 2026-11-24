@@ -38,7 +38,8 @@ import {
   postgresTemporaryTableUnavailableSqlState,
 } from "../../utils/sql-errors";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
   type OperationBackend,
   type StoreTransactionBackend,
 } from "../operation-scope";
@@ -350,7 +351,13 @@ export async function withInlineIterativeGraphOperation<T>(
   if (ctx.backend.capabilities.execution.interactiveTransactions) {
     return ctx.backend.transaction(
       async (backend: StoreTransactionBackend) =>
-        run(createOperation(ctx, options, legacyTransactionOperation(backend))),
+        run(
+          createOperation(
+            ctx,
+            options,
+            enterOperation(openTransactionSession(backend)).backend,
+          ),
+        ),
       {
         isolationLevel: "repeatable_read",
         accessMode: "read_only",
@@ -399,7 +406,7 @@ export async function runIterativeGraphOperation<
           ctx,
           options,
           plan,
-          legacyTransactionOperation(backend),
+          enterOperation(openTransactionSession(backend)).backend,
         );
       },
       transactionOptions,

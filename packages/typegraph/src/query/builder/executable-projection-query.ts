@@ -2,7 +2,8 @@ import { backendDerivationRoot } from "../../backend/derive-backend";
 import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { ConfigurationError } from "../../errors";
 import {
-  legacyTransactionOperation,
+  enterTargetOperation,
+  operationEntryBackend,
   type StatementBackend,
   type StoreTransactionBackend,
 } from "../../store/operation-scope";
@@ -25,6 +26,7 @@ import {
   hasParameterReferences,
   validateQueryBindings,
 } from "./prepared-query";
+import { enterQueryExecution } from "./query-operation";
 import {
   buildQueryTemplate,
   buildReadInstantTemplate,
@@ -183,19 +185,30 @@ export class ExecutableProjectionQuery<
   }
 
   execute(): Promise<readonly Result[]> {
-    return this.executeOn(this.#requireBackend());
+    this.#requireBackend();
+    return this.#executeOnStatementBackend(() => this.#enterExecution());
   }
   /** Runs on an explicitly supplied target, including store.batch() transactions. */
   executeOn(
     backend: GraphBackend | TransactionBackend,
   ): Promise<readonly Result[]>;
-  async executeOn(
+  executeOn(
     backend: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly Result[]> {
-    const rows = await this.#fetchRows(
-      legacyTransactionOperation(backend),
-      this.toAst(),
+    return this.#executeOnStatementBackend(() =>
+      operationEntryBackend(enterTargetOperation(backend)),
     );
+  }
+  /**
+   * One row read: refuses an unbound query, then `enter` supplies its
+   * statement target, once; a read that refuses enters no operation.
+   */
+  async #executeOnStatementBackend(
+    enter: () => StatementBackend,
+  ): Promise<readonly Result[]> {
+    const ast = this.toAst();
+    this.#assertBound(ast);
+    const rows = await this.#fetchRows(enter(), ast);
     return rows.map((row) => this.#decodeRow(row));
   }
   async first(): Promise<Result | undefined> {
@@ -217,14 +230,18 @@ export class ExecutableProjectionQuery<
     ) => Promise<readonly Result[]>;
   }> {
     const ast = this.toAst();
-    const backend = this.#requireBackend();
+    this.#requireBackend();
     // Refuse at prepare() what every execute() would refuse: the statement
     // execute() sends, checked by the function that compiles it.
     this.#compileRowsStatement(ast);
     return {
       execute: async (bindings) => {
         validateQueryBindings([ast], bindings);
-        const rows = await this.#fetchRows(backend, ast, bindings);
+        const rows = await this.#fetchRows(
+          this.#enterExecution(),
+          ast,
+          bindings,
+        );
         return rows.map((row) => this.#decodeRow(row));
       },
     };
@@ -272,6 +289,18 @@ export class ExecutableProjectionQuery<
       );
     return this.#config.backend;
   }
+  /**
+   * The statement target of one execution (`enterQueryExecution`): call it
+   * once per public terminal call, after the call's refusals.
+   */
+  #enterExecution(): GraphBackend {
+    const backend = enterQueryExecution(this.#config);
+    if (backend === undefined)
+      throw new ConfigurationError(
+        "Projection execution requires a backend; use store.query().",
+      );
+    return backend;
+  }
   #assertBound(ast: QueryAst): void {
     if (hasParameterReferences(ast))
       throw new ConfigurationError(
@@ -289,12 +318,12 @@ export class ExecutableProjectionQuery<
           surface: "recorded-projection",
         });
   }
+  /** Sends the row statement; the caller has already refused an unbound read. */
   #fetchRows(
     backend: StatementBackend,
     ast: QueryAst,
     bindings?: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {
-    if (bindings === undefined) this.#assertBound(ast);
     const checked = getQueryBuilderInternalContext(
       this.#config,
     ).expectedSchemaVersion;
@@ -416,7 +445,8 @@ export class ExecutableProjectionQuery<
   async #scalarTerminal(operation: "count" | "exists"): Promise<number> {
     const ast = this.toAst();
     this.#assertBound(ast);
-    const backend = this.#requireBackend();
+    this.#requireBackend();
+    const backend = this.#enterExecution();
     const checked = getQueryBuilderInternalContext(
       this.#config,
     ).expectedSchemaVersion;
