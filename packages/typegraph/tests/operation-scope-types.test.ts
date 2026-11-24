@@ -8,9 +8,11 @@ import type {
 } from "../src/backend/types";
 import {
   enterOperation,
+  type EntryScope,
   legacyTransactionOperation,
   type Operation,
   type OperationBackend,
+  type OperationEntry,
   type OperationScoped,
   type StatementBackend,
   type StoreCommitSchemaVersionWithPreflight,
@@ -21,8 +23,6 @@ import {
   storeSetActiveVersionWithPreflight,
   type StoreTransactionBackend,
   type TransactionSession,
-  type WriteEntry,
-  type WriteScope,
 } from "../src/store/operation-scope";
 import type { executeEdgeCreate } from "../src/store/operations/edge-operations";
 
@@ -46,15 +46,15 @@ describe("operation-scoped statement targets", () => {
     expectTypeOf<OperationBackend>().not.toExtend<EdgeCreateBackend>();
     expectTypeOf<StatementBackend>().not.toExtend<EdgeCreateBackend>();
     expectTypeOf<Operation>().toExtend<EdgeCreateBackend>();
-    expectTypeOf<EdgeCreateBackend>().toEqualTypeOf<WriteEntry>();
+    expectTypeOf<EdgeCreateBackend>().toEqualTypeOf<OperationEntry>();
   });
 
   it("enters an operation from a session, and passes the root through", () => {
-    expectTypeOf(enterOperation).returns.toEqualTypeOf<WriteEntry>();
-    expectTypeOf(enterOperation).parameter(0).toEqualTypeOf<WriteScope>();
+    expectTypeOf(enterOperation).returns.toEqualTypeOf<OperationEntry>();
+    expectTypeOf(enterOperation).parameter(0).toEqualTypeOf<EntryScope>();
     expectTypeOf(enteredFromSession).returns.toEqualTypeOf<Operation>();
-    expectTypeOf<TransactionBackend>().not.toExtend<WriteScope>();
-    expectTypeOf<StoreTransactionBackend>().not.toExtend<WriteScope>();
+    expectTypeOf<TransactionBackend>().not.toExtend<EntryScope>();
+    expectTypeOf<StoreTransactionBackend>().not.toExtend<EntryScope>();
   });
 });
 

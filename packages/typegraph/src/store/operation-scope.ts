@@ -218,10 +218,11 @@ export type TransactionSession = OperationScoped<
 >;
 
 /**
- * One public Store call inside a transaction: the session it belongs to and
- * the operation-scoped handle its statements go through. Entered by
- * {@link enterOperation}, once per public call; work the call composes
- * (a nested write frame, a mutation set's legs) runs under the same
+ * One public Store call inside a transaction, a read or a write: the session
+ * it belongs to and the operation-scoped handle its statements go through.
+ * Entered by {@link enterOperation}, once per public call, when the call
+ * executes; work the call composes (a nested write frame, a mutation set's
+ * legs, a query's selective attempt and its fallback) runs under the same
  * operation rather than entering another.
  */
 export type Operation = OperationScoped<
@@ -232,17 +233,18 @@ export type Operation = OperationScoped<
 >;
 
 /**
- * Where a write enters the write executor: the pooled root backend itself (a
- * root write allocates nothing), or an {@link Operation} of a transaction
+ * Where a public Store call enters, a write (into the write executor) or a
+ * read (a query terminal, a read member): the pooled root backend itself (a
+ * root call allocates nothing), or an {@link Operation} of a transaction
  * session.
  */
-export type WriteEntry = GraphBackend | Operation;
+export type OperationEntry = GraphBackend | Operation;
 
 /**
- * Where a Store surface's writes enter from: the root backend, or the
- * session of the transaction the surface belongs to.
+ * Where a Store surface's calls enter from: the root backend, or the session
+ * of the transaction the surface belongs to.
  */
-export type WriteScope = GraphBackend | TransactionSession;
+export type EntryScope = GraphBackend | TransactionSession;
 
 /**
  * The mint where a Store opens or joins a transaction: a new session for
@@ -264,8 +266,8 @@ export function openTransactionSession(
  * {@link Operation} of the session.
  */
 export function enterOperation(scope: TransactionSession): Operation;
-export function enterOperation(scope: WriteScope): WriteEntry;
-export function enterOperation(scope: WriteScope): WriteEntry {
+export function enterOperation(scope: EntryScope): OperationEntry;
+export function enterOperation(scope: EntryScope): OperationEntry {
   if (!(SESSION_TRANSACTION in scope)) return scope;
   /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
   return {
@@ -275,15 +277,35 @@ export function enterOperation(scope: WriteScope): WriteEntry {
   /* eslint-enable no-restricted-syntax */
 }
 
+/**
+ * The mint where an outside target enters through a public signature
+ * (`executeOn`, which `store.batch()` also goes through): the root backend as
+ * itself, or the first {@link Operation} of a NEW session for a transaction.
+ * The public type carries no session and none is looked up from the object,
+ * so whatever transaction the caller holds — one of this Store's, another
+ * Store's, or one built on the engine directly — joins as a binding of its
+ * own.
+ *
+ * THE one owner of the root-or-transaction decision for a target held as a
+ * backend.
+ */
+export function enterTargetOperation(
+  target: GraphBackend | StoreTransactionBackend,
+): OperationEntry {
+  return "transaction" in target ? target : (
+      enterOperation(openTransactionSession(target))
+    );
+}
+
 /** The session `entry` belongs to, or `undefined` for the root backend. */
-export function writeEntrySession(
-  entry: WriteEntry,
+export function operationEntrySession(
+  entry: OperationEntry,
 ): TransactionSession | undefined {
   return OPERATION_SESSION in entry ? entry[OPERATION_SESSION] : undefined;
 }
 
 /** What `entry`'s statements go through: the root, or the operation's handle. */
-export function writeEntryBackend(entry: WriteEntry): StatementBackend {
+export function operationEntryBackend(entry: OperationEntry): StatementBackend {
   return OPERATION_SESSION in entry ? entry.backend : entry;
 }
 

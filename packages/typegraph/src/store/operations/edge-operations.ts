@@ -205,10 +205,10 @@ import {
   resolveEdgeMatchIdentityStorage,
 } from "../edge-match-key";
 import {
+  type OperationEntry,
+  operationEntryBackend,
   type OperationScoped,
   type StatementBackend,
-  type WriteEntry,
-  writeEntryBackend,
 } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
@@ -1099,7 +1099,7 @@ async function durableIdentityIdConflict(
 async function executeEdgeCreateInternal<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: CreateEdgeInput,
-  entry: WriteEntry,
+  entry: OperationEntry,
   options?: Readonly<{
     returnRow?: boolean;
     convergeOn?: EdgeConvergenceGuard;
@@ -1113,7 +1113,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     decidedCompositionWindows?: CompositionWindowVerdict;
   }>,
 ): Promise<EdgeCreateInternalResult> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   const kind = input.kind;
   const id = input.id ?? generateId();
   const registration = getEdgeRegistration(ctx.graph, kind);
@@ -1596,7 +1596,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
 export async function executeEdgeCreate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: CreateEdgeInput,
-  entry: WriteEntry,
+  entry: OperationEntry,
 ): Promise<Edge> {
   const result = await executeEdgeCreateInternal(ctx, input, entry, {
     returnRow: true,
@@ -1622,7 +1622,7 @@ export async function executeEdgeCreate<G extends GraphDef>(
 export async function executeEdgeCreateNoReturn<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: CreateEdgeInput,
-  entry: WriteEntry,
+  entry: OperationEntry,
 ): Promise<void> {
   await executeEdgeCreateInternal(ctx, input, entry, { returnRow: false });
 }
@@ -2124,9 +2124,9 @@ function assertDurableBatchRows(
 export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
-  entry: WriteEntry,
+  entry: OperationEntry,
 ): Promise<void> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   if (inputs.length === 0) {
     return;
   }
@@ -2257,7 +2257,7 @@ function batchFallbackInputs(
 export async function executeEdgeCreateBatch<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
-  entry: WriteEntry,
+  entry: OperationEntry,
   options?: EdgeCreateBatchOptions,
 ): Promise<readonly Edge[]> {
   const { edges } = await executeDecidedEdgeCreateBatch(
@@ -2289,10 +2289,10 @@ type DecidedEdgeCreateBatch = Readonly<{
 async function executeDecidedEdgeCreateBatch<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
-  entry: WriteEntry,
+  entry: OperationEntry,
   options?: EdgeCreateBatchOptions,
 ): Promise<DecidedEdgeCreateBatch> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   if (inputs.length === 0) {
     return { edges: [], compositionWindows: undefined };
   }
@@ -3570,9 +3570,9 @@ export async function executeEdgeUpdate<G extends GraphDef>(
     validTo?: string;
     clearValidTo?: true;
   },
-  entry: WriteEntry,
+  entry: OperationEntry,
 ): Promise<Edge> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   const id = input.id;
 
   // Read outside execution: the hook context needs the edge kind, and an
@@ -3677,7 +3677,7 @@ type EdgeUpsertUpdateOutcome = Readonly<{
 async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: UpsertUpdateEdgeInput,
-  entry: WriteEntry,
+  entry: OperationEntry,
   options?: Readonly<{
     clearDeleted?: boolean;
     coalesceUnchanged?: boolean;
@@ -3688,7 +3688,7 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
     decidedCompositionWindows?: CompositionWindowVerdict | undefined;
   }>,
 ): Promise<EdgeUpsertUpdateOutcome> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   if (input.clearValidTo === true) {
     assertClearValidToSupported(backend, "edge");
   }
@@ -3787,7 +3787,7 @@ function edgeUpsertCoalesces<G extends GraphDef>(
 export async function executeEdgeUpsertUpdate<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   input: UpsertUpdateEdgeInput,
-  entry: WriteEntry,
+  entry: OperationEntry,
   options?: Readonly<{
     clearDeleted?: boolean;
     matchOn?: readonly string[];
@@ -3814,13 +3814,13 @@ export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   creates: readonly CreateEdgeInput[],
   updates: readonly EdgeUpsertUpdateBatchEntry[],
-  entry: WriteEntry,
+  entry: OperationEntry,
 ): Promise<
   ResolvedMutationSetAttempt<
     Readonly<{ created: readonly Edge[]; updated: readonly Edge[] }>
   >
 > {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   if (creates.length === 0 || updates.length === 0) {
     return unsupportedResolvedMutationSet();
   }
@@ -3940,9 +3940,9 @@ export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
 export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   entries: readonly EdgeUpsertUpdateBatchEntry[],
-  entry: WriteEntry,
+  entry: OperationEntry,
 ): Promise<readonly Edge[]> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   if (entries.length === 0) return [];
   for (const entry of entries) {
     if (entry.input.clearValidTo === true) {
@@ -4147,9 +4147,9 @@ export async function executeEdgeDelete<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   expectedKind: string,
   id: string,
-  entry: WriteEntry,
+  entry: OperationEntry,
 ): Promise<void> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   // Gate outside execution so an absent/tombstoned edge never fires hooks or
   // submits a write; the gate row also supplies and verifies the hook kind.
   // Eligible deletes then carry that kind into one atomic program. Other
@@ -4234,9 +4234,9 @@ export async function executeEdgeDeleteBatch<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   expectedKind: string,
   ids: readonly string[],
-  entry: WriteEntry,
+  entry: OperationEntry,
 ): Promise<void> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   const atomicExecutor = resolveAtomicEdgeDeleteBatchExecutor({
     backend,
     graph: ctx.graph,
@@ -4363,9 +4363,9 @@ export async function executeEdgeHardDelete<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   expectedKind: string,
   id: string,
-  entry: WriteEntry,
+  entry: OperationEntry,
 ): Promise<void> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   // Gate outside the transaction so an absent edge never opens an empty one;
   // hooks wrap the transaction (see executeEdgeDelete).
   const gate = await backend.getEdge(ctx.graphId, id);
@@ -4453,7 +4453,7 @@ export async function executeEdgeHardDeleteBatch<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   expectedKind: string,
   ids: readonly string[],
-  entry: WriteEntry,
+  entry: OperationEntry,
 ): Promise<void> {
   const holdsCardinalityClaim = edgeHardDeleteReleasesClaim(ctx, expectedKind);
   await runWritePlan(
@@ -4723,7 +4723,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   toKind: string,
   toId: string,
   props: Record<string, unknown>,
-  entry: WriteEntry,
+  entry: OperationEntry,
   options?: Readonly<{
     matchOn?: readonly string[];
     ifExists?: IfExistsMode;
@@ -4733,7 +4733,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     onImmutableLowerBound?: "preserve" | "refuse";
   }>,
 ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   const ifExists = options?.ifExists ?? "return";
 
   const registration = getEdgeRegistration(ctx.graph, kind);
@@ -4796,7 +4796,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
   > {
     return runInWriteEntryTransaction(
       entry,
-      (frame) => findCandidates(writeEntryBackend(frame)),
+      (frame) => findCandidates(operationEntryBackend(frame)),
       { transaction: { accessMode: "read_only" } },
     );
   }
@@ -5106,13 +5106,13 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     clearValidTo?: true;
     onImmutableLowerBound?: "preserve" | "refuse";
   }>[],
-  entry: WriteEntry,
+  entry: OperationEntry,
   options?: Readonly<{
     matchOn?: readonly string[];
     ifExists?: IfExistsMode;
   }>,
 ): Promise<Readonly<{ edge: Edge; action: GetOrCreateAction }>[]> {
-  const backend = writeEntryBackend(entry);
+  const backend = operationEntryBackend(entry);
   if (items.length === 0) return [];
 
   const ifExists = options?.ifExists ?? "return";

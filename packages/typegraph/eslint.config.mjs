@@ -254,8 +254,8 @@ const DETERMINISM_RESTRICTIONS = [
 
 const OPERATION_BRAND_MESSAGE =
   "Do not assert a value to OperationScoped / OperationBackend / " +
-  "StatementBackend / Operation / TransactionSession / WriteEntry / " +
-  "WriteScope / LegacyOperationTarget / StoreTransactionBackend, or " +
+  "StatementBackend / Operation / TransactionSession / OperationEntry / " +
+  "EntryScope / LegacyOperationTarget / StoreTransactionBackend, or " +
   "to a Store-facing schema opener (StoreSchemaWriteTransaction, " +
   "StoreSchemaPreflightMember, StoreCommitSchemaVersionWithPreflight, " +
   "StoreSetActiveVersionWithPreflight, StoreAdoptSchemaWriteTransaction, " +
@@ -274,7 +274,7 @@ const OPERATION_BRAND_MESSAGE =
   "type, to the mints.";
 
 const OPERATION_BRAND_TYPE_NAMES =
-  "/^(OperationScoped|OperationBackend|StatementBackend|Operation|TransactionSession|WriteEntry|WriteScope|LegacyOperationTarget|StoreTransactionBackend|StoreSchemaWriteTransaction|StoreSchemaPreflightMember|StoreCommitSchemaVersionWithPreflight|StoreSetActiveVersionWithPreflight|StoreAdoptSchemaWriteTransaction|StoreAdoptedSchemaWriteTransaction)$/";
+  "/^(OperationScoped|OperationBackend|StatementBackend|Operation|TransactionSession|OperationEntry|EntryScope|LegacyOperationTarget|StoreTransactionBackend|StoreSchemaWriteTransaction|StoreSchemaPreflightMember|StoreCommitSchemaVersionWithPreflight|StoreSetActiveVersionWithPreflight|StoreAdoptSchemaWriteTransaction|StoreAdoptedSchemaWriteTransaction)$/";
 const OPERATION_MINT_NAMES =
   "/^(enterOperation|openTransactionSession|scopeWriteFrameTarget|legacyTransactionOperation|storeSchemaWriteTransaction|storeCommitSchemaVersionWithPreflight|storeSetActiveVersionWithPreflight|storeAdoptSchemaWriteTransaction)$/";
 const OPERATION_BRAND_CONTEXT =

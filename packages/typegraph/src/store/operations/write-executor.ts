@@ -18,10 +18,10 @@ import { deriveBackend } from "../../backend/derive-backend";
 import { type GraphBackend } from "../../backend/types";
 import { requireDefined } from "../../utils/presence";
 import {
+  type OperationEntry,
   type OperationScoped,
   scopeWriteFrameTarget,
   type StatementBackend,
-  type WriteEntry,
 } from "../operation-scope";
 import {
   type GraphWriteLock,
@@ -167,7 +167,7 @@ export type WriteRowWork<K extends RowWorkKind, T> = (
   overlaidSession: OverlaidSessionMint<K>,
   lock: GraphWriteLock,
   transactionMode: WriteTransactionMode,
-  frame: WriteEntry,
+  frame: OperationEntry,
 ) => Promise<T>;
 
 /**
@@ -188,7 +188,7 @@ function planFrame<K extends RowWorkKind, T>(
     target: StatementBackend,
     lock: GraphWriteLock,
     transactionMode: WriteTransactionMode,
-    frame: WriteEntry,
+    frame: OperationEntry,
   ): Promise<T> => {
     if (plan.requiresIdentityLock) {
       const acquireIdentityLock = requireDefined(
@@ -249,7 +249,7 @@ function planTransactionOptions<K extends RowWorkKind, T>(
 export function runWritePlan<K extends RowWorkKind, T>(
   ctx: WritePlanContext,
   plan: WritePlan<K>,
-  entry: WriteEntry,
+  entry: OperationEntry,
   rowWork: WriteRowWork<K, T>,
   options?: WritePlanOptions<T>,
 ): Promise<T> {
@@ -274,7 +274,7 @@ export function runHookedWritePlan<K extends RowWorkKind, T>(
   ctx: HookedWritePlanContext,
   opContext: OperationHookContext,
   plan: WritePlan<K>,
-  entry: WriteEntry,
+  entry: OperationEntry,
   rowWork: WriteRowWork<K, T>,
   options?: WritePlanOptions<T>,
 ): Promise<T> {
