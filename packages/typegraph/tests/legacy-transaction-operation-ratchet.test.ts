@@ -60,7 +60,7 @@ const FAMILY_BASELINE = {
   "capture and flush": 10,
   "schema and evolution": 12,
   "merge and durable operations": 31,
-  "provenance and interchange": 7,
+  "provenance and interchange": 0,
   "working copies": 3,
 } as const satisfies Record<Family, number>;
 
@@ -323,35 +323,10 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
     family: "merge and durable operations",
   },
 
-  // --- provenance and interchange
-  "src/graph-merge/provenance-store.ts#claimSidecarOwnership": {
-    count: 1,
-    family: "provenance and interchange",
-  },
-  "src/provenance/holds.ts#readBelievedFacts": {
-    count: 1,
-    family: "provenance and interchange",
-  },
-  "src/provenance/holds.ts#assertFactsHold": {
-    count: 1,
-    family: "provenance and interchange",
-  },
-  "src/provenance/locks.ts#acquireCapabilityReadLock": {
-    count: 1,
-    family: "provenance and interchange",
-  },
-  "src/provenance/transition.ts#runTransition": {
-    count: 1,
-    family: "provenance and interchange",
-  },
-  "src/interchange/export.ts#exportGraphStreamFromBackend": {
-    count: 1,
-    family: "provenance and interchange",
-  },
-  "src/identity/interchange-read.ts#readIdentityAssertionsForInterchange": {
-    count: 1,
-    family: "provenance and interchange",
-  },
+  // --- provenance and interchange: none. Provenance enters an operation of
+  // the session its transaction context carries (`enterTransactionOperation`);
+  // the sidecar claim and the export open the session of the transaction they
+  // open; the interchange identity read is handed its caller's target.
 
   // --- working copies: engine-layer code that consumes the Store's
   // transaction port and Store functions.

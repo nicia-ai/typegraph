@@ -3,7 +3,7 @@ import { ConfigurationError } from "../errors";
 import { getDialect } from "../query/dialect";
 import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
-import { legacyTransactionOperation } from "../store/operation-scope";
+import { type StatementBackend } from "../store/operation-scope";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
 import { identityReferenceKey } from "./reference";
@@ -277,19 +277,19 @@ export async function readIdentityAssertionPageAtTarget<G extends GraphDef>(
   };
 }
 
+/**
+ * Every identity assertion in transfer shape, read through `target`: the root
+ * backend, or the operation handle of the call that reads them.
+ */
 export async function readIdentityAssertionsForInterchange<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
+  target: StatementBackend,
   mode: "state" | "archival",
   options?: IdentityInterchangeReadOptions,
 ): Promise<readonly IdentityTransferAssertion[]> {
-  const page = await readIdentityAssertionPageAtTarget(
-    ctx,
-    legacyTransactionOperation(ctx.backend),
-    mode,
-    {
-      ...options,
-      limit: 2_147_483_647,
-    },
-  );
+  const page = await readIdentityAssertionPageAtTarget(ctx, target, mode, {
+    ...options,
+    limit: 2_147_483_647,
+  });
   return page.assertions;
 }
