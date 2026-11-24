@@ -89,6 +89,8 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
     ["<graph1>"]
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( ?, ?, ?, ?, ? ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" <> ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? ORDER BY "typegraph_edges"."id" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","one:link","[\"Item\",\"item-a\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","item-a","item-c"]
 hook error create edge CardinalityError[CARDINALITY_ERROR]
 libsql rollback
 => CardinalityError[CARDINALITY_ERROR]
@@ -115,6 +117,8 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
     ["<graph1>"]
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( ?, ?, ?, ?, ? ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" <> ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? ORDER BY "typegraph_edges"."id" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","one:link","[\"Item\",\"item-a\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","item-a","item-b"]
 hook error create edge CardinalityError[CARDINALITY_ERROR]
 libsql rollback
 => CardinalityError[CARDINALITY_ERROR]
@@ -126,9 +130,11 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
     ["<graph1>"]
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( ?, ?, ?, ?, ? ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" <> ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? ORDER BY "typegraph_edges"."id" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","one:link","[\"Item\",\"item-a\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-a"]
-hook error create edge CardinalityError[CARDINALITY_ERROR]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","item-a","item-dead"]
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
 libsql rollback
-=> CardinalityError[CARDINALITY_ERROR]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
 
 ### edge.create on a taken target axis from a tombstoned source
 libsql transaction default
@@ -212,22 +218,8 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "
     ["<graph1>","link","Item","item-a","Item","item-dead"]
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( ?, ?, ?, ?, ? ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" <> ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? ORDER BY "typegraph_edges"."id" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","one:link","[\"Item\",\"item-a\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-a"]
-hook error create edge CardinalityError[CARDINALITY_ERROR]
-sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
-    ["<graph1>","link","Item","item-a","Item","item-dead"]
-hook start create edge:link <id2>
-sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
-    ["<graph1>","link","Item","item-a","Item","item-dead"]
-sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( ?, ?, ?, ?, ? ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" <> ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? ORDER BY "typegraph_edges"."id" LIMIT 1 ) AS incumbent_edge_id
-    ["<graph1>","one:link","[\"Item\",\"item-a\"]","<id2>","<timestamp>","<graph1>","<id2>","link","Item","item-a"]
-hook error create edge CardinalityError[CARDINALITY_ERROR]
-sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
-    ["<graph1>","link","Item","item-a","Item","item-dead"]
-hook start create edge:link <id3>
-sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ? ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
-    ["<graph1>","link","Item","item-a","Item","item-dead"]
-sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( ?, ?, ?, ?, ? ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" <> ? AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ? ORDER BY "typegraph_edges"."id" LIMIT 1 ) AS incumbent_edge_id
-    ["<graph1>","one:link","[\"Item\",\"item-a\"]","<id3>","<timestamp>","<graph1>","<id3>","link","Item","item-a"]
-hook error create edge CardinalityError[CARDINALITY_ERROR]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?, ?)
+    ["<graph1>","Item","item-a","item-dead"]
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
 libsql rollback
-=> CardinalityError[CARDINALITY_ERROR]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]

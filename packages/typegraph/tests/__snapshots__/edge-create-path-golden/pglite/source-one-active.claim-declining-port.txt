@@ -99,6 +99,8 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
 port transaction edge.create claims=1 -> declined cardinalityClaim
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( $1, $2, $3, $4, $5 ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $6 AND "typegraph_edges"."id" <> $7 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = $8 AND "typegraph_edges"."from_kind" = $9 AND "typegraph_edges"."from_id" = $10 AND "typegraph_edges"."valid_to" IS NULL ORDER BY "typegraph_edges"."id" COLLATE "C" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","oneActive:link","[\"Item\",\"item-a\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-c"]
 sql ROLLBACK
 hook error create edge CardinalityError[CARDINALITY_ERROR]
 => CardinalityError[CARDINALITY_ERROR]
@@ -128,6 +130,8 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
 port transaction edge.create claims=1 -> declined cardinalityClaim
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( $1, $2, $3, $4, $5 ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $6 AND "typegraph_edges"."id" <> $7 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = $8 AND "typegraph_edges"."from_kind" = $9 AND "typegraph_edges"."from_id" = $10 AND "typegraph_edges"."valid_to" IS NULL ORDER BY "typegraph_edges"."id" COLLATE "C" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","oneActive:link","[\"Item\",\"item-a\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-b"]
 sql ROLLBACK
 hook error create edge CardinalityError[CARDINALITY_ERROR]
 => CardinalityError[CARDINALITY_ERROR]
@@ -140,9 +144,11 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
 port transaction edge.create claims=1 -> declined cardinalityClaim
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( $1, $2, $3, $4, $5 ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $6 AND "typegraph_edges"."id" <> $7 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = $8 AND "typegraph_edges"."from_kind" = $9 AND "typegraph_edges"."from_id" = $10 AND "typegraph_edges"."valid_to" IS NULL ORDER BY "typegraph_edges"."id" COLLATE "C" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","oneActive:link","[\"Item\",\"item-a\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-dead"]
 sql ROLLBACK
-hook error create edge CardinalityError[CARDINALITY_ERROR]
-=> CardinalityError[CARDINALITY_ERROR]
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
 
 ### edge.create on a taken target axis from a tombstoned source
 hook start create edge:link <id1>
@@ -235,32 +241,8 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
 port transaction edge.create claims=1 -> declined cardinalityClaim
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( $1, $2, $3, $4, $5 ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $6 AND "typegraph_edges"."id" <> $7 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = $8 AND "typegraph_edges"."from_kind" = $9 AND "typegraph_edges"."from_id" = $10 AND "typegraph_edges"."valid_to" IS NULL ORDER BY "typegraph_edges"."id" COLLATE "C" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","oneActive:link","[\"Item\",\"item-a\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-dead"]
 sql ROLLBACK
-hook error create edge CardinalityError[CARDINALITY_ERROR]
-sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
-    ["<graph1>","link","Item","item-a","Item","item-dead"]
-hook start create edge:link <id2>
-sql BEGIN
-sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
-    ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
-sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
-    ["<graph1>","link","Item","item-a","Item","item-dead"]
-port transaction edge.create claims=1 -> declined cardinalityClaim
-sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( $1, $2, $3, $4, $5 ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $6 AND "typegraph_edges"."id" <> $7 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = $8 AND "typegraph_edges"."from_kind" = $9 AND "typegraph_edges"."from_id" = $10 AND "typegraph_edges"."valid_to" IS NULL ORDER BY "typegraph_edges"."id" COLLATE "C" LIMIT 1 ) AS incumbent_edge_id
-    ["<graph1>","oneActive:link","[\"Item\",\"item-a\"]","<id2>","<timestamp>","<graph1>","<id2>","link","Item","item-a"]
-sql ROLLBACK
-hook error create edge CardinalityError[CARDINALITY_ERROR]
-sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
-    ["<graph1>","link","Item","item-a","Item","item-dead"]
-hook start create edge:link <id3>
-sql BEGIN
-sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) , "fence_row" AS ( INSERT INTO "typegraph_fences" (key, generation) SELECT $5, 1 FROM "graph_write_lock" WHERE TRUE ON CONFLICT (key) DO UPDATE SET generation = "typegraph_fences".generation + 1 RETURNING generation ) SELECT TRUE AS "fence_acquired", "fence_row"."generation" AS "generation", current_setting('transaction_isolation') AS "transaction_isolation" FROM "fence_row"
-    ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>","typegraph:recorded-graph-write:<graph1>"]
-sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
-    ["<graph1>","link","Item","item-a","Item","item-dead"]
-port transaction edge.create claims=1 -> declined cardinalityClaim
-sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( $1, $2, $3, $4, $5 ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $6 AND "typegraph_edges"."id" <> $7 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = $8 AND "typegraph_edges"."from_kind" = $9 AND "typegraph_edges"."from_id" = $10 AND "typegraph_edges"."valid_to" IS NULL ORDER BY "typegraph_edges"."id" COLLATE "C" LIMIT 1 ) AS incumbent_edge_id
-    ["<graph1>","oneActive:link","[\"Item\",\"item-a\"]","<id3>","<timestamp>","<graph1>","<id3>","link","Item","item-a"]
-sql ROLLBACK
-hook error create edge CardinalityError[CARDINALITY_ERROR]
-=> CardinalityError[CARDINALITY_ERROR]
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]

@@ -117,6 +117,8 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
 port transaction edge.create claims=1 -> declined cardinalityClaim
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( $1, $2, $3, $4, $5 ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $6 AND "typegraph_edges"."id" <> $7 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = $8 AND "typegraph_edges"."to_kind" = $9 AND "typegraph_edges"."to_id" = $10 ORDER BY "typegraph_edges"."id" COLLATE "C" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","\u001eto\u001eone:link","[\"Item\",\"item-b\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-b"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-c","item-b"]
 sql ROLLBACK
 hook error create edge CardinalityError[CARDINALITY_ERROR]
 => CardinalityError[CARDINALITY_ERROR]
@@ -129,6 +131,8 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
 port transaction edge.create claims=1 -> declined cardinalityClaim
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( $1, $2, $3, $4, $5 ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $6 AND "typegraph_edges"."id" <> $7 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = $8 AND "typegraph_edges"."to_kind" = $9 AND "typegraph_edges"."to_id" = $10 ORDER BY "typegraph_edges"."id" COLLATE "C" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","\u001eto\u001eone:link","[\"Item\",\"item-b\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-b"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-b"]
 sql ROLLBACK
 hook error create edge CardinalityError[CARDINALITY_ERROR]
 => CardinalityError[CARDINALITY_ERROR]
@@ -158,9 +162,11 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
 port transaction edge.create claims=1 -> declined cardinalityClaim
 sql INSERT INTO "typegraph_edge_claims" ( "graph_id", "axis", "key", "edge_id", "updated_at" ) VALUES ( $1, $2, $3, $4, $5 ) ON CONFLICT ( "graph_id", "axis", "key" ) DO UPDATE SET "updated_at" = "typegraph_edge_claims"."updated_at" RETURNING "edge_id" AS holder_edge_id, ( SELECT "typegraph_edges"."id" FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $6 AND "typegraph_edges"."id" <> $7 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."kind" = $8 AND "typegraph_edges"."to_kind" = $9 AND "typegraph_edges"."to_id" = $10 ORDER BY "typegraph_edges"."id" COLLATE "C" LIMIT 1 ) AS incumbent_edge_id
     ["<graph1>","\u001eto\u001eone:link","[\"Item\",\"item-b\"]","<id1>","<timestamp>","<graph1>","<id1>","link","Item","item-b"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-dead","item-b"]
 sql ROLLBACK
-hook error create edge CardinalityError[CARDINALITY_ERROR]
-=> CardinalityError[CARDINALITY_ERROR]
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
 
 ### edge.create with an occupied id
 hook start create edge:link link-live

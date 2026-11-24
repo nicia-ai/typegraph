@@ -62,6 +62,7 @@ import {
   registerEdgeClaimSelfHealIntegrationTests,
   registerEdgeCreateDeclineIntegrationTests,
   registerEdgeCreateRefusalMatrixIntegrationTests,
+  registerEdgeEndpointRefusalOrderIntegrationTests,
   registerEdgeOperationIntegrationTests,
   registerEdgePropertyIntegrationTests,
   registerEdgeTargetCardinalityIntegrationTests,
@@ -328,6 +329,7 @@ export const INTEGRATION_REGISTRATIONS: readonly IntegrationRegistration[] = [
   { register: registerEdgeTargetCardinalityIntegrationTests, weight: 2 },
   { register: registerEdgeCreateDeclineIntegrationTests, weight: 2 },
   { register: registerEdgeCreateRefusalMatrixIntegrationTests, weight: 8 },
+  { register: registerEdgeEndpointRefusalOrderIntegrationTests, weight: 8 },
   { register: registerBatchWriteVerdictIntegrationTests, weight: 10 },
   {
     register: registerEdgeTargetCardinalityTemporalIntegrationTests,

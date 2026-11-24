@@ -44,6 +44,7 @@ export { registerEdgeCaseIntegrationTests } from "./edge-cases";
 export { registerEdgeClaimSelfHealIntegrationTests } from "./edge-claim-self-heal";
 export { registerEdgeCreateDeclineIntegrationTests } from "./edge-create-declines";
 export { registerEdgeCreateRefusalMatrixIntegrationTests } from "./edge-create-refusal-matrix";
+export { registerEdgeEndpointRefusalOrderIntegrationTests } from "./edge-endpoint-refusal-order";
 export { registerEdgeOperationIntegrationTests } from "./edge-operations";
 export { registerEdgePropertyIntegrationTests } from "./edge-properties";
 export { registerAdvancedEdgePropertyIntegrationTests } from "./edge-properties-advanced";

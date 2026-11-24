@@ -3658,7 +3658,7 @@ async function prepareCompositionCreateEdge<G extends GraphDef>(
   }
   const edgeInput = buildCompositionCreateEdgeInput(work, partId, temporal);
   return validateAndPrepareEdgeCreate(ctx, edgeInput, generateId(), target, {
-    validateEndpoints: options.endpoints.source === "read",
+    endpoints: options.endpoints.source === "read" ? "read" : "provenByFrame",
     validateCardinality: true,
     validateRelations: options.validateRelations,
     lock,

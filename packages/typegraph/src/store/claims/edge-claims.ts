@@ -615,6 +615,23 @@ export function claimRefusalFor(
 }
 
 /**
+ * Whether `error` is a refusal {@link claimRefusalFor} builds — the answer a
+ * lost claim or a refused cardinality probe gives, and nothing else. A
+ * `CompositionError` counts only in its `occupied` situation, the one shape a
+ * composition claim refuses with; its window and existence refusals are
+ * other decisions.
+ */
+export function isClaimRefusal(
+  error: unknown,
+): error is CardinalityError | CompositionError {
+  return (
+    error instanceof CardinalityError ||
+    (error instanceof CompositionError &&
+      error.details.situation === "occupied")
+  );
+}
+
+/**
  * Converts the engine's "relation does not exist" into a typed precondition
  * error naming the relation and the way to create it.
  *

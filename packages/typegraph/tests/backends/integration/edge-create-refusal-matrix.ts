@@ -17,9 +17,11 @@
  * does not — or where lanes, or paths on one lane, disagree on the winning
  * error — the case states the correct outcome and, per known defect, the
  * lanes it affects and the exact outcome main produces there today
- * (`tests/helpers/known-defect.ts`), labelled with the issue (#946) or the
- * design note's divergence (`D1`, `D2`, and `D7`, which the note does not
- * list). A fix that closes one fails the case with "defect fixed, flip this
+ * (`tests/helpers/known-defect.ts`), labelled with the design note's
+ * divergence (`D2`, and `D7`, which the note does not list). A dead
+ * endpoint outranks a taken axis on every lane and every create path (#946);
+ * `edge-endpoint-refusal-order.ts` holds that order across every edge write
+ * path. A fix that closes one fails the case with "defect fixed, flip this
  * marker" until the marker is removed.
  *
  * Pairs no single create can meet are listed with the reason in
@@ -73,28 +75,6 @@ function cardinality(
   incumbent: string,
 ): string {
   return `CardinalityError[CARDINALITY_ERROR] ${direction} incumbent=${incumbent}`;
-}
-
-/**
- * #946: on a port without the fused claim insert (both SQLite drivers), the
- * session claims before the endpoint-predicated retry, so a taken axis
- * refuses before the dead endpoint is seen.
- */
-function issue946(today: string): CreateDefect {
-  return {
-    label: "#946",
-    on: { dialect: ["sqlite"] },
-    today: { error: today },
-  };
-}
-
-/**
- * D1: a durable-identity kind with a cardinality probes the axis before
- * any endpoint read (`probesCardinalityBeforeWrite`), on every lane; every
- * other create path reports the dead endpoint.
- */
-function d1DurableProbeFirst(today: string): CreateDefect {
-  return { label: "D1", on: {}, today: { error: today } };
 }
 
 /**
@@ -431,14 +411,12 @@ const REFUSAL_CASES: readonly MatrixCase[] = [
     causes: ["dead", "source"],
     carrier: "mxSource a->dead",
     wins: ENDPOINT,
-    defects: [issue946(cardinality("source", "s-ab"))],
     run: (s) => s.edges.mxSource.create(ITEM.a, ITEM.dead, { label: "x" }),
   },
   {
     causes: ["dead", "source"],
     carrier: "mxIdentitySource a->dead",
     wins: ENDPOINT,
-    defects: [d1DurableProbeFirst(cardinality("source", "is-ab"))],
     run: (s) =>
       s.edges.mxIdentitySource.create(ITEM.a, ITEM.dead, { label: "x" }),
   },
@@ -452,7 +430,6 @@ const REFUSAL_CASES: readonly MatrixCase[] = [
     causes: ["dead", "target"],
     carrier: "mxIdentityTarget dead->b",
     wins: ENDPOINT,
-    defects: [d1DurableProbeFirst(cardinality("target", "it-ab"))],
     run: (s) =>
       s.edges.mxIdentityTarget.create(ITEM.dead, ITEM.b, { label: "x" }),
   },

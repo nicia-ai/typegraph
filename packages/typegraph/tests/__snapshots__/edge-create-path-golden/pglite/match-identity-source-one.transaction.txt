@@ -109,6 +109,8 @@ sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."gra
     ["<graph1>","link","Item","item-a"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
     ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-c"]
 hook error create edge CardinalityError[CARDINALITY_ERROR]
 sql ROLLBACK
 => CardinalityError[CARDINALITY_ERROR]
@@ -139,6 +141,8 @@ sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."gra
     ["<graph1>","link","Item","item-a"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
     ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-b"]
 hook error create edge CardinalityError[CARDINALITY_ERROR]
 sql ROLLBACK
 => CardinalityError[CARDINALITY_ERROR]
@@ -152,9 +156,11 @@ sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."gra
     ["<graph1>","link","Item","item-a"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
     ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
-hook error create edge CardinalityError[CARDINALITY_ERROR]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-dead"]
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
 sql ROLLBACK
-=> CardinalityError[CARDINALITY_ERROR]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
 
 ### edge.create on a taken target axis from a tombstoned source
 sql BEGIN
@@ -197,6 +203,8 @@ sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."gra
     ["<graph1>","link","Item","item-a"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
     ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-b"]
 hook error create edge CardinalityError[CARDINALITY_ERROR]
 sql ROLLBACK
 => CardinalityError[CARDINALITY_ERROR]
@@ -240,24 +248,8 @@ sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."gra
     ["<graph1>","link","Item","item-a"]
 sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
     ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
-hook error create edge CardinalityError[CARDINALITY_ERROR]
-hook start create edge:link <id2>
-sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
-    ["<graph1>"]
-sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
-    ["<graph1>","link","Item","item-a","Item","item-dead"]
-sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL
-    ["<graph1>","link","Item","item-a"]
-sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
-    ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
-hook error create edge CardinalityError[CARDINALITY_ERROR]
-hook start create edge:link <id3>
-sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 ORDER BY "typegraph_edges"."created_at" DESC, "typegraph_edges"."id" DESC
-    ["<graph1>","link","Item","item-a","Item","item-dead"]
-sql SELECT COUNT(*) as count FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."kind" = $2 AND "typegraph_edges"."from_kind" = $3 AND "typegraph_edges"."from_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL
-    ["<graph1>","link","Item","item-a"]
-sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."from_kind" = $2 AND "typegraph_edges"."from_id" = $3 UNION ALL SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $4 AND "typegraph_edges"."deleted_at" IS NULL AND "typegraph_edges"."to_kind" = $5 AND "typegraph_edges"."to_id" = $6 AND NOT ( "typegraph_edges"."from_kind" = $7 AND "typegraph_edges"."from_id" = $8 )
-    ["<graph1>","Item","item-a","<graph1>","Item","item-a","Item","item-a"]
-hook error create edge CardinalityError[CARDINALITY_ERROR]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" IN ($3, $4)
+    ["<graph1>","Item","item-a","item-dead"]
+hook error create edge EndpointNotFoundError[ENDPOINT_NOT_FOUND]
 sql ROLLBACK
-=> CardinalityError[CARDINALITY_ERROR]
+=> EndpointNotFoundError[ENDPOINT_NOT_FOUND]
