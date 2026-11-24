@@ -57,7 +57,7 @@ const FAMILY_BASELINE = {
   "edge writes": 0,
   "query terminals and tx.backend": 0,
   "identity and search facades": 40,
-  "capture and flush": 10,
+  "capture and flush": 0,
   "schema and evolution": 12,
   "merge and durable operations": 31,
   "provenance and interchange": 7,
@@ -194,45 +194,15 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
     family: "identity and search facades",
   },
 
-  // --- capture and flush: session-level work, and the places the three
-  // transaction kinds open or join the native transaction. The end state
-  // hands these a session, never an operation.
-  "src/store/recorded-capture.ts#runCapturedAutocommit": {
-    count: 1,
-    family: "capture and flush",
-  },
-  "src/store/recorded-capture.ts#transaction": {
-    count: 1,
-    family: "capture and flush",
-  },
-  "src/store/recorded-read-service.ts#createRecordedReadBackend": {
-    count: 1,
-    family: "capture and flush",
-  },
-  "src/store/recorded-anchor-log.ts#pruneRecordedAnchors": {
-    count: 1,
-    family: "capture and flush",
-  },
-  "src/store/allocation-owner.ts#rotateGraphAllocationOwner": {
-    count: 1,
-    family: "capture and flush",
-  },
-  "src/store/store.ts#StoreImplementation.clear": {
-    count: 1,
-    family: "capture and flush",
-  },
-  "src/store/store.ts#StoreImplementation.#runTransaction": {
-    count: 2,
-    family: "capture and flush",
-  },
-  "src/store/store.ts#StoreImplementation.withTransaction": {
-    count: 1,
-    family: "capture and flush",
-  },
-  "src/store/store.ts#StoreImplementation.withRecordedTransaction": {
-    count: 1,
-    family: "capture and flush",
-  },
+  // --- capture and flush: none. A unit that opens its own transaction
+  // (the recorded capture and recorded read overlays, the captured
+  // autocommit write, anchor pruning, allocation-owner rotation, `clear`)
+  // opens the session there and runs as one operation of it. The three
+  // transaction kinds (`store.transaction`, `withTransaction`,
+  // `withRecordedTransaction`) open the session where they open or join the
+  // transaction, bind the decoration their writes go through
+  // (`openBoundTransactionSession`), and hand `#buildTransactionContext`
+  // that session; their own statements go through one operation of it.
 
   // --- schema and evolution: the schema-write and commit-preflight channel,
   // session-level work.

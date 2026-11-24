@@ -14,6 +14,7 @@ export { registerCapabilityBundleNoThrowIntegrationTests } from "./capability-bu
 export { registerCapabilityMemberDropMatrixIntegrationTests } from "./capability-member-drop-matrix";
 export { registerCapabilityPortBindingIntegrationTests } from "./capability-port-binding";
 export { registerCapabilityRefusalIntegrationTests } from "./capability-refusals";
+export { registerCaptureFlushOperationRoutingIntegrationTests } from "./capture-flush-operation-routing";
 export { registerClaimCompensationIntegrationTests } from "./claim-compensation";
 export { registerClaimLookupPreferenceIntegrationTests } from "./claim-lookup-preference";
 export { registerClaimOwnerIdentityIntegrationTests } from "./claim-owner-identity";
