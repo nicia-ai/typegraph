@@ -11,6 +11,15 @@
  * sent the reads and writes only it makes through such a handle, of the
  * session the transaction's other work entered from (by identity) or of the
  * one session the path opened for a transaction it opened itself.
+ *
+ * These stores are history stores, so the native transaction a path opens is
+ * opened by the recorded capture overlay, which runs its own work (an
+ * isolation check, the capture flush) as the first operation of a session of
+ * its own and hands the Store a statement surface over that operation's
+ * handle. Every statement of the Store's session therefore passes through the
+ * overlay's recording handle too; a call is attributed to the first recording
+ * handle it reaches, the operation that issued it, and the overlay's session
+ * is told apart as the first one entered.
  */
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -61,6 +70,8 @@ type Recording = Readonly<{
   calls: RoutedCall[];
   /** The session each operation was entered from, by operation number. */
   entered: operationScope.TransactionSession[];
+  /** The operations a transaction-bound internal entered itself. */
+  transactionEntries: number[];
   restore: () => void;
 }>;
 
@@ -73,8 +84,13 @@ type Recording = Readonly<{
 function routeOperationsThroughRecordingHandles(): Recording {
   const calls: RoutedCall[] = [];
   const entered: operationScope.TransactionSession[] = [];
+  const transactionEntries: number[] = [];
   const enterOperation = operationScope.enterOperation;
   const enterTransactionOperation = operationScope.enterTransactionOperation;
+  // How many recorded calls are on the stack: a handle forwards to the handle
+  // beneath it synchronously, so a call made while one is already running is
+  // that call passing through a lower operation's handle, not a new one.
+  let forwarding = 0;
   function recordingEntry(
     entry: operationScope.OperationEntry,
   ): operationScope.OperationEntry {
@@ -92,15 +108,22 @@ function routeOperationsThroughRecordingHandles(): Recording {
       call: (...args: Arguments) => Result,
     ): (...args: Arguments) => Result {
       return (...args) => {
-        calls.push({
-          session,
-          operation,
-          member,
-          kind: kindOf(member, args),
-          statement:
-            member === "execute" ? (args[0] as SqlFragment) : undefined,
-        });
-        return call.apply(transaction, args);
+        if (forwarding === 0) {
+          calls.push({
+            session,
+            operation,
+            member,
+            kind: kindOf(member, args),
+            statement:
+              member === "execute" ? (args[0] as SqlFragment) : undefined,
+          });
+        }
+        forwarding += 1;
+        try {
+          return call.apply(transaction, args);
+        } finally {
+          forwarding -= 1;
+        }
       };
     }
     const { executeRaw, executeStatement, getNodes } = transaction;
@@ -136,16 +159,17 @@ function routeOperationsThroughRecordingHandles(): Recording {
       ),
     vi
       .spyOn(operationScope, "enterTransactionOperation")
-      .mockImplementation(
-        (transaction) =>
-          recordingEntry(
-            enterTransactionOperation(transaction),
-          ) as operationScope.Operation,
-      ),
+      .mockImplementation((transaction) => {
+        transactionEntries.push(entered.length);
+        return recordingEntry(
+          enterTransactionOperation(transaction),
+        ) as operationScope.Operation;
+      }),
   ];
   return {
     calls,
     entered,
+    transactionEntries,
     restore: () => {
       for (const spy of spies) spy.mockRestore();
     },
@@ -155,6 +179,7 @@ function routeOperationsThroughRecordingHandles(): Recording {
 function clear(recording: Recording): void {
   recording.calls.length = 0;
   recording.entered.length = 0;
+  recording.transactionEntries.length = 0;
 }
 
 /**
@@ -264,34 +289,63 @@ export function registerProvenanceInterchangeOperationRoutingIntegrationTests(
       try {
         clear(recording);
         const report = await provenance.retract(source);
-        const [session, ...others] = distinctSessions(recording);
+        const [overlay, session, ...others] = distinctSessions(recording);
+        const transitionReads = callsNaming(recording, [
+          "Source",
+          ...SUPPORT_EDGE_KINDS,
+        ]);
         expect({
           died: report.died.map((fact) => fact.id),
-          sessions: others.length + (session === undefined ? 0 : 1),
+          // The capture overlay's session, and the one session the
+          // transition's transaction opened for the Store.
+          sessions: distinctSessions(recording).length,
+          overlayOperations: recording.entered.filter(
+            (entered) => entered === overlay,
+          ).length,
+          otherSessions: others.length,
           // The transition's own source read and support reads went through
-          // a handle, and every operation was of the one session the
-          // transition's transaction opened.
-          sourceRead: recording.calls.some(
+          // a handle, of the session the transition's transaction opened.
+          sourceRead: transitionReads.some(
             (call) => call.member === "getNode" && call.kind === "Source",
           ),
           supportReads: callsNaming(recording, SUPPORT_EDGE_KINDS).length > 0,
-          ofThatSession: recording.calls.every(
+          ofThatSession: transitionReads.every(
             (call) => call.session === session,
           ),
         }).toEqual({
           died: ["fact"],
-          sessions: 1,
+          sessions: 2,
+          overlayOperations: 1,
+          otherSessions: 0,
           sourceRead: true,
           supportReads: true,
           ofThatSession: true,
         });
-        // The transition's reads share ONE operation.
+        // The transition's reads share ONE operation: the one the transition
+        // entered itself, not another operation of the session (the
+        // transaction context's, say).
         const supportOperations = new Set(
           callsNaming(recording, SUPPORT_EDGE_KINDS).map(
             (call) => call.operation,
           ),
         );
-        expect(supportOperations.size).toBe(1);
+        const [supportOperation] = supportOperations;
+        expect({
+          supportOperations: supportOperations.size,
+          enteredByTheTransition:
+            supportOperation !== undefined &&
+            recording.transactionEntries.includes(supportOperation),
+          sourceReadThere: recording.calls.some(
+            (call) =>
+              call.operation === supportOperation &&
+              call.member === "getNode" &&
+              call.kind === "Source",
+          ),
+        }).toEqual({
+          supportOperations: 1,
+          enteredByTheTransition: true,
+          sourceReadThere: true,
+        });
         expect(store.graphId).toBe(routingGraph.id);
       } finally {
         recording.restore();
@@ -312,9 +366,19 @@ export function registerProvenanceInterchangeOperationRoutingIntegrationTests(
             (call) => call.operation,
           ),
         );
+        const [overlay] = recording.entered;
+        // The Store's session: the transaction's opener, its context, and
+        // holding()'s own operation, entered last.
+        const holdingOperation = recording.entered.length - 1;
+        const storeCalls = recording.calls.filter(
+          (call) => call.session !== overlay,
+        );
         expect({
           believed: believed.map((fact) => fact.id),
-          operations: recording.entered.length,
+          sessions: distinctSessions(recording).length,
+          overlayOperations: recording.entered.filter(
+            (entered) => entered === overlay,
+          ).length,
           supportOperations: [...supportOperations],
           // On a backend whose plan takes a keyed lock, the graph lock went
           // through the operation the support reads went through.
@@ -326,14 +390,15 @@ export function registerProvenanceInterchangeOperationRoutingIntegrationTests(
                   lockSql,
             )
             .map((call) => call.operation),
-          throughTheOperation: recording.calls.every(
-            (call) => call.operation === 0,
+          throughTheOperation: storeCalls.every(
+            (call) => call.operation === holdingOperation,
           ),
         }).toEqual({
           believed: ["fact"],
-          operations: 1,
-          supportOperations: [0],
-          graphLocks: lockSql === undefined ? [] : [0],
+          sessions: 2,
+          overlayOperations: 1,
+          supportOperations: [holdingOperation],
+          graphLocks: lockSql === undefined ? [] : [holdingOperation],
           throughTheOperation: true,
         });
       } finally {
@@ -407,18 +472,28 @@ export function registerProvenanceInterchangeOperationRoutingIntegrationTests(
         clear(recording);
         const chunks: unknown[] = [];
         for await (const chunk of exportGraphStream(store)) chunks.push(chunk);
+        const [overlay] = recording.entered;
+        const exportCalls = recording.calls.filter(
+          (call) => call.session !== overlay,
+        );
         expect({
           exported: chunks.length > 0,
           operations: recording.entered.length,
-          routed: recording.calls.length > 0,
-          throughTheOperation: recording.calls.every(
-            (call) => call.operation === 0,
+          overlayOperations: recording.entered.filter(
+            (entered) => entered === overlay,
+          ).length,
+          routed: exportCalls.length > 0,
+          // The overlay's operation is the first; the export's own is the
+          // second, of the session the export opened.
+          throughTheOperation: exportCalls.every(
+            (call) => call.operation === 1,
           ),
         }).toEqual({
           exported: true,
           // A backend without interactive transactions exports from the
           // root, which enters nothing.
-          operations: interactive ? 1 : 0,
+          operations: interactive ? 2 : 0,
+          overlayOperations: interactive ? 1 : 0,
           routed: interactive,
           throughTheOperation: true,
         });
