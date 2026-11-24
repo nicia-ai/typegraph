@@ -247,8 +247,28 @@ describe("an identity call enters its operation", () => {
     );
   });
 
+  it("a pinned view's identity read enters from a root backend and opens no session", async () => {
+    const { store } = await createIdentityStore(true);
+    await store.identity.assertSame(a, b);
+    const now = await store.recordedNow();
+    if (now === undefined)
+      throw new Error("the history store has no recorded instant");
+    const view = store.asOfRecorded(now);
+    clearMints();
+    const nodes = await view.identity.nodesOf(a);
+    expect(nodes.map((node) => node.id).toSorted()).toEqual(["a", "b"]);
+    const scopes = enteredScopes();
+    expect(scopes).toHaveLength(1);
+    expect(scopes[0] !== undefined && "heldGraphWriteLocks" in scopes[0]).toBe(
+      false,
+    );
+    expect(openedSessions()).toEqual([]);
+    expect(targetEntries()).toEqual([]);
+  });
+
   it("a refused identity call enters nothing", async () => {
     const { store: historyOff } = await createIdentityStore(false);
+    const { store: historyOn } = await createIdentityStore(true);
     const unregistered = { kind: "Nobody", id: "a" } as unknown as typeof a;
     const refusals: readonly (readonly [string, () => Promise<unknown>])[] = [
       [
@@ -264,7 +284,7 @@ describe("an identity call enters its operation", () => {
         "transitionsOf, history off",
         () => historyOff.identity.transitionsOf(a),
       ],
-      ["replay, bad limit", () => historyOff.identity.replay(a, { limit: 0 })],
+      ["replay, bad limit", () => historyOn.identity.replay(a, { limit: 0 })],
     ];
     const observed: unknown[] = [];
     await historyOff.transaction(async (tx) => {
@@ -388,6 +408,8 @@ describe("identity and search maintenance open a session where they open their t
     await store.identity.assertSame(a, b);
     clearMints();
     await storeRuntime(store).rebuildIdentityClosure();
+    // The root is handed in as the entry itself, not joined as a target.
+    expect(targetEntries()).toEqual([]);
     const opened = openedSessions();
     expect(opened).toHaveLength(1);
     expect(enteredScopes()).toEqual([opened[0]]);

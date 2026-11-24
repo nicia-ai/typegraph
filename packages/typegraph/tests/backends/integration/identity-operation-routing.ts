@@ -62,7 +62,7 @@ function routeOperationsThroughRecordingHandles(
         return call.apply(transaction, args);
       };
     }
-    const { executeRaw, executeStatement } = transaction;
+    const { executeRaw, executeStatement, getNodes } = transaction;
     const handle = deriveBackend(transaction, {
       execute: recorded("execute", transaction.execute),
       ...(executeRaw === undefined ?
@@ -72,6 +72,9 @@ function routeOperationsThroughRecordingHandles(
         {}
       : { executeStatement: recorded("executeStatement", executeStatement) }),
       getNode: recorded("getNode", transaction.getNode),
+      ...(getNodes === undefined ?
+        {}
+      : { getNodes: recorded("getNodes", getNodes) }),
       findNodesByKind: recorded("findNodesByKind", transaction.findNodesByKind),
       getActiveSchema: recorded("getActiveSchema", transaction.getActiveSchema),
     });
@@ -205,10 +208,12 @@ export function registerIdentityOperationRoutingIntegrationTests(
           ];
 
           const observed: unknown[] = [];
+          const routedCalls = new Map<string, number>();
           for (const [label, call] of identityCalls) {
             calls.length = 0;
             operations.length = 0;
             const result = await call();
+            routedCalls.set(label, calls.length);
             observed.push({
               at: label,
               result,
@@ -234,6 +239,11 @@ export function registerIdentityOperationRoutingIntegrationTests(
               routed: true,
               throughItsOperation: true,
             })),
+          );
+          // nodesOf hydrates the members it resolved through the same
+          // handle: it routes strictly more than the membership read alone.
+          expect(routedCalls.get("nodesOf") ?? 0).toBeGreaterThan(
+            routedCalls.get("membersOf") ?? 0,
           );
         });
       } finally {
