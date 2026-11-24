@@ -61,7 +61,7 @@ const FAMILY_BASELINE = {
   "schema and evolution": 12,
   "merge and durable operations": 31,
   "provenance and interchange": 0,
-  "working copies": 3,
+  "working copies": 0,
 } as const satisfies Record<Family, number>;
 
 type InventoryEntry = Readonly<{ count: number; family: Family }>;
@@ -328,18 +328,9 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
   // the sidecar claim and the export open the session of the transaction they
   // open; the interchange identity read is handed its caller's target.
 
-  // --- working copies: engine-layer code that consumes the Store's
-  // transaction port and Store functions.
-  "src/backend/drizzle/postgres-working-copy-operations.ts#coordinatesAt": {
-    count: 1,
-    family: "working copies",
-  },
-  "src/backend/drizzle/postgres-working-copy-operations.ts#operateInAllocation":
-    { count: 1, family: "working copies" },
-  "src/backend/drizzle/postgres-working-copy.ts#allocate": {
-    count: 1,
-    family: "working copies",
-  },
+  // --- working copies: none. A durable operation enters an operation of the
+  // session its transaction context carries, and the clone opens the session
+  // of the source transaction it opens.
 };
 
 /**
