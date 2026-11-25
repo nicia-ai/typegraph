@@ -43,6 +43,7 @@ import {
   eq,
   getTableName,
   inArray,
+  is,
   isNull,
   lte,
   type SQL,
@@ -105,8 +106,9 @@ import {
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
+  createNativeTransactionToken,
+  publishConnectionNativeTransaction,
   recordNativeTransactionHandle,
-  runConnectionNativeTransaction,
 } from "../native-transaction-handle";
 import {
   REVISION_JOURNAL_ENTITY,
@@ -819,6 +821,13 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
   lineage?: LineageMembers | undefined;
   /** The root backend's own `recordedTime` bag. See {@link CreateSqliteOperationBackendOptions}. */
   recordedTime?: EngineRecordedTimeMembers | undefined;
+  /**
+   * The identity of the transaction this call's caller is opening on the
+   * connection-level `db` (`createNativeTransactionToken`), recorded as the
+   * native transaction this bind runs on. Absent for a bind on a transaction
+   * that is already open.
+   */
+  nativeTransaction?: object | undefined;
 }>;
 
 function createSqliteOperationBackend(
@@ -1944,8 +1953,16 @@ export function buildSqliteEngineProfile(
             "transactionSync, and async transaction runners.",
         );
       }
+      // Inside the storage callback the transaction has begun: every bind on
+      // this connection until it settles runs in it.
       return runWithSerializedQueue(serializedQueue, () =>
-        storage.transaction(() => runConnectionNativeTransaction(db, run)),
+        storage.transaction(() =>
+          publishConnectionNativeTransaction(
+            nativeTransactionConnection(db),
+            createNativeTransactionToken(),
+            run,
+          ),
+        ),
       );
     }
 
@@ -2046,36 +2063,42 @@ export function buildSqliteEngineProfile(
       }
 
       if (transactionMode === "sql") {
-        return runWithSerializedQueue(serializedQueue, () =>
-          runConnectionNativeTransaction(db, async () => {
-            // Write-lock is held here, so the schema-write-capable
-            // InternalOperationBackend is used intentionally (see its type).
-            const txBackend = createTransactionBackend({
-              capabilities,
-              db,
-              executionAdapter,
-              operationStrategy,
-              profileHints: { isSync },
-              tableNames,
-              fulltextStrategy,
-              vectorStrategy,
-              contributionMaterializer: ctx.contributionMaterializer,
-              fenceTarget,
-              lineage: provisioning.lineage,
-              recordedTime: provisioning.recordedTime,
-              isFirstParty,
-            });
-            await runFrameStatement(sql`BEGIN IMMEDIATE`);
-            try {
-              const result = await fn(txBackend);
-              await runFrameStatement(sql`COMMIT`);
-              return result;
-            } catch (error) {
-              await rollbackFrameQuietly();
-              throw error;
-            }
-          }),
-        );
+        return runWithSerializedQueue(serializedQueue, async () => {
+          // Write-lock is held here, so the schema-write-capable
+          // InternalOperationBackend is used intentionally (see its type).
+          const nativeTransaction = createNativeTransactionToken();
+          const txBackend = createTransactionBackend({
+            capabilities,
+            db,
+            executionAdapter,
+            operationStrategy,
+            profileHints: { isSync },
+            tableNames,
+            fulltextStrategy,
+            vectorStrategy,
+            contributionMaterializer: ctx.contributionMaterializer,
+            fenceTarget,
+            lineage: provisioning.lineage,
+            recordedTime: provisioning.recordedTime,
+            isFirstParty,
+            nativeTransaction,
+          });
+          await runFrameStatement(sql`BEGIN IMMEDIATE`);
+          try {
+            // Published only once BEGIN succeeded: a bind on this connection
+            // records this transaction only while it is open.
+            const result = await publishConnectionNativeTransaction(
+              nativeTransactionConnection(db),
+              nativeTransaction,
+              () => fn(txBackend),
+            );
+            await runFrameStatement(sql`COMMIT`);
+            return result;
+          } catch (error) {
+            await rollbackFrameQuietly();
+            throw error;
+          }
+        });
       }
 
       if (transactionMode === "do-sqlite") {
@@ -2224,61 +2247,68 @@ export function buildSqliteEngineProfile(
           // contribution marker (one cached SELECT) before this method is
           // reached. The caller's BEGIN never carries CREATE statements.
           if (transactionMode === "sql") {
-            return runWithSerializedQueue(serializedQueue, () =>
-              runConnectionNativeTransaction(db, async () => {
-                // Not `bindTransactionBackend(...)`: this path frames the tx
-                // with manual BEGIN/COMMIT on the *outer* `db`, so it must
-                // reuse that connection's already-built `executionAdapter`
-                // rather than synthesize a fresh one for a distinct handle.
-                // Serves sync drivers AND local libsql clients before 0.18:
-                // both keep one stable connection, where raw BEGIN/COMMIT
-                // composes and Drizzle's `db.transaction()` (which for those
-                // libsql clients abandons the client's connection — fatal for
-                // `:memory:`) must be avoided.
-                const txBackend = createTransactionBackend({
-                  capabilities,
-                  db,
-                  executionAdapter,
-                  operationStrategy,
-                  profileHints: { isSync },
-                  tableNames,
-                  fulltextStrategy,
-                  vectorStrategy,
-                  contributionMaterializer: ctx.contributionMaterializer,
-                  fenceTarget,
-                  lineage: provisioning.lineage,
-                  recordedTime: provisioning.recordedTime,
-                  isFirstParty,
-                });
-                // Read-only multi-statement operations need one snapshot but must not
-                // reserve SQLite's single writer slot. Business transactions retain
-                // BEGIN IMMEDIATE so read-then-write cannot lose a lock-upgrade race.
-                await runFrameStatement(
-                  options?.accessMode === "read_only" || temporaryWrites ?
-                    sql`BEGIN`
-                  : sql`BEGIN IMMEDIATE`,
-                );
+            return runWithSerializedQueue(serializedQueue, async () => {
+              // Not `bindTransactionBackend(...)`: this path frames the tx
+              // with manual BEGIN/COMMIT on the *outer* `db`, so it must
+              // reuse that connection's already-built `executionAdapter`
+              // rather than synthesize a fresh one for a distinct handle.
+              // Serves sync drivers AND local libsql clients before 0.18:
+              // both keep one stable connection, where raw BEGIN/COMMIT
+              // composes and Drizzle's `db.transaction()` (which for those
+              // libsql clients abandons the client's connection — fatal for
+              // `:memory:`) must be avoided.
+              const nativeTransaction = createNativeTransactionToken();
+              const txBackend = createTransactionBackend({
+                capabilities,
+                db,
+                executionAdapter,
+                operationStrategy,
+                profileHints: { isSync },
+                tableNames,
+                fulltextStrategy,
+                vectorStrategy,
+                contributionMaterializer: ctx.contributionMaterializer,
+                fenceTarget,
+                lineage: provisioning.lineage,
+                recordedTime: provisioning.recordedTime,
+                isFirstParty,
+                nativeTransaction,
+              });
+              // Read-only multi-statement operations need one snapshot but must not
+              // reserve SQLite's single writer slot. Business transactions retain
+              // BEGIN IMMEDIATE so read-then-write cannot lose a lock-upgrade race.
+              await runFrameStatement(
+                options?.accessMode === "read_only" || temporaryWrites ?
+                  sql`BEGIN`
+                : sql`BEGIN IMMEDIATE`,
+              );
 
-                try {
-                  const result = await fn(
-                    markSchemaFencedInsertEligibleUnderFence(
-                      gateFulltext(
-                        txBackend,
-                        ctx.contributionMaterializer.assertInitialized,
-                        ctx.contributionMaterializer.refuseUnavailableFulltext,
+              try {
+                // Published only once BEGIN succeeded: a bind on this
+                // connection records this transaction only while it is open.
+                const result = await publishConnectionNativeTransaction(
+                  nativeTransactionConnection(db),
+                  nativeTransaction,
+                  () =>
+                    fn(
+                      markSchemaFencedInsertEligibleUnderFence(
+                        gateFulltext(
+                          txBackend,
+                          ctx.contributionMaterializer.assertInitialized,
+                          ctx.contributionMaterializer.refuseUnavailableFulltext,
+                        ),
+                        fencePlan,
                       ),
-                      fencePlan,
+                      db,
                     ),
-                    db,
-                  );
-                  await runFrameStatement(sql`COMMIT`);
-                  return result;
-                } catch (error) {
-                  await rollbackFrameQuietly();
-                  throw error;
-                }
-              }),
-            );
+                );
+                await runFrameStatement(sql`COMMIT`);
+                return result;
+              } catch (error) {
+                await rollbackFrameQuietly();
+                throw error;
+              }
+            });
           }
 
           if (transactionMode === "do-sqlite") {
@@ -2690,14 +2720,46 @@ function createTransactionBackend(
     lineage: options.lineage,
     recordedTime: options.recordedTime,
   });
-  // The native transaction this bind runs on: a Drizzle transaction object is
-  // one per BEGIN, while any other handle is the connection itself.
-  recordNativeTransactionHandle(
-    txBackend,
-    options.db,
-    options.db instanceof SQLiteTransaction ? "transaction" : "connection",
-  );
+  recordSqliteNativeTransaction(txBackend, options);
   return options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
+}
+
+/**
+ * The connection a connection-level SQLite handle runs on, as the native
+ * transaction record names it: the driver client or Durable Object storage
+ * the serialized-resource audit identifies (every Drizzle wrapper over one
+ * client shares it), or the handle itself when the audit recognizes none.
+ */
+function nativeTransactionConnection(db: AnySqliteDatabase): object {
+  return getSerializedSqliteConnection(db) ?? db;
+}
+
+/**
+ * Records the native transaction one bind runs on: the token of the
+ * transaction its opener is opening, a Drizzle transaction object (one per
+ * BEGIN) as itself, and otherwise the transaction published on the
+ * connection the handle runs on. The transaction-object decision is
+ * Drizzle's brand check, the one `adoptTransaction` accepts a handle by.
+ */
+function recordSqliteNativeTransaction(
+  txBackend: object,
+  options: CreateSqliteTransactionBackendOptions,
+): void {
+  if (options.nativeTransaction !== undefined) {
+    recordNativeTransactionHandle(
+      txBackend,
+      options.nativeTransaction,
+      "transaction",
+    );
+  } else if (is(options.db, SQLiteTransaction)) {
+    recordNativeTransactionHandle(txBackend, options.db, "transaction");
+  } else {
+    recordNativeTransactionHandle(
+      txBackend,
+      nativeTransactionConnection(options.db),
+      "connection",
+    );
+  }
 }
 
 // Re-export schema utilities

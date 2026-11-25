@@ -11,14 +11,26 @@ import { describe, expect, it } from "vitest";
 
 import { deriveBackend } from "../src/backend/derive-backend";
 import {
+  createNativeTransactionToken,
+  publishConnectionNativeTransaction,
   recordNativeTransactionHandle,
   resolveNativeTransactionHandle,
-  runConnectionNativeTransaction,
 } from "../src/backend/native-transaction-handle";
-import type { TransactionBackend } from "../src/backend/types";
 import { resolveNativeTransactionState } from "../src/store/native-transaction-state";
-import { openTransactionSession } from "../src/store/operation-scope";
+import {
+  openTransactionSession,
+  type StoreTransactionBackend,
+} from "../src/store/operation-scope";
 import { createTestBackend } from "./test-utils";
+
+/** Publishes a new transaction token on `connection` for the span of `run`. */
+function publishNew<T>(connection: object, run: () => Promise<T>): Promise<T> {
+  return publishConnectionNativeTransaction(
+    connection,
+    createNativeTransactionToken(),
+    run,
+  );
+}
 
 /** A span body that settles when the test says so. */
 function heldSpan(): Readonly<{
@@ -74,14 +86,14 @@ describe("native transaction record", () => {
 
   it("identifies each engine transaction on a connection by a token of its own, never the connection", async () => {
     const connection = { connection: true };
-    const inFirst = await runConnectionNativeTransaction(connection, () => {
+    const inFirst = await publishNew(connection, () => {
       const one = boundBackend();
       const two = boundBackend();
       recordNativeTransactionHandle(one, connection, "connection");
       recordNativeTransactionHandle(two, connection, "connection");
       return Promise.resolve([one, two] as const);
     });
-    const inSecond = await runConnectionNativeTransaction(connection, () => {
+    const inSecond = await publishNew(connection, () => {
       const bound = boundBackend();
       recordNativeTransactionHandle(bound, connection, "connection");
       return Promise.resolve(bound);
@@ -102,11 +114,26 @@ describe("native transaction record", () => {
   it("never reinstates the token of a span that ended first when spans on one connection end out of order", async () => {
     const connection = { connection: true };
     const outerSpan = heldSpan();
-    const outer = runConnectionNativeTransaction(connection, outerSpan.run);
+    const outerToken = createNativeTransactionToken();
+    const outer = publishConnectionNativeTransaction(
+      connection,
+      outerToken,
+      outerSpan.run,
+    );
     const innerSpan = heldSpan();
-    const inner = runConnectionNativeTransaction(connection, innerSpan.run);
+    const innerToken = createNativeTransactionToken();
+    const inner = publishConnectionNativeTransaction(
+      connection,
+      innerToken,
+      innerSpan.run,
+    );
     outerSpan.end();
     await outer;
+    // The outer span ended first: a bind now records the inner transaction,
+    // never the one that ended.
+    const between = boundBackend();
+    recordNativeTransactionHandle(between, connection, "connection");
+    expect(resolveNativeTransactionHandle(between)).toBe(innerToken);
     innerSpan.end();
     await inner;
     const afterwards = boundBackend();
@@ -153,10 +180,15 @@ describe("native transaction state", () => {
   it("gives every session over a hand-written transaction backend a state of its own", async () => {
     const backend = createTestBackend();
     await backend.transactionWithNative((target) => {
-      // A custom backend built by copying the engine's members rather than
-      // through `deriveBackend`: nothing links it to the engine's record, so
-      // the Store has no evidence its sessions share a native transaction.
-      const handWritten: TransactionBackend = { ...target };
+      // A transaction a custom backend built itself: a new object naming
+      // only the members a session needs, not derived from the engine's
+      // bound backend through `deriveBackend`. Nothing links it to the
+      // engine's record, so the Store has no evidence its sessions share a
+      // native transaction.
+      const handWritten: StoreTransactionBackend = {
+        dialect: target.dialect,
+        capabilities: target.capabilities,
+      };
       const first = openTransactionSession(handWritten);
       const second = openTransactionSession(handWritten);
       expect(first.native).not.toBe(second.native);

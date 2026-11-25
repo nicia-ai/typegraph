@@ -19,13 +19,21 @@
  *   itself.
  * - A handle that is the connection itself (better-sqlite3 and Durable Object
  *   storage hand every TypeGraph-owned transaction the long-lived database
- *   object) identifies the connection, not the transaction. It is recorded as
- *   the token of the transaction the engine holds open on that connection
- *   ({@link runConnectionNativeTransaction}), a new object per transaction
- *   that the engine drops when it ends. Bound outside such a transaction (a
- *   caller adopting the database object around a BEGIN of its own), nothing
- *   is recorded: the engine cannot tell one of those transactions from the
- *   next.
+ *   object) identifies the connection, not the transaction. A transaction the
+ *   engine opens on such a connection is identified by a token of its own
+ *   ({@link createNativeTransactionToken}): the opener records it on its own
+ *   bind, and publishes it on the connection
+ *   ({@link publishConnectionNativeTransaction}) only once the transaction has
+ *   begun and only until it ends, so a bind on that connection in between
+ *   records it. A BEGIN that fails never publishes. Bound outside such a span
+ *   (a caller adopting the database object around a BEGIN of its own),
+ *   nothing is recorded: the engine cannot tell one of those transactions
+ *   from the next.
+ *
+ * The dialect decides which kind a handle is, and names the connection a
+ * connection-level handle runs on, with the same brand check its adoption
+ * boundary uses and the same connection identity its serialized-resource
+ * audit uses.
  *
  * A backend nothing recorded (a hand-written backend, or one bound by another
  * copy of this package) resolves to `undefined`, and the Store keeps its
@@ -44,17 +52,18 @@ export type NativeHandleScope = "transaction" | "connection";
 const BOUND_NATIVE_TRANSACTIONS = new WeakMap<object, object>();
 
 /**
- * Connection → the tokens of the transactions the engine holds open on it,
- * innermost last. An entry lives only for the span of
- * {@link runConnectionNativeTransaction}.
+ * Connection → the tokens of the transactions the engine has begun on it and
+ * not yet ended, innermost last. An entry lives only for the span of
+ * {@link publishConnectionNativeTransaction}.
  */
 const OPEN_CONNECTION_TRANSACTIONS = new WeakMap<object, readonly object[]>();
 
 /**
  * Records, once per bind, the native transaction `backend` runs on: `handle`
- * itself when it identifies one transaction, or the transaction the engine
- * holds open on the connection `handle` names. Records nothing for a
- * connection the engine holds no transaction open on.
+ * itself when it identifies one transaction (a driver transaction object, or
+ * a token from {@link createNativeTransactionToken}), or the transaction the
+ * engine has published on the connection `handle` names. Records nothing for
+ * a connection with no published transaction.
  */
 export function recordNativeTransactionHandle(
   backend: object,
@@ -71,18 +80,25 @@ export function recordNativeTransactionHandle(
 }
 
 /**
- * Runs `run`, the span of one transaction the engine opens on a
- * connection-level handle, with a new token identifying that transaction:
- * every backend bound on `connection` during the span records it. The token
- * is dropped when the span ends, so a backend bound on the connection
- * afterwards does not inherit the transaction that ended.
+ * A new identity for one transaction the engine is about to open on a
+ * connection-level handle. Carries nothing but its identity.
  */
-export async function runConnectionNativeTransaction<T>(
+export function createNativeTransactionToken(): object {
+  return Object.freeze({});
+}
+
+/**
+ * Runs `run` with `token` published on `connection`: every backend bound on
+ * the connection during the span records it. Call it once the transaction
+ * `token` identifies has begun, around the work that runs inside it; the
+ * token is withdrawn when `run` settles, so a backend bound on the
+ * connection afterwards does not inherit the transaction that ended.
+ */
+export async function publishConnectionNativeTransaction<T>(
   connection: object,
+  token: object,
   run: () => Promise<T>,
 ): Promise<T> {
-  // Carries nothing but its identity.
-  const token = Object.freeze({});
   OPEN_CONNECTION_TRANSACTIONS.set(connection, [
     ...(OPEN_CONNECTION_TRANSACTIONS.get(connection) ?? []),
     token,

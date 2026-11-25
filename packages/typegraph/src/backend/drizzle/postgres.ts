@@ -51,6 +51,7 @@ import {
   eq,
   getTableName,
   inArray,
+  is,
   isNull,
   lte,
   type SQL,
@@ -4476,11 +4477,13 @@ function createTransactionBackend(
   }
   registerSavepointGuard(backend, guardSavepoint);
   // The native transaction this bind runs on: a Drizzle transaction object is
-  // one per BEGIN (or per savepoint scope on an enclosing transaction).
+  // one per BEGIN (or per savepoint scope on an enclosing transaction). The
+  // decision is Drizzle's brand check, the one `adoptTransaction` accepts a
+  // handle by.
   recordNativeTransactionHandle(
     backend,
     options.db,
-    options.db instanceof PgTransaction ? "transaction" : "connection",
+    is(options.db, PgTransaction) ? "transaction" : "connection",
   );
 
   if (sessionAtomicBatchAdapter !== undefined) {
