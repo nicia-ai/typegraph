@@ -6133,6 +6133,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async clear(
     options: Readonly<{ preserveContributionMaterializations?: boolean }> = {},
   ): Promise<void> {
+    // The Store's own write gate first, as its collection writes pass it: a
+    // Store over a caller's transaction refuses while that transaction is
+    // inside a read-only scope, before any statement.
+    this.#ownWriteGate()?.assertWritable("store.clear()");
     // Tracked tokens and content fingerprints from lineage-capable stores
     // can carry the graph's durable origin; clear rotates that namespace.
     const mintsAnchorOrigin = mintsOriginNamespacedAnchor(

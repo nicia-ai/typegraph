@@ -30,6 +30,7 @@ import {
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { GRAPH_BACKEND_PROJECTION_KEYS } from "../../../src/backend/graph-backend-keys";
 import { createPostgresTransactionBackend } from "../../../src/backend/postgres";
+import { createSqliteBackend } from "../../../src/backend/sqlite";
 import {
   type AdapterBackend,
   type TransactionBackend,
@@ -731,7 +732,7 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
       expect(await graphState(plain)).toEqual(before);
     });
 
-    it("does not outlive the transaction: the same adoption writes in a read-write transaction afterwards", async () => {
+    it("leaves a later read-write transaction writable through the same adoption (a native transaction of its own)", async () => {
       const graph = buildGraph(nextGraphId());
       const [store] = await createAdapterStoreWithSchema(
         graph,
@@ -862,13 +863,25 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
     });
   });
 
-  // SQLite has no factory for a backend over a caller's transaction.
-  describe.runIf(
-    context.driver === "pglite" ||
-      context.driver === "node-postgres" ||
-      context.driver === "postgres-js",
-  )(
-    "writes through a Store over createPostgresTransactionBackend(tx.sql) of a read-only transaction",
+  /**
+   * A backend over the caller's transaction handle `handle`:
+   * `createPostgresTransactionBackend` on PostgreSQL, `createSqliteBackend` in
+   * `transactionMode: "drizzle"` over libSQL's transaction object.
+   */
+  function backendOverTransaction(handle: unknown): AdapterBackend<unknown> {
+    return context.driver === "libsql" ?
+        (createSqliteBackend(handle as never, {
+          executionProfile: { isSync: false, transactionMode: "drizzle" },
+        }) as AdapterBackend<unknown>)
+      : (createPostgresTransactionBackend(
+          handle as never,
+        ) as AdapterBackend<unknown>);
+  }
+
+  // better-sqlite3 hands `tx.sql` out as the database itself, not a
+  // transaction object, so there is no backend over its transaction to build.
+  describe.runIf(context.driver !== "better-sqlite3")(
+    "writes through a Store over a backend built on a read-only transaction's tx.sql",
     () => {
       type StoreOverTransaction = Awaited<
         ReturnType<typeof createAdapterStoreWithSchema<RotGraph, unknown>>
@@ -919,6 +932,10 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
           operation: "trustedImportGraphStream()",
           write: (store) => trustedImportGraphStream(store, unreadChunks()),
         },
+        {
+          operation: "store.clear()",
+          write: (store) => store.clear(),
+        },
       ];
 
       for (const { operation, write } of WRITES) {
@@ -935,7 +952,7 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
             async (tx) => {
               const overTransaction = createAdapterStore(
                 graph,
-                createPostgresTransactionBackend(nativeHandle(tx) as never),
+                backendOverTransaction(nativeHandle(tx)),
               ) as unknown as StoreOverTransaction;
               refusal = await rejectionOf(write(overTransaction, data));
               return tx.nodes.RotPerson.getById(asNodeId("p1"));
@@ -959,7 +976,7 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
         await store.transaction(async (tx) => {
           const overTransaction = createAdapterStore(
             graph,
-            createPostgresTransactionBackend(nativeHandle(tx) as never),
+            backendOverTransaction(nativeHandle(tx)),
           );
           // A read-only store.transaction on this Store is a savepoint of the
           // caller's transaction: the caller's own context is refused while
@@ -971,6 +988,16 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
               );
             },
             { accessMode: "read_only" },
+          );
+          // A read-only savepoint whose callback throws ends its scope too.
+          await rejectionOf(
+            overTransaction.transaction(
+              async () => {
+                await Promise.resolve();
+                throw new Error("the read-only callback fails");
+              },
+              { accessMode: "read_only" },
+            ),
           );
           await tx.nodes.RotTeam.create({ name: "t4" }, { id: "t4" });
           await overTransaction.nodes.RotTeam.create(

@@ -2396,7 +2396,7 @@ error, before any statement:
 | `store.withRecordedTransaction(tx.sql, fn)` | the same writes inside `fn`, and `applyMergePlanInTransaction()` with that context |
 | `store.withRecordedTransaction(tx.sql, fn)` on a history store | `store.withRecordedTransaction()`, before `fn` runs (it fences its writes first) |
 | `store.withEvolvedTransaction(tx.sql, plan, fn)` | `store.withEvolvedTransaction()`, before `fn` runs, for every plan |
-| a Store over `createPostgresTransactionBackend(tx.sql)` | its `store.nodes`, `store.edges` and `store.identity` writes (`store.nodes.Person.create()`), `importGraph()`, `importGraphStream()`, `trustedImportGraphStream()`, and the writes and provenance verbs in its own `store.transaction()` |
+| a Store over `createPostgresTransactionBackend(tx.sql)`, or over `createSqliteBackend(tx.sql)` on a libSQL transaction | its `store.nodes`, `store.edges` and `store.identity` writes (`store.nodes.Person.create()`), `store.clear()`, `importGraph()`, `importGraphStream()`, `trustedImportGraphStream()`, and the writes and provenance verbs in its own `store.transaction()` |
 
 A read-only `store.transaction()` on a Store over a caller's read-write transaction runs as a
 savepoint of that transaction: the caller's transaction refuses TypeGraph writes while that
@@ -2414,7 +2414,10 @@ The refusal covers what TypeGraph writes. A statement issued through the native 
 not checked: PostgreSQL rejects a write there and aborts the transaction (which then rejects with
 `TransactionOutcomeUnknownError`, even if the callback caught the refusal, since the callback read
 `tx.sql`), while SQLite, whose
-transaction is not read-only at the engine, runs it and commits it.
+transaction is not read-only at the engine, runs it and commits it. A read-only `store.transaction()`
+that runs as a savepoint of a caller's read-write transaction is not read-only at the engine
+either, on PostgreSQL included: the access mode applies to a whole transaction, not a savepoint, so a
+write through that callback's `tx.sql` runs and commits with the caller's transaction.
 
 #### Overlapping calls in one transaction
 

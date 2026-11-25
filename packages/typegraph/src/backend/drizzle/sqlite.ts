@@ -1315,7 +1315,17 @@ export function createSqliteBackend(
   db: AnySqliteDatabase,
   options: SqliteBackendOptions = {},
 ): AdapterBackend<AnySqliteDatabase> {
-  return createSqlBackend(buildSqliteEngineProfile(db, options));
+  const backend = createSqlBackend(buildSqliteEngineProfile(db, options));
+  // Built over a caller's transaction object, every statement of this
+  // backend, and every savepoint it opens, runs in that object's native
+  // transaction: recorded as for a bind, so a Store over this backend reaches
+  // that transaction's state before a write of its own opens a savepoint. A
+  // database handle names a connection, which runs many transactions over
+  // its life, so nothing is recorded for one.
+  if (isSqliteTransactionHandle(db)) {
+    recordNativeTransactionHandle(backend, sqliteNativeHandle(db));
+  }
+  return backend;
 }
 
 /**
