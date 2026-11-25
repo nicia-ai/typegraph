@@ -371,7 +371,6 @@ import {
   enterOperation,
   enterTargetOperation,
   type EntryScope,
-  legacyTransactionOperation,
   openBoundTransactionSession,
   openTransactionSession,
   type Operation,
@@ -436,7 +435,6 @@ import {
   batchRefusalDetails,
   batchRefusalSuffix,
   diagnoseFusedSchemaFenceNoRow,
-  legacyWriteEntry,
   refuseReadOnlyTransactionWrite,
   resolveBatchWriteVerdict,
   runInWriteTransaction,
@@ -658,6 +656,20 @@ const ROW_MAPPER_CONFIGS = {
 
 function rowMapperConfigFor(backend: StatementBackend) {
   return ROW_MAPPER_CONFIGS[backend.dialect];
+}
+
+/**
+ * An optional statement target handed to a public Store runtime member, whose
+ * type carries no session: the root as itself, a transaction as the first
+ * operation of a new session (`enterTargetOperation`), or `undefined` for the
+ * member's own default.
+ */
+function outsideStatementTarget(
+  target: GraphBackend | StoreTransactionBackend | undefined,
+): StatementBackend | undefined {
+  return target === undefined ? undefined : (
+      operationEntryBackend(enterTargetOperation(target))
+    );
 }
 
 // ============================================================
@@ -1728,7 +1740,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // the queries actually run on.
       queryBackend: (target?: GraphBackend | StoreTransactionBackend) =>
         this.#createHookedQueryBackend(
-          legacyTransactionOperation(target ?? this[STORE_RUNTIME].backend),
+          outsideStatementTarget(target) ?? this[STORE_RUNTIME].backend,
         ),
       sealedQuery: (coordinate) => this.sealedQuery(coordinate),
       recordedNodeGetById: (kind, id, coordinate) =>
@@ -1766,7 +1778,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#createNodeOperationContext(),
           work.kind,
           work.id,
-          legacyWriteEntry(legacyTransactionOperation(target)),
+          enterTargetOperation(target),
           { policy },
         ),
       applyResolvedNodeUniqueness: async (
@@ -1774,7 +1786,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         writes,
         apply,
       ) => {
-        const target = legacyTransactionOperation(transaction);
         const { upserts, releases } = this.#resolvedNodeClaimWrites(writes);
         if (
           upserts.every((upsert) => upsert.constraints.length === 0) &&
@@ -1787,6 +1798,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // they are outside a merge — this branch is what keeps that true.
           return apply();
         }
+        // The transaction arrives through a signature the public API spells,
+        // with no session: it joins as a binding of its own.
+        const target = enterOperation(
+          openTransactionSession(transaction),
+        ).backend;
         // The per-graph write lock, before any claim or sidecar work: the
         // rebuild below writes claim rows, and the lock is what the claim
         // discipline requires ahead of them. It is reentrant and memoized per
@@ -1810,7 +1826,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         ids,
         target?: GraphBackend | StoreTransactionBackend,
       ) => {
-        const backend = legacyTransactionOperation(target ?? this.#baseBackend);
+        const backend = outsideStatementTarget(target) ?? this.#baseBackend;
         const liveKindsById = await liveNodeKindsSharingIds(
           this.#identityContext(backend),
           backend,
@@ -1828,7 +1844,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ) => {
         // An identity-disabled graph has no assertions table to read from.
         if (this.#graph.identity === undefined) return new Map();
-        const backend = legacyTransactionOperation(target ?? this.#baseBackend);
+        const backend = outsideStatementTarget(target) ?? this.#baseBackend;
         const ctx = this.#identityContext(backend);
         const rows = await loadAssertionsByIds(
           backend,
@@ -1846,7 +1862,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ) => {
         // An identity-disabled graph has no closure table to read from.
         if (this.#graph.identity === undefined) return new Map();
-        const backend = legacyTransactionOperation(target ?? this.#baseBackend);
+        const backend = outsideStatementTarget(target) ?? this.#baseBackend;
         const ctx = this.#identityContext(backend);
         return loadCurrentStructuralClasses(
           backend,
@@ -1874,13 +1890,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           options,
         ),
       interchangeIdentityAssertionsByIdsAtTarget: async (
-        transactionTarget: GraphBackend | StoreTransactionBackend,
+        transaction: GraphBackend | StoreTransactionBackend,
         ids,
         mode,
         options,
       ) => {
+        // Returns before entry: an empty read enters nothing.
         if (this.#graph.identity === undefined || ids.length === 0) return [];
-        const target = legacyTransactionOperation(transactionTarget);
+        const target = this.#identityTargetBackend(transaction);
         return readIdentityAssertionsByIdsAtTarget(
           this.#identityContext(target),
           target,

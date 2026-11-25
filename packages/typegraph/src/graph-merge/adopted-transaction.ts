@@ -1,10 +1,7 @@
 import { statementExecutionVerdict } from "../backend/capabilities/resolve";
 import { resolveWriteFencePlan } from "../backend/capabilities/write-fence";
 import type { GraphDef } from "../core/define-graph";
-import {
-  legacyTransactionOperation,
-  type OperationBackend,
-} from "../store/operation-scope";
+import { type OperationBackend } from "../store/operation-scope";
 import {
   ensureEngineSerializedWriterSlot,
   hasPendingWriteTransactionRevision,
@@ -13,9 +10,8 @@ import {
   hasPendingRecordedGraphWrites,
   runRecordedTransactionSavepoint,
 } from "../store/recorded-capture";
-import { storeBackend, transactionBackend } from "../store/runtime-port";
+import { storeBackend } from "../store/runtime-port";
 import type { Store } from "../store/store";
-import type { TransactionContext } from "../store/types";
 import { MergePlanCapabilityError } from "./errors";
 
 /** A plan's durable revision cannot fence changes still awaiting capture flush. */
@@ -66,10 +62,13 @@ const ADOPTED_MERGE_APPLY_SAVEPOINT = "typegraph_merge_apply";
  *
  * A target whose transactions expose no statement execution has no savepoint
  * to take, so it is refused before anything is applied.
+ *
+ * `txBackend` is the handle of the operation the apply entered in the
+ * caller's transaction: the savepoint is taken and released on it.
  */
 export async function withAdoptedMergeApplySavepoint<G extends GraphDef, T>(
   target: Store<G>,
-  tx: TransactionContext<G>,
+  txBackend: OperationBackend,
   apply: () => Promise<T>,
 ): Promise<T> {
   const statements = statementExecutionVerdict(storeBackend(target));
@@ -80,7 +79,7 @@ export async function withAdoptedMergeApplySavepoint<G extends GraphDef, T>(
     );
   }
   return runRecordedTransactionSavepoint(
-    legacyTransactionOperation(transactionBackend(tx)),
+    txBackend,
     statements,
     ADOPTED_MERGE_APPLY_SAVEPOINT,
     async () => ({ action: "release", value: await apply() }),
