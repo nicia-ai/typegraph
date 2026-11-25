@@ -152,6 +152,7 @@ import {
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
+import { recordNativeTransactionHandle } from "../native-transaction-handle";
 import {
   deferNativeHandle,
   guardNativeTransactionSavepoint,
@@ -4474,6 +4475,13 @@ function createTransactionBackend(
     registerDriverSavepointScope(backend, enterDriverScope);
   }
   registerSavepointGuard(backend, guardSavepoint);
+  // The native transaction this bind runs on: a Drizzle transaction object is
+  // one per BEGIN (or per savepoint scope on an enclosing transaction).
+  recordNativeTransactionHandle(
+    backend,
+    options.db,
+    options.db instanceof PgTransaction ? "transaction" : "connection",
+  );
 
   if (sessionAtomicBatchAdapter !== undefined) {
     registerAtomicSqlProgram(backend, sessionAtomicBatchAdapter);
