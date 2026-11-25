@@ -1121,9 +1121,15 @@ const toSchemaVersionRow = createSchemaVersionRowMapper(
 
 /**
  * Whether `handle` is a Drizzle PostgreSQL transaction object: THE
- * classifier the adoption boundaries and the native-transaction record share.
- * Drizzle's brand check, so a transaction of another loaded copy of Drizzle
- * qualifies as it does for `instanceof`'s own copy.
+ * classifier every site in this module that asks "is this a transaction"
+ * calls — factory routing (`createPostgresBackend`,
+ * `buildPostgresEngineProfile`), the adoption boundaries, lazy and
+ * schema-write DDL session binding, recorded-anchor retention adoption, the
+ * scoped vector-search GUC group, engine savepoint recording and the
+ * native-transaction record. Drizzle's brand check, so a transaction of
+ * another loaded copy of Drizzle qualifies as it does for `instanceof`'s own
+ * copy; a site that asked `instanceof` instead would route such a handle as
+ * a root database.
  */
 function isPostgresTransactionHandle(
   handle: unknown,
@@ -1155,8 +1161,7 @@ export function createPostgresBackend(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
-  if (db instanceof PgTransaction) {
-    assertAdoptedDialect(db, isPostgresTransactionHandle, "postgres");
+  if (isPostgresTransactionHandle(db)) {
     return createPostgresTransactionBackend(db, options);
   }
   return markAllocationBound(
@@ -1212,7 +1217,7 @@ export function buildPostgresEngineProfile(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
 ): SqlEngineProfile<AnyPgTransaction> {
-  if (db instanceof PgTransaction) {
+  if (isPostgresTransactionHandle(db)) {
     throw new ConfigurationError(
       "A PostgreSQL transaction requires createPostgresTransactionBackend(tx, options).",
       { backend: "postgres", code: "TRANSACTION_REQUIRES_SCOPED_BACKEND" },
@@ -1533,7 +1538,7 @@ function buildPostgresEngineProfileInternal(
       await db.execute(statement);
       return;
     }
-    if (db instanceof PgTransaction) {
+    if (isPostgresTransactionHandle(db)) {
       await assertCallerSessionInAllocationSchema(
         executionAdapter,
         allocationSchema,
@@ -1558,7 +1563,7 @@ function buildPostgresEngineProfileInternal(
     tx: AnyPgTransaction,
   ): Promise<void> {
     if (allocationPin === undefined || allocationSchema === undefined) return;
-    if (db instanceof PgTransaction) {
+    if (isPostgresTransactionHandle(db)) {
       await assertCallerSessionInAllocationSchema(
         createPostgresExecutionAdapter(tx, adapterOptions),
         allocationSchema,
@@ -2070,7 +2075,7 @@ function buildPostgresEngineProfileInternal(
       }
       try {
         const ddl = postgresRecordedAnchorRetentionAdoptionDDL(tableName);
-        if (db instanceof PgTransaction) {
+        if (isPostgresTransactionHandle(db)) {
           // Savepoint rollback restores both the caller's session and GUC after a timeout.
           await withConcurrentCreateRetry(() =>
             db.transaction(async (transaction: AnyPgTransaction) => {
@@ -3753,7 +3758,7 @@ function createPostgresOperationBackend(
     if (overrides.length === 0) {
       return execAll<Row>(query);
     }
-    if (db instanceof PgTransaction) {
+    if (isPostgresTransactionHandle(db)) {
       // Already inside the caller's transaction (low-level
       // backend.transaction / adoptTransaction). `executionAdapter` is
       // bound to this tx client, but SET LOCAL persists to the end of the
