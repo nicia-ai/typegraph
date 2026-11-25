@@ -72,7 +72,9 @@ export async function believedFactsInOwnTransaction<
  * Every believed fact of the graph, read in the caller's transaction: under
  * the schema-version fence and the per-graph write lock when that transaction
  * can write, so a write after the read keeps the canonical lock order, or
- * under the graph lock alone when it is read-only.
+ * under the graph lock alone when it is read-only. A transaction that can
+ * write must also prove that its reads observe every earlier holder of the
+ * graph lock, or it is refused before the first read, naming `operation`.
  */
 export async function believedFactsInCallerTransaction<
   G extends GraphDef,
@@ -80,8 +82,9 @@ export async function believedFactsInCallerTransaction<
 >(
   scope: CapabilityScope,
   tx: TransactionContext<G>,
+  operation: string,
 ): Promise<readonly ProvenanceFactRef<G, FactKind>[]> {
-  await acquireCallerTransactionReadLocks(tx);
+  await acquireCallerTransactionReadLocks(tx, operation);
   return readBelievedFacts<G, FactKind>(scope, enterTransactionOperation(tx));
 }
 

@@ -432,6 +432,11 @@ import {
 import { nodeKindOwesCompositionEdge } from "./operations/atomic-mutation-program";
 import { readIdentityParticipants } from "./operations/identity-participation";
 import {
+  freshSnapshotUnprovableError,
+  refuseWriterBetweenSnapshotAndGraphLock,
+  supportReadWriterSlotRefusals,
+} from "./operations/write-fence-prelude";
+import {
   acquireManagedWriteFences,
   batchRefusalDetails,
   batchRefusalSuffix,
@@ -4560,7 +4565,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *
    * The receipt does not count writes that bypass the `tx.nodes.*` /
    * `tx.edges.*` collections, such as direct backend writes, raw SQL, or
-   * import helpers. The adopted-commit sibling
+   * import helpers. It does count the node deletions and revivals TypeGraph
+   * makes on the transaction outside those collections, each as one write of
+   * its node kind: a node graph-merge apply deletes, including the delete half
+   * of a recreation, through `applyMergePlan` (whose report carries the
+   * receipt) or `applyMergePlanInTransaction` (counted in the caller's
+   * receipt), and a fact a provenance retraction verb closes or reopens on
+   * the transaction. The adopted-commit sibling
    * {@link AdapterStore.withRecordedTransaction} also returns a
    * {@link TransactionOutcome}; only `withTransaction` (whose commit belongs
    * entirely to the caller with no flush point) produces no receipt. On
@@ -4767,31 +4778,39 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           const {
             session,
             binding: { txOperation, mutationWitness, writeTarget },
-          } = await openBoundTransactionSession(transaction, (opened, held) => {
-            const txOperation = enterOperation(opened);
-            const mutationWitness =
-              this.#engineNativeHistory && receiptRequested ?
-                createMutationWitness()
-              : undefined;
-            const writeTarget =
-              mutationWitness === undefined ? held : mutationWitness.wrap(held);
-            if (mutationWitness !== undefined) {
-              // Identity assertions run through a wholly separate seam
-              // (`withRecordedIdentityMutationTarget`) that `wrap`'s overlay
-              // does not cover — register the witness's sink against both
-              // object identities `writeTarget` can be reached through, the
-              // same binding capture uses for its own session-backed sink.
-              registerRecordedIdentityMutationWitness(
-                writeTarget,
-                held,
-                mutationWitness.sink,
-              );
-            }
-            return {
-              statements: writeTarget,
-              binding: { txOperation, mutationWitness, writeTarget },
-            };
-          });
+          } = await openBoundTransactionSession(
+            transaction,
+            (opened, held) => {
+              const txOperation = enterOperation(opened);
+              const mutationWitness =
+                this.#engineNativeHistory && receiptRequested ?
+                  createMutationWitness()
+                : undefined;
+              const writeTarget =
+                mutationWitness === undefined ? held : (
+                  mutationWitness.wrap(held)
+                );
+              if (mutationWitness !== undefined) {
+                // Identity assertions run through a wholly separate seam
+                // (`withRecordedIdentityMutationTarget`) that `wrap`'s overlay
+                // does not cover — register the witness's sink against both
+                // object identities `writeTarget` can be reached through, the
+                // same binding capture uses for its own session-backed sink.
+                registerRecordedIdentityMutationWitness(
+                  writeTarget,
+                  held,
+                  mutationWitness.sink,
+                );
+              }
+              return {
+                statements: writeTarget,
+                binding: { txOperation, mutationWitness, writeTarget },
+              };
+            },
+            // This attempt opened the transaction: on SQLite its BEGIN
+            // IMMEDIATE already holds the writer slot.
+            true,
+          );
           const runHooks = this.#createBufferedHookRunner(pending, writeTarget);
           const runBulkHooks = this.#createBufferedBulkHookRunner(
             pending,
@@ -5035,6 +5054,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * cannot silently diverge history from live state. This sealing behavior is
    * unchanged by the receipt return.
    *
+   * **When `fn` rejects, roll back the native transaction.** The rejection
+   * reaches the caller, who owns the commit. If the caller catches it and
+   * commits instead, the graph writes `fn` made before failing commit to the
+   * live rows. Under TypeGraph-owned history capture the rejection also skips
+   * the flush, so those writes are not captured: recorded-time reads such as
+   * `asOfRecorded()` keep showing the state before them, and no recorded
+   * revision is allocated for them (issue #930). A backend with engine-native
+   * recorded time records committed writes itself, independently of that
+   * flush, so there they are recorded. Either way only the native rollback
+   * discards the partial writes of the failed callback.
+   *
+   * Operation hooks run as each write completes, not at the native commit:
+   * `onOperationEnd` can report a write the native transaction then rolls
+   * back, so treat it as provisional until that commit succeeds.
+   *
    * Returns a {@link TransactionOutcome} — the adopted path is the only way to
    * get exactly-once cursors and graph writes atomically on a history store, so
    * it surfaces the same receipt `transactionWithReceipt` does: `receipt.writes`
@@ -5117,6 +5151,48 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     }
     return withAdoptedTransactionScope(externalTx, () =>
       this.#runAdoptedRecordedTransaction(adopt(externalTx), externalTx, fn),
+    );
+  }
+
+  /**
+   * The transaction runtime's write fences for a caller that reads and then
+   * decides under them — provenance's retraction transitions, its commit-time
+   * assert and a writable `holding(tx)`: on an adopted SQLite transaction the
+   * writer slot first (a snapshot another connection overtook is refused with
+   * a `TransactionConflictError` naming `operation`), then the managed write
+   * frame's schema-version fence and per-graph write lock, then
+   * `refuseWriterBetweenSnapshotAndGraphLock`: a write fence that serializes
+   * writers passes on its declaration alone, and a keyed one must show, from
+   * the lock acquisition's own evidence, that every read after it observes
+   * every earlier holder. A keyed session at a snapshot or unknown isolation
+   * is refused there, naming `operation`, before the caller's first read and
+   * with the transaction still usable.
+   *
+   * `entry` is the one operation of the context's session the fences are
+   * taken under: the lock statement and the judgment of its evidence go
+   * through the same handle.
+   */
+  async #acquireFreshSnapshotWriteFences(
+    nodeOperationContext: NodeOperationContext<G>,
+    entry: Operation,
+    operation: string,
+  ): Promise<void> {
+    const lock = await acquireManagedWriteFences(
+      nodeOperationContext,
+      entry,
+      supportReadWriterSlotRefusals(operation, this.graphId),
+    );
+    refuseWriterBetweenSnapshotAndGraphLock(
+      entry.backend,
+      this.graphId,
+      lock,
+      (isolation) =>
+        freshSnapshotUnprovableError(
+          operation,
+          this.graphId,
+          isolation,
+          "serialized-or-evidence",
+        ),
     );
   }
 
@@ -5351,23 +5427,19 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         edges: scopedEdges,
         identity,
       } = wrapSurfaceForRecorders(surface, chain);
-      // The internal delete port travels with the surface too. It runs
-      // `executeNodeDelete` against a node operation context directly and
-      // never touches `surface.nodes` — the collection wrappers just above
-      // are the only thing that increments a receipt's `writes` counters, so
-      // this delete counts toward NEITHER this scope's nor any enclosing
-      // scope's `writes`, rebound or not. What rebinding decides is
-      // `cascadedParts` alone: a scope that inherited the OUTER context's
-      // port would run the delete against the OUTER surface's node operation
-      // context, attributing its `cascadedParts` to the outer chain's
-      // recorders and leaving THIS scope's own (freshly created) receipt
-      // without them. Taken from the scope's own surface, so
-      // `cascadedParts` reaches this scope's receipt too — the same
-      // attribution-follows-the-context reasoning as the collections above,
-      // for a write those collections cannot see at all. The receipt this
-      // yields is therefore a receipt shape callers must expect: a delete
-      // reported here carries `cascadedParts` while its own `writes` stay at
-      // zero, since no collection ever counted it.
+      // The internal delete and revive ports travel with the surface too.
+      // They run `executeNodeDelete` / `executeNodeRevive` against a node
+      // operation context directly and never touch `surface.nodes`, so the
+      // collection wrappers just above cannot count them; each port counts
+      // its own node write in its surface's recorders instead
+      // (`recordPortNodeWrite`). A scope that inherited the OUTER context's
+      // ports would run them against the OUTER surface, counting the write
+      // and attributing a delete's `cascadedParts` to the outer chain's
+      // recorders only, and leaving THIS scope's own (freshly created)
+      // receipt without either. Taken from the scope's own surface, so the
+      // write and its `cascadedParts` reach this scope's receipt and every
+      // enclosing one — the same attribution-follows-the-context reasoning
+      // as the collections above, for writes those collections cannot see.
       const scopedContext = overlayPropertyDescriptors(context, {
         nodes: scopedNodes,
         edges: scopedEdges,
@@ -5734,21 +5806,29 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         runtime: {
           ...transactionRuntimeSession(session),
           backend: txBackend,
-          deleteNodeWithPolicy: (work, policy) =>
-            executeNodeDelete(
+          // The collection wrappers count every write made through
+          // `nodes`; these two ports bypass them, so they count their one
+          // node write in the same receipts themselves, on resolution, as a
+          // collection `delete` would — a rejected write counts 0.
+          deleteNodeWithPolicy: async (work, policy) => {
+            await executeNodeDelete(
               nodeOperationContext,
               work.kind,
               work.id,
               enterOperation(session),
               { policy },
-            ),
-          reviveNode: (work) =>
-            executeNodeRevive(
+            );
+            recordPortNodeWrite(receiptRecorders, work.kind);
+          },
+          reviveNode: async (work) => {
+            await executeNodeRevive(
               nodeOperationContext,
               work.kind,
               work.id,
               enterOperation(session),
-            ),
+            );
+            recordPortNodeWrite(receiptRecorders, work.kind);
+          },
           acquireWriteFences: async (refusal) => {
             if (readOnly) {
               refuseReadOnlyTransactionWrite(
@@ -5757,19 +5837,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 refusal.suggestion,
               );
             }
-            await acquireManagedWriteFences(
+            await this.#acquireFreshSnapshotWriteFences(
               nodeOperationContext,
               enterOperation(session),
+              refusal.operation,
             );
           },
-          acquireReadFences: async () => {
+          acquireReadFences: async (operation) => {
             if (readOnly) {
               await lockRecordedGraphWrite(txBackend, this.graphId);
               return;
             }
-            await acquireManagedWriteFences(
+            await this.#acquireFreshSnapshotWriteFences(
               nodeOperationContext,
               enterOperation(session),
+              operation,
             );
           },
           assertWritable: (operation) => {
@@ -6249,6 +6331,28 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     });
   }
 
+  /**
+   * Applies an evolution plan inside a caller-owned native transaction and
+   * runs `fn` against the evolved graph on that same transaction, so the
+   * schema change, the graph writes and the caller's own SQL share the
+   * caller's one commit. See the graph-extensions guide for the full contract.
+   *
+   * **When `fn` rejects, roll back the native transaction.** The rejection
+   * reaches the caller, who owns the commit. If the caller catches it and
+   * commits instead, the schema change commits, and the graph writes `fn`
+   * made before failing commit to the live rows. Under TypeGraph-owned
+   * history capture those writes are not captured, because capture flushes
+   * only when `fn` resolves: recorded-time reads such as `asOfRecorded()`
+   * keep showing the state before them, and no recorded revision is allocated
+   * for them (issue #930). A backend with engine-native recorded time records
+   * committed writes itself, independently of that flush, so there they are
+   * recorded. Either way only the native rollback discards the schema change
+   * and the partial writes of the failed callback.
+   *
+   * Operation hooks run as each write completes, not at the native commit:
+   * `onOperationEnd` can report a write the native transaction then rolls
+   * back, so treat it as provisional until that commit succeeds.
+   */
   async withEvolvedTransaction<T>(
     this: AdapterHistoryStore<G, TNativeTransaction>,
     externalTx: TNativeTransaction,
@@ -8880,6 +8984,18 @@ type TransactionWriteSurface<G extends GraphDef> = Readonly<{
   edges: GraphEdgeCollections<G>;
   identity?: IdentityFacade<G>;
 }>;
+
+/**
+ * Counts one node write made through a transaction runtime port, which the
+ * collection wrappers of {@link wrapSurfaceForRecorders} never see, in every
+ * receipt of the surface the port belongs to.
+ */
+function recordPortNodeWrite(
+  recorders: readonly TransactionReceiptRecorder[],
+  kind: string,
+): void {
+  for (const recorder of recorders) recorder.recordNode(kind, 1);
+}
 
 /**
  * Wraps a write surface's collections and identity facade once per recorder,

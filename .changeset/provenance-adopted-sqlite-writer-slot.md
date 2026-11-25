@@ -1,0 +1,5 @@
+---
+"@nicia-ai/typegraph": patch
+---
+
+`provenance.assertHolds(tx, …)` and a writable `provenance.holding(tx)` in a SQLite transaction adopted through `withRecordedTransaction()` or `withEvolvedTransaction()` now take SQLite's writer slot before their first support read. A transaction the caller began `DEFERRED` holds no writer slot until it writes, so another connection could commit after its first read fixed its snapshot, and the call judged support from that stale snapshot: `assertHolds` could pass a fact another connection had just retracted. The slot is taken with the zero-row write constrained store writes already use on an adopted SQLite transaction. When another connection has committed since the transaction's snapshot, SQLite refuses the slot (`SQLITE_BUSY_SNAPSHOT`) and the call throws `TransactionConflictError` naming it, with the driver error as `cause`, before reading anything; roll back and re-run the transaction, or begin it with `BEGIN IMMEDIATE`. A transaction TypeGraph opens already holds the slot and issues no extra statement.

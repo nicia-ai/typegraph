@@ -231,6 +231,18 @@ export type TransactionSession<
      */
     heldGraphWriteLocks: Map<string, Promise<GraphWriteLock>>;
     /**
+     * Whether `store.transaction()` opened this session's transaction for
+     * it, rather than the binding joining one it did not open. On an
+     * `engine-serialized` engine the first holds the writer slot from its
+     * `BEGIN IMMEDIATE`; a joined one may have been begun DEFERRED by its
+     * caller and hold none until it writes
+     * (`ensureAdoptedWriterSlot` in `write-transaction.ts`). A fact of this
+     * binding, not of the native transaction: a `store.transaction()` that
+     * is a savepoint of an enclosing transaction ends with its session, and
+     * the enclosing transaction's later bindings must not inherit it.
+     */
+    openedByStoreTransaction: boolean;
+    /**
      * The state every session of this session's native transaction shares
      * (`native-transaction-state.ts`): the same object for every binding
      * the engine recorded as running on that transaction, and one of the
@@ -272,7 +284,9 @@ export type EntryScope = GraphBackend | TransactionSession;
 
 /**
  * The mint where a Store opens or joins a transaction: a new session for
- * `transaction` as this binding holds it.
+ * `transaction` as this binding holds it. `openedByStoreTransaction` is
+ * `true` only where `store.transaction()` opens the transaction for this
+ * session ({@link TransactionSession.openedByStoreTransaction}).
  *
  * `Engine` names a specialised engine transaction (the schema-write
  * transaction, say) when `transaction` is the Store form of one; the
@@ -282,11 +296,15 @@ export type EntryScope = GraphBackend | TransactionSession;
  */
 export function openTransactionSession<
   Engine extends TransactionBackend = TransactionBackend,
->(transaction: StoreTransactionBackend<Engine>): TransactionSession<Engine> {
+>(
+  transaction: StoreTransactionBackend<Engine>,
+  openedByStoreTransaction = false,
+): TransactionSession<Engine> {
   /* eslint-disable no-restricted-syntax -- This module is the mint: a session over a transaction the Store opened or joined is built here and nowhere else. */
   return {
     [SESSION_TRANSACTION]: transaction,
     heldGraphWriteLocks: new Map<string, Promise<GraphWriteLock>>(),
+    openedByStoreTransaction,
     native: resolveNativeTransactionState(transaction),
   } as TransactionSession<Engine>;
   /* eslint-enable no-restricted-syntax */
@@ -340,10 +358,14 @@ export async function openBoundTransactionSession<
   ) =>
     | TransactionSessionBinding<Binding, Engine>
     | Promise<TransactionSessionBinding<Binding, Engine>>,
+  openedByStoreTransaction = false,
 ): Promise<
   Readonly<{ session: TransactionSession<Engine>; binding: Binding }>
 > {
-  const session = openTransactionSession(transaction);
+  const session = openTransactionSession(
+    transaction,
+    openedByStoreTransaction,
+  );
   const bound = await bind(session, session[SESSION_TRANSACTION]);
   session[SESSION_TRANSACTION] = bound.statements;
   return { session, binding: bound.binding };
