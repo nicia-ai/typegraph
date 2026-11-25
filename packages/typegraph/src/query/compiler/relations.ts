@@ -252,7 +252,7 @@ export function readsSelectionOrder(expression: DatabaseExpression): boolean {
 
 /**
  * Compiles an expression of a derived relation's projection or ordering.
- * When `selectionGroups` holds (a `distinct()` relation ordered by its source's
+ * When `selectionGroups` holds (a grouped or distinct relation ordered by its source's
  * selection order, see {@link compileDerived}), the selection-order column
  * reads each distinct row's best occurrence, `MIN` of its rank.
  */
@@ -308,20 +308,26 @@ function compileDerived(
   dialect: DatabaseExpressionCompilerContext["dialect"],
   orderedAggregates: boolean,
 ): CompiledSelectSql {
+  // A relation whose rows are groups (`distinct()` or `groupBy()`) and that
+  // is ordered by its source's selection order sorts each group by its best
+  // occurrence, as a search statement sorts a group by its best member: it
+  // reads the smallest rank of each group. A distinct relation groups by
+  // every other projected value, which is what DISTINCT compares (its other
+  // ordering terms read projected columns, and a grouped relation's projected
+  // values are determined by its grouping, so grouping by them instead
+  // selects the same distinct rows).
+  const selectionGroups =
+    (relation.distinct || (relation.groupBy?.length ?? 0) > 0) &&
+    relation.orderBy.some((order) => readsSelectionOrder(order.expression));
   validateRelationAggregation(
-    relation.projection.map(({ expression }) => expression),
+    relation.projection
+      .map(({ expression }) => expression)
+      .filter(
+        (expression) => !(selectionGroups && readsSelectionOrder(expression)),
+      ),
     relation.groupBy,
   );
   const source = compileRelationPart(relation.source, dialect, "wrapped");
-  // A distinct relation ordered by its source's selection order sorts each
-  // distinct row by its best occurrence, as a search statement sorts a group
-  // by its best member: it groups by every other projected value (what
-  // DISTINCT compares; the other ordering terms read projected columns) and
-  // reads the smallest rank of each group.
-  const selectionGroups =
-    relation.distinct &&
-    (relation.groupBy === undefined || relation.groupBy.length === 0) &&
-    relation.orderBy.some((order) => readsSelectionOrder(order.expression));
   const projection = sql.join(
     relation.projection.map(
       ({ column, expression }) =>
@@ -334,7 +340,7 @@ function compileDerived(
       sql.empty()
     : sql` WHERE ${compileExpression(relation.predicate, dialect, false, orderedAggregates)}`;
   const groupExpressions =
-    selectionGroups ?
+    selectionGroups && relation.distinct ?
       relation.projection
         .map(({ expression }) => expression)
         .filter((expression) => !readsSelectionOrder(expression))

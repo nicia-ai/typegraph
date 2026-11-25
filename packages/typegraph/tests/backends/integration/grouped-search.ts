@@ -564,7 +564,7 @@ export function registerGroupedSearchIntegrationTests(
         }
       });
 
-      it(`keeps the relevance order of a ${kind} relation through distinct(), paging, appended ordering and set operations`, async (ctx) => {
+      it(`keeps the relevance order of a ${kind} relation through distinct(), groupBy(), paging, appended ordering and set operations`, async (ctx) => {
         const store = storeWith(context, ctx, capabilitiesOf(kind));
         await seedMixedScores(store);
 
@@ -584,6 +584,9 @@ export function registerGroupedSearchIntegrationTests(
           distinct: await titles().distinct().execute(),
           distinctFirst: await titles().distinct().first(),
           distinctCount: await titles().distinct().count(),
+          grouped: await titles()
+            .groupBy((columns) => [columns.title])
+            .execute(),
           page: await titles()
             .distinct()
             .orderBy((columns) => columns.title)
@@ -596,6 +599,7 @@ export function registerGroupedSearchIntegrationTests(
           distinct: byRelevance,
           distinctFirst: byRelevance[0],
           distinctCount: 3,
+          grouped: byRelevance,
           page: byRelevance.slice(0, 2),
           appended: [
             { title: STRONG_TEXT },

@@ -93,8 +93,9 @@ including distinctness and its range; `exists()` checks whether it has a row. Ne
 A relation built from a full-text, vector or hybrid query keeps the query's relevance order: its
 rows come in the order `execute()` returns them, and the query's limit and offset select the same
 rows. An `orderBy()` added to such a relation breaks ties in relevance, as the same term in the
-query's own `orderBy()` would. `distinct()` orders each distinct row by its most relevant
-occurrence, and `page()` and `stream()` apply that order before the projected columns.
+query's own `orderBy()` would. `distinct()` and `groupBy()` order each distinct row or group by
+its most relevant occurrence, and `page()` and `stream()` apply that order before the projected
+columns.
 
 <a id="ordered-scalar-collections"></a>
 
