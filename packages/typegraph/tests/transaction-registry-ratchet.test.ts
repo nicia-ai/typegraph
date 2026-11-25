@@ -131,6 +131,11 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
     reason:
       "Detects nested adopted scopes on the caller's handle before any adoption exists; on better-sqlite3 the handle is the long-lived database, not a per-BEGIN object.",
   },
+  "store/native-transaction-state.ts#nativeTransactionStates": {
+    keyedBy: "native-handle",
+    reason:
+      "The state every session of one native transaction shares, keyed by the engine's per-bind record of that transaction (a per-BEGIN driver transaction object, or the engine's per-transaction token on a connection-level handle; never the connection). It exists because each adoption binds a new transaction backend, so no binding-keyed registry can join the bindings of one transaction. It does not absorb `ACTIVE_ADOPTED_TRANSACTIONS`: that registry is consulted on the caller's raw handle before any adoption, and on a caller-opened better-sqlite3 transaction the engine records nothing to join on.",
+  },
   // --- keyed by a transaction callback's runtime ------------------------
   "store/runtime-port.ts#transactionStoreOwners": {
     keyedBy: "callback-context",
