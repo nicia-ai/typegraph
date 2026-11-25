@@ -341,8 +341,10 @@ is refused on a conflict). A partial transition can therefore leave a fact close
 still stands (a `retractMany` that closed its facts and flagged only some of
 its sources), or a source flag cleared while its fact is still closed (an
 `unRetract` that cannot reopen a fact because a live fact now holds that
-fact's unique key), and a commit keeps that state. Running the same verb again
-completes the transition. To discard a partial transition instead, let the
+fact's unique key), and a commit keeps that state. A later verb that reaches
+only a required part of a whole left closed this way leaves the part closed as
+well, its support standing, until a transition reopens the whole. Running the
+same verb again completes the transition. To discard a partial transition instead, let the
 error leave the callback so the whole transaction rolls back.
 
 In `withRecordedTransaction()` and `withEvolvedTransaction()`, an error that
@@ -884,23 +886,29 @@ reads in its own transaction.
   for the graph lock if yours already holds it.
 - Reacquiring a lock the transaction already holds reuses it.
 
-Three limits apply to `assertHolds(tx)` and to `holding(tx)` in a read-write
-transaction. Each is tracked for a fix:
+Two conditions on `assertHolds(tx)` and on `holding(tx)` in a read-write
+transaction are refused rather than answered from a stale snapshot, and two
+limits apply:
 
-- **A snapshot isolation level on PostgreSQL with engine-native recorded
-  time.** Holding the graph lock excludes concurrent writers but does not make
-  a `REPEATABLE READ` or `SERIALIZABLE` transaction see what an earlier lock
-  holder committed after its snapshot. A transaction whose snapshot predates
-  another session's committed `retract` can therefore assert or read against
-  support that is already gone. Run these calls at read committed there.
-  TypeGraph-owned history capture already refuses a snapshot isolation level
-  when the transaction opens, so it is not affected.
+- **A snapshot isolation level on PostgreSQL.** Holding the graph lock excludes
+  concurrent writers but does not make a `REPEATABLE READ` or `SERIALIZABLE`
+  transaction see what an earlier lock holder committed after its snapshot. On
+  a keyed write fence the call therefore requires the lock statement to have
+  observed read committed on the transaction's session, and refuses anything
+  else with `UnsupportedBackendCapabilityError`
+  (`observedReadCommittedIsolation`) before its first support read, as the
+  retraction verbs do (see the freshness table above). TypeGraph-owned history
+  capture already refuses a snapshot isolation level when the transaction
+  opens.
 - **An adopted SQLite transaction begun as deferred.** A transaction passed to
   `withTransaction`, `withRecordedTransaction` or `withEvolvedTransaction`
   that has only read so far holds no writer slot, and in WAL mode another
-  connection can commit after its snapshot. Begin the native transaction with
-  `BEGIN IMMEDIATE`. A transaction `store.transaction()` opens takes the
-  writer slot itself.
+  connection can commit after its snapshot. The call takes the writer slot
+  before its first support read; when another connection has already committed
+  since the snapshot, SQLite refuses the slot and the call throws
+  `TransactionConflictError`: roll back and re-run, or begin the native
+  transaction with `BEGIN IMMEDIATE`. A transaction `store.transaction()`
+  opens holds the writer slot from its start.
 - **Lock order with engine-native recorded time on PostgreSQL.** There an
   ordinary write takes row locks without the graph lock, so "before or after
   your first write" above holds only under TypeGraph-owned capture. With

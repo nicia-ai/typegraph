@@ -182,6 +182,41 @@ async function closeFacts<G extends GraphDef>(
 }
 
 /**
+ * The reopen candidates without every required part whose fact whole stays
+ * closed after this pass: a whole that is a tombstoned fact row and is not
+ * itself reopened here, at any depth up the part's chain.
+ *
+ * Support judges a required part by its fact whole's SUPPORT, not its row, so
+ * a whole can be supported and still closed: a caller that caught a failure
+ * between a verb's source flip and the whole's reopen, and committed, keeps
+ * exactly that prefix. A later transition that reaches only the part (through
+ * a source of the part's own) must not reopen it there, or a required part
+ * goes live under a closed whole. The part stays closed, its support standing,
+ * until a transition reopens the whole, which reopens the part with it.
+ * A whole that is not a fact is judged live by support itself.
+ */
+function withoutPartsOfClosedWholes<T extends NodeRow>(
+  snapshot: SupportSnapshot,
+  dependencies: CompositionExistenceDependencies,
+  reopening: ReadonlyMap<string, T>,
+): ReadonlyMap<string, T> {
+  const wholeOpens = (partKey: string, visited: Set<string>): boolean => {
+    if (!dependencies.requiredPartFactKeys.has(partKey)) return true;
+    const wholeKey = dependencies.wholeKeyByPartKey.get(partKey);
+    if (wholeKey === undefined || visited.has(wholeKey)) return true;
+    const whole = snapshot.facts.get(wholeKey);
+    if (whole === undefined || isLiveNodeRow(whole)) return true;
+    visited.add(wholeKey);
+    return reopening.has(wholeKey) && wholeOpens(wholeKey, visited);
+  };
+  const kept = new Map<string, T>();
+  for (const [key, row] of reopening) {
+    if (wholeOpens(key, new Set([key]))) kept.set(key, row);
+  }
+  return kept;
+}
+
+/**
  * The reopen half ({@link closeFacts} states what both halves share): revives
  * every affected fact that is supported in the post-transition snapshot and
  * still tombstoned. It runs after the close pass, because a reopen re-checks
@@ -192,6 +227,8 @@ async function closeFacts<G extends GraphDef>(
  * Every whole reopens before its required parts: the exact reverse of the
  * close pass's leaf-first order, so a caught failure between two reopens
  * leaves a part closed under a live whole, never live under a closed one.
+ * For the same reason a required part whose whole stays closed after this
+ * pass is not reopened at all ({@link withoutPartsOfClosedWholes}).
  */
 async function reopenFacts<G extends GraphDef>(
   tx: TransactionContext<G>,
@@ -199,11 +236,15 @@ async function reopenFacts<G extends GraphDef>(
   snapshot: SupportSnapshot,
   affected: ReadonlySet<string>,
 ): Promise<void> {
-  const reopening = selectAffectedFactRows(
+  const reopening = withoutPartsOfClosedWholes(
     snapshot,
-    affected,
-    (key) => snapshot.supportedFactKeys.has(key),
-    isTombstonedNodeRow,
+    dependencies,
+    selectAffectedFactRows(
+      snapshot,
+      affected,
+      (key) => snapshot.supportedFactKeys.has(key),
+      isTombstonedNodeRow,
+    ),
   );
   const wholesFirst = cascadeDeletionOrder(
     compositionDepthRounds(dependencies, reopening),

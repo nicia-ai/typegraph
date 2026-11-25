@@ -2056,7 +2056,8 @@ export function registerProvenanceIntegrationTests(
     // Load-bearing: each refusal precedes every statement on the foreign
     // transaction. Revert check: move `resolveScope(tx, request.operation)`
     // in `runTransition` (`src/provenance/transition.ts`) after a read of
-    // the source row on `transactionBackend(tx)` and `issued` records it.
+    // the source row through `enterTransactionOperation(tx)` and `issued`
+    // records it.
     it("refuses another store's or graph's transaction and one kept past its callback, before any statement", async () => {
       const recorded = recordTransactionCalls(context.getBackend());
       const [store] = await createAdapterStoreWithSchema(
@@ -2139,10 +2140,19 @@ export function registerProvenanceIntegrationTests(
     // element's index where the transaction goes. Revert check: drop the
     // `isTransactionContext` refusal from the capability's transaction
     // resolver and these calls fail with the generic
-    // PROVENANCE_TRANSACTION_NOT_OWNED instead.
+    // PROVENANCE_TRANSACTION_NOT_OWNED instead. Every transaction the store
+    // opens is recorded, so a refusal reached only after a statement (say,
+    // `runTransition` taking the write locks in a transaction of its own
+    // before it resolves the caller's) leaves calls in `issued`.
     it("refuses a second argument that is not a transaction context, naming it, before any statement", async () => {
-      const store = await createHistoryStore(context);
+      const recorded = recordTransactionCalls(context.getBackend());
+      const [store] = await createAdapterStoreWithSchema(
+        provenanceGraph,
+        recorded.backend,
+        { history: true },
+      );
       const provenance = await seedCallerWorld(store);
+      const refusalsStart = recorded.calls.length;
       const single = [dropSource];
       const lists = [[dropSource]];
 
@@ -2240,13 +2250,17 @@ export function registerProvenanceIntegrationTests(
         "the number 0",
         "number",
       );
+      expect(recorded.calls.slice(refusalsStart), "issued").toEqual([]);
       await expect(sourceFlag(store, dropSource.id)).resolves.toBe(false);
 
       // The documented replacement: a function that passes the source alone.
+      // Control: the recorder sees the transaction it opens.
+      const replacementStart = recorded.calls.length;
       const reports = await Promise.all(
         single.map((source) => provenance.retract(source)),
       );
       expect(reports[0]?.died).toEqual([dropFact]);
+      expect(recorded.calls.length).toBeGreaterThan(replacementStart);
     });
 
     // Load-bearing: the write-access refusal precedes every statement.
@@ -2863,6 +2877,76 @@ export function registerProvenanceIntegrationTests(
           verb.believedAfter,
         );
         expect(await liveFactIds(store)).toEqual(verb.believedAfter);
+        expect(await store.verifyConstraintFences()).toEqual([]);
+      },
+    );
+
+    // A caught failure can leave a whole closed while the support it needs
+    // stands (the safe prefix above). A later verb that reaches only a
+    // required part of that whole, through a source of the part's own, must
+    // not reopen the part while its whole stays closed: that would be a
+    // required part live under a closed whole. The part stays closed until
+    // the whole reopens; re-running the interrupted verb reopens both.
+    // Revert check: drop the closed-whole filter from `reopenFacts`
+    // (`src/provenance/transition.ts`) and `unRetract(sourceOther)` reopens
+    // `part-one` under the closed `whole-one`, which
+    // `verifyConstraintFences()` reports as `compositionExistence`.
+    it.each(KIND_ORDERS)(
+      "($order) a later verb reaching only a required part leaves it closed while a caught failure keeps its whole closed, and re-running the interrupted verb reopens both",
+      async ({ factKinds }) => {
+        const armed = { on: false, started: 0 };
+        const [store] = await createAdapterStoreWithSchema(
+          compositionGraph,
+          context.getBackend(),
+          {
+            history: true,
+            hooks: {
+              onOperationStart: () => {
+                if (!armed.on) return;
+                armed.started += 1;
+                // Write 0 restores `sourceOne`; write 1 reopens its whole.
+                if (armed.started === 2) throw new Error(REJECTED_WRITE);
+              },
+            },
+          },
+        );
+        await seedTwoSourceWorld(store);
+        // `part-one` also holds through `sourceOther`, on its own.
+        await store.nodes.Justification.create(
+          { label: "part-one-other-j" },
+          { id: "part-one-other-j" },
+        );
+        await store.edges.premiseOf.create(
+          sourceOther,
+          { kind: "Justification", id: "part-one-other-j" },
+          {},
+        );
+        await store.edges.derives.create(
+          { kind: "Justification", id: "part-one-other-j" },
+          section("part-one"),
+          {},
+        );
+        const provenance = capabilityFor(store, factKinds);
+        await provenance.retractMany([sourceOne, sourceOther]);
+
+        const caught = await store.transaction(async (tx) => {
+          armed.on = true;
+          try {
+            return await captureRejection(provenance.unRetract(sourceOne, tx));
+          } finally {
+            armed.on = false;
+          }
+        });
+        expect(String(caught)).toContain(REJECTED_WRITE);
+        expect(await liveFactIds(store)).not.toContain("whole-one");
+
+        await provenance.unRetract(sourceOther);
+        const live = await liveFactIds(store);
+        expect(live).not.toContain("part-one");
+        expect(await store.verifyConstraintFences()).toEqual([]);
+
+        await provenance.unRetract(sourceOne);
+        expect(await liveFactIds(store)).toEqual(ALL_FACTS);
         expect(await store.verifyConstraintFences()).toEqual([]);
       },
     );
