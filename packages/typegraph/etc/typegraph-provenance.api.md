@@ -4638,6 +4638,14 @@ type MisassignedEdgeEndpointRow = Readonly<{
     toId: string;
 }>;
 
+// @public (undocumented)
+const NATIVE_TRANSACTION_STATE: unique symbol;
+
+// @public
+type NativeTransactionState = Readonly<{
+    [NATIVE_TRANSACTION_STATE]: true;
+}>;
+
 // @public
 type NeighborNodeOrderField<G extends GraphDef> = {
     [K in keyof G["nodes"] & string]: Exclude<keyof Node<G["nodes"][K]["type"]>, "id" | "kind" | "meta"> & string;
@@ -6360,10 +6368,10 @@ type RestoredRecordedInstant = string & {
 
 // @public (undocumented)
 export type RetractionCapability<G extends GraphDef = GraphDef, SourceKind extends NodeKind<G> = NodeKind<G>, FactKind extends NodeKind<G> = NodeKind<G>, JustificationKind extends NodeKind<G> = NodeKind<G>> = Readonly<{
-    retract: (source: ProvenanceSourceInput<G, SourceKind>) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
-    retractMany: (sources: readonly ProvenanceSourceInput<G, SourceKind>[]) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
-    unRetract: (source: ProvenanceSourceInput<G, SourceKind>) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
-    unRetractMany: (sources: readonly ProvenanceSourceInput<G, SourceKind>[]) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
+    retract: (source: ProvenanceSourceInput<G, SourceKind>, tx?: TransactionContext<G>) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
+    retractMany: (sources: readonly ProvenanceSourceInput<G, SourceKind>[], tx?: TransactionContext<G>) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
+    unRetract: (source: ProvenanceSourceInput<G, SourceKind>, tx?: TransactionContext<G>) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
+    unRetractMany: (sources: readonly ProvenanceSourceInput<G, SourceKind>[], tx?: TransactionContext<G>) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
     holding: (tx?: TransactionContext<G>) => Promise<readonly ProvenanceFactRef<G, FactKind>[]>;
     assertHolds: (tx: TransactionContext<G>, facts: readonly ProvenanceFactInput<G, FactKind>[]) => Promise<readonly SurvivedVia<G, FactKind, JustificationKind>[]>;
 }>;
@@ -7822,7 +7830,7 @@ type TransactionRuntime = Readonly<{
         operation: string;
         suggestion: string;
     }>) => Promise<void>;
-    acquireReadFences: () => Promise<void>;
+    acquireReadFences: (operation: string) => Promise<void>;
     assertWritable: (operation: string) => void;
 }>;
 
@@ -7831,6 +7839,8 @@ type TransactionSession<Engine extends TransactionBackend = TransactionBackend> 
     [SESSION_TRANSACTION]: OperationScoped<Engine>;
 } & Readonly<{
     heldGraphWriteLocks: Map<string, Promise<GraphWriteLock>>;
+    openedByStoreTransaction: boolean;
+    native: NativeTransactionState;
 }>>;
 
 // @public (undocumented)
