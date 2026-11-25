@@ -218,6 +218,7 @@ import {
   unsupportedResolvedMutationSet,
 } from "../resolved-mutation-set";
 import { type EdgeRow, rowToEdge } from "../row-mappers";
+import { reviveStoredDateProps } from "../stored-date-revival";
 import {
   type CompositionNodeRef,
   type CreateEdgeInput,
@@ -2651,9 +2652,10 @@ function computeEdgeUpdate<G extends GraphDef>(
   inputProps: Partial<Record<string, unknown>>,
 ): Record<string, unknown> {
   const registration = getEdgeRegistration(ctx.graph, kind);
+  const schema = registration.type.schema;
   const validatedProps = validateEdgeProps(
-    registration.type.schema,
-    { ...existingProps, ...inputProps },
+    schema,
+    { ...reviveStoredDateProps(schema, existingProps), ...inputProps },
     { kind, operation: "update", id },
   );
   const identityRefusal = edgeMatchIdentityUpdateRefusal({

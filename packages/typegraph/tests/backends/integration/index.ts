@@ -138,6 +138,7 @@ export { registerSharedNativeTransactionTests } from "./shared-native-transactio
 export { registerSqlIdentifierIdentityIntegrationTests } from "./sql-identifier-identity";
 export { registerStoreAnalysisIntegrationTests } from "./store-analysis";
 export { registerStoreOperationIntegrationTests } from "./store-operation";
+export { registerStoredDateRevalidationIntegrationTests } from "./stored-date-revalidation";
 export { registerStoreViewIntegrationTests } from "./store-view";
 export { registerSubgraphIntegrationTests } from "./subgraph";
 export { registerSubgraphSharedIdIntegrationTests } from "./subgraph-shared-ids";
