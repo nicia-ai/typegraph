@@ -325,9 +325,10 @@ including ones naming an `aggregate()` key, break ties between groups, and a
 hybrid group still tied after them falls back to its smallest node id in byte
 order on every backend. `.limit()` counts groups. Every terminal selects the same
 groups in the same order: `execute()`, `first()`, `executeOn()`, `prepare()`,
-`count()`, `exists()`, `store.batchOnce()` and `asRelation()`. On a relation
+`count()`, `exists()`, `store.batchOnce()` and `asRelation()`; groups tied on
+every ordering term can come in either order on any of them. On a relation
 built from a search query, an `orderBy()` added after `asRelation()` breaks
-ties in relevance, and `distinct()` orders each distinct row by its most
+the ties the query's own ordering leaves, and `distinct()` orders each distinct row by its most
 relevant occurrence.
 
 ```typescript

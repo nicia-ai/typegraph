@@ -578,6 +578,13 @@ export function registerGroupedSearchIntegrationTests(
           { title: WEAK_TEXT },
         ];
         const union = await titles().union(titles()).execute();
+        // `peak` holds the best and the worst match, `steady` the three
+        // between them: by best occurrence `peak` leads, by worst `steady`.
+        const categories = () =>
+          searchArticles(store, kind)
+            .project((expressions) => ({ category: expressions.a.category }))
+            .asRelation();
+        const byBestOccurrence = [{ category: "peak" }, { category: "steady" }];
         // Alphabetically the weak text comes first, so an order that lost
         // relevance leads with it.
         expect({
@@ -586,6 +593,10 @@ export function registerGroupedSearchIntegrationTests(
           distinctCount: await titles().distinct().count(),
           grouped: await titles()
             .groupBy((columns) => [columns.title])
+            .execute(),
+          distinctCategories: await categories().distinct().execute(),
+          groupedCategories: await categories()
+            .groupBy((columns) => [columns.category])
             .execute(),
           page: await titles()
             .distinct()
@@ -600,6 +611,8 @@ export function registerGroupedSearchIntegrationTests(
           distinctFirst: byRelevance[0],
           distinctCount: 3,
           grouped: byRelevance,
+          distinctCategories: byBestOccurrence,
+          groupedCategories: byBestOccurrence,
           page: byRelevance.slice(0, 2),
           appended: [
             { title: STRONG_TEXT },
