@@ -351,7 +351,7 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
     ["<graph1>"]
 sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" = ? AND "typegraph_edges"."kind" = ? RETURNING "typegraph_edges"."id"
     ["<graph1>","link-live","link"]
-sql DELETE FROM "typegraph_edge_claims" WHERE "typegraph_edge_claims"."graph_id" = ? AND "typegraph_edge_claims"."edge_id" IN (?)
+sql DELETE FROM "typegraph_edge_claims" WHERE ( "graph_id", "axis", "key" ) IN ( SELECT "typegraph_edge_claims"."graph_id", "typegraph_edge_claims"."axis", "typegraph_edge_claims"."key" FROM "typegraph_edge_claims" WHERE "typegraph_edge_claims"."graph_id" = ? AND "typegraph_edge_claims"."edge_id" IN (?) ORDER BY "typegraph_edge_claims"."axis", "typegraph_edge_claims"."key" )
     ["<graph1>","link-live"]
 libsql commit
 hook end delete edge:link link-live unknown
@@ -366,7 +366,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "
 sql SAVEPOINT typegraph_frame_writes
 sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND "typegraph_edges"."id" IN (?, ?) AND "typegraph_edges"."kind" = ? RETURNING "typegraph_edges"."id"
     ["<graph1>","link-live","link-dead","link"]
-sql DELETE FROM "typegraph_edge_claims" WHERE "typegraph_edge_claims"."graph_id" = ? AND "typegraph_edge_claims"."edge_id" IN (?, ?)
+sql DELETE FROM "typegraph_edge_claims" WHERE ( "graph_id", "axis", "key" ) IN ( SELECT "typegraph_edge_claims"."graph_id", "typegraph_edge_claims"."axis", "typegraph_edge_claims"."key" FROM "typegraph_edge_claims" WHERE "typegraph_edge_claims"."graph_id" = ? AND "typegraph_edge_claims"."edge_id" IN (?, ?) ORDER BY "typegraph_edge_claims"."axis", "typegraph_edge_claims"."key" )
     ["<graph1>","link-live","link-dead"]
 sql RELEASE SAVEPOINT typegraph_frame_writes
 libsql commit
