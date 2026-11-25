@@ -42,7 +42,10 @@ import {
   type VectorSearchParams,
   type VectorSearchResult,
 } from "../../../types";
-import type { ContributionMaterializer } from "../../contribution-materializations";
+import {
+  type ContributionMaterializer,
+  transactionContributionAdministrationError,
+} from "../../contribution-materializations";
 import type { ExecutableSql } from "../../execution/types";
 import type { CommonOperationStrategy } from "../../operations/strategy";
 import {
@@ -63,7 +66,17 @@ type VectorSearchRawRow = Readonly<{ node_id: string; score: number }>;
  * immediately without touching any of them — mirroring a fulltext-less
  * backend.
  */
-export type CreateVectorMembersDeps =
+export type CreateVectorMembersDeps = Readonly<{
+  /**
+   * Whether these members belong to a transaction-scoped backend. Vector
+   * index creation provisions storage (table, durable marker, ANN index), a
+   * privileged root operation, so a transaction-scoped `createVectorIndex`
+   * refuses before any statement — while its transaction is open and after
+   * it ended alike.
+   */
+  transactionScoped: boolean;
+}> &
+  (
   | Readonly<{ vectorStrategy: undefined }>
   | Readonly<{
       vectorStrategy: VectorStrategy;
@@ -98,7 +111,8 @@ export type CreateVectorMembersDeps =
       runIndexBuild: (
         params: Readonly<{ slot: VectorSlot; indexStatement: ExecutableSql }>,
       ) => Promise<void>;
-    }>;
+    }>
+  );
 
 export type VectorMembers = Readonly<{
   upsertEmbedding?: (params: UpsertEmbeddingParams) => Promise<void>;
@@ -312,6 +326,9 @@ export function createVectorMembers(
     },
 
     async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
+      if (deps.transactionScoped) {
+        throw transactionContributionAdministrationError("createVectorIndex");
+      }
       if (deps.vectorStrategy === undefined) return;
       const { vectorStrategy, contributionMaterializer, runIndexBuild } =
         deps;

@@ -2434,11 +2434,23 @@ try {
 Thrown when a statement reaches a transaction-scoped backend after its
 transaction boundary has already returned.
 
-A transaction pins one database connection, which carries one statement at a
-time. When `store.transaction(...)` resolves or rejects, the driver emits
-`COMMIT` or `ROLLBACK` on that connection and hands it back to the pool. Any
-statement still in flight then has nowhere safe to go — it would execute inside
-somebody else's transaction — so TypeGraph refuses it.
+A transaction runs on one database connection. When `store.transaction(...)`
+resolves or rejects, `COMMIT` or `ROLLBACK` runs on that connection: on
+PostgreSQL the pool then hands it to somebody else, and on SQLite the next
+transaction may open on it at once. A statement arriving afterwards would
+execute outside the transaction that issued it — in autocommit, or inside
+somebody else's transaction. So before the boundary TypeGraph lets every
+statement already running finish, and from then on refuses every statement
+issued through that transaction with this error. This holds on every bundled
+driver, and covers a prepared query or a `stream()` iterator kept past the
+callback, a `backend.trustedImport()` session kept past its import, and the
+contribution-marker reads a transaction backend's vector and fulltext
+operations make, as well as an orphaned write.
+
+A transaction backend's `createVectorIndex()` is refused outright, open or
+ended, with a [`ConfigurationError`](#configurationerror) whose
+`details.capability` is `"contributionAdministration"`: creating a vector index
+provisions storage, which only the root backend does.
 
 The usual source is a callback that lets work escape it. `Promise.all` rejects
 on its first rejection while its siblings keep running:

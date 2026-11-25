@@ -295,6 +295,7 @@ import {
 import { createPostgresTransactionSession } from "./execution/postgres-transaction-session";
 import { createSessionAtomicBatchAdapter } from "./execution/session-atomic-batch";
 import { createSerialExecutionAdapter } from "./execution/statement-queue";
+import type { CompiledSqlQuery } from "./execution/types";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
 import { postgresInstantiateGraphTemplateStatement } from "./graph-template-sql";
 import {
@@ -2589,9 +2590,10 @@ function buildPostgresEngineProfileInternal(
     ): Readonly<{
       backend: TransactionBackend;
       privilegedBackend: InternalOperationBackend;
+      executeCompiled: TransactionCompiledExecution | undefined;
       drainAndClose: () => Promise<void>;
     }> {
-      const { backend, contributionReadGate, drainAndClose } =
+      const { backend, contributionReadGate, executeCompiled, drainAndClose } =
         createTransactionBackend({
           db: tx,
           connection,
@@ -2623,8 +2625,103 @@ function buildPostgresEngineProfileInternal(
       return {
         backend: gatedBackend,
         privilegedBackend: backend,
+        executeCompiled,
         drainAndClose,
       };
+    }
+
+    /**
+     * Opens a transaction TypeGraph owns and runs `fn` on its backend, its
+     * native handle, and the pinned-client compiled execution behind the
+     * backend's view (absent when the driver exposes none).
+     * `transactionWithNative` is this minus that execution; `trustedImport`
+     * issues its batches through it, so they queue and are admitted by the
+     * same view the backend's own statements are, and are refused once the
+     * transaction ends.
+     */
+    async function openTransaction<T>(
+      fn: (
+        tx: TransactionBackend,
+        sql: AnyPgTransaction,
+        executeCompiled: TransactionCompiledExecution | undefined,
+      ) => Promise<T>,
+      options?: InternalTransactionOptions,
+    ): Promise<T> {
+        // #134/#135: NO DDL or ensure here. The tx-scoped backend's
+        // fulltext-touching methods assert the durable contribution
+        // marker (one cached SELECT — never DDL) at point of use, exactly
+        // like the non-tx wrappers. A transaction that never touches
+        // fulltext never asserts; one that does runs pure DML against an
+        // already-materialized table, with the "no DDL in the business
+        // transaction" guarantee backed by the durable fact.
+        const temporaryWrites =
+          options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
+        if (temporaryWrites && options.accessMode !== "read_only") {
+          throw new ConfigurationError(
+            "Temporary-write transactions must be semantically read-only.",
+            { dialect: "postgres" },
+          );
+        }
+        const txConfig =
+          (
+            options?.isolationLevel !== undefined ||
+            options?.accessMode !== undefined ||
+            temporaryWrites
+          ) ?
+            {
+              ...(options.isolationLevel === undefined ?
+                {}
+              : {
+                  isolationLevel: options.isolationLevel.replace("_", " ") as
+                    | "read uncommitted"
+                    | "read committed"
+                    | "repeatable read"
+                    | "serializable",
+                }),
+              ...(options.accessMode === undefined && !temporaryWrites ?
+                {}
+              : {
+                  accessMode:
+                    temporaryWrites ?
+                      ("read write" as const)
+                    : (requireDefined(options.accessMode).replace(
+                        "_",
+                        " ",
+                      ) as "read only" | "read write"),
+                }),
+            }
+          : undefined;
+
+        return openCommittingTransaction(
+          txConfig,
+          async (tx) => {
+            const {
+              backend: txBackend,
+              executeCompiled,
+              drainAndClose,
+            } = bindTransactionBackend(
+              tx,
+              isFirstParty,
+              nestedTransactionConnection,
+            );
+            try {
+              return await fn(
+                markSchemaFencedInsertEligibleUnderFence(txBackend, fencePlan),
+                nativeHandleForCallback(tx, options),
+                executeCompiled,
+              );
+            } finally {
+              // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
+              // instant the callback settles, and those control statements do not
+              // travel through the backend's statement queue. Wait for whatever is
+              // on the wire, and refuse anything the callback left running — a
+              // `Promise.all` that rejects orphans its siblings, whose statements
+              // would otherwise overlap the ROLLBACK and then land on a connection
+              // the pool had already handed to somebody else.
+              await drainAndClose();
+            }
+          },
+        );
     }
 
     return {
@@ -2643,80 +2740,7 @@ function buildPostgresEngineProfileInternal(
           fn: (tx: TransactionBackend, sql: AnyPgTransaction) => Promise<T>,
           options?: InternalTransactionOptions,
         ): Promise<T> {
-          // #134/#135: NO DDL or ensure here. The tx-scoped backend's
-          // fulltext-touching methods assert the durable contribution
-          // marker (one cached SELECT — never DDL) at point of use, exactly
-          // like the non-tx wrappers. A transaction that never touches
-          // fulltext never asserts; one that does runs pure DML against an
-          // already-materialized table, with the "no DDL in the business
-          // transaction" guarantee backed by the durable fact.
-          const temporaryWrites =
-            options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
-          if (temporaryWrites && options.accessMode !== "read_only") {
-            throw new ConfigurationError(
-              "Temporary-write transactions must be semantically read-only.",
-              { dialect: "postgres" },
-            );
-          }
-          const txConfig =
-            (
-              options?.isolationLevel !== undefined ||
-              options?.accessMode !== undefined ||
-              temporaryWrites
-            ) ?
-              {
-                ...(options.isolationLevel === undefined ?
-                  {}
-                : {
-                    isolationLevel: options.isolationLevel.replace("_", " ") as
-                      | "read uncommitted"
-                      | "read committed"
-                      | "repeatable read"
-                      | "serializable",
-                  }),
-                ...(options.accessMode === undefined && !temporaryWrites ?
-                  {}
-                : {
-                    accessMode:
-                      temporaryWrites ?
-                        ("read write" as const)
-                      : (requireDefined(options.accessMode).replace(
-                          "_",
-                          " ",
-                        ) as "read only" | "read write"),
-                  }),
-              }
-            : undefined;
-
-          return openCommittingTransaction(
-            txConfig,
-            async (tx) => {
-              const { backend: txBackend, drainAndClose } =
-                bindTransactionBackend(
-                  tx,
-                  isFirstParty,
-                  nestedTransactionConnection,
-                );
-              try {
-                return await fn(
-                  markSchemaFencedInsertEligibleUnderFence(
-                    txBackend,
-                    fencePlan,
-                  ),
-                  nativeHandleForCallback(tx, options),
-                );
-              } finally {
-                // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
-                // instant the callback settles, and those control statements do not
-                // travel through the backend's statement queue. Wait for whatever is
-                // on the wire, and refuse anything the callback left running — a
-                // `Promise.all` that rejects orphans its siblings, whose statements
-                // would otherwise overlap the ROLLBACK and then land on a connection
-                // the pool had already handed to somebody else.
-                await drainAndClose();
-              }
-            },
-          );
+          return openTransaction((tx, native) => fn(tx, native), options);
         },
 
         adoptTransaction(externalTx: AnyPgTransaction): TransactionBackend {
@@ -3064,18 +3088,13 @@ function buildPostgresEngineProfileInternal(
             fn: (session: TrustedImportSession) => Promise<T>,
             options_?: TrustedImportOptions,
           ): Promise<T> {
-            return ctx.self().transactionWithNative(
-              async (tx, rawSql) => {
+            return openTransaction(
+              async (tx, _native, executeCompiled) => {
                 if (options_?.schemaWrite !== undefined) {
                   await requireDefined(tx.lockSchemaVersionForWrite)({
                     ...options_.schemaWrite,
                   });
                 }
-                const trustedExecutionAdapter = createPostgresExecutionAdapter(
-                  rawSql,
-                  { ...adapterOptions, useTransactionClient: true },
-                );
-                const executeCompiled = trustedExecutionAdapter.executeCompiled;
                 if (executeCompiled === undefined) {
                   throw new ConfigurationError(
                     "Trusted import could not bind raw execution to the PostgreSQL transaction.",
@@ -3104,8 +3123,9 @@ function buildPostgresEngineProfileInternal(
                 await analyzeImportedTables(trustedTx, tableNames);
                 return result;
               },
-              // The raw handle carries only the import's own statements; the
-              // session handed to `fn` exposes none.
+              // The raw handle is never used: the import's own statements run
+              // through `executeCompiled`, and the session handed to `fn`
+              // exposes none.
               deferNativeHandle(undefined),
             );
           },
@@ -3972,8 +3992,9 @@ function createPostgresOperationBackend(
   // `runIndexBuild`.
   const vectorMembers =
     vectorStrategy === undefined ?
-      createVectorMembers({ vectorStrategy: undefined })
+      createVectorMembers({ vectorStrategy: undefined, transactionScoped })
     : createVectorMembers({
+        transactionScoped,
         vectorStrategy,
         execution: { execRun },
         batchConfig,
@@ -4367,8 +4388,19 @@ function createPostgresOperationBackend(
 type BoundTransactionBackend = Readonly<{
   backend: InternalOperationBackend;
   contributionReadGate: ContributionMaterializer;
+  /**
+   * The pinned client's compiled-text execution, queued and admitted by the
+   * same view as `backend`'s statements. A session that issues statements
+   * of its own on this transaction (trusted import) runs them here.
+   */
+  executeCompiled: TransactionCompiledExecution | undefined;
   drainAndClose: () => Promise<void>;
 }>;
+
+/** Compiled-text execution on one transaction's pinned client. */
+type TransactionCompiledExecution = <TRow>(
+  compiledQuery: CompiledSqlQuery,
+) => Promise<readonly TRow[]>;
 
 function resolvedSetOnlyEdgeMutationProgram(
   executor: AtomicEdgeMutationProgramExecutor,
@@ -4528,6 +4560,11 @@ function createTransactionBackend(
   return {
     backend,
     contributionReadGate: txContributionMaterializer,
+    executeCompiled:
+      executeCompiled === undefined ? undefined : (
+        <TRow>(compiledQuery: CompiledSqlQuery) =>
+          runExclusive(() => executeCompiled<TRow>(compiledQuery))
+      ),
     drainAndClose: txExecutionAdapter.drainAndClose,
   };
 }

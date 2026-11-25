@@ -52,7 +52,10 @@ import { createPostgresBackend } from "../../../src/backend/postgres";
 import type {
   AdapterBackend,
   GraphBackend,
+  InsertEdgeParams,
+  InsertNodeParams,
   TransactionBackend,
+  TrustedImportSession,
 } from "../../../src/backend/types";
 import { TypeGraphError } from "../../../src/errors";
 import { defineGraphExtension } from "../../../src/graph-extension";
@@ -130,6 +133,15 @@ const POSTGRES_DRIVERS: readonly IntegrationLaneDriver[] = [
 ];
 
 /** The scope of a known defect every driver shows today. */
+/** The lanes whose backend offers `trustedImport`: a synchronous SQLite driver, or PostgreSQL. */
+const TRUSTED_IMPORT_DRIVERS: ReadonlySet<IntegrationLaneDriver> = new Set([
+  "better-sqlite3",
+  "pglite",
+  "node-postgres",
+  "postgres-js",
+]);
+/** The lanes whose serialized backend carries a vector strategy. */
+const VECTOR_DRIVERS: ReadonlySet<IntegrationLaneDriver> = new Set(ALL_DRIVERS);
 const ON_EVERY_DRIVER: DefectScope = { driver: ALL_DRIVERS };
 /** The scope of a known defect every PostgreSQL driver shows today. */
 const ON_POSTGRES_DRIVERS: DefectScope = { driver: POSTGRES_DRIVERS };
@@ -208,6 +220,26 @@ function refusalOf(pending: Promise<unknown>): Promise<Refusal> {
     (error: unknown): Refusal => typedErrorOf(error),
   );
 }
+
+/** The refusal of a statement issued after its transaction's view closed. */
+const TRANSACTION_CLOSED: TypedError = {
+  error: "TransactionClosedError",
+  code: "TRANSACTION_CLOSED",
+  details: {},
+};
+
+/**
+ * The refusal of contribution administration (here `createVectorIndex`)
+ * through a transaction-scoped backend.
+ */
+const VECTOR_INDEX_ADMINISTRATION_REFUSAL: TypedError = {
+  error: "ConfigurationError",
+  code: "CONFIGURATION_ERROR",
+  details: {
+    capability: "contributionAdministration",
+    member: "createVectorIndex",
+  },
+};
 
 /**
  * The refusal of a unit whose transaction target lacks `executeStatement`:
@@ -311,7 +343,7 @@ async function liveClaims(
 
 async function countRows(
   backend: GraphBackend,
-  table: "nodes" | "recordedNodes",
+  table: "nodes" | "edges" | "recordedNodes",
   graphId: string,
 ): Promise<number> {
   const tables = requireDefined(backend.tableNames);
@@ -323,6 +355,40 @@ async function countRows(
     `),
   );
   return Number(requireDefined(rows[0]).count);
+}
+
+/** One node row as trusted import writes it. */
+function importedNode(graphId: string, id: string): InsertNodeParams {
+  return { graphId, kind: "HzItem", id, props: { label: id } };
+}
+
+/** One edge row as trusted import writes it. */
+function importedEdge(graphId: string, id: string): InsertEdgeParams {
+  return {
+    graphId,
+    id,
+    kind: "hzLink",
+    fromKind: "HzItem",
+    fromId: "a",
+    toKind: "HzItem",
+    toId: "b",
+    props: {},
+  };
+}
+
+/** Whether a relation named `name` exists in the backend's catalog. */
+async function relationExists(
+  backend: GraphBackend,
+  name: string,
+): Promise<boolean> {
+  const rows = await backend.execute<{ count: number | string }>(
+    asCompiledRowsSql(
+      backend.dialect === "sqlite" ?
+        sql`SELECT COUNT(*) AS count FROM sqlite_master WHERE name = ${name}`
+      : sql`SELECT COUNT(*) AS count FROM pg_catalog.pg_class WHERE relname = ${name}`,
+    ),
+  );
+  return Number(requireDefined(rows[0]).count) > 0;
 }
 
 async function activeSchemaVersion(
@@ -750,17 +816,6 @@ export function registerTransactionSessionHazardTests(
           [
             {
               label: "hazard 2c",
-              on: { driver: ["better-sqlite3", "libsql"] },
-              today: {
-                transaction: { status: "fulfilled", receiptTotal: 0 },
-                late: "fulfilled",
-                items: ["s3"],
-                claims: { s1: 0, s2: 0 },
-                unhandled: [],
-              },
-            },
-            {
-              label: "hazard 2c",
               on: { driver: ["postgres-js"] },
               today: {
                 transaction: { status: "fulfilled", receiptTotal: 0 },
@@ -849,18 +904,6 @@ export function registerTransactionSessionHazardTests(
             ],
           ),
           ACCEPTED,
-          [
-            {
-              label: "hazard 2d",
-              on: { driver: ["better-sqlite3"] },
-              today: {
-                first: "fulfilled",
-                late: "fulfilled",
-                seenInSecond: ["n1", "n2"],
-                items: [],
-              },
-            },
-          ],
         );
       });
     });
@@ -1675,14 +1718,180 @@ export function registerTransactionSessionHazardTests(
           context,
           { sawUncommittedRow: seen.includes("x1") },
           { sawUncommittedRow: false },
-          [
-            {
-              label: "hazard 7b",
-              on: { driver: ["better-sqlite3"] },
-              today: { sawUncommittedRow: true },
-            },
-          ],
         );
+      });
+    });
+
+    describe("a transaction's view once the transaction ends", () => {
+      // The Store seals its own collections when the callback returns, so a
+      // kept collection is refused before it reaches the backend; a kept
+      // transaction backend, prepared query or stream reaches the view.
+      it("refuses a kept transaction backend, prepared query and stream with TransactionClosedError", async () => {
+        const graph = buildGraph();
+        const backend = context.getBackend();
+        const [store] = await createStoreWithSchema(graph, backend);
+        await store.nodes.HzItem.bulkCreate([
+          { props: { label: "s1" }, id: "s1" },
+          { props: { label: "s2" }, id: "s2" },
+        ]);
+        const kept = await store.transaction(async (tx) => {
+          const query = () =>
+            tx
+              .query()
+              .from("HzItem", "item")
+              .select((select) => select.item.id)
+              .orderBy("item", "id");
+          const stream = query()
+            .stream({ batchSize: 1 })
+            [Symbol.asyncIterator]();
+          await stream.next();
+          return { prepared: query().prepare(), stream };
+        });
+        let escaped: TransactionBackend | undefined;
+        await backend.transaction((tx) => {
+          escaped = tx;
+          return Promise.resolve();
+        });
+        expect({
+          backend: await refusalOf(
+            requireDefined(escaped).getNode(graph.id, "HzItem", "s1"),
+          ),
+          prepared: await refusalOf(kept.prepared.execute()),
+          stream: await refusalOf(kept.stream.next()),
+        }).toEqual({
+          backend: TRANSACTION_CLOSED,
+          prepared: TRANSACTION_CLOSED,
+          stream: TRANSACTION_CLOSED,
+        });
+      });
+
+      it("refuses a kept trusted-import session's batches once its import committed or rolled back", async () => {
+        const backend = context.getBackend();
+        const trustedImport = backend.trustedImport;
+        expect({
+          driver: context.driver,
+          trustedImport: trustedImport !== undefined,
+        }).toEqual({
+          driver: context.driver,
+          trustedImport: TRUSTED_IMPORT_DRIVERS.has(context.driver),
+        });
+        if (trustedImport === undefined) return;
+        const graphId = buildGraph().id;
+
+        const committed = await trustedImport((session) =>
+          Promise.resolve(session),
+        );
+        const abort = new Error("abort the import");
+        let rolledBack: TrustedImportSession | undefined;
+        await expect(
+          trustedImport((session) => {
+            rolledBack = session;
+            return Promise.reject(abort);
+          }),
+        ).rejects.toBe(abort);
+        const kept = requireDefined(rolledBack);
+
+        const afterCommit = await refusalOf(
+          committed.insertNodes([importedNode(graphId, "after-commit")]),
+        );
+        const edgeAfterCommit = await refusalOf(
+          committed.insertEdges([importedEdge(graphId, "after-commit")]),
+        );
+        const afterRollback = await refusalOf(
+          kept.insertNodes([importedNode(graphId, "after-rollback")]),
+        );
+        // Issued while the next transaction on the connection is open, a late
+        // batch must not join that transaction either.
+        let insideNext: Refusal | undefined;
+        await backend.transaction(async () => {
+          insideNext = await refusalOf(
+            kept.insertEdges([importedEdge(graphId, "inside-next")]),
+          );
+        });
+        expect({
+          afterCommit,
+          edgeAfterCommit,
+          afterRollback,
+          insideNext,
+          nodes: await countRows(backend, "nodes", graphId),
+          edges: await countRows(backend, "edges", graphId),
+        }).toEqual({
+          afterCommit: TRANSACTION_CLOSED,
+          edgeAfterCommit: TRANSACTION_CLOSED,
+          afterRollback: TRANSACTION_CLOSED,
+          insideNext: TRANSACTION_CLOSED,
+          nodes: 0,
+          edges: 0,
+        });
+      });
+
+      it("commits a trusted-import batch still in flight when its callback returns", async () => {
+        const backend = context.getBackend();
+        const trustedImport = backend.trustedImport;
+        if (trustedImport === undefined) return;
+        const graphId = buildGraph().id;
+        let inFlight: Promise<Status> = Promise.resolve("rejected");
+        await trustedImport((session) => {
+          inFlight = statusOf(
+            session.insertNodes([importedNode(graphId, "in-flight")]),
+          );
+          return Promise.resolve();
+        });
+        expect({
+          inFlight: await inFlight,
+          nodes: await countRows(backend, "nodes", graphId),
+        }).toEqual({ inFlight: "fulfilled", nodes: 1 });
+      });
+
+      it("refuses vector index creation through a transaction backend, open or ended, and creates no storage", async () => {
+        const handle = await context.createSerializedBackend();
+        try {
+          const backend = handle.backend;
+          const strategy = backend.vectorStrategy;
+          expect({
+            driver: context.driver,
+            vector: strategy !== undefined,
+          }).toEqual({
+            driver: context.driver,
+            vector: VECTOR_DRIVERS.has(context.driver),
+          });
+          if (strategy === undefined) return;
+          const graph = buildGraph();
+          await createStoreWithSchema(graph, backend);
+          // A slot no schema declares, so nothing has materialized it.
+          const params = {
+            graphId: graph.id,
+            nodeKind: "HzUndeclared",
+            fieldPath: "embedding",
+            dimensions: 3,
+            metric: "cosine",
+            indexType:
+              requireDefined(backend.capabilities.vector).indexTypes[0] ??
+              "none",
+          } as const;
+          let escaped: TransactionBackend | undefined;
+          const whileOpen = await backend.transaction((tx) => {
+            escaped = tx;
+            return refusalOf(requireDefined(tx.createVectorIndex)(params));
+          });
+          const afterEnd = await refusalOf(
+            requireDefined(requireDefined(escaped).createVectorIndex)(params),
+          );
+          expect({
+            whileOpen,
+            afterEnd,
+            storage: await relationExists(
+              backend,
+              strategy.tableName(graph.id, params.nodeKind, params.fieldPath),
+            ),
+          }).toEqual({
+            whileOpen: VECTOR_INDEX_ADMINISTRATION_REFUSAL,
+            afterEnd: VECTOR_INDEX_ADMINISTRATION_REFUSAL,
+            storage: false,
+          });
+        } finally {
+          await handle.close();
+        }
       });
     });
   });

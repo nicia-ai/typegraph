@@ -69,7 +69,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
-import { isSqlFragment, sql as portableSql } from "../../query/sql-fragment";
+import { sql as portableSql } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   type CompiledRowsSql,
@@ -155,6 +155,7 @@ import {
 import {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,
+  createSqliteTransactionExecutionView,
   getDurableObjectStorageClient,
   isBetterSqlite3Client,
   isBunSqliteClient,
@@ -190,6 +191,7 @@ import {
 } from "../transaction-resource";
 import { assertBaseSchemaVersionCurrent } from "./base-schema";
 import {
+  admitContributionReadsThroughView,
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
@@ -837,7 +839,6 @@ function createSqliteOperationBackend(
 ): InternalOperationBackend {
   const {
     capabilities,
-    db,
     executionAdapter,
     atomicSqlProgramExecutor,
     operationStrategy,
@@ -859,7 +860,6 @@ function createSqliteOperationBackend(
   // drizzle's session on every call. Async drivers (remote libsql, D1)
   // have no statement cache and keep the drizzle fallback.
   const compiledExecute = executionAdapter.executeCompiled;
-  const compiledRun = executionAdapter.executeCompiledRun;
 
   function execGet<T>(query: ExecutableSql): Promise<T | undefined> {
     // Fallback uses db.all()[0], not db.get(): drizzle-team/drizzle-orm#1049
@@ -889,15 +889,9 @@ function createSqliteOperationBackend(
   }
 
   function execRun(query: ExecutableSql): Promise<void> {
-    return runWithSerializedQueue(serializedQueue, async () => {
-      if (compiledRun === undefined) {
-        await db.run(
-          isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
-        );
-        return;
-      }
-      await compiledRun(executionAdapter.compile(query));
-    });
+    return runWithSerializedQueue(serializedQueue, async () =>
+      executionAdapter.executeRun(query),
+    );
   }
 
   const batchConfig = computeSqliteBatchChunkSizes(
@@ -970,8 +964,9 @@ function createSqliteOperationBackend(
   // `applySearchOverrides` and `runIndexBuild`.
   const vectorMembers =
     vectorStrategy === undefined ?
-      createVectorMembers({ vectorStrategy: undefined })
+      createVectorMembers({ vectorStrategy: undefined, transactionScoped })
     : createVectorMembers({
+        transactionScoped,
         vectorStrategy,
         execution: { execRun },
         batchConfig,
@@ -2069,7 +2064,7 @@ export function buildSqliteEngineProfile(
           // Write-lock is held here, so the schema-write-capable
           // InternalOperationBackend is used intentionally (see its type).
           const nativeTransaction = createNativeTransactionToken();
-          const txBackend = createTransactionBackend({
+          const bound = createTransactionBackend({
             capabilities,
             db,
             executionAdapter,
@@ -2094,7 +2089,7 @@ export function buildSqliteEngineProfile(
             nativeTransaction,
             async () => {
               try {
-                const result = await fn(txBackend);
+                const result = await runInTransactionView(bound, fn);
                 await runFrameStatement(sql`COMMIT`);
                 return result;
               } catch (error) {
@@ -2114,23 +2109,25 @@ export function buildSqliteEngineProfile(
         // `transaction()` do-sqlite branch). Schema-version commits remain
         // data-only; administrative removal cleanup may use the target's
         // transaction-scoped DDL primitive.
-        return runDoSqliteStorageTransaction(async () => {
-          const txBackend = createTransactionBackend({
-            capabilities,
-            db,
-            operationStrategy,
-            profileHints: { isSync },
-            tableNames,
-            fulltextStrategy,
-            vectorStrategy,
-            contributionMaterializer: ctx.contributionMaterializer,
-            fenceTarget,
-            lineage: provisioning.lineage,
-            recordedTime: provisioning.recordedTime,
-            isFirstParty,
-          });
-          return fn(txBackend);
-        });
+        return runDoSqliteStorageTransaction(async () =>
+          runInTransactionView(
+            createTransactionBackend({
+              capabilities,
+              db,
+              operationStrategy,
+              profileHints: { isSync },
+              tableNames,
+              fulltextStrategy,
+              vectorStrategy,
+              contributionMaterializer: ctx.contributionMaterializer,
+              fenceTarget,
+              lineage: provisioning.lineage,
+              recordedTime: provisioning.recordedTime,
+              isFirstParty,
+            }),
+            fn,
+          ),
+        );
       }
 
       // transactionMode === "drizzle". Drizzle's sqlite-core transaction
@@ -2143,21 +2140,23 @@ export function buildSqliteEngineProfile(
           db.transaction(
             async (tx) => {
               recordSqliteEngineSavepoint(db, tx);
-              const txBackend = createTransactionBackend({
-                capabilities,
-                db: tx,
-                operationStrategy,
-                profileHints: { isSync },
-                tableNames,
-                fulltextStrategy,
-                vectorStrategy,
-                contributionMaterializer: ctx.contributionMaterializer,
-                fenceTarget,
-                lineage: provisioning.lineage,
-                recordedTime: provisioning.recordedTime,
-                isFirstParty,
-              });
-              return fn(txBackend);
+              return runInTransactionView(
+                createTransactionBackend({
+                  capabilities,
+                  db: tx,
+                  operationStrategy,
+                  profileHints: { isSync },
+                  tableNames,
+                  fulltextStrategy,
+                  vectorStrategy,
+                  contributionMaterializer: ctx.contributionMaterializer,
+                  fenceTarget,
+                  lineage: provisioning.lineage,
+                  recordedTime: provisioning.recordedTime,
+                  isFirstParty,
+                }),
+                fn,
+              );
             },
             { behavior: "immediate" },
           ) as Promise<T>,
@@ -2176,8 +2175,17 @@ export function buildSqliteEngineProfile(
     function bindTransactionBackend(
       tx: AnySqliteDatabase,
       txIsFirstParty: boolean,
-    ): TransactionBackend {
-      const txBackend = createTransactionBackend({
+    ): Readonly<{
+      backend: TransactionBackend;
+      executionAdapter: SqliteExecutionAdapter;
+      drainAndClose: () => Promise<void>;
+    }> {
+      const {
+        backend: txBackend,
+        executionAdapter: txExecutionAdapter,
+        contributionReadGate,
+        drainAndClose,
+      } = createTransactionBackend({
         capabilities,
         db: tx,
         operationStrategy,
@@ -2191,16 +2199,45 @@ export function buildSqliteEngineProfile(
         recordedTime: provisioning.recordedTime,
         isFirstParty: txIsFirstParty,
       });
-      return gateFulltext(
-        txBackend,
-        ctx.contributionMaterializer.assertInitialized,
-        ctx.contributionMaterializer.refuseUnavailableFulltext,
-      );
+      return {
+        backend: gateFulltext(
+          txBackend,
+          contributionReadGate.assertInitialized,
+          contributionReadGate.refuseUnavailableFulltext,
+        ),
+        executionAdapter: txExecutionAdapter,
+        drainAndClose,
+      };
+    }
+
+    /**
+     * Runs `fn` on a backend bound to a transaction TypeGraph opened, and ends
+     * that backend's view when `fn` settles — before the runner's COMMIT /
+     * ROLLBACK. See {@link runInTransactionView}.
+     */
+    async function runOnOwnedTransaction<T>(
+      tx: AnySqliteDatabase,
+      fn: (
+        backend: TransactionBackend,
+        executionAdapter: SqliteExecutionAdapter,
+      ) => Promise<T>,
+    ): Promise<T> {
+      const { backend, executionAdapter: txExecutionAdapter, drainAndClose } =
+        bindTransactionBackend(tx, isFirstParty);
+      try {
+        return await fn(
+          markSchemaFencedInsertEligibleUnderFence(backend, fencePlan),
+          txExecutionAdapter,
+        );
+      } finally {
+        await drainAndClose();
+      }
     }
 
     function bindPrivilegedTransactionBackend(
       tx: AnySqliteDatabase,
     ): InternalOperationBackend {
+      // Adopted: the caller ends this transaction, so its view is never closed.
       return createTransactionBackend({
         capabilities,
         db: tx,
@@ -2214,7 +2251,156 @@ export function buildSqliteEngineProfile(
         lineage: provisioning.lineage,
         recordedTime: provisioning.recordedTime,
         isFirstParty: false,
-      });
+      }).backend;
+    }
+
+    /**
+     * Opens a transaction TypeGraph owns and runs `fn` on its backend, its
+     * native handle, and the execution adapter behind the backend's view.
+     * `transactionWithNative` is this minus the adapter; `trustedImport`
+     * issues its batches through the adapter, so they are admitted by the
+     * same view the backend's own statements are and refused once the
+     * transaction ends.
+     */
+    async function openTransaction<T>(
+      fn: (
+        tx: TransactionBackend,
+        sql: AnySqliteDatabase,
+        executionAdapter: SqliteExecutionAdapter,
+      ) => Promise<T>,
+      options?: InternalTransactionOptions,
+    ): Promise<T> {
+        const temporaryWrites =
+          options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
+        if (temporaryWrites && options.accessMode !== "read_only") {
+          throw new ConfigurationError(
+            "Temporary-write transactions must be semantically read-only.",
+            { dialect: "sqlite" },
+          );
+        }
+        if (transactionMode === "none") {
+          throwSqliteTransactionsDisabled(
+            "This SQLite backend does not support atomic transactions. " +
+              "Operations within a transaction are not rolled back on failure. " +
+              "Use backend.capabilities.execution.interactiveTransactions to check for transaction support, " +
+              "or use individual operations with manual error handling.",
+          );
+        }
+
+        // #134/#135: NO DDL or ensure here. The tx-scoped backend
+        // exposes raw fulltext methods without self-ensure wrappers; the
+        // single gate is `Store.transaction()`, which asserts the durable
+        // contribution marker (one cached SELECT) before this method is
+        // reached. The caller's BEGIN never carries CREATE statements.
+        if (transactionMode === "sql") {
+          return runWithSerializedQueue(serializedQueue, async () => {
+            // Not `bindTransactionBackend(...)`: this path frames the tx
+            // with manual BEGIN/COMMIT on the *outer* `db`, so it must
+            // reuse that connection's already-built `executionAdapter`
+            // rather than synthesize a fresh one for a distinct handle.
+            // Serves sync drivers AND local libsql clients before 0.18:
+            // both keep one stable connection, where raw BEGIN/COMMIT
+            // composes and Drizzle's `db.transaction()` (which for those
+            // libsql clients abandons the client's connection — fatal for
+            // `:memory:`) must be avoided.
+            const nativeTransaction = createNativeTransactionToken();
+            const bound = createTransactionBackend({
+              capabilities,
+              db,
+              executionAdapter,
+              operationStrategy,
+              profileHints: { isSync },
+              tableNames,
+              fulltextStrategy,
+              vectorStrategy,
+              contributionMaterializer: ctx.contributionMaterializer,
+              fenceTarget,
+              lineage: provisioning.lineage,
+              recordedTime: provisioning.recordedTime,
+              isFirstParty,
+              nativeTransaction,
+            });
+            // Read-only multi-statement operations need one snapshot but must not
+            // reserve SQLite's single writer slot. Business transactions retain
+            // BEGIN IMMEDIATE so read-then-write cannot lose a lock-upgrade race.
+            await runFrameStatement(
+              options?.accessMode === "read_only" || temporaryWrites ?
+                sql`BEGIN`
+              : sql`BEGIN IMMEDIATE`,
+            );
+
+            // Published from BEGIN succeeding to COMMIT or ROLLBACK
+            // finishing: a bind on this connection records this
+            // transaction only while it is open.
+            return publishConnectionNativeTransaction(
+              nativeTransactionConnection(db),
+              nativeTransaction,
+              async () => {
+                try {
+                  // The view is ended before COMMIT and before ROLLBACK, both
+                  // of which run on this same outer connection, and both
+                  // inside this publication span: a statement the callback
+                  // left running settles first, a later one is refused
+                  // rather than landing after the frame closed, and the
+                  // token is withdrawn only after the frame has ended.
+                  const result = await runInTransactionView(
+                    bound,
+                    (txBackend) =>
+                      fn(
+                        markSchemaFencedInsertEligibleUnderFence(
+                          gateFulltext(
+                            txBackend,
+                            bound.contributionReadGate.assertInitialized,
+                            bound.contributionReadGate
+                              .refuseUnavailableFulltext,
+                          ),
+                          fencePlan,
+                        ),
+                        db,
+                        bound.executionAdapter,
+                      ),
+                  );
+                  await runFrameStatement(sql`COMMIT`);
+                  return result;
+                } catch (error) {
+                  await rollbackFrameQuietly();
+                  throw error;
+                }
+              },
+            );
+          });
+        }
+
+        if (transactionMode === "do-sqlite") {
+          return runDoSqliteStorageTransaction(async () =>
+            runOnOwnedTransaction(db, (txBackend, txExecutionAdapter) =>
+              fn(txBackend, db, txExecutionAdapter),
+            ),
+          );
+        }
+
+        // transactionMode === "drizzle". Read-only work uses a deferred snapshot;
+        // business transactions retain BEGIN IMMEDIATE for safe lock upgrades.
+        return runWithSerializedQueue(
+          serializedQueue,
+          async () =>
+            db.transaction(
+              async (tx) => {
+                recordSqliteEngineSavepoint(db, tx);
+                return runOnOwnedTransaction(
+                  tx,
+                  (txBackend, txExecutionAdapter) =>
+                    fn(txBackend, tx, txExecutionAdapter),
+                );
+              },
+              {
+                behavior:
+                  options?.accessMode === "read_only" || temporaryWrites ?
+                    "deferred"
+                  : "immediate",
+              },
+            ) as Promise<T>,
+        );
     }
 
     return {
@@ -2230,131 +2416,7 @@ export function buildSqliteEngineProfile(
           fn: (tx: TransactionBackend, sql: AnySqliteDatabase) => Promise<T>,
           options?: InternalTransactionOptions,
         ): Promise<T> {
-          const temporaryWrites =
-            options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
-          if (temporaryWrites && options.accessMode !== "read_only") {
-            throw new ConfigurationError(
-              "Temporary-write transactions must be semantically read-only.",
-              { dialect: "sqlite" },
-            );
-          }
-          if (transactionMode === "none") {
-            throwSqliteTransactionsDisabled(
-              "This SQLite backend does not support atomic transactions. " +
-                "Operations within a transaction are not rolled back on failure. " +
-                "Use backend.capabilities.execution.interactiveTransactions to check for transaction support, " +
-                "or use individual operations with manual error handling.",
-            );
-          }
-
-          // #134/#135: NO DDL or ensure here. The tx-scoped backend
-          // exposes raw fulltext methods without self-ensure wrappers; the
-          // single gate is `Store.transaction()`, which asserts the durable
-          // contribution marker (one cached SELECT) before this method is
-          // reached. The caller's BEGIN never carries CREATE statements.
-          if (transactionMode === "sql") {
-            return runWithSerializedQueue(serializedQueue, async () => {
-              // Not `bindTransactionBackend(...)`: this path frames the tx
-              // with manual BEGIN/COMMIT on the *outer* `db`, so it must
-              // reuse that connection's already-built `executionAdapter`
-              // rather than synthesize a fresh one for a distinct handle.
-              // Serves sync drivers AND local libsql clients before 0.18:
-              // both keep one stable connection, where raw BEGIN/COMMIT
-              // composes and Drizzle's `db.transaction()` (which for those
-              // libsql clients abandons the client's connection — fatal for
-              // `:memory:`) must be avoided.
-              const nativeTransaction = createNativeTransactionToken();
-              const txBackend = createTransactionBackend({
-                capabilities,
-                db,
-                executionAdapter,
-                operationStrategy,
-                profileHints: { isSync },
-                tableNames,
-                fulltextStrategy,
-                vectorStrategy,
-                contributionMaterializer: ctx.contributionMaterializer,
-                fenceTarget,
-                lineage: provisioning.lineage,
-                recordedTime: provisioning.recordedTime,
-                isFirstParty,
-                nativeTransaction,
-              });
-              // Read-only multi-statement operations need one snapshot but must not
-              // reserve SQLite's single writer slot. Business transactions retain
-              // BEGIN IMMEDIATE so read-then-write cannot lose a lock-upgrade race.
-              await runFrameStatement(
-                options?.accessMode === "read_only" || temporaryWrites ?
-                  sql`BEGIN`
-                : sql`BEGIN IMMEDIATE`,
-              );
-
-              // Published from BEGIN succeeding to COMMIT or ROLLBACK
-              // finishing: a bind on this connection records this
-              // transaction only while it is open.
-              return publishConnectionNativeTransaction(
-                nativeTransactionConnection(db),
-                nativeTransaction,
-                async () => {
-                  try {
-                    const result = await fn(
-                      markSchemaFencedInsertEligibleUnderFence(
-                        gateFulltext(
-                          txBackend,
-                          ctx.contributionMaterializer.assertInitialized,
-                          ctx.contributionMaterializer.refuseUnavailableFulltext,
-                        ),
-                        fencePlan,
-                      ),
-                      db,
-                    );
-                    await runFrameStatement(sql`COMMIT`);
-                    return result;
-                  } catch (error) {
-                    await rollbackFrameQuietly();
-                    throw error;
-                  }
-                },
-              );
-            });
-          }
-
-          if (transactionMode === "do-sqlite") {
-            return runDoSqliteStorageTransaction(async () =>
-              fn(
-                markSchemaFencedInsertEligibleUnderFence(
-                  bindTransactionBackend(db, isFirstParty),
-                  fencePlan,
-                ),
-                db,
-              ),
-            );
-          }
-
-          // transactionMode === "drizzle". Read-only work uses a deferred snapshot;
-          // business transactions retain BEGIN IMMEDIATE for safe lock upgrades.
-          return runWithSerializedQueue(
-            serializedQueue,
-            async () =>
-              db.transaction(
-                async (tx) => {
-                  recordSqliteEngineSavepoint(db, tx);
-                  return fn(
-                    markSchemaFencedInsertEligibleUnderFence(
-                      bindTransactionBackend(tx, isFirstParty),
-                      fencePlan,
-                    ),
-                    tx,
-                  );
-                },
-                {
-                  behavior:
-                    options?.accessMode === "read_only" || temporaryWrites ?
-                      "deferred"
-                    : "immediate",
-                },
-              ) as Promise<T>,
-          );
+          return openTransaction((tx, native) => fn(tx, native), options);
         },
 
         adoptTransaction(externalTx: AnySqliteDatabase): TransactionBackend {
@@ -2381,7 +2443,8 @@ export function buildSqliteEngineProfile(
           // the caller opened this transaction, its lifetime is not one
           // TypeGraph has audited, and it must not qualify for the
           // dialect-derivation fallback or the lazy schema-fence lease.
-          return bindTransactionBackend(externalTx, false);
+          // Its view is never closed: the caller ends this transaction.
+          return bindTransactionBackend(externalTx, false).backend;
         },
 
         ...(supportsSchemaWriteAdoption ?
@@ -2627,7 +2690,7 @@ export function buildSqliteEngineProfile(
             fn: (session: TrustedImportSession) => Promise<T>,
             options_?: TrustedImportOptions,
           ): Promise<T> {
-            return ctx.self().transaction(async (tx) => {
+            return openTransaction(async (tx, _native, txExecutionAdapter) => {
               if (options_?.schemaWrite !== undefined) {
                 await requireDefined(tx.lockSchemaVersionForWrite)({
                   ...options_.schemaWrite,
@@ -2639,7 +2702,7 @@ export function buildSqliteEngineProfile(
                 tableNames,
               );
               const result = await fn(
-                createSqliteTrustedImportSession(executionAdapter, tableNames),
+                createSqliteTrustedImportSession(txExecutionAdapter, tableNames),
               );
               await restoreSecondaryIndexes(tx, indexDefinitions);
               await analyzeImportedTables(tx, tableNames);
@@ -2690,14 +2753,62 @@ export function buildSqliteEngineProfile(
   return registerFirstPartyProfile(profile);
 }
 
+/**
+ * A transaction-scoped backend plus the hook that ends its view of the
+ * connection. Every runner TypeGraph owns awaits `drainAndClose` before it
+ * issues COMMIT / ROLLBACK (or lets the driver issue them); an adopted
+ * transaction never calls it, because its caller ends the transaction.
+ */
+type BoundTransactionBackend = Readonly<{
+  backend: InternalOperationBackend;
+  /**
+   * The execution adapter behind `backend`'s view. A session that issues
+   * statements of its own on this transaction (trusted import) runs them
+   * here, so the view admits them like the backend's.
+   */
+  executionAdapter: SqliteExecutionAdapter;
+  /** The marker gate `backend` uses, admitted through the same view. */
+  contributionReadGate: ContributionMaterializer;
+  drainAndClose: () => Promise<void>;
+}>;
+
+/**
+ * Runs `fn` on a bound transaction backend and ends the backend's view once
+ * `fn` settles, whichever way: statements `fn` left running settle first, and
+ * any issued afterwards are refused, so nothing reaches the connection after
+ * this transaction's COMMIT / ROLLBACK.
+ */
+async function runInTransactionView<T>(
+  bound: BoundTransactionBackend,
+  fn: (backend: InternalOperationBackend) => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn(bound.backend);
+  } finally {
+    await bound.drainAndClose();
+  }
+}
+
 function createTransactionBackend(
   options: CreateSqliteTransactionBackendOptions,
-): InternalOperationBackend {
-  const txExecutionAdapter =
+): BoundTransactionBackend {
+  // A fresh view per transaction (and per retried attempt): the runner closes
+  // it at the boundary, and a later transaction on the same connection gets
+  // its own.
+  const view = createSqliteTransactionExecutionView(
     options.executionAdapter ??
-    createSqliteExecutionAdapter(options.db, {
-      profileHints: options.profileHints,
-    });
+      createSqliteExecutionAdapter(options.db, {
+        profileHints: options.profileHints,
+      }),
+  );
+  const txExecutionAdapter = view.adapter;
+  // Marker reads share the root materializer's cache (SQLite's root session
+  // reads the same committed markers as this transaction), but are admitted
+  // through this transaction's view; administration is refused.
+  const txContributionMaterializer = admitContributionReadsThroughView(
+    options.contributionMaterializer,
+    view.admit,
+  );
 
   // The transaction-scoped backend shares the outer backend's
   // contribution materializer: the per-field vector table is provisioned
@@ -2713,14 +2824,20 @@ function createTransactionBackend(
     tableNames: options.tableNames,
     fulltextStrategy: options.fulltextStrategy,
     vectorStrategy: options.vectorStrategy,
-    contributionMaterializer: options.contributionMaterializer,
+    contributionMaterializer: txContributionMaterializer,
     transactionScoped: true,
     fenceTarget: options.fenceTarget,
     lineage: options.lineage,
     recordedTime: options.recordedTime,
   });
   recordSqliteNativeTransaction(txBackend, options);
-  return options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
+  return {
+    backend:
+      options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend,
+    executionAdapter: txExecutionAdapter,
+    contributionReadGate: txContributionMaterializer,
+    drainAndClose: view.drainAndClose,
+  };
 }
 
 /**
