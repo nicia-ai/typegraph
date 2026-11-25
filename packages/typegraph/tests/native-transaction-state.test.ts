@@ -13,6 +13,7 @@ import { deriveBackend } from "../src/backend/derive-backend";
 import {
   createNativeTransactionToken,
   publishConnectionNativeTransaction,
+  recordEngineSavepoint,
   recordNativeTransactionHandle,
   resolveNativeTransactionHandle,
 } from "../src/backend/native-transaction-handle";
@@ -59,8 +60,14 @@ describe("native transaction record", () => {
     const handle = { begin: 1 };
     const first = boundBackend();
     const second = boundBackend();
-    recordNativeTransactionHandle(first, handle, "transaction");
-    recordNativeTransactionHandle(second, handle, "transaction");
+    recordNativeTransactionHandle(first, {
+      kind: "transaction",
+      transaction: handle,
+    });
+    recordNativeTransactionHandle(second, {
+      kind: "transaction",
+      transaction: handle,
+    });
     expect(resolveNativeTransactionHandle(first)).toBe(handle);
     expect(resolveNativeTransactionHandle(second)).toBe(handle);
   });
@@ -68,7 +75,10 @@ describe("native transaction record", () => {
   it("resolves the record along the derivation chain", () => {
     const handle = { begin: 1 };
     const bound = boundBackend();
-    recordNativeTransactionHandle(bound, handle, "transaction");
+    recordNativeTransactionHandle(bound, {
+      kind: "transaction",
+      transaction: handle,
+    });
     const derived = deriveBackend(deriveBackend(bound, {}), {});
     expect(resolveNativeTransactionHandle(derived)).toBe(handle);
   });
@@ -80,7 +90,7 @@ describe("native transaction record", () => {
   it("records nothing for a connection the engine holds no transaction open on", () => {
     const connection = { connection: true };
     const bound = boundBackend();
-    recordNativeTransactionHandle(bound, connection, "connection");
+    recordNativeTransactionHandle(bound, { kind: "connection", connection });
     expect(resolveNativeTransactionHandle(bound)).toBeUndefined();
   });
 
@@ -89,17 +99,20 @@ describe("native transaction record", () => {
     const inFirst = await publishNew(connection, () => {
       const one = boundBackend();
       const two = boundBackend();
-      recordNativeTransactionHandle(one, connection, "connection");
-      recordNativeTransactionHandle(two, connection, "connection");
+      recordNativeTransactionHandle(one, { kind: "connection", connection });
+      recordNativeTransactionHandle(two, { kind: "connection", connection });
       return Promise.resolve([one, two] as const);
     });
     const inSecond = await publishNew(connection, () => {
       const bound = boundBackend();
-      recordNativeTransactionHandle(bound, connection, "connection");
+      recordNativeTransactionHandle(bound, { kind: "connection", connection });
       return Promise.resolve(bound);
     });
     const afterwards = boundBackend();
-    recordNativeTransactionHandle(afterwards, connection, "connection");
+    recordNativeTransactionHandle(afterwards, {
+      kind: "connection",
+      connection,
+    });
 
     const first = resolveNativeTransactionHandle(inFirst[0]);
     expect(first).toBeDefined();
@@ -132,13 +145,70 @@ describe("native transaction record", () => {
     // The outer span ended first: a bind now records the inner transaction,
     // never the one that ended.
     const between = boundBackend();
-    recordNativeTransactionHandle(between, connection, "connection");
+    recordNativeTransactionHandle(between, { kind: "connection", connection });
     expect(resolveNativeTransactionHandle(between)).toBe(innerToken);
     innerSpan.end();
     await inner;
     const afterwards = boundBackend();
-    recordNativeTransactionHandle(afterwards, connection, "connection");
+    recordNativeTransactionHandle(afterwards, {
+      kind: "connection",
+      connection,
+    });
     expect(resolveNativeTransactionHandle(afterwards)).toBeUndefined();
+  });
+});
+
+describe("native transaction record of a nested handle", () => {
+  it("records a savepoint the engine opened, at any depth, as the transaction it is in", () => {
+    const transaction = { begin: 1 };
+    const savepoint = { savepoint: 1 };
+    const nestedSavepoint = { savepoint: 2 };
+    recordEngineSavepoint(savepoint, { kind: "transaction", transaction });
+    recordEngineSavepoint(nestedSavepoint, {
+      kind: "transaction",
+      transaction: savepoint,
+    });
+    for (const handle of [savepoint, nestedSavepoint]) {
+      const bound = boundBackend();
+      recordNativeTransactionHandle(bound, {
+        kind: "transaction",
+        transaction: handle,
+      });
+      expect(resolveNativeTransactionHandle(bound)).toBe(transaction);
+    }
+  });
+
+  it("records a savepoint the engine never saw opened as itself", () => {
+    const savepoint = { savepoint: 1 };
+    const bound = boundBackend();
+    recordNativeTransactionHandle(bound, {
+      kind: "transaction",
+      transaction: savepoint,
+    });
+    expect(resolveNativeTransactionHandle(bound)).toBe(savepoint);
+  });
+
+  it("records a transaction object on a connection the engine has published a transaction on as that transaction, and as itself outside the span", async () => {
+    const connection = { connection: true };
+    const savepoint = { savepoint: 1 };
+    const token = createNativeTransactionToken();
+    const inside = boundBackend();
+    await publishConnectionNativeTransaction(connection, token, () => {
+      recordNativeTransactionHandle(inside, {
+        kind: "transaction",
+        transaction: savepoint,
+        connection,
+      });
+      return Promise.resolve();
+    });
+    const outside = boundBackend();
+    recordNativeTransactionHandle(outside, {
+      kind: "transaction",
+      transaction: savepoint,
+      connection,
+    });
+    expect(resolveNativeTransactionHandle(inside)).toBe(token);
+    expect(resolveNativeTransactionHandle(outside)).toBe(savepoint);
   });
 });
 
@@ -147,8 +217,14 @@ describe("native transaction state", () => {
     const handle = { begin: 1 };
     const first = boundBackend();
     const second = boundBackend();
-    recordNativeTransactionHandle(first, handle, "transaction");
-    recordNativeTransactionHandle(second, handle, "transaction");
+    recordNativeTransactionHandle(first, {
+      kind: "transaction",
+      transaction: handle,
+    });
+    recordNativeTransactionHandle(second, {
+      kind: "transaction",
+      transaction: handle,
+    });
     const state = resolveNativeTransactionState(first);
     expect(resolveNativeTransactionState(second)).toBe(state);
     expect(resolveNativeTransactionState(deriveBackend(second, {}))).toBe(

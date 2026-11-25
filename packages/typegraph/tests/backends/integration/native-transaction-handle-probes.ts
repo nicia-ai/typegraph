@@ -12,6 +12,13 @@
  * (`session.native`) on every driver, including better-sqlite3, whose
  * handle is the long-lived database: the cases below pin that the state is
  * shared within one transaction and never carried into the next.
+ *
+ * A savepoint is not a transaction of its own: one the engine opens resolves
+ * the enclosing transaction's state on every driver that has one. A caller's
+ * own savepoint resolves it only where the engine published the enclosing
+ * transaction on the connection (better-sqlite3); elsewhere Drizzle's
+ * savepoint object has no link to the enclosing one, and its sessions share
+ * a state of their own (`src/backend/native-transaction-handle.ts`).
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -22,6 +29,8 @@ import {
   defineNode,
 } from "../../../src";
 import { backendDerivationRoot } from "../../../src/backend/derive-backend";
+import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
+import type { AdapterBackend } from "../../../src/backend/types";
 import type { NativeTransactionState } from "../../../src/store/native-transaction-state";
 import {
   enterTransactionOperation,
@@ -31,7 +40,21 @@ import {
 import { transactionBackend } from "../../../src/store/runtime-port";
 import { requireDefined } from "../../../src/utils/presence";
 import { PER_BEGIN_NATIVE_DRIVERS } from "../../helpers/native-transaction-handles";
-import type { IntegrationTestContext } from "./test-context";
+import type {
+  IntegrationLaneDriver,
+  IntegrationTestContext,
+} from "./test-context";
+
+const POSTGRES_DRIVERS: ReadonlySet<IntegrationLaneDriver> = new Set([
+  "pglite",
+  "node-postgres",
+  "postgres-js",
+]);
+
+/** A native transaction handle's own Drizzle `transaction()`. */
+type CallerTransactionHandle = Readonly<{
+  transaction: <T>(run: (savepoint: object) => T) => T | Promise<T>;
+}>;
 
 const ProbeItem = defineNode("ProbeItem", {
   schema: z.object({ label: z.string() }),
@@ -198,5 +221,89 @@ export function registerNativeTransactionHandleProbeTests(
         shared: perBegin,
       });
     });
+  });
+
+  describe("native transaction state of a savepoint", () => {
+    it("resolves a caller's own savepoint in a TypeGraph-owned transaction to the enclosing state only where the engine published that transaction on the connection", async () => {
+      const backend = context.getBackend();
+      const [plain] = await createAdapterStoreWithSchema(probeGraph, backend);
+      const observed = await backend.transactionWithNative(
+        async (target, native) => {
+          const opener = openTransactionSession(target).native;
+          // Returns synchronously: better-sqlite3 runs the savepoint's
+          // callback synchronously and refuses a promise.
+          const inSavepoint = await (
+            native as CallerTransactionHandle
+          ).transaction((savepoint) => [
+            stateOf(plain.withTransaction(savepoint)),
+            stateOf(plain.withTransaction(savepoint)),
+          ]);
+          return { opener, inSavepoint };
+        },
+      );
+      const [first, second] = observed.inSavepoint;
+      expect({
+        driver: context.driver,
+        joinsEnclosing: first === observed.opener,
+        sharedWithinSavepoint: first === second,
+      }).toEqual({
+        driver: context.driver,
+        joinsEnclosing: !PER_BEGIN_NATIVE_DRIVERS.has(context.driver),
+        sharedWithinSavepoint: true,
+      });
+    });
+
+    // SQLite has no factory for a backend over a caller's transaction.
+    describe.runIf(POSTGRES_DRIVERS.has(context.driver))(
+      "over createPostgresTransactionBackend",
+      () => {
+        it("resolves the enclosing transaction's state in every savepoint the engine opens, at any depth, and in a Store's transaction", async () => {
+          const backend = context.getBackend();
+          const states = await backend.transactionWithNative(
+            async (target, native) => {
+              const opener = openTransactionSession(target).native;
+              const overTransaction = createPostgresBackend(
+                native as never,
+              ) as AdapterBackend<unknown>;
+              const [store] = await createAdapterStoreWithSchema(
+                probeGraph,
+                overTransaction,
+              );
+              const inStoreTransaction = await store.transaction((tx) =>
+                Promise.resolve(stateOf(tx)),
+              );
+              const inSavepoints = await overTransaction.transactionWithNative(
+                async (savepointTarget, savepoint) => {
+                  const overSavepoint = createPostgresBackend(
+                    savepoint as never,
+                  ) as AdapterBackend<unknown>;
+                  const nested = await overSavepoint.transactionWithNative(
+                    (nestedTarget) =>
+                      Promise.resolve(
+                        openTransactionSession(nestedTarget).native,
+                      ),
+                  );
+                  return [
+                    openTransactionSession(savepointTarget).native,
+                    stateOf(store.withTransaction(savepoint)),
+                    nested,
+                  ];
+                },
+              );
+              return {
+                opener,
+                others: [
+                  stateOf(store.withTransaction(native)),
+                  inStoreTransaction,
+                  ...inSavepoints,
+                ],
+              };
+            },
+          );
+          expect(states.others).toHaveLength(5);
+          for (const state of states.others) expect(state).toBe(states.opener);
+        });
+      },
+    );
   });
 }

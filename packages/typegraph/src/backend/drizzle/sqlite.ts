@@ -107,7 +107,9 @@ import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
   createNativeTransactionToken,
+  type NativeHandle,
   publishConnectionNativeTransaction,
+  recordEngineSavepoint,
   recordNativeTransactionHandle,
 } from "../native-transaction-handle";
 import {
@@ -2084,20 +2086,23 @@ export function buildSqliteEngineProfile(
             nativeTransaction,
           });
           await runFrameStatement(sql`BEGIN IMMEDIATE`);
-          try {
-            // Published only once BEGIN succeeded: a bind on this connection
-            // records this transaction only while it is open.
-            const result = await publishConnectionNativeTransaction(
-              nativeTransactionConnection(db),
-              nativeTransaction,
-              () => fn(txBackend),
-            );
-            await runFrameStatement(sql`COMMIT`);
-            return result;
-          } catch (error) {
-            await rollbackFrameQuietly();
-            throw error;
-          }
+          // Published from BEGIN succeeding to COMMIT or ROLLBACK finishing:
+          // a bind on this connection records this transaction only while it
+          // is open.
+          return publishConnectionNativeTransaction(
+            nativeTransactionConnection(db),
+            nativeTransaction,
+            async () => {
+              try {
+                const result = await fn(txBackend);
+                await runFrameStatement(sql`COMMIT`);
+                return result;
+              } catch (error) {
+                await rollbackFrameQuietly();
+                throw error;
+              }
+            },
+          );
         });
       }
 
@@ -2137,6 +2142,7 @@ export function buildSqliteEngineProfile(
         async () =>
           db.transaction(
             async (tx) => {
+              recordSqliteEngineSavepoint(db, tx);
               const txBackend = createTransactionBackend({
                 capabilities,
                 db: tx,
@@ -2283,14 +2289,15 @@ export function buildSqliteEngineProfile(
                 : sql`BEGIN IMMEDIATE`,
               );
 
-              try {
-                // Published only once BEGIN succeeded: a bind on this
-                // connection records this transaction only while it is open.
-                const result = await publishConnectionNativeTransaction(
-                  nativeTransactionConnection(db),
-                  nativeTransaction,
-                  () =>
-                    fn(
+              // Published from BEGIN succeeding to COMMIT or ROLLBACK
+              // finishing: a bind on this connection records this
+              // transaction only while it is open.
+              return publishConnectionNativeTransaction(
+                nativeTransactionConnection(db),
+                nativeTransaction,
+                async () => {
+                  try {
+                    const result = await fn(
                       markSchemaFencedInsertEligibleUnderFence(
                         gateFulltext(
                           txBackend,
@@ -2300,14 +2307,15 @@ export function buildSqliteEngineProfile(
                         fencePlan,
                       ),
                       db,
-                    ),
-                );
-                await runFrameStatement(sql`COMMIT`);
-                return result;
-              } catch (error) {
-                await rollbackFrameQuietly();
-                throw error;
-              }
+                    );
+                    await runFrameStatement(sql`COMMIT`);
+                    return result;
+                  } catch (error) {
+                    await rollbackFrameQuietly();
+                    throw error;
+                  }
+                },
+              );
             });
           }
 
@@ -2329,14 +2337,16 @@ export function buildSqliteEngineProfile(
             serializedQueue,
             async () =>
               db.transaction(
-                async (tx) =>
-                  fn(
+                async (tx) => {
+                  recordSqliteEngineSavepoint(db, tx);
+                  return fn(
                     markSchemaFencedInsertEligibleUnderFence(
                       bindTransactionBackend(tx, isFirstParty),
                       fencePlan,
                     ),
                     tx,
-                  ),
+                  );
+                },
                 {
                   behavior:
                     options?.accessMode === "read_only" || temporaryWrites ?
@@ -2362,11 +2372,7 @@ export function buildSqliteEngineProfile(
                 "libsql, bun:sqlite).",
             );
           }
-          assertAdoptedDialect<AnySqliteDatabase>(
-            externalTx,
-            BaseSQLiteDatabase,
-            "sqlite",
-          );
+          assertAdoptedDialect(externalTx, isSqliteDrizzleHandle, "sqlite");
           // serializedQueue is deliberately NOT applied to an adopted tx: a
           // sync better-sqlite3 driver runs the adopted statements on the
           // caller's stack, so wrapping a caller-driven tx in our queue
@@ -2395,9 +2401,9 @@ export function buildSqliteEngineProfile(
                     { waitBudgetMs: options.waitBudgetMs },
                   );
                 }
-                assertAdoptedDialect<AnySqliteDatabase>(
+                assertAdoptedDialect(
                   externalTx,
-                  BaseSQLiteDatabase,
+                  isSqliteDrizzleHandle,
                   "sqlite",
                 );
 
@@ -2407,14 +2413,7 @@ export function buildSqliteEngineProfile(
                 // object or a successful zero-row UPDATE alone proves neither fact.
                 const rootClient = (db as Readonly<{ $client?: unknown }>)
                   .$client;
-                const transactionClient =
-                  externalTx instanceof SQLiteTransaction ?
-                    (
-                      externalTx as unknown as Readonly<{
-                        session?: Readonly<{ client?: unknown }>;
-                      }>
-                    ).session?.client
-                  : (externalTx as Readonly<{ $client?: unknown }>).$client;
+                const transactionClient = sqliteHandleClient(externalTx);
                 if (
                   typeof rootClient !== "object" ||
                   rootClient === null ||
@@ -2725,41 +2724,81 @@ function createTransactionBackend(
 }
 
 /**
- * The connection a connection-level SQLite handle runs on, as the native
- * transaction record names it: the driver client or Durable Object storage
- * the serialized-resource audit identifies (every Drizzle wrapper over one
- * client shares it), or the handle itself when the audit recognizes none.
+ * Whether `handle` is a Drizzle SQLite transaction object: THE classifier
+ * the native-transaction record and schema-write adoption share. Drizzle's
+ * brand check, so a transaction of another loaded copy of Drizzle qualifies.
+ */
+function isSqliteTransactionHandle(handle: unknown): boolean {
+  return is(handle, SQLiteTransaction);
+}
+
+/** Whether `handle` is a Drizzle SQLite database or transaction object. */
+function isSqliteDrizzleHandle(handle: unknown): handle is AnySqliteDatabase {
+  return is(handle, BaseSQLiteDatabase);
+}
+
+/**
+ * The driver client a SQLite handle executes on: a transaction object's
+ * session client, or a database's `$client`.
+ */
+function sqliteHandleClient(db: AnySqliteDatabase): unknown {
+  return isSqliteTransactionHandle(db) ?
+      (db as unknown as Readonly<{ session?: Readonly<{ client?: unknown }> }>)
+        .session?.client
+    : (db as Readonly<{ $client?: unknown }>).$client;
+}
+
+/**
+ * The connection a SQLite handle runs on, as the native transaction record
+ * names it: the driver client or Durable Object storage the
+ * serialized-resource audit identifies for the handle's client (every
+ * Drizzle wrapper and transaction object over one client shares it), or the
+ * handle itself when the audit recognizes none.
  */
 function nativeTransactionConnection(db: AnySqliteDatabase): object {
-  return getSerializedSqliteConnection(db) ?? db;
+  return (
+    getSerializedSqliteConnection({
+      $client: sqliteHandleClient(db),
+    } as unknown as AnySqliteDatabase) ?? db
+  );
+}
+
+/** A SQLite handle as the native-transaction record classifies it. */
+function sqliteNativeHandle(db: AnySqliteDatabase): NativeHandle {
+  const connection = nativeTransactionConnection(db);
+  return isSqliteTransactionHandle(db) ?
+      { kind: "transaction", transaction: db, connection }
+    : { kind: "connection", connection };
+}
+
+/**
+ * Records that the engine's own `db.transaction()` on a transaction object
+ * opened the savepoint `tx` in it. On a database, `tx` is a BEGIN of its own.
+ */
+function recordSqliteEngineSavepoint(
+  db: AnySqliteDatabase,
+  tx: AnySqliteDatabase,
+): void {
+  if (isSqliteTransactionHandle(db)) {
+    recordEngineSavepoint(tx, sqliteNativeHandle(db));
+  }
 }
 
 /**
  * Records the native transaction one bind runs on: the token of the
- * transaction its opener is opening, a Drizzle transaction object (one per
- * BEGIN) as itself, and otherwise the transaction published on the
- * connection the handle runs on. The transaction-object decision is
- * Drizzle's brand check, the one `adoptTransaction` accepts a handle by.
+ * transaction its opener is opening, and otherwise what the handle runs in
+ * (`identifyNativeTransaction`).
  */
 function recordSqliteNativeTransaction(
   txBackend: object,
   options: CreateSqliteTransactionBackendOptions,
 ): void {
-  if (options.nativeTransaction !== undefined) {
-    recordNativeTransactionHandle(
-      txBackend,
-      options.nativeTransaction,
-      "transaction",
-    );
-  } else if (is(options.db, SQLiteTransaction)) {
-    recordNativeTransactionHandle(txBackend, options.db, "transaction");
-  } else {
-    recordNativeTransactionHandle(
-      txBackend,
-      nativeTransactionConnection(options.db),
-      "connection",
-    );
-  }
+  recordNativeTransactionHandle(
+    txBackend,
+    options.nativeTransaction === undefined ?
+      sqliteNativeHandle(options.db)
+    : { kind: "transaction", transaction: options.nativeTransaction },
+  );
 }
 
 // Re-export schema utilities
