@@ -323,12 +323,12 @@ hybrid. Native scores differ between engines (SQLite's BM25 and PostgreSQL's
 same on every backend but the ranks it reads are not. `.orderBy()` terms,
 including ones naming an `aggregate()` key, break ties between groups, and a
 hybrid group still tied after them falls back to its smallest node id in byte
-order on every backend. `.limit()` counts groups. This order holds for
-`execute()`; terminals that run the query through a relation (`first()`,
-`executeOn()`, `prepare()`, `batchOnce()`, `asRelation()`) order by the
-`.orderBy()` terms alone and can select a different group, which is tracked in
-[#974](https://github.com/nicia-ai/typegraph/issues/974). Until it is fixed, use
-`.limit(n).execute()` when the group order matters:
+order on every backend. `.limit()` counts groups. Every terminal selects the same
+groups in the same order: `execute()`, `first()`, `executeOn()`, `prepare()`,
+`count()`, `exists()`, `store.batchOnce()` and `asRelation()`. On a relation
+built from a search query, an `orderBy()` added after `asRelation()` breaks
+ties in relevance, and `distinct()` orders each distinct row by its most
+relevant occurrence.
 
 ```typescript
 const categories = await store

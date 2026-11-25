@@ -65,3 +65,10 @@ function relevanceSortSources(
   if (fulltext) return ["fulltext_rank"];
   return [];
 }
+
+/**
+ * The column a relevance-ordered statement compiled for a wrapping statement
+ * carries the rank of its own ORDER BY in (`buildStandardSelectionOrderColumn`).
+ * It is in the reserved `__tg` namespace, which no caller's output key may use.
+ */
+export const SELECTION_ORDER_COLUMN = "__tg_selection_order";

@@ -90,6 +90,12 @@ position; the defaults are NULLS LAST for ascending and NULLS FIRST for descendi
 select an arbitrary edge or path to represent an entity. `count()` counts the current relation,
 including distinctness and its range; `exists()` checks whether it has a row. Neither runs `map()`.
 
+A relation built from a full-text, vector or hybrid query keeps the query's relevance order: its
+rows come in the order `execute()` returns them, and the query's limit and offset select the same
+rows. An `orderBy()` added to such a relation breaks ties in relevance, as the same term in the
+query's own `orderBy()` would. `distinct()` orders each distinct row by its most relevant
+occurrence, and `page()` and `stream()` apply that order before the projected columns.
+
 <a id="ordered-scalar-collections"></a>
 
 ## Ordered collections
