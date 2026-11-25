@@ -362,10 +362,7 @@ export async function openBoundTransactionSession<
 ): Promise<
   Readonly<{ session: TransactionSession<Engine>; binding: Binding }>
 > {
-  const session = openTransactionSession(
-    transaction,
-    openedByStoreTransaction,
-  );
+  const session = openTransactionSession(transaction, openedByStoreTransaction);
   const bound = await bind(session, session[SESSION_TRANSACTION]);
   session[SESSION_TRANSACTION] = bound.statements;
   return { session, binding: bound.binding };
