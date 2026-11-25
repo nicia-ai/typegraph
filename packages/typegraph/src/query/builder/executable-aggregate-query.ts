@@ -352,7 +352,10 @@ export class ExecutableAggregateQuery<
     this.asRelation().checkSqlNamesBeforeExecution?.();
   }
 
-  /** Runs on a target with the same database and transaction provenance. */
+  /**
+   * Runs on the target it is given, as its relation's `executeOn` does. The
+   * target is not checked against the database this query was built on.
+   */
   executeOn(
     backend: GraphBackend | TransactionBackend,
   ): Promise<readonly AggregateResult<R, Aliases>[]>;

@@ -3038,8 +3038,14 @@ contract. Use `batch()` when those queued collection reads or sequential executi
 
 Runs several independent queries in sequence and returns a typed tuple of results preserving input
 order — N query executions, never one round trip. Accepts two or more queries (from `.select()`,
-set operations, or edge collection `batchFind*` methods), each keeping its own projection,
-filtering, sorting, and pagination.
+`.project()`, `.aggregate()`, relations, set operations, or edge collection `batchFind*`
+methods), each keeping its own projection, filtering, sorting, and pagination.
+
+Each query runs through its `executeOn()` in the transaction `batch()` opens. `executeOn(target)`
+runs every read terminal (select, projection, set operation, relation, aggregate, bound prepared
+relation) on the backend or transaction backend it is given. It does not check that the target
+belongs to the database the query was built on: passing a target of another database is the
+caller's error and is not detected, and the query reads that database's rows.
 
 **Cost.** At least one statement per query. Whole-node, whole-edge, and spread selections detected
 during planning use a full fetch from the start. A selector branch that depends on actual row

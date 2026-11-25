@@ -3917,7 +3917,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * // companies: readonly { id: string; name: string }[]
    * ```
    *
-   * @param queries - Two or more executable queries (from `.select()` or set operations)
+   * Each query runs through its `executeOn()` in the transaction this batch
+   * opens. The target is not checked against the database a query was built
+   * on.
+   *
+   * @param queries - Two or more executable queries (from `.select()`,
+   *   `.project()`, `.aggregate()`, relations, or set operations)
    * @returns A tuple with per-query typed results, preserving input order
    */
   async batch<

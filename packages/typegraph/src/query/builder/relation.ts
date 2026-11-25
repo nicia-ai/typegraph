@@ -1008,7 +1008,7 @@ export class ExecutableRelationQuery<
    * backend, then one execution entered from the configuration.
    */
   async #executeConfigured(backend: GraphBackend): Promise<readonly Result[]> {
-    this.#assertExecutableOn(backend);
+    this.#assertExecutable();
     const rows = await this.#fetchRows(
       backend,
       () => this.#enterExecution(),
@@ -1040,7 +1040,7 @@ export class ExecutableRelationQuery<
   async #executeOnTarget(
     target: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly Result[]> {
-    this.#assertExecutableOn(target);
+    this.#assertExecutable();
     const rows = await this.#fetchRows(
       target,
       () => operationEntryBackend(enterTargetOperation(target)),
@@ -1049,18 +1049,16 @@ export class ExecutableRelationQuery<
     return rows.map((row) => this.#definition.decodeRow(row));
   }
 
-  /** Refuses, before any statement, a target this relation cannot run on. */
-  #assertExecutableOn(target: GraphBackend | StoreTransactionBackend): void {
+  /**
+   * Refuses, before any statement, a relation that cannot execute at all.
+   * A target handed to `executeOn` is not checked against the database this
+   * relation was built on, as no other read checks it: the caller owns the
+   * target they pass.
+   */
+  #assertExecutable(): void {
     if (this.#definition.provenance.checked)
       throw new ConfigurationError(
         "Derived relations are unavailable inside withCheckedReads().",
-      );
-    if (
-      backendDerivationRoot(target) !==
-      this.#definition.provenance.executionTarget
-    )
-      throw new ConfigurationError(
-        "A relation cannot execute on a different database or transaction target.",
       );
   }
 
