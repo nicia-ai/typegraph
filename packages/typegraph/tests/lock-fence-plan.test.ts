@@ -98,6 +98,8 @@ import {
 } from "../src/query/sql-fragment";
 import { buildKindRegistry } from "../src/registry/builders";
 import {
+  enterOperation,
+  openTransactionSession,
   type OperationEntry,
   operationEntryBackend,
 } from "../src/store/operation-scope";
@@ -388,7 +390,9 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
       logged.reset();
       await expect(
         store[STORE_RUNTIME].applyResolvedNodeUniqueness(
-          unfencedTarget,
+          // The member runs in the operation it is handed: one of a session
+          // over the unfenced target, as a caller holding it would pass.
+          enterOperation(openTransactionSession(unfencedTarget)),
           {
             upserts: [
               {

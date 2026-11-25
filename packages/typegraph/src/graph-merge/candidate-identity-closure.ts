@@ -8,11 +8,12 @@
  * The caller supplies endpoints from touched target edges as well as candidate
  * rows: this module deliberately does not perform candidate or edge reads.
  * Every lookup receives the same target, so callers that need a concurrent
- * exact snapshot must pass a transaction-bound, identity-fenced target.
+ * exact snapshot must pass the operation of a transaction-bound,
+ * identity-fenced target.
  */
 import type { GraphDef } from "../core/define-graph";
 import type { IdentityTransferAssertion } from "../identity/service";
-import type { StatementBackend } from "../store/operation-scope";
+import type { OperationEntry } from "../store/operation-scope";
 import { hasScopedIdentityReads, storeRuntime } from "../store/runtime-port";
 import type { Store } from "../store/store";
 import { compareCodePoints } from "../utils/compare";
@@ -40,7 +41,7 @@ export type CandidateIdentityScope = Readonly<{
  */
 export async function readCandidateIdentityClosure<G extends GraphDef>(
   store: Store<G>,
-  target: StatementBackend,
+  target: OperationEntry,
   input: Readonly<{
     references: readonly CandidateIdentityReference[];
     assertionIds?: readonly string[];
@@ -170,7 +171,7 @@ export async function readCandidateIdentityClosure<G extends GraphDef>(
 
 async function readStateIdentityProjection<G extends GraphDef>(
   store: Store<G>,
-  target: StatementBackend,
+  target: OperationEntry,
   initialReferences: readonly CandidateIdentityReference[],
   assertionIds: readonly string[],
   includeDeletedEndpoints: boolean,

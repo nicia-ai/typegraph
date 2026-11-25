@@ -24,6 +24,8 @@ import { activeOnlyAxisReferences } from "../store/claims/edge-claims";
 import {
   enterOperation,
   openTransactionSession,
+  type OperationEntry,
+  operationEntryBackend,
   type StatementBackend,
   type StoreTransactionBackend,
 } from "../store/operation-scope";
@@ -364,8 +366,8 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       backend.capabilities.execution.interactiveTransactions,
     );
   }
-  const produce = async (target: StatementBackend): Promise<void> => {
-    await produceExportChunks(store, target, resolved, (chunk) =>
+  const produce = async (entry: OperationEntry): Promise<void> => {
+    await produceExportChunks(store, entry, resolved, (chunk) =>
       channel.push(chunk),
     );
   };
@@ -412,7 +414,7 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
               // holds the transaction, so no other call interleaves with the
               // pages it produces.
               (target: StoreTransactionBackend) =>
-                produce(enterOperation(openTransactionSession(target)).backend),
+                produce(enterOperation(openTransactionSession(target))),
               {
                 isolationLevel: "repeatable_read",
                 accessMode: "read_only",
@@ -572,10 +574,10 @@ function claimSnapshotExportLeaseOrRefuse(
  */
 async function graphHasIdentityTransitions<G extends GraphDef>(
   store: Store<G>,
-  backend: StatementBackend,
+  entry: OperationEntry,
 ): Promise<boolean> {
   const probe = await storeRuntime(store).readIdentityTransitionPageAtTarget(
-    backend,
+    entry,
     { limit: 1 },
   );
   return probe.transitions.length > 0;
@@ -583,10 +585,13 @@ async function graphHasIdentityTransitions<G extends GraphDef>(
 
 async function produceExportChunks<G extends GraphDef>(
   store: Store<G>,
-  backend: StatementBackend,
+  // The export's one operation (or the pooled root): its own reads go through
+  // the handle, and the Store port reads it makes run in the same operation.
+  entry: OperationEntry,
   options: ExportOptions_ & Readonly<{ batchSize: number }>,
   emit: (chunk: GraphInterchangeChunk) => Promise<void>,
 ): Promise<void> {
+  const backend = operationEntryBackend(entry);
   const graphId = store.graphId;
   const nodeKinds = options.nodeKinds ?? getNodeKinds(store.graph);
   const edgeKinds = options.edgeKinds ?? getEdgeKinds(store.graph);
@@ -601,7 +606,7 @@ async function produceExportChunks<G extends GraphDef>(
   const retentionCut =
     archivalIdentityEnabled ?
       archivalRetentionCut(
-        await storeRuntime(store).identityTransitionRetentionAtTarget(backend),
+        await storeRuntime(store).identityTransitionRetentionAtTarget(entry),
       )
     : undefined;
   const retention =
@@ -619,7 +624,7 @@ async function produceExportChunks<G extends GraphDef>(
   // snapshot the header's other fields come from.
   const hasTransitions =
     archivalIdentityEnabled ?
-      await graphHasIdentityTransitions(store, backend)
+      await graphHasIdentityTransitions(store, entry)
     : false;
 
   await emit({
@@ -670,7 +675,7 @@ async function produceExportChunks<G extends GraphDef>(
   let after: string | undefined;
   for (;;) {
     const page = await storeRuntime(store).readIdentityAssertionPageAtTarget(
-      backend,
+      entry,
       options.identityMode,
       {
         ...(options.nodeKinds === undefined ? {} : { nodeKinds }),
@@ -701,7 +706,7 @@ async function produceExportChunks<G extends GraphDef>(
   if (options.identityMode === "archival") {
     await produceIdentityTransitionChunks(
       store,
-      backend,
+      entry,
       emit,
       options.batchSize,
     );
@@ -737,7 +742,7 @@ function wireTransition(
 
 async function produceIdentityTransitionChunks<G extends GraphDef>(
   store: Store<G>,
-  backend: StatementBackend,
+  entry: OperationEntry,
   emit: (chunk: GraphInterchangeChunk) => Promise<void>,
   batchSize: number,
 ): Promise<void> {
@@ -752,7 +757,7 @@ async function produceIdentityTransitionChunks<G extends GraphDef>(
   let emittedAny = false;
   for (;;) {
     const page = await storeRuntime(store).readIdentityTransitionPageAtTarget(
-      backend,
+      entry,
       {
         ...(after === undefined ? {} : { after }),
         limit: batchSize,

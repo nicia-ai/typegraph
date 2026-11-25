@@ -471,7 +471,7 @@ export async function operateStore<G extends GraphDef>(
     let pending: Pending | undefined;
     const options = withTransactionPreCommitHook(
       { isolationLevel: "read_committed" },
-      async (backend) => {
+      async ({ backend }) => {
         if (pending === undefined) return;
         const recorded =
           store.historyEnabled ?

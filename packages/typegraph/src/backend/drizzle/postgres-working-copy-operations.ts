@@ -65,7 +65,7 @@ import { asBaseVersion } from "../../graph-merge/types";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import {
   enterTransactionOperation,
-  type OperationBackend,
+  type Operation,
 } from "../../store/operation-scope";
 import {
   lockRecordedGraphWrite,
@@ -334,13 +334,13 @@ function toEvidence(row: EvidenceRow): DurableBranchOperationEvidence {
  */
 async function coordinatesAt<G extends GraphDef>(
   store: Store<G>,
-  target: OperationBackend,
+  operation: Operation,
 ): Promise<DurableBranchCoordinates> {
-  const base = await computeBaseVersionAtTarget(store, target);
+  const base = await computeBaseVersionAtTarget(store, operation);
   const lineage = resolveLineage(store);
   return lineage === undefined ?
       { base }
-    : { base, revision: await lineage.revision(target) };
+    : { base, revision: await lineage.revision(operation.backend) };
 }
 
 async function readEvidence(
@@ -409,14 +409,14 @@ async function operateInAllocation<G extends GraphDef>(
   // read the `before` or `outcome` a rolled-back run left behind.
   const attempts: OperationAttempt[] = [];
 
-  // The pre-commit hook is handed the handle its statements go through by the
-  // Store that fires it.
-  const recordEvidence = async (target: OperationBackend): Promise<void> => {
+  // The pre-commit hook is handed the operation it runs in by the layer that
+  // fires it.
+  const recordEvidence = async (operation: Operation): Promise<void> => {
     const attempt = attempts.at(-1);
     if (attempt?.before === undefined) return;
-    const after = await coordinatesAt(store, target);
+    const after = await coordinatesAt(store, operation);
     const evidence = await insertEvidence(
-      target,
+      operation.backend,
       evidenceRelation,
       request,
       attempt.before,
@@ -431,7 +431,8 @@ async function operateInAllocation<G extends GraphDef>(
     // One operation of the session `store.transaction` opened, for this
     // run's own statements; `operations.apply` writes through `transaction`,
     // whose members enter their own.
-    const target = enterTransactionOperation(transaction).backend;
+    const operation = enterTransactionOperation(transaction);
+    const target = operation.backend;
     await allocation.lockSealed(target, expectedOrigin);
     const existing = await readEvidence(
       target,
@@ -445,7 +446,7 @@ async function operateInAllocation<G extends GraphDef>(
     // The write fence comes BEFORE the coordinate read: a writer that takes
     // this lock cannot commit between `before` and `apply` once we hold it.
     await lockRecordedGraphWrite(target, store.graphId);
-    attempt.before = await coordinatesAt(store, target);
+    attempt.before = await coordinatesAt(store, operation);
     await operations.apply(transaction, request.mutation);
   };
 

@@ -498,7 +498,7 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
         try {
           const options = withTransactionPreCommitHook(
             undefined,
-            async (target) => {
+            async ({ backend: target }) => {
               routing.enter("pre-commit");
               await target.execute(markerStatement(PRE_COMMIT_MARKER));
               routing.enter("after pre-commit");

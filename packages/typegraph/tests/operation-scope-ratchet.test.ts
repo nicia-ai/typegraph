@@ -775,12 +775,6 @@ const RAW_TRANSACTION_DECLARATIONS: Readonly<
     }>
   >
 > = {
-  "src/store/runtime-port.ts#StoreRuntime": {
-    sites: 14,
-    route: "signature",
-    reason:
-      "The Store runtime port's member signatures appear in the store, graph-merge, identity and other reports. They are function types with no body; their implementations in store.ts annotate the narrowed type, which the type checker holds them to.",
-  },
   "src/query/builder/types.ts#BatchableQuery": {
     sites: 1,
     route: "signature",

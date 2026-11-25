@@ -12,7 +12,6 @@ import {
   type RawQueryExecutionBackend,
   type SchemaReadBackend,
   type SqlCompilationBackend,
-  type TransactionBackend,
 } from "../backend/types";
 import {
   type EdgeKinds,
@@ -43,8 +42,9 @@ import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import { requireDefined } from "../utils/presence";
 import { type InternalGraphAlgorithms } from "./algorithms";
 import {
+  type Operation,
+  type OperationEntry,
   requireTransactionRuntime,
-  type StatementBackend,
   type StoreTransactionBackend,
 } from "./operation-scope";
 import { type NodeDeletePolicy } from "./operations/node-write-pipeline";
@@ -76,6 +76,14 @@ export const STORE_RUNTIME: unique symbol =
  * public Store contract and non-enumerable at runtime. JavaScript reflection
  * can still discover symbol properties, so this is an unsupported internal
  * surface rather than a security boundary.
+ *
+ * A member that issues statements on a caller's behalf takes the caller's
+ * {@link OperationEntry}: the root backend, or the {@link Operation} the
+ * caller holds. It runs in that operation, of that operation's session, and
+ * never opens a session of its own over a transaction its caller already
+ * holds. An entry another copy of TypeGraph minted is refused
+ * (`requireOperationEntry`). The import members below take the narrow
+ * statement projection of an import frame instead, and open no session.
  */
 export type StoreRuntime<G extends GraphDef> = Readonly<{
   backend: GraphBackend;
@@ -152,7 +160,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * returns its argument unchanged, so a hookless Store answers with the very
    * object it was handed and a comparison against that object is a tautology.
    */
-  queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;
+  queryBackend: (target?: OperationEntry) => GraphBackend;
   sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
   recordedNodeGetById: <N extends NodeType>(
     kind: string,
@@ -242,8 +250,8 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * transaction's own buffered hook runner and attempt — every production
    * caller (merge apply) does this today.
    *
-   * `target` accepts the root {@link GraphBackend} itself, not only a
-   * `TransactionBackend`, on purpose: `transactionDeleteNodeWithPolicy` is
+   * `target` accepts the root {@link GraphBackend} itself, not only an
+   * operation of a transaction, on purpose: `transactionDeleteNodeWithPolicy` is
    * always transaction-scoped, and a transaction-scoped backend never
    * exposes the fused atomic delete command (see `executeNodeDelete`'s
    * `resolveAtomicNodeDeleteBatchExecutor` call) — so calling THIS port
@@ -252,15 +260,15 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * delete paths at all.
    */
   deleteNodeWithPolicy: (
-    target: GraphBackend | TransactionBackend,
+    target: OperationEntry,
     work: Readonly<{ kind: string; id: string }>,
     policy?: NodeDeletePolicy,
   ) => Promise<void>;
   /**
    * Validates one final resolved node write set, then clears the affected
    * nodes' claim rows so its upserts may take their approved keys in any order,
-   * and re-takes the complete claim set once the writes have landed. The caller
-   * must supply a transaction-bound backend.
+   * and re-takes the complete claim set once the writes have landed. It runs
+   * in the operation of the caller's transaction it is handed.
    *
    * The clear is by OWNER, so it takes every claim the affected nodes hold —
    * uniqueness and `disjointWith` alike — and the rebuild therefore goes through
@@ -268,7 +276,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * insert. See `store/claims/resolved-node-claims.ts`.
    */
   applyResolvedNodeUniqueness: <Output>(
-    target: TransactionBackend,
+    target: Operation,
     writes: Readonly<{
       upserts: readonly Readonly<{
         kind: string;
@@ -308,7 +316,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    */
   liveNodesSharingIds: (
     ids: readonly string[],
-    target?: GraphBackend | TransactionBackend,
+    target?: OperationEntry,
   ) => Promise<readonly Readonly<{ kind: string; id: string }>[]>;
   /**
    * Every stored assertion row (ended rows included) for the given assertion
@@ -318,7 +326,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    */
   identityAssertionRowsByIds: (
     ids: readonly string[],
-    target?: GraphBackend | TransactionBackend,
+    target?: OperationEntry,
   ) => Promise<
     ReadonlyMap<
       string,
@@ -343,12 +351,12 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    */
   structuralIdentityClasses: (
     references: readonly Readonly<{ kind: string; id: string }>[],
-    target?: GraphBackend | TransactionBackend,
+    target?: OperationEntry,
   ) => Promise<
     ReadonlyMap<string, readonly Readonly<{ kind: string; id: string }>[]>
   >;
   identityAssertionsAtTarget: (
-    target: GraphBackend | TransactionBackend,
+    target: OperationEntry,
     mode?: "state" | "archival",
   ) => Promise<
     readonly Readonly<{
@@ -363,7 +371,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   >;
   /** Current-state or archival assertions incident to any supplied endpoint. */
   identityAssertionsTouchingAtTarget?: (
-    target: GraphBackend | TransactionBackend,
+    target: OperationEntry,
     references: readonly Readonly<{ kind: string; id: string }>[],
     mode?: "state" | "archival",
     options?: Readonly<{ includeDeleted?: boolean }>,
@@ -380,7 +388,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
   >;
   /** Interchange-visible assertion ID rows, with the requested archive state. */
   interchangeIdentityAssertionsByIdsAtTarget?: (
-    target: GraphBackend | TransactionBackend,
+    target: OperationEntry,
     ids: readonly string[],
     mode: "state" | "archival",
     options?: Readonly<{ includeDeleted?: boolean }>,
@@ -396,7 +404,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     }>[]
   >;
   readIdentityAssertionPageAtTarget: (
-    target: GraphBackend | TransactionBackend,
+    target: OperationEntry,
     mode: "state" | "archival",
     options: Readonly<{
       nodeKinds?: readonly string[];
@@ -508,7 +516,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * mirroring `readIdentityAssertionPageAtTarget` above.
    */
   readIdentityTransitionPageAtTarget: (
-    target: GraphBackend | TransactionBackend,
+    target: OperationEntry,
     options: Readonly<{ after?: IdentityTransitionCursor; limit: number }>,
   ) => Promise<
     Readonly<{
@@ -522,7 +530,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * cut and the cut an archival restore carried in — for archival export.
    */
   identityTransitionRetentionAtTarget: (
-    target: GraphBackend | TransactionBackend,
+    target: OperationEntry,
   ) => Promise<IdentityTransitionRetention>;
   /**
    * @internal Restores archival identity transitions inside an import
@@ -550,7 +558,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * anonymous `fold`. `undefined` for an apply with no governing decision.
    */
   applyIdentityMergeAtTarget: (
-    target: GraphBackend | TransactionBackend,
+    target: OperationEntry,
     retractions: readonly Readonly<{
       id: string;
       relation: "same" | "different";
@@ -579,7 +587,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * graphs resolve immediately.
    */
   assertIdentityClassesConsistentAtTarget: (
-    target: GraphBackend | TransactionBackend,
+    target: OperationEntry,
     seeds: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
 }>;
@@ -644,7 +652,7 @@ export function storeCaptureEnabled<G extends GraphDef>(
  */
 export function storeQueryBackend<G extends GraphDef>(
   store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
-  target?: StatementBackend,
+  target?: OperationEntry,
 ): GraphBackend {
   return storeRuntime(store).queryBackend(target);
 }
@@ -665,8 +673,24 @@ export type TransactionDeleteNodeWithPolicy = (
   policy?: NodeDeletePolicy,
 ) => Promise<void>;
 
-const transactionStoreOwners = new WeakMap<object, object>();
-const evolvedTransactionOriginalOwners = new WeakMap<object, object>();
+// The owner maps hold an identity token per Store runtime, never the runtime
+// itself: ownership is decided by identity alone, and a runtime's members
+// demand an operation, which a value widened to `object` would no longer.
+const transactionStoreOwners = new WeakMap<object, symbol>();
+const evolvedTransactionOriginalOwners = new WeakMap<object, symbol>();
+const storeRuntimeTokens = new WeakMap<object, symbol>();
+
+/** The identity token of one Store runtime, minted on first use. */
+function storeRuntimeToken<G extends GraphDef>(
+  runtime: StoreRuntime<G>,
+): symbol {
+  const existing = storeRuntimeTokens.get(runtime);
+  if (existing !== undefined) return existing;
+  const token = Symbol("typegraph.storeRuntime");
+  storeRuntimeTokens.set(runtime, token);
+  return token;
+}
+
 const evolvedTransactionStores = new WeakMap<object, object>();
 const activeTransactionContexts = new WeakSet<object>();
 const scopedTransactionRuntimes = new WeakMap<object, object>();
@@ -698,7 +722,7 @@ export function bindTransactionStore<G extends GraphDef>(
   store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
 ): void {
   const runtime = requireDefined(transaction[TRANSACTION_RUNTIME]);
-  transactionStoreOwners.set(runtime, storeRuntime(store));
+  transactionStoreOwners.set(runtime, storeRuntimeToken(storeRuntime(store)));
 }
 
 /** Binds an evolved callback to its original Store and temporary evolved view. */
@@ -708,8 +732,14 @@ export function bindEvolvedTransactionStore<TStore extends object>(
   evolvedStore: TStore,
 ): void {
   const runtime = requireDefined(transaction[TRANSACTION_RUNTIME]);
-  transactionStoreOwners.set(runtime, storeRuntime(evolvedStore));
-  evolvedTransactionOriginalOwners.set(runtime, storeRuntime(originalStore));
+  transactionStoreOwners.set(
+    runtime,
+    storeRuntimeToken(storeRuntime(evolvedStore)),
+  );
+  evolvedTransactionOriginalOwners.set(
+    runtime,
+    storeRuntimeToken(storeRuntime(originalStore)),
+  );
   evolvedTransactionStores.set(runtime, evolvedStore);
 }
 
@@ -736,9 +766,9 @@ export function activeTransactionStore<TStore extends object>(
   if (scopeRuntime === undefined) return undefined;
   const runtime = callbackRuntimeOf(scopeRuntime);
   if (!activeTransactionContexts.has(runtime)) return undefined;
-  const ownerRuntime = storeRuntime(store);
-  if (transactionStoreOwners.get(runtime) === ownerRuntime) return store;
-  if (evolvedTransactionOriginalOwners.get(runtime) !== ownerRuntime) {
+  const ownerToken = storeRuntimeToken(storeRuntime(store));
+  if (transactionStoreOwners.get(runtime) === ownerToken) return store;
+  if (evolvedTransactionOriginalOwners.get(runtime) !== ownerToken) {
     return undefined;
   }
   return evolvedTransactionStores.get(runtime) as TStore | undefined;

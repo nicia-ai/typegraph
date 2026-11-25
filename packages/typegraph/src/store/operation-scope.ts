@@ -354,22 +354,32 @@ export function enterOperation(scope: EntryScope): OperationEntry {
 
 /**
  * The mint where an outside target enters through a public signature
- * (`executeOn`, which `store.batch()` also goes through): the root backend as
- * itself, or the first {@link Operation} of a NEW session for a transaction.
+ * (`executeOn`, which `store.batch()` also goes through), or where a Store
+ * opener receives a bare target from `runOptionallyInTransaction`: the
+ * root backend as itself, or the first {@link Operation} of a NEW session for
+ * a transaction. The Store runtime port never enters here: its members take
+ * the caller's {@link OperationEntry} and run in that operation.
  * The public type carries no session and none is looked up from the object,
  * so whatever transaction the caller holds — one of this Store's, another
  * Store's, or one built on the engine directly — joins as a binding of its
  * own.
- *
- * THE one owner of the root-or-transaction decision for a target held as a
- * backend.
  */
 export function enterTargetOperation(
   target: GraphBackend | StoreTransactionBackend,
 ): OperationEntry {
-  return "transaction" in target ? target : (
+  return isRootBackend(target) ? target : (
       enterOperation(openTransactionSession(target))
     );
+}
+
+/**
+ * THE one owner of the root-or-transaction decision for a value held as a
+ * backend or an entry: only the pooled root has a `transaction` member.
+ */
+function isRootBackend(
+  target: GraphBackend | StoreTransactionBackend | OperationEntry,
+): target is GraphBackend {
+  return "transaction" in target;
 }
 
 // ---------------------------------------------------------------------------
@@ -465,6 +475,20 @@ export function decorateOperation<Engine extends TransactionBackend>(
   /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
   return { [OPERATION_SESSION]: session, backend: decorated } as Operation;
   /* eslint-enable no-restricted-syntax */
+}
+
+/**
+ * THE refusal of an entry handed across the Store runtime port that is
+ * neither a root backend nor an {@link Operation} this module minted: an
+ * operation another copy of TypeGraph minted carries that copy's private
+ * keys, so this copy would otherwise take it for a root backend and send its
+ * statements to an object that is not one. Returns `entry` itself.
+ */
+export function requireOperationEntry(entry: OperationEntry): OperationEntry {
+  if (isRootBackend(entry) || OPERATION_SESSION in entry) return entry;
+  throw new TypeError(
+    "Cannot run in this operation. It may come from an incompatible TypeGraph version.",
+  );
 }
 
 /** The session `entry` belongs to, or `undefined` for the root backend. */

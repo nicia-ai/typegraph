@@ -42,10 +42,7 @@ import {
   normalizeIdentityPair,
 } from "../identity/reference";
 import { isCurrentIdentityAssertion } from "../identity/validity-window";
-import type {
-  OperationBackend,
-  StatementBackend,
-} from "../store/operation-scope";
+import type { Operation, OperationEntry } from "../store/operation-scope";
 import { nowIso } from "../utils/date";
 import { encodeTupleKey } from "../utils/tuple-key";
 import { type CanonicalEntity, COMMITTED_TARGET_BRANCH } from "./canonicalize";
@@ -830,11 +827,11 @@ async function snapshotIdentityClasses<G extends GraphDef>(
   seeds: readonly Readonly<{ kind: string; id: string }>[],
   liveKeys: ReadonlySet<MergeKey>,
   plannedDeletions: ReadonlySet<MergeKey>,
-  txBackend?: OperationBackend,
+  operation?: Operation,
 ): Promise<IdentityClassSnapshot> {
   const classes = await storeRuntime(target).structuralIdentityClasses(
     seeds,
-    txBackend,
+    operation,
   );
   const fingerprints = new Map<string, string>();
   const groups: (readonly Readonly<{ kind: string; id: string }>[])[] = [];
@@ -863,24 +860,24 @@ export type LedgerAssertion = Readonly<{
 
 /**
  * The target's CURRENT assertions touching the guarded universe, read fresh
- * from `backend` (the tx backend inside the commit transaction).
+ * in `entry` (the root, or the commit transaction's operation).
  */
 async function relevantLedgerAssertions<G extends GraphDef>(
   target: Store<G>,
   memberKeys: ReadonlySet<MergeKey>,
-  backend: StatementBackend,
+  entry: OperationEntry,
 ): Promise<readonly LedgerAssertion[]> {
   const runtime = storeRuntime(target);
   if (hasScopedIdentityReads(runtime)) {
     return runtime.identityAssertionsTouchingAtTarget(
-      backend,
+      entry,
       [...memberKeys].map((key) => ({ kind: kindOf(key), id: idOf(key) })),
       "state",
     );
   }
   // Older custom Store runtimes lack the scoped read. Preserve their original
   // full-ledger guard, using the same transaction target and endpoint filter.
-  return (await runtime.identityAssertionsAtTarget(backend, "state")).filter(
+  return (await runtime.identityAssertionsAtTarget(entry, "state")).filter(
     (assertion) =>
       memberKeys.has(mergeKey(assertion.a.kind, assertion.a.id)) ||
       memberKeys.has(mergeKey(assertion.b.kind, assertion.b.id)),
@@ -1045,7 +1042,7 @@ export function assertOneIdOneTruth(
  */
 export async function assertPlannedIdentityIdsFresh<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   plan: Pick<IdentityPlanSlice, "identityAssertions" | "identityRetractions">,
 ): Promise<void> {
   const plannedIds = [
@@ -1055,7 +1052,7 @@ export async function assertPlannedIdentityIdsFresh<G extends GraphDef>(
   if (plannedIds.length === 0) return;
   const storedById = await storeRuntime(target).identityAssertionRowsByIds(
     plannedIds,
-    txBackend,
+    operation,
   );
   for (const assertion of plan.identityAssertions) {
     const stored = storedById.get(assertion.id);
@@ -1156,11 +1153,11 @@ export function affectedIdentityClassSeeds(
  */
 export async function assertMergedIdentityClassesConsistent<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   plan: IdentityPlanSlice,
 ): Promise<void> {
   await storeRuntime(target).assertIdentityClassesConsistentAtTarget(
-    txBackend,
+    operation,
     affectedIdentityClassSeeds(plan, target.graph.identity?.sameIdAcrossKinds),
   );
 }
@@ -1292,13 +1289,13 @@ function asIdentityMergeConflict(
  */
 export async function assertIdentityPeersStable<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   probe: IdentityPeerProbe | undefined,
   plan: IdentityPlanSlice,
 ): Promise<void> {
   if (probe === undefined) return;
   const live = (
-    await storeRuntime(target).liveNodesSharingIds(probe.ids, txBackend)
+    await storeRuntime(target).liveNodesSharingIds(probe.ids, operation)
   ).filter((peer) => !probe.plannedDeletions.has(mergeKey(peer.kind, peer.id)));
   // Under "fold" ANY new same-id peer changes the classes the plan folded
   // on; under "ignore" only a peer of a kind DISJOINT with a seed sharing
@@ -1337,7 +1334,7 @@ export async function assertIdentityPeersStable<G extends GraphDef>(
       probe.seeds,
       new Set(live.map((peer) => mergeKey(peer.kind, peer.id))),
       probe.plannedDeletions,
-      txBackend,
+      operation,
     );
   const drifted = [...probe.classFingerprints]
     .filter(([key, fingerprint]) => liveFingerprints.get(key) !== fingerprint)
@@ -1354,7 +1351,7 @@ export async function assertIdentityPeersStable<G extends GraphDef>(
   const ledger = await relevantLedgerAssertions(
     target,
     probe.memberKeys,
-    txBackend,
+    operation,
   );
   if (
     differentLedgerFingerprint(
@@ -1385,7 +1382,7 @@ export async function assertIdentityPeersStable<G extends GraphDef>(
     : (
         await loadIdentityWindowHistory(
           storeRuntime(target).identityContext(),
-          txBackend,
+          operation.backend,
           plan.identityAssertions,
           nowIso(),
         )
