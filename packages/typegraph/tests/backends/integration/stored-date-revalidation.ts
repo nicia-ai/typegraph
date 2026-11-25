@@ -27,12 +27,12 @@ const LATER = "2099-01-01T00:00:00.000Z";
 
 const DATED_DOC_TITLE = "dated_doc_title";
 
-const DatedDoc = defineNode("DatedDoc", {
+const DatedDocument = defineNode("DatedDoc", {
   schema: z.object({
     title: z.string(),
     publishedAt: z.date(),
     reviewedAt: z.date().optional(),
-    archivedAt: z.date().nullable().default(null),
+    archivedAt: z.date().nullable().default(FALLBACK),
     // A `.catch()` replaced a refused stored date with its fallback silently.
     checkedAt: z.date().optional().catch(FALLBACK),
     review: z.object({ at: z.date(), by: z.string() }).optional(),
@@ -41,7 +41,7 @@ const DatedDoc = defineNode("DatedDoc", {
 });
 
 /** Only a caught date: the refused stored text was replaced, not refused. */
-const CaughtDoc = defineNode("CaughtDoc", {
+const CaughtDocument = defineNode("CaughtDoc", {
   schema: z.object({
     title: z.string(),
     checkedAt: z.date().optional().catch(FALLBACK),
@@ -59,9 +59,9 @@ const datedCites = defineEdge("datedCites", {
 const datedGraph = defineGraph({
   id: "stored_date_revalidation",
   nodes: {
-    CaughtDoc: { type: CaughtDoc },
+    CaughtDoc: { type: CaughtDocument },
     DatedDoc: {
-      type: DatedDoc,
+      type: DatedDocument,
       unique: [
         {
           name: DATED_DOC_TITLE,
@@ -73,7 +73,11 @@ const datedGraph = defineGraph({
     },
   },
   edges: {
-    datedCites: { type: datedCites, from: [DatedDoc], to: [DatedDoc] },
+    datedCites: {
+      type: datedCites,
+      from: [DatedDocument],
+      to: [DatedDocument],
+    },
   },
 });
 
@@ -87,7 +91,7 @@ const STORED_DOC_DATES = {
   revisions: [PUBLISHED.toISOString(), REVISED.toISOString()],
 } as const;
 
-function fullDoc(title: string) {
+function fullDocument(title: string) {
   return {
     title,
     publishedAt: PUBLISHED,
@@ -100,7 +104,7 @@ function fullDoc(title: string) {
 }
 
 /** What a read returns for the date properties: the stored ISO text. */
-function docDates(node: Readonly<Record<string, unknown>> | undefined) {
+function documentDates(node: Readonly<Record<string, unknown>> | undefined) {
   const read = requireDefined(node);
   return {
     publishedAt: read["publishedAt"],
@@ -122,60 +126,61 @@ function edgeDates(edge: Readonly<Record<string, unknown>> | undefined) {
   return { at: read["at"], seenAt: read["seenAt"] };
 }
 
+/** A store holding two dated documents and one dated edge between them. */
+async function seed(context: IntegrationTestContext) {
+  const store = await context.createStore(datedGraph);
+  const document = await store.nodes.DatedDoc.create(fullDocument("a"));
+  const other = await store.nodes.DatedDoc.create(fullDocument("b"));
+  const edge = await store.edges.datedCites.create(document, other, {
+    note: "n",
+    at: PUBLISHED,
+    seenAt: REVIEWED,
+  });
+  return { store, doc: document, other, edge };
+}
+
 export function registerStoredDateRevalidationIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("a write that re-validates a stored row keeps its untouched dates (#851)", () => {
-    async function seed() {
-      const store = await context.createStore(datedGraph);
-      const doc = await store.nodes.DatedDoc.create(fullDoc("a"));
-      const other = await store.nodes.DatedDoc.create(fullDoc("b"));
-      const edge = await store.edges.datedCites.create(doc, other, {
-        note: "n",
-        at: PUBLISHED,
-        seenAt: REVIEWED,
-      });
-      return { store, doc, other, edge };
-    }
-
     it("node update", async () => {
-      const { store, doc } = await seed();
+      const { store, doc } = await seed(context);
       const updated = await store.nodes.DatedDoc.update(doc.id, {
         title: "a2",
       });
       expect(updated.title).toBe("a2");
-      expect(docDates(updated)).toEqual(STORED_DOC_DATES);
-      expect(docDates(await store.nodes.DatedDoc.getById(doc.id))).toEqual(
+      expect(documentDates(updated)).toEqual(STORED_DOC_DATES);
+      expect(documentDates(await store.nodes.DatedDoc.getById(doc.id))).toEqual(
         STORED_DOC_DATES,
       );
     });
 
     it("node update keeps a caught date instead of replacing it with the fallback", async () => {
       const store = await context.createStore(datedGraph);
-      const doc = await store.nodes.CaughtDoc.create({
+      const document = await store.nodes.CaughtDoc.create({
         title: "a",
         checkedAt: REVIEWED,
       });
-      const updated = await store.nodes.CaughtDoc.update(doc.id, {
+      const updated = await store.nodes.CaughtDoc.update(document.id, {
         title: "a2",
       });
-      expect(updated["checkedAt"]).toBe(REVIEWED.toISOString());
+      expect(updated.checkedAt).toBe(REVIEWED.toISOString());
     });
 
     it("node update inside a transaction", async () => {
-      const { store, doc } = await seed();
+      const { store, doc } = await seed(context);
       await store.transaction(async (tx) => {
         await tx.nodes.DatedDoc.update(doc.id, { title: "a2" });
       });
       const read = await store.nodes.DatedDoc.getById(doc.id);
       expect(read?.title).toBe("a2");
-      expect(docDates(read)).toEqual(STORED_DOC_DATES);
+      expect(documentDates(read)).toEqual(STORED_DOC_DATES);
     });
 
     it("node upsertById and bulkUpsertById of an existing node", async () => {
-      const { store, doc, other } = await seed();
+      const { store, doc, other } = await seed(context);
       await store.nodes.DatedDoc.upsertById(doc.id, {
-        ...fullDoc("a2"),
+        ...fullDocument("a2"),
         publishedAt: PUBLISHED,
       });
       // The required `publishedAt` is restated; every optional date is left
@@ -183,29 +188,29 @@ export function registerStoredDateRevalidationIntegrationTests(
       await store.nodes.DatedDoc.bulkUpsertById([
         { id: other.id, props: { title: "b2", publishedAt: PUBLISHED } },
       ]);
-      expect(docDates(await store.nodes.DatedDoc.getById(doc.id))).toEqual(
+      expect(documentDates(await store.nodes.DatedDoc.getById(doc.id))).toEqual(
         STORED_DOC_DATES,
       );
       const bulk = await store.nodes.DatedDoc.getById(other.id);
       expect(bulk?.title).toBe("b2");
-      expect(docDates(bulk)).toEqual(STORED_DOC_DATES);
+      expect(documentDates(bulk)).toEqual(STORED_DOC_DATES);
     });
 
     it("node upsertById coalescing an unchanged replay", async () => {
       const store = await context.createStore(datedGraph, {
         coalesceUnchangedUpserts: true,
       });
-      const doc = await store.nodes.DatedDoc.create(fullDoc("a"));
-      const replayed = await store.nodes.DatedDoc.upsertById(doc.id, {
+      const document = await store.nodes.DatedDoc.create(fullDocument("a"));
+      const replayed = await store.nodes.DatedDoc.upsertById(document.id, {
         title: "a",
         publishedAt: PUBLISHED,
       });
-      expect(replayed.meta.version).toBe(doc.meta.version);
-      expect(docDates(replayed)).toEqual(STORED_DOC_DATES);
+      expect(replayed.meta.version).toBe(document.meta.version);
+      expect(documentDates(replayed)).toEqual(STORED_DOC_DATES);
     });
 
     it("node getOrCreateByConstraint and its bulk form updating a match", async () => {
-      const { store, doc, other } = await seed();
+      const { store, doc, other } = await seed(context);
       // These paths parse the stated props as a create first, so a property
       // with a `.default()` or `.catch()` takes that value when omitted; it
       // is restated here, and the optional dates are left to the stored row.
@@ -226,16 +231,16 @@ export function registerStoredDateRevalidationIntegrationTests(
         { ifExists: "update" },
       );
       expect(bulk?.action).toBe("updated");
-      expect(docDates(await store.nodes.DatedDoc.getById(doc.id))).toEqual(
+      expect(documentDates(await store.nodes.DatedDoc.getById(doc.id))).toEqual(
         STORED_DOC_DATES,
       );
-      expect(docDates(await store.nodes.DatedDoc.getById(other.id))).toEqual(
-        STORED_DOC_DATES,
-      );
+      expect(
+        documentDates(await store.nodes.DatedDoc.getById(other.id)),
+      ).toEqual(STORED_DOC_DATES);
     });
 
     it("node updateWhere and compareAndSet", async () => {
-      const { store, doc, other } = await seed();
+      const { store, doc, other } = await seed(context);
       const result = await store.nodes.DatedDoc.updateWhere({
         where: (node) => node.title.eq("a"),
         patch: { title: "a2" },
@@ -248,14 +253,14 @@ export function registerStoredDateRevalidationIntegrationTests(
       expect(swapped).toBe(true);
       const updated = await store.nodes.DatedDoc.getById(doc.id);
       expect(updated?.title).toBe("a2");
-      expect(docDates(updated)).toEqual(STORED_DOC_DATES);
+      expect(documentDates(updated)).toEqual(STORED_DOC_DATES);
       const compared = await store.nodes.DatedDoc.getById(other.id);
       expect(compared?.title).toBe("b2");
-      expect(docDates(compared)).toEqual(STORED_DOC_DATES);
+      expect(documentDates(compared)).toEqual(STORED_DOC_DATES);
     });
 
     it("edge update, with and without ending its window", async () => {
-      const { store, edge } = await seed();
+      const { store, edge } = await seed(context);
       const updated = await store.edges.datedCites.update(edge.id, {
         note: "n2",
       });
@@ -273,7 +278,7 @@ export function registerStoredDateRevalidationIntegrationTests(
     });
 
     it("edge bulkUpsertById and getOrCreateByEndpoints updating a match", async () => {
-      const { store, doc, other, edge } = await seed();
+      const { store, doc, other, edge } = await seed(context);
       await store.edges.datedCites.bulkUpsertById([
         {
           id: edge.id,
@@ -303,7 +308,7 @@ export function registerStoredDateRevalidationIntegrationTests(
     });
 
     it("validateStore reports no violation for a stored date", async () => {
-      const { store } = await seed();
+      const { store } = await seed(context);
       const nodes = await store.validateStore({
         entity: "node",
         kind: "DatedDoc",
@@ -319,7 +324,7 @@ export function registerStoredDateRevalidationIntegrationTests(
     });
 
     it("still refuses a non-date value a caller states for a date property", async () => {
-      const { store, doc } = await seed();
+      const { store, doc } = await seed(context);
       await expect(
         store.nodes.DatedDoc.update(doc.id, {
           publishedAt: PUBLISHED.toISOString() as unknown as Date,

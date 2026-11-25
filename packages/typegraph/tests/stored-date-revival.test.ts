@@ -21,7 +21,7 @@ describe("reviveStoredDates", () => {
     ["catch", z.date().catch(new Date(0))],
     ["readonly", z.date().readonly()],
     ["nonoptional", z.date().optional().nonoptional()],
-    ["stacked wrappers", z.date().nullable().optional().default(null)],
+    ["stacked wrappers", z.date().nullable().optional().default(new Date(0))],
   ] as const)("revives canonical text under %s", ([, schema]) => {
     expect(reviveStoredDates(schema, TEXT)).toEqual(DATE);
   });
@@ -32,6 +32,7 @@ describe("reviveStoredDates", () => {
     ["text with an offset", z.date(), "2024-01-02T03:04:05.678+00:00"],
     ["not a date at all", z.date(), "yesterday"],
     ["a number", z.date(), 1_704_164_645_678],
+    // eslint-disable-next-line unicorn/no-null -- a stored JSON null
     ["null under nullable", z.date().nullable(), null],
     ["a string schema", z.string(), TEXT],
     ["a union with a date", z.union([z.date(), z.string()]), TEXT],
