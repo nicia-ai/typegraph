@@ -283,6 +283,7 @@ import {
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
   getPgliteClient,
+  getPinnedPgliteTransaction,
   getPinnedPostgresTransactionConnection,
   hasFunctionProperty,
   isNeonHttpClient,
@@ -1138,14 +1139,33 @@ function isPostgresTransactionHandle(
 }
 
 /**
- * A PostgreSQL handle as the native-transaction record classifies it: a
- * transaction object is one per BEGIN or savepoint; anything else is a
- * connection or pool, on which the engine publishes no transaction.
+ * A PostgreSQL handle as the native-transaction record classifies it
+ * (`native-transaction-handle.ts`):
+ *
+ * - a PGlite transaction object, or a savepoint of one: proof 2, the PGlite
+ *   transaction client its session pins;
+ * - any other transaction object: proof 3, itself — node-postgres and
+ *   postgres-js give each BEGIN and each savepoint a new object that runs only
+ *   inside it, and keep no link from a caller's savepoint to its enclosing
+ *   transaction;
+ * - anything else is a connection or pool, on which the engine publishes no
+ *   transaction: no proof.
  */
 function postgresNativeHandle(db: object): NativeHandle {
-  return isPostgresTransactionHandle(db) ?
-      { kind: "transaction", transaction: db }
-    : { kind: "connection", connection: db };
+  if (!isPostgresTransactionHandle(db)) {
+    return { kind: "connection", handle: db, connection: db };
+  }
+  const pinned = getPinnedPgliteTransaction(db);
+  return pinned === undefined ?
+      { kind: "transaction", handle: db }
+    : {
+        kind: "pinned",
+        handle: db,
+        pinned,
+        // PGlite marks its transaction client closed once the transaction
+        // has committed or rolled back, and refuses statements from then on.
+        isOpen: () => (pinned as Readonly<{ closed?: unknown }>).closed !== true,
+      };
 }
 
 /**

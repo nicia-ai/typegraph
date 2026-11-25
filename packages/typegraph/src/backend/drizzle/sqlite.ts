@@ -106,11 +106,13 @@ import {
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
+  type ConnectionTransactionProbe,
   createNativeTransactionToken,
   type NativeHandle,
   publishConnectionNativeTransaction,
   recordEngineSavepoint,
   recordNativeTransactionHandle,
+  recordOpenedNativeTransaction,
 } from "../native-transaction-handle";
 import {
   REVISION_JOURNAL_ENTITY,
@@ -168,7 +170,7 @@ import {
   copyGraphTemplateContributionMarkersStatement,
   sqliteInstantiateGraphTemplateStatement,
 } from "./graph-template-sql";
-import { isLocalLibsqlClient } from "./libsql-client";
+import { isLibsqlTransaction, isLocalLibsqlClient } from "./libsql-client";
 import { adoptSqliteColumns } from "./sqlite-column-adoption";
 import {
   EMBEDDING_UPSERT_PARAM_COUNT,
@@ -1945,7 +1947,7 @@ export function buildSqliteEngineProfile(
      * cleanup may execute transaction-scoped DDL.
      */
     function runDoSqliteStorageTransaction<T>(
-      run: () => Promise<T>,
+      run: (nativeTransaction: object) => Promise<T>,
     ): Promise<T> {
       const storage = getDurableObjectStorageClient(db);
       if (storage === undefined) {
@@ -1955,16 +1957,18 @@ export function buildSqliteEngineProfile(
             "transactionSync, and async transaction runners.",
         );
       }
-      // Inside the storage callback the transaction has begun: every bind on
-      // this connection until it settles runs in it.
+      // Inside the storage callback the transaction has begun. The storage
+      // object reports no transaction state, so its token proves nothing
+      // through the connection: only the opener's own binds record it.
       return runWithSerializedQueue(serializedQueue, () =>
-        storage.transaction(() =>
-          publishConnectionNativeTransaction(
-            nativeTransactionConnection(db),
-            createNativeTransactionToken(),
-            run,
-          ),
-        ),
+        storage.transaction(() => {
+          const nativeTransaction = createNativeTransactionToken(
+            sqliteConnectionProbe(db),
+          );
+          return publishConnectionNativeTransaction(nativeTransaction, () =>
+            run(nativeTransaction),
+          );
+        }),
       );
     }
 
@@ -2068,7 +2072,9 @@ export function buildSqliteEngineProfile(
         return runWithSerializedQueue(serializedQueue, async () => {
           // Write-lock is held here, so the schema-write-capable
           // InternalOperationBackend is used intentionally (see its type).
-          const nativeTransaction = createNativeTransactionToken();
+          const nativeTransaction = createNativeTransactionToken(
+            sqliteConnectionProbe(db),
+          );
           const txBackend = createTransactionBackend({
             capabilities,
             db,
@@ -2090,7 +2096,6 @@ export function buildSqliteEngineProfile(
           // a bind on this connection records this transaction only while it
           // is open.
           return publishConnectionNativeTransaction(
-            nativeTransactionConnection(db),
             nativeTransaction,
             async () => {
               try {
@@ -2114,7 +2119,7 @@ export function buildSqliteEngineProfile(
         // `transaction()` do-sqlite branch). Schema-version commits remain
         // data-only; administrative removal cleanup may use the target's
         // transaction-scoped DDL primitive.
-        return runDoSqliteStorageTransaction(async () => {
+        return runDoSqliteStorageTransaction(async (nativeTransaction) => {
           const txBackend = createTransactionBackend({
             capabilities,
             db,
@@ -2128,6 +2133,7 @@ export function buildSqliteEngineProfile(
             lineage: provisioning.lineage,
             recordedTime: provisioning.recordedTime,
             isFirstParty,
+            nativeTransaction,
           });
           return fn(txBackend);
         });
@@ -2176,6 +2182,7 @@ export function buildSqliteEngineProfile(
     function bindTransactionBackend(
       tx: AnySqliteDatabase,
       txIsFirstParty: boolean,
+      nativeTransaction?: object,
     ): TransactionBackend {
       const txBackend = createTransactionBackend({
         capabilities,
@@ -2190,6 +2197,7 @@ export function buildSqliteEngineProfile(
         lineage: provisioning.lineage,
         recordedTime: provisioning.recordedTime,
         isFirstParty: txIsFirstParty,
+        nativeTransaction,
       });
       return gateFulltext(
         txBackend,
@@ -2263,7 +2271,9 @@ export function buildSqliteEngineProfile(
               // composes and Drizzle's `db.transaction()` (which for those
               // libsql clients abandons the client's connection — fatal for
               // `:memory:`) must be avoided.
-              const nativeTransaction = createNativeTransactionToken();
+              const nativeTransaction = createNativeTransactionToken(
+                sqliteConnectionProbe(db),
+              );
               const txBackend = createTransactionBackend({
                 capabilities,
                 db,
@@ -2293,7 +2303,6 @@ export function buildSqliteEngineProfile(
               // finishing: a bind on this connection records this
               // transaction only while it is open.
               return publishConnectionNativeTransaction(
-                nativeTransactionConnection(db),
                 nativeTransaction,
                 async () => {
                   try {
@@ -2320,10 +2329,10 @@ export function buildSqliteEngineProfile(
           }
 
           if (transactionMode === "do-sqlite") {
-            return runDoSqliteStorageTransaction(async () =>
+            return runDoSqliteStorageTransaction(async (nativeTransaction) =>
               fn(
                 markSchemaFencedInsertEligibleUnderFence(
-                  bindTransactionBackend(db, isFirstParty),
+                  bindTransactionBackend(db, isFirstParty, nativeTransaction),
                   fencePlan,
                 ),
                 db,
@@ -2763,12 +2772,87 @@ function nativeTransactionConnection(db: AnySqliteDatabase): object {
   );
 }
 
-/** A SQLite handle as the native-transaction record classifies it. */
+/**
+ * The per-transaction libSQL handle a Drizzle libSQL transaction object's
+ * session pins (`session.tx`), shared by every savepoint of that transaction;
+ * `undefined` for any other handle.
+ */
+function pinnedLibsqlTransaction(db: AnySqliteDatabase): object | undefined {
+  if (!isSqliteTransactionHandle(db)) return undefined;
+  const pinned = (db as unknown as Readonly<{ session?: { tx?: unknown } }>)
+    .session?.tx;
+  return isLibsqlTransaction(pinned) ? pinned : undefined;
+}
+
+/**
+ * A SQLite handle as the native-transaction record classifies it
+ * (`native-transaction-handle.ts`):
+ *
+ * - a libSQL transaction object, or a savepoint of one: proof 2, the
+ *   per-transaction libSQL handle its session pins, never the client it was
+ *   opened from — a libSQL transaction does not run on that client's
+ *   connection;
+ * - anything else — a database, or a transaction object of a driver whose
+ *   transaction session is the database's own (better-sqlite3, bun:sqlite,
+ *   sql.js, Durable Object storage), which runs on whatever transaction the
+ *   connection has, a later one included: the connection, proof 4 or none.
+ */
 function sqliteNativeHandle(db: AnySqliteDatabase): NativeHandle {
-  const connection = nativeTransactionConnection(db);
-  return isSqliteTransactionHandle(db) ?
-      { kind: "transaction", transaction: db, connection }
-    : { kind: "connection", connection };
+  const pinned = pinnedLibsqlTransaction(db);
+  return pinned === undefined ?
+      {
+        kind: "connection",
+        handle: db,
+        connection: nativeTransactionConnection(db),
+      }
+    : {
+        kind: "pinned",
+        handle: db,
+        pinned,
+        // A libSQL transaction handle reports `closed` once its transaction
+        // has ended, committed, rolled back or ended by the engine, and
+        // refuses every statement from then on.
+        isOpen: () => !(pinned as Readonly<{ closed: boolean }>).closed,
+      };
+}
+
+/**
+ * Whether the driver reports a transaction open on `client` right now. A
+ * read that throws (a closed database) is not a confirmation.
+ */
+function readSqliteInTransaction(client: object): boolean {
+  try {
+    return (client as Readonly<{ inTransaction?: unknown }>).inTransaction ===
+      true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * How the driver confirms that a transaction the engine opened on `db` is
+ * still open (proof 4): better-sqlite3's and bun:sqlite's `inTransaction`,
+ * the connection's own autocommit state. `undefined` for a driver that
+ * reports none (`@libsql/client` before 0.18 hides its connection, sql.js
+ * and Durable Object storage expose no transaction state): its token is never
+ * honoured through the connection.
+ */
+function sqliteConnectionProbe(
+  db: AnySqliteDatabase,
+): ConnectionTransactionProbe | undefined {
+  const client = (db as Readonly<{ $client?: unknown }>).$client;
+  if (
+    (!isBetterSqlite3Client(client) && !isBunSqliteClient(client)) ||
+    typeof (client as Readonly<{ inTransaction?: unknown }>).inTransaction !==
+      "boolean"
+  ) {
+    return undefined;
+  }
+  const driverClient = client as object;
+  return {
+    connection: nativeTransactionConnection(db),
+    isTransactionOpen: () => readSqliteInTransaction(driverClient),
+  };
 }
 
 /**
@@ -2786,19 +2870,18 @@ function recordSqliteEngineSavepoint(
 
 /**
  * Records the native transaction one bind runs on: the token of the
- * transaction its opener is opening, and otherwise what the handle runs in
- * (`identifyNativeTransaction`).
+ * transaction its opener is opening, and otherwise what the handle proves
+ * (`sqliteNativeHandle`).
  */
 function recordSqliteNativeTransaction(
   txBackend: object,
   options: CreateSqliteTransactionBackendOptions,
 ): void {
-  recordNativeTransactionHandle(
-    txBackend,
-    options.nativeTransaction === undefined ?
-      sqliteNativeHandle(options.db)
-    : { kind: "transaction", transaction: options.nativeTransaction },
-  );
+  if (options.nativeTransaction === undefined) {
+    recordNativeTransactionHandle(txBackend, sqliteNativeHandle(options.db));
+  } else {
+    recordOpenedNativeTransaction(txBackend, options.nativeTransaction);
+  }
 }
 
 // Re-export schema utilities
