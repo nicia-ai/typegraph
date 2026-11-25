@@ -4550,6 +4550,16 @@ type MisassignedEdgeEndpointRow = Readonly<{
     toId: string;
 }>;
 
+// @public (undocumented)
+const NATIVE_TRANSACTION_STATE: unique symbol;
+
+// @public
+type NativeTransactionState = Readonly<{
+    [NATIVE_TRANSACTION_STATE]: true;
+}> & {
+    [READ_ONLY_SCOPES]: number;
+};
+
 // @public
 type NeighborNodeOrderField<G extends GraphDef> = {
     [K in keyof G["nodes"] & string]: Exclude<keyof Node<G["nodes"][K]["type"]>, "id" | "kind" | "meta"> & string;
@@ -5762,6 +5772,9 @@ type ReachableNode = Readonly<{
 type ReachableOptions<G extends GraphDef> = BaseTraversalOptions<G> & Readonly<{
     excludeSource?: boolean;
 }>;
+
+// @public (undocumented)
+const READ_ONLY_SCOPES: unique symbol;
 
 // @public
 type ReadConstraintFenceViolationsParams = Readonly<{
@@ -7732,6 +7745,7 @@ type TransactionSession<Engine extends TransactionBackend = TransactionBackend> 
     [SESSION_TRANSACTION]: OperationScoped<Engine>;
 } & Readonly<{
     heldGraphWriteLocks: Map<string, Promise<GraphWriteLock>>;
+    native: NativeTransactionState;
 }>>;
 
 // @public (undocumented)
