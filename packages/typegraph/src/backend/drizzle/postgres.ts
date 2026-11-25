@@ -51,6 +51,7 @@ import {
   eq,
   getTableName,
   inArray,
+  is,
   isNull,
   lte,
   type SQL,
@@ -152,6 +153,11 @@ import {
 import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
+import {
+  type NativeHandle,
+  recordEngineSavepoint,
+  recordNativeTransactionHandle,
+} from "../native-transaction-handle";
 import {
   deferNativeHandle,
   guardNativeTransactionSavepoint,
@@ -1114,6 +1120,29 @@ const toSchemaVersionRow = createSchemaVersionRowMapper(
 // ============================================================
 
 /**
+ * Whether `handle` is a Drizzle PostgreSQL transaction object: THE
+ * classifier the adoption boundaries and the native-transaction record share.
+ * Drizzle's brand check, so a transaction of another loaded copy of Drizzle
+ * qualifies as it does for `instanceof`'s own copy.
+ */
+function isPostgresTransactionHandle(
+  handle: unknown,
+): handle is AnyPgTransaction {
+  return is(handle, PgTransaction);
+}
+
+/**
+ * A PostgreSQL handle as the native-transaction record classifies it: a
+ * transaction object is one per BEGIN or savepoint; anything else is a
+ * connection or pool, on which the engine publishes no transaction.
+ */
+function postgresNativeHandle(db: object): NativeHandle {
+  return isPostgresTransactionHandle(db) ?
+      { kind: "transaction", transaction: db }
+    : { kind: "connection", connection: db };
+}
+
+/**
  * Creates a TypeGraph backend for PostgreSQL databases.
  *
  * Works with any Drizzle PostgreSQL instance regardless of the underlying driver.
@@ -1127,7 +1156,7 @@ export function createPostgresBackend(
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
   if (db instanceof PgTransaction) {
-    assertAdoptedDialect<AnyPgTransaction>(db, PgTransaction, "postgres");
+    assertAdoptedDialect(db, isPostgresTransactionHandle, "postgres");
     return createPostgresTransactionBackend(db, options);
   }
   return markAllocationBound(
@@ -1149,7 +1178,7 @@ export function createPostgresTransactionBackend(
   tx: AnyPgTransaction,
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
-  assertAdoptedDialect<AnyPgTransaction>(tx, PgTransaction, "postgres");
+  assertAdoptedDialect(tx, isPostgresTransactionHandle, "postgres");
   return markAllocationBound(
     createSqlBackend(buildPostgresEngineProfileInternal(tx, options, true)),
     options,
@@ -2206,14 +2235,22 @@ function buildPostgresEngineProfileInternal(
       config: PgTransactionConfig | undefined,
       body: (tx: AnyPgTransaction) => Promise<T>,
     ): Promise<T> {
+      // On a transaction-scoped backend `tx` is a savepoint on `db`: it runs
+      // in `db`'s native transaction, not one of its own.
+      const run = (tx: AnyPgTransaction): Promise<T> => {
+        if (isPostgresTransactionHandle(db)) {
+          recordEngineSavepoint(tx, postgresNativeHandle(db));
+        }
+        return body(tx);
+      };
       if (capabilities.execution.commitOutcome !== "commit-reply") {
-        return db.transaction((tx) => body(tx), config);
+        return db.transaction((tx) => run(tx), config);
       }
       return runMarkedPostgresTransaction(
         db,
         (markedBody) => db.transaction(markedBody, config),
         (error) => isSerializationFailure(error, ctx.self()),
-        (tx) => body(tx),
+        (tx) => run(tx),
       );
     }
 
@@ -2702,9 +2739,9 @@ function buildPostgresEngineProfileInternal(
               },
             );
           }
-          assertAdoptedDialect<AnyPgTransaction>(
+          assertAdoptedDialect(
             externalTx,
-            PgTransaction,
+            isPostgresTransactionHandle,
             "postgres",
           );
           // The caller owns BEGIN/COMMIT/ROLLBACK via its own
@@ -2736,9 +2773,9 @@ function buildPostgresEngineProfileInternal(
                     { capability: "execution.interactiveTransactions" },
                   );
                 }
-                assertAdoptedDialect<AnyPgTransaction>(
+                assertAdoptedDialect(
                   externalTx,
-                  PgTransaction,
+                  isPostgresTransactionHandle,
                   "postgres",
                 );
                 if (
@@ -4474,6 +4511,7 @@ function createTransactionBackend(
     registerDriverSavepointScope(backend, enterDriverScope);
   }
   registerSavepointGuard(backend, guardSavepoint);
+  recordNativeTransactionHandle(backend, postgresNativeHandle(options.db));
 
   if (sessionAtomicBatchAdapter !== undefined) {
     registerAtomicSqlProgram(backend, sessionAtomicBatchAdapter);

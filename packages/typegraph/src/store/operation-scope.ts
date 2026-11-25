@@ -72,6 +72,10 @@ import type {
   SqlCompilationBackend,
   TransactionBackend,
 } from "../backend/types";
+import {
+  type NativeTransactionState,
+  resolveNativeTransactionState,
+} from "./native-transaction-state";
 import type { GraphWriteLock } from "./recorded-capture/clock";
 import { TRANSACTION_RUNTIME } from "./types";
 
@@ -205,6 +209,9 @@ const OPERATION_SESSION: unique symbol = Symbol("typegraph.operation");
  * write locks its frames hold or are acquiring
  * ({@link GraphWriteLock}, see `write-transaction.ts`). It never hands out
  * its transaction; an operation entered from it does.
+ *
+ * State about the native transaction alone, shared by every binding of it,
+ * is on {@link TransactionSession.native}, not on the session.
  */
 export type TransactionSession<
   Engine extends TransactionBackend = TransactionBackend,
@@ -223,6 +230,13 @@ export type TransactionSession<
      * is still acquiring, by graph id: owned by `write-transaction.ts`.
      */
     heldGraphWriteLocks: Map<string, Promise<GraphWriteLock>>;
+    /**
+     * The state every session of this session's native transaction shares
+     * (`native-transaction-state.ts`): the same object for every binding
+     * the engine recorded as running on that transaction, and one of the
+     * session's own when it recorded none.
+     */
+    native: NativeTransactionState;
   }>
 >;
 
@@ -273,6 +287,7 @@ export function openTransactionSession<
   return {
     [SESSION_TRANSACTION]: transaction,
     heldGraphWriteLocks: new Map<string, Promise<GraphWriteLock>>(),
+    native: resolveNativeTransactionState(transaction),
   } as TransactionSession<Engine>;
   /* eslint-enable no-restricted-syntax */
 }

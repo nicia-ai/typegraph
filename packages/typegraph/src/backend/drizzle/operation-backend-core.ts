@@ -1,4 +1,4 @@
-import { is, type SQL, sql as drizzleSql } from "drizzle-orm";
+import { type SQL, sql as drizzleSql } from "drizzle-orm";
 
 import {
   CompilerInvariantError,
@@ -760,14 +760,16 @@ const DRIZZLE_DIALECT_LABELS = {
  * Assert an externally-supplied transaction handle is the expected
  * Drizzle dialect, narrowing it for `adoptTransaction`. A wrong-dialect
  * handle would otherwise surface as an opaque driver error mid-
- * transaction; this fails it loudly at the boundary instead.
+ * transaction; this fails it loudly at the boundary instead. `accepts` is
+ * the dialect's own handle classifier, so adoption and the native-transaction
+ * record cannot disagree about a handle.
  */
 export function assertAdoptedDialect<T>(
   externalTx: unknown,
-  brand: Parameters<typeof is>[1],
+  accepts: (handle: unknown) => handle is T,
   backend: SqlDialect,
 ): asserts externalTx is T {
-  if (is(externalTx, brand)) return;
+  if (accepts(externalTx)) return;
   const label = DRIZZLE_DIALECT_LABELS[backend];
   throw new ConfigurationError(
     `adoptTransaction received a handle that is not a ${label} Drizzle ` +
