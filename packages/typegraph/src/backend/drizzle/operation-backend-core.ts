@@ -4969,6 +4969,44 @@ export function createCommonOperationBackend(
     return { affectedCount: updatedRows.length, rows: updatedRows };
   }
 
+  /**
+   * Drops the claim rows the named edges hold: the one owner behind the
+   * `purgeEdgeClaims` member and the node hard-delete cascades, which call it
+   * with exactly the edge ids their DELETE returned. An empty list runs no
+   * statement, so a node delete that removed no edge pays nothing for it.
+   *
+   * A database bootstrapped before the claim relation existed holds no claim
+   * row, but the DELETE still names the relation; its absence is reported as
+   * the typed precondition error the claim writes raise.
+   */
+  async function purgeClaimsOfEdges(
+    graphId: string,
+    edgeIds: readonly string[],
+  ): Promise<void> {
+    // A node cascade reports a self-loop once and a set-wise read never twice,
+    // but a caller-supplied list may repeat an id.
+    const uniqueEdgeIds = [...new Set(edgeIds)];
+    // The statement binds the graph id and one parameter per edge id, as an
+    // edge read does, so the edge-read chunk budget bounds it.
+    for (const chunk of chunkArray(
+      uniqueEdgeIds,
+      batchConfig.getEdgesChunkSize,
+    )) {
+      const query = operationStrategy.buildPurgeEdgeClaims({
+        graphId,
+        edgeIds: chunk,
+      });
+      try {
+        await execution.execRun(query);
+      } catch (error) {
+        if (isMissingTableError(error)) {
+          throw edgeClaimRelationMissing(graphId, error);
+        }
+        throw error;
+      }
+    }
+  }
+
   async function clearGraphWithOptions(
     graphId: string,
     options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
@@ -5272,6 +5310,14 @@ export function createCommonOperationBackend(
     // IMPORTANT: This cascade is not atomic. Callers must ensure this runs
     // within a transaction to prevent partial deletion on intermediate failure.
     //
+    // The incident-edge DELETE returns the rows it removed, live or
+    // tombstoned, and exactly those edges' claim rows are released before the
+    // node row goes. The store already released the claims of the live edges
+    // its delete-behavior verdict removed first; the rows left for this DELETE
+    // (tombstoned edges, and a composition edge the store left to the part's
+    // own delete) had none released anywhere else. Keyed by what the statement
+    // returned, never by a prior read or the current graph's cardinalities.
+    //
     // Embeddings are NOT cleaned up here: they live in per-`(nodeKind,
     // fieldPath)` strategy-owned tables addressable only with the slot
     // context the graph-agnostic backend lacks. The store's hard-delete
@@ -5301,7 +5347,13 @@ export function createCommonOperationBackend(
         params.kind,
         params.id,
       );
-      await execution.execRun(deleteEdgesQuery);
+      const removedEdges = await execution.execAll<{ id: string }>(
+        deleteEdgesQuery,
+      );
+      await purgeClaimsOfEdges(
+        params.graphId,
+        removedEdges.map((row) => row.id),
+      );
 
       const query = operationStrategy.buildHardDeleteNode(params);
       await execution.execRun(query);
@@ -5313,7 +5365,11 @@ export function createCommonOperationBackend(
     // failure part-way (on a backend without interactive transactions, say)
     // leaves the node row in place and a retry clears whatever it owns, never
     // a claim behind an already-removed row. The edge and node DELETEs RETURN
-    // what they removed, which is all the call reports.
+    // what they removed, which is all the call reports; each chunk releases
+    // the claims of the edges its DELETE returned before its node DELETE, as
+    // `hardDeleteNode` does. Without a transaction, a failure between an edge
+    // DELETE and its release leaves those claim rows behind: storage only,
+    // since a claim whose holder is gone is taken over in place.
     // Present only when the strategy supplies both of its builders.
     ...((
       buildHardDeleteNodesBatch === undefined ||
@@ -5347,7 +5403,9 @@ export function createCommonOperationBackend(
             const removedEdges = await execution.execAll<{ id: string }>(
               buildHardDeleteEdgesByNodes(params.graphId, params.kind, chunk),
             );
-            for (const row of removedEdges) removedEdgeIds.push(row.id);
+            const chunkEdgeIds = removedEdges.map((row) => row.id);
+            await purgeClaimsOfEdges(params.graphId, chunkEdgeIds);
+            removedEdgeIds.push(...chunkEdgeIds);
             const removedNodes = await execution.execAll<{ id: string }>(
               buildHardDeleteNodesBatch({
                 graphId: params.graphId,
@@ -5920,16 +5978,7 @@ export function createCommonOperationBackend(
     },
 
     async purgeEdgeClaims(params: PurgeEdgeClaimsParams): Promise<void> {
-      const edgeIds = [...new Set(params.edgeIds)];
-      // One claim row per edge at most, so the edge-read chunk budget is the
-      // right ceiling for a list of edge ids.
-      for (const chunk of chunkArray(edgeIds, batchConfig.getEdgesChunkSize)) {
-        const query = operationStrategy.buildPurgeEdgeClaims({
-          ...params,
-          edgeIds: chunk,
-        });
-        await execution.execRun(query);
-      }
+      await purgeClaimsOfEdges(params.graphId, params.edgeIds);
     },
 
     async readConstraintFenceViolations(

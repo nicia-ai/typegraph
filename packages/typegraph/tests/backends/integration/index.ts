@@ -92,6 +92,7 @@ export { registerMultiRootSubgraphBatchIntegrationTests } from "./multi-root-sub
 export { registerMutationPlanningIntegrationTests } from "./mutation-planning";
 export { registerNativeTransactionHandleProbeTests } from "./native-transaction-handle-probes";
 export { registerNodeBulkHardDeleteIntegrationTests } from "./node-bulk-hard-delete";
+export { registerNodeHardDeleteClaimReleaseIntegrationTests } from "./node-hard-delete-claim-release";
 export { registerOntologyEquivalenceIntegrationTests } from "./ontology-equivalence";
 export { registerOntologyTighteningIntegrationTests } from "./ontology-tightening";
 export { registerOntologyTypedSubsumptionIntegrationTests } from "./ontology-typed-subsumption";
