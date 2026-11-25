@@ -1121,6 +1121,12 @@ export type HardDeleteNodeParams = Readonly<{
   graphId: string;
   kind: string;
   id: string;
+  /**
+   * Release the claim rows of the edges the cascade removes. The store sets
+   * it exactly when the target holds claims (its claims bundle resolves
+   * supported); absent or `false`, the cascade runs no claim statement.
+   */
+  releaseEdgeClaims?: boolean;
 }>;
 
 /**
@@ -1131,6 +1137,8 @@ export type HardDeleteNodesBatchParams = Readonly<{
   graphId: string;
   kind: string;
   ids: readonly string[];
+  /** See {@link HardDeleteNodeParams.releaseEdgeClaims}. */
+  releaseEdgeClaims?: boolean;
 }>;
 
 /**
@@ -2533,10 +2541,10 @@ export type GraphBackend = Readonly<{
    * its fulltext row and every incident edge (either endpoint, any edge kind,
    * live or tombstoned), then the node row last.
    *
-   * A backend that declares `capabilities.constraintClaims` also drops the
-   * edge claim rows held by exactly the edge rows this call removed — the ids
-   * its edge DELETE reports, never a prior read or the current graph's
-   * cardinalities — before the node row goes, as `purgeEdgeClaims` drops them.
+   * When `params.releaseEdgeClaims` is `true` it also drops the edge claim
+   * rows held by exactly the edge rows this call removed — the ids its edge
+   * DELETE reports, never a prior read or the current graph's cardinalities —
+   * before the node row goes, as `purgeEdgeClaims` drops them.
    * The store releases the claims of the live edges its `onDelete` verdict
    * removes before this call; the rows left for this call (tombstoned edges,
    * and a composition edge the store leaves to its part's own delete) have no
@@ -2558,7 +2566,7 @@ export type GraphBackend = Readonly<{
    * another kind.
    *
    * Like `hardDeleteNode` it releases the claim rows of exactly the edge rows
-   * it removes (with `capabilities.constraintClaims`), before the node rows,
+   * it removes when `params.releaseEdgeClaims` is `true`, before the node rows,
    * and cleans no embeddings (the store does, through the vector members).
    * Not atomic on its own: the store runs it inside its write frame.
    * Optional — the store falls back to one `hardDeleteNode` per node when it

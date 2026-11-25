@@ -107,8 +107,10 @@ import {
   buildInsertEdgeIfEndpointsLiveWithCardinalityClaim,
   buildLockEdgeClaimGuarded,
   buildLockEdgeClaims,
+  buildLockEdgeClaimTargets,
   buildPurgeEdgeClaims,
   buildReadEdgeClaimIncumbents,
+  buildReadEdgeClaimTargets,
   buildTakeOverEdgeClaim,
   buildTakeOverEdgeClaimGuarded,
 } from "./edge-claims";
@@ -657,6 +659,19 @@ export type CommonOperationStrategy = Readonly<{
   ) => SQL;
   buildPurgeEdgeClaims: (params: PurgeEdgeClaimsParams) => SQL;
   /**
+   * Present only on a dialect whose purge takes row locks: the two halves of
+   * the global lock order a purge spanning several statements needs (see
+   * `buildLockEdgeClaimTargets`). An engine that admits one writer at a time
+   * has no lock order to keep and pays no statement for one.
+   */
+  claimPurgeLockOrder?: Readonly<{
+    buildReadEdgeClaimTargets: (params: PurgeEdgeClaimsParams) => SQL;
+    buildLockEdgeClaimTargets: (
+      graphId: string,
+      targets: readonly Readonly<{ axis: string; key: string }>[],
+    ) => SQL;
+  }>;
+  /**
    * The three read-only fence-audit statements, one per constraint family.
    * Members of this interface for the same reason the claim statements are:
    * the type checker forces both dialects to have them, so a family cannot be
@@ -892,6 +907,12 @@ const CLAIM_PURGE_LOCK_CLAUSES = {
   postgres: sql`FOR UPDATE`,
   sqlite: sql.empty(),
 } satisfies Record<SqlDialect, SQL>;
+
+/** Whether a claim purge locks rows at all, and so has a lock order to keep. */
+const CLAIM_PURGE_LOCKS_ROWS = {
+  postgres: true,
+  sqlite: false,
+} satisfies Record<SqlDialect, boolean>;
 
 function postgresRowLock(strength: "FOR KEY SHARE" | "FOR UPDATE") {
   return (of?: readonly string[]): SQL =>
@@ -1485,6 +1506,25 @@ function createCommonOperationStrategy(
         CLAIM_PURGE_LOCK_CLAUSES[dialect],
       );
     },
+    ...(CLAIM_PURGE_LOCKS_ROWS[dialect] ?
+      {
+        claimPurgeLockOrder: {
+          buildReadEdgeClaimTargets: (params: PurgeEdgeClaimsParams): SQL =>
+            buildReadEdgeClaimTargets(tables, params),
+          buildLockEdgeClaimTargets: (
+            graphId: string,
+            targets: readonly Readonly<{ axis: string; key: string }>[],
+          ): SQL =>
+            buildLockEdgeClaimTargets(
+              tables,
+              graphId,
+              targets,
+              dialect,
+              CLAIM_PURGE_LOCK_CLAUSES[dialect],
+            ),
+        },
+      }
+    : {}),
     buildContendedUniqueRowAudit(
       graphId: string,
       constraintNames: readonly string[],

@@ -24,7 +24,7 @@ import { type UniquenessScope } from "../../core/types";
 import { uniquenessScopeSpansSubclasses } from "../../core/unique-constraint-options";
 import { ConfigurationError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
-import { compareCodePoints, compareStrings } from "../../utils/compare";
+import { compareCodePoints } from "../../utils/compare";
 import { encodeTupleKey } from "../../utils/tuple-key";
 // Type-only: `edge-claims.ts` value-imports `edgeCardinalityAxis` from this
 // file, but a type-only import is erased at runtime, so this back-edge
@@ -340,11 +340,11 @@ export function compareClaimTargets(
   right: ClaimTarget,
 ): number {
   return (
-    compareStrings(left.relation, right.relation) ||
-    compareStrings(left.graphId, right.graphId) ||
-    compareStrings(left.axis, right.axis) ||
-    compareStrings(left.constraintName ?? "", right.constraintName ?? "") ||
-    compareStrings(left.key, right.key)
+    compareCodePoints(left.relation, right.relation) ||
+    compareCodePoints(left.graphId, right.graphId) ||
+    compareCodePoints(left.axis, right.axis) ||
+    compareCodePoints(left.constraintName ?? "", right.constraintName ?? "") ||
+    compareCodePoints(left.key, right.key)
   );
 }
 

@@ -34,9 +34,11 @@ import {
   type HardDeleteNodeParams,
   type TransactionBackend,
 } from "../../../src/backend/types";
+import { FORMAT_VERSION, importGraph } from "../../../src/interchange";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import { compareClaimTargets } from "../../../src/store/claims/axis";
 import { requireDefined } from "../../../src/utils/presence";
 import { readEdgeClaimRows } from "../../edge-claim-rows";
 import {
@@ -380,6 +382,68 @@ function claimDeleteCount(statements: readonly TracedStatement[]): number {
   }).length;
 }
 
+/**
+ * A port whose every transaction target's `hardDeleteNode` runs the real
+ * cascade and then throws: a failure after the cascade's statements ran, as a
+ * failing claim release would be.
+ */
+function failingAfterCascade(backend: GraphBackend): GraphBackend {
+  function wrap<T extends GraphBackend | TransactionBackend>(target: T): T {
+    return deriveBackend(target, {
+      async hardDeleteNode(params: HardDeleteNodeParams): Promise<void> {
+        await target.hardDeleteNode(params);
+        throw new InjectedHardDeleteFailure();
+      },
+    } as never);
+  }
+  return deriveBackend(wrap(backend), {
+    transaction: (fn, transactionOptions) =>
+      backend.transaction((tx) => fn(wrap(tx)), transactionOptions),
+  });
+}
+
+const NhcPart = defineNode("NhcPart", {
+  schema: z.object({ code: z.string() }),
+});
+const NhcWhole = defineNode("NhcWhole", { schema: z.object({}) });
+const NhcTag = defineNode("NhcTag", { schema: z.object({}) });
+const nhcPartOf = defineEdge("nhcPartOf", { schema: z.object({}) });
+const nhcTagged = defineEdge("nhcTagged", { schema: z.object({}) });
+
+/** A required composition, for import's purge of a refused part. */
+function requiredPartGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: {
+      NhcPart: {
+        type: NhcPart,
+        unique: [
+          {
+            name: "nhc_part_code",
+            fields: ["code"],
+            scope: "kind",
+            collation: "binary",
+          },
+        ],
+      },
+      NhcWhole: { type: NhcWhole },
+      NhcTag: { type: NhcTag },
+    },
+    edges: {
+      nhcPartOf: {
+        type: nhcPartOf,
+        from: [NhcPart],
+        to: [NhcWhole],
+        cardinality: "one",
+      },
+      nhcTagged: { type: nhcTagged, from: [NhcTag], to: [NhcPart] },
+    },
+    ontology: [
+      partOf(NhcPart, NhcWhole, { via: nhcPartOf, existence: "required" }),
+    ],
+  });
+}
+
 function describeScenario(scenario: Scenario): string {
   const edges =
     scenario.edges === "all" ? "every claim axis" : "the composition axis";
@@ -532,6 +596,118 @@ export function registerNodeHardDeleteClaimReleaseIntegrationTests(
     // `operation-backend-core.ts` — the edged deletes run no claim DELETE.
     // The bare counts hold the other side: a release that ran whatever the
     // edge DELETE returned would show one there.
+
+    it("import keeps a refused required part whole when its purge fails part-way", async () => {
+      const graphId = nextGraphId();
+      const seeded = await context.createStore(requiredPartGraph(graphId));
+      await seeded.nodes.NhcTag.create({}, { id: "t1" });
+      const store = createStore(
+        requiredPartGraph(graphId),
+        failingAfterCascade(seeded.backend),
+      );
+      // p1 is written with a composition edge that attaches nothing and a tag
+      // edge onto it, then refused and purged; the purge fails after the
+      // cascade removed p1's rows.
+      const result = await importGraph(
+        store,
+        {
+          formatVersion: FORMAT_VERSION,
+          exportedAt: "2026-01-01T00:00:00.000Z",
+          source: { type: "external", description: "failing purge" },
+          nodes: [{ kind: "NhcPart", id: "p1", properties: { code: "c1" } }],
+          edges: [
+            {
+              kind: "nhcPartOf",
+              id: "po-1",
+              from: { kind: "NhcPart", id: "p1" },
+              to: { kind: "NhcWhole", id: "w-missing" },
+              properties: {},
+            },
+            {
+              kind: "nhcTagged",
+              id: "tag-1",
+              from: { kind: "NhcTag", id: "t1" },
+              to: { kind: "NhcPart", id: "p1" },
+              properties: {},
+            },
+          ],
+        },
+        {
+          onConflict: "error",
+          onUnknownProperty: "error",
+          validateReferences: false,
+          batchSize: 100,
+          refreshStatistics: false,
+        },
+      );
+
+      expect(result.errors).toEqual([
+        expect.objectContaining({ entityType: "node", id: "p1" }),
+      ]);
+      // The failed purge left the part, its edges, their claims and its
+      // uniqueness entry exactly as the import wrote them.
+      expect(await seeded.backend.getNode(graphId, "NhcPart", "p1")).toEqual(
+        expect.objectContaining({ id: "p1" }),
+      );
+      for (const edgeId of ["po-1", "tag-1"]) {
+        expect(await seeded.backend.getEdge(graphId, edgeId)).toEqual(
+          expect.objectContaining({ id: edgeId }),
+        );
+      }
+      const claimsAfter = await readEdgeClaimRows(seeded.backend, graphId);
+      expect(claimsAfter.map((row) => row.edge_id)).toEqual(["po-1", "po-1"]);
+      await expect(
+        seeded.nodes.NhcPart.create({ code: "c1" }, { id: "p2" }),
+      ).rejects.toThrow();
+    });
+    // MUTATION CHECK: call `frame.session.purgeNode` directly in
+    // `purgeUnattachedRequiredPart` instead of through `purgeAsUnit` — the
+    // row error is recorded while p1's node row, edges, claims and uniqueness
+    // entry are gone.
+
+    it("orders claim targets as the database orders the claim relation", async () => {
+      // Code-unit order puts the astral character's surrogate pair below
+      // U+E000; code-point order, which the database's claim-target ORDER BY
+      // uses, puts it above. A purge and a claim writer that disagree lock
+      // the same two rows in opposite orders.
+      const keys = ["\u{10000}", "\uE000", "a"];
+      const graphId = nextGraphId();
+      const store = await context.createStore(buildGraph(graphId));
+      const schema = createSqlSchema(store.backend.tableNames);
+      for (const key of keys) {
+        await store.backend.execute(
+          asCompiledRowsSql(sql`
+            INSERT INTO ${sql.identifier(schema.tables.edgeClaims)}
+              (graph_id, axis, "key", edge_id, updated_at)
+            VALUES (${graphId}, 'axis', ${key}, ${`e-${key}`}, '2026-01-01T00:00:00.000Z')
+            RETURNING "key"
+          `),
+        );
+      }
+      const claimOrder = keys.toSorted((left, right) =>
+        compareClaimTargets(
+          { relation: "edgeClaims", graphId, axis: "axis", key: left },
+          { relation: "edgeClaims", graphId, axis: "axis", key: right },
+        ),
+      );
+      // The order the purge's ORDER BY locks in: byte (code-point) order,
+      // `COLLATE "C"` on PostgreSQL and the BINARY default on SQLite.
+      const orderedRows = await store.backend.execute<
+        Readonly<{ key: string }>
+      >(
+        asCompiledRowsSql(sql`
+          SELECT "key" FROM ${sql.identifier(schema.tables.edgeClaims)}
+          WHERE graph_id = ${graphId}
+          ORDER BY ${sql.raw(store.backend.dialect === "postgres" ? '"key" COLLATE "C"' : '"key"')}
+        `),
+      );
+      const databaseOrder = orderedRows.map((row) => row.key);
+      expect(claimOrder).toEqual(databaseOrder);
+      expect(databaseOrder).toEqual(["a", "\uE000", "\u{10000}"]);
+    });
+    // MUTATION CHECK: compare with `compareStrings` (UTF-16 code units) in
+    // `compareClaimTargets` — the astral key sorts first in JS and last in
+    // the database.
 
     it("a refused batch releases no claim", async () => {
       const graphId = nextGraphId();

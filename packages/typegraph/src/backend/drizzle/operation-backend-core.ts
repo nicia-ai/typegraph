@@ -4988,22 +4988,61 @@ export function createCommonOperationBackend(
     const uniqueEdgeIds = [...new Set(edgeIds)];
     // The statement binds the graph id and one parameter per edge id, as an
     // edge read does, so the edge-read chunk budget bounds it.
-    for (const chunk of chunkArray(
-      uniqueEdgeIds,
-      batchConfig.getEdgesChunkSize,
-    )) {
-      const query = operationStrategy.buildPurgeEdgeClaims({
-        graphId,
-        edgeIds: chunk,
-      });
-      try {
-        await execution.execRun(query);
-      } catch (error) {
-        if (isMissingTableError(error)) {
-          throw edgeClaimRelationMissing(graphId, error);
-        }
-        throw error;
+    const chunks = chunkArray(uniqueEdgeIds, batchConfig.getEdgesChunkSize);
+    try {
+      // Each purge statement locks its own rows in claim-target order; locks
+      // are held to commit, so a purge spanning several statements locks
+      // every row first, in one order across all of them.
+      const lockOrder = operationStrategy.claimPurgeLockOrder;
+      if (chunks.length > 1 && lockOrder !== undefined) {
+        await lockClaimRowsInTargetOrder(graphId, chunks, lockOrder);
       }
+      for (const chunk of chunks) {
+        await execution.execRun(
+          operationStrategy.buildPurgeEdgeClaims({ graphId, edgeIds: chunk }),
+        );
+      }
+    } catch (error) {
+      if (isMissingTableError(error)) {
+        throw edgeClaimRelationMissing(graphId, error);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Locks every claim row the edges of `chunks` hold, in claim-target order
+   * ({@link compareClaimTargets}, the order every claim write takes), before
+   * a multi-statement purge deletes any. The targets are read unlocked first;
+   * a row a concurrent writer takes over meanwhile is still locked (after the
+   * writer commits) and then skipped by the purge, whose re-check no longer
+   * finds it naming a listed edge.
+   */
+  async function lockClaimRowsInTargetOrder(
+    graphId: string,
+    chunks: readonly (readonly string[])[],
+    lockOrder: NonNullable<CommonOperationStrategy["claimPurgeLockOrder"]>,
+  ): Promise<void> {
+    const targets: { axis: string; key: string }[] = [];
+    for (const chunk of chunks) {
+      const rows = await execution.execAll<{ axis: string; key: string }>(
+        lockOrder.buildReadEdgeClaimTargets({ graphId, edgeIds: chunk }),
+      );
+      for (const row of rows) targets.push({ axis: row.axis, key: row.key });
+    }
+    const ordered = targets.toSorted((left, right) =>
+      compareClaimTargets(
+        { relation: "edgeClaims", graphId, ...left },
+        { relation: "edgeClaims", graphId, ...right },
+      ),
+    );
+    // Two parameters per target beside the graph id.
+    const targetChunkSize = Math.max(
+      1,
+      Math.floor(batchConfig.getEdgesChunkSize / 2),
+    );
+    for (const run of chunkArray(ordered, targetChunkSize)) {
+      await execution.execAll(lockOrder.buildLockEdgeClaimTargets(graphId, run));
     }
   }
 
@@ -5311,8 +5350,9 @@ export function createCommonOperationBackend(
     // within a transaction to prevent partial deletion on intermediate failure.
     //
     // The incident-edge DELETE returns the rows it removed, live or
-    // tombstoned, and exactly those edges' claim rows are released before the
-    // node row goes. The store already released the claims of the live edges
+    // tombstoned, and — when the store asks (`releaseEdgeClaims`, set exactly
+    // when the target holds claims) — exactly those edges' claim rows are
+    // released before the node row goes. The store already released the claims of the live edges
     // its delete-behavior verdict removed first; the rows left for this DELETE
     // (tombstoned edges, and a composition edge the store left to the part's
     // own delete) had none released anywhere else. Keyed by what the statement
@@ -5350,10 +5390,12 @@ export function createCommonOperationBackend(
       const removedEdges = await execution.execAll<{ id: string }>(
         deleteEdgesQuery,
       );
-      await purgeClaimsOfEdges(
-        params.graphId,
-        removedEdges.map((row) => row.id),
-      );
+      if (params.releaseEdgeClaims === true) {
+        await purgeClaimsOfEdges(
+          params.graphId,
+          removedEdges.map((row) => row.id),
+        );
+      }
 
       const query = operationStrategy.buildHardDeleteNode(params);
       await execution.execRun(query);
@@ -5404,8 +5446,12 @@ export function createCommonOperationBackend(
               buildHardDeleteEdgesByNodes(params.graphId, params.kind, chunk),
             );
             const chunkEdgeIds = removedEdges.map((row) => row.id);
-            await purgeClaimsOfEdges(params.graphId, chunkEdgeIds);
-            removedEdgeIds.push(...chunkEdgeIds);
+            if (params.releaseEdgeClaims === true) {
+              await purgeClaimsOfEdges(params.graphId, chunkEdgeIds);
+            }
+            // One push per row: a high-degree node can return more ids than a
+            // spread call can pass as arguments.
+            for (const id of chunkEdgeIds) removedEdgeIds.push(id);
             const removedNodes = await execution.execAll<{ id: string }>(
               buildHardDeleteNodesBatch({
                 graphId: params.graphId,

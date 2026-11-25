@@ -38,10 +38,12 @@ import { createPostgresBackend } from "../../../src/backend/postgres";
 import {
   type ClaimEdgeCardinalityParams,
   type GraphBackend,
+  type PurgeEdgeClaimsParams,
   type TransactionBackend,
 } from "../../../src/backend/types";
 import { requireDefined } from "../../../src/utils/presence";
 import { readEdgeClaimRows } from "../../edge-claim-rows";
+import { expectObservation } from "../../helpers/known-defect";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 import { runServerSuiteSetup } from "./server-suite-setup";
 
@@ -236,13 +238,30 @@ function settle(promise: Promise<unknown>): Promise<Settled> {
 type DeletePath = "edge bulkHardDelete" | "node hardDelete";
 
 /**
+ * Whether the purge reaches both holders in one statement (the default bind
+ * budget, no other holders) or across several: a bind budget of 32 caps a
+ * purge statement at 31 edge ids, and 40 tombstoned filler holders sit
+ * between `e-a` and `e-b`, so the lock order must hold across statements,
+ * not only within one.
+ */
+type PurgeBudget = "one statement" | "across statements";
+
+const PURGE_BUDGETS = {
+  "one statement": { maxBindParameters: undefined, fillers: 0 },
+  "across statements": { maxBindParameters: 32, fillers: 40 },
+} as const satisfies Record<
+  PurgeBudget,
+  Readonly<{ maxBindParameters: number | undefined; fillers: number }>
+>;
+
+/**
  * Seeds `x`, `y` and the hub, and two tombstoned `loPairs` edges on the hub:
  * `e-a` from `x` (holding the source claim keyed by x) first, then `e-b` into
  * `y` (holding the target claim keyed by y). The creator's `x -> y` edge
  * claims the target axis before the source axis (the target-axis prefix
  * sorts first), so it locks `e-b`'s row first; the purge meets `e-a`'s first.
  */
-async function seed(): Promise<void> {
+async function seed(fillers: number): Promise<readonly string[]> {
   const [setup] = await createStoreWithSchema(
     graph,
     createPostgresBackend(drizzle(requirePools().setup)),
@@ -251,9 +270,23 @@ async function seed(): Promise<void> {
   const x = await setup.nodes.LoNode.create({ name: "x" }, { id: "x" });
   const y = await setup.nodes.LoNode.create({ name: "y" }, { id: "y" });
   await setup.edges.loPairs.create(x, hub, {}, { id: "e-a" });
-  await setup.edges.loPairs.create(hub, y, {}, { id: "e-b" });
   await setup.edges.loPairs.delete("e-a" as never);
+  // Each filler points at the hub, so it takes the hub's target claim over
+  // from `e-a` and the holder before it; `e-a` keeps x's source claim.
+  const fillerIds: string[] = [];
+  for (let index = 0; index < fillers; index += 1) {
+    const id = `e-filler-${String(index).padStart(3, "0")}`;
+    const peer = await setup.nodes.LoNode.create(
+      { name: id },
+      { id: `peer-${index}` },
+    );
+    await setup.edges.loPairs.create(peer, hub, {}, { id });
+    await setup.edges.loPairs.delete(id as never);
+    fillerIds.push(id);
+  }
+  await setup.edges.loPairs.create(hub, y, {}, { id: "e-b" });
   await setup.edges.loPairs.delete("e-b" as never);
+  return ["e-a", ...fillerIds, "e-b"];
 }
 
 type Observation = Readonly<{
@@ -265,9 +298,13 @@ type Observation = Readonly<{
   claimHolders: readonly string[];
 }>;
 
-async function observe(path: DeletePath): Promise<Observation> {
+async function observe(
+  path: DeletePath,
+  budget: PurgeBudget,
+): Promise<Observation> {
   const live = requirePools();
-  await seed();
+  const { maxBindParameters, fillers } = PURGE_BUDGETS[budget];
+  const holderIds = await seed(fillers);
 
   const reached = deferred();
   const opened = deferred();
@@ -281,7 +318,12 @@ async function observe(path: DeletePath): Promise<Observation> {
   );
   const [deleter] = await createStoreWithSchema(
     graph,
-    createPostgresBackend(drizzle(live.deleter)),
+    createPostgresBackend(
+      drizzle(live.deleter),
+      maxBindParameters === undefined ?
+        {}
+      : { capabilities: { maxBindParameters } },
+    ),
   );
 
   // One transaction each, so neither outcome is hidden by the store's
@@ -301,7 +343,7 @@ async function observe(path: DeletePath): Promise<Observation> {
   const deletion = settle(
     deleter.transaction(async (tx) => {
       await (path === "edge bulkHardDelete" ?
-        tx.edges.loPairs.bulkHardDelete(["e-a", "e-b"] as never)
+        tx.edges.loPairs.bulkHardDelete(holderIds as never)
       : tx.nodes.LoNode.hardDelete("hub" as never));
     }),
   );
@@ -332,18 +374,20 @@ async function observe(path: DeletePath): Promise<Observation> {
 describe.runIf(process.env["POSTGRES_URL"])(
   "two-claim edge create against a concurrent claim purge (PostgreSQL)",
   () => {
-    for (const path of [
-      "edge bulkHardDelete",
-      "node hardDelete",
-    ] as const satisfies readonly DeletePath[]) {
+    for (const [path, budget] of [
+      ["edge bulkHardDelete", "one statement"],
+      ["node hardDelete", "one statement"],
+      ["edge bulkHardDelete", "across statements"],
+      ["node hardDelete", "across statements"],
+    ] as const satisfies readonly (readonly [DeletePath, PurgeBudget])[]) {
       it(
-        `${path} purging tombstoned holders while a create takes their claims over`,
+        `${path} purging tombstoned holders (${budget}) while a create takes their claims over`,
         { timeout: CASE_TIMEOUT_MS },
         async () => {
           // The deleter waits for the creator instead of holding a row it
           // needs: both commit, the purge skips the two rows the creator took
           // over, and the hub-side claims of the removed holders are gone.
-          expect(await observe(path)).toEqual({
+          expect(await observe(path, budget)).toEqual({
             deleterWhileGated: "queued",
             creator: "ok",
             deleter: "ok",
@@ -352,5 +396,125 @@ describe.runIf(process.env["POSTGRES_URL"])(
         },
       );
     }
+  },
+);
+
+/**
+ * The deleting session's backend for the id-reuse case: every transaction
+ * target's `purgeEdgeClaims` waits on `opened` (signalling `reached` first),
+ * so the edge row is gone, uncommitted, before its claims are released.
+ */
+function gatedPurgeBackend(
+  base: GraphBackend,
+  reached: Deferred,
+  opened: Deferred,
+): GraphBackend {
+  function gated(target: TransactionBackend): TransactionBackend {
+    const purge = requireDefined(target.purgeEdgeClaims);
+    return deriveBackend(target, {
+      purgeEdgeClaims: async (params: PurgeEdgeClaimsParams) => {
+        reached.resolve();
+        await opened.promise;
+        return purge(params);
+      },
+    } as never);
+  }
+  return deriveBackend(base, {
+    transaction: (fn, options) =>
+      base.transaction((tx) => fn(gated(tx)), options),
+  });
+}
+
+/**
+ * KNOWN DEFECT (edge-id-reuse-purge-deadlock): a hard delete releases claims
+ * after it removes the edge row, keyed by the ids the DELETE returned. A
+ * concurrent create that reuses the removed edge's id from a surviving
+ * constrained endpoint finds the claim row still naming that id, claims it as
+ * its own (locking the row), then waits for the deleter's uncommitted DELETE
+ * on the edges primary key — while the deleter's purge waits for that claim
+ * row. PostgreSQL aborts one of the two with `40P01`.
+ *
+ * Present on main for an edge `hardDelete`, which is the path pinned here
+ * (its purge is a separate member, so the gate can sit between the two
+ * statements); a node hard delete's cascade has the same DELETE-then-release
+ * order. The fix is outside the purge's lock order: either release before the
+ * edge row goes (which a statement-returned key forbids) or have the create
+ * take the edges primary-key wait before it locks a claim row whose holder
+ * shares its id.
+ */
+describe.runIf(process.env["POSTGRES_URL"])(
+  "edge id reuse against a concurrent hard delete (PostgreSQL)",
+  () => {
+    it(
+      "a create reusing a hard-deleted edge's id while the delete releases its claims",
+      { timeout: CASE_TIMEOUT_MS },
+      async () => {
+        const live = requirePools();
+        const [setup] = await createStoreWithSchema(
+          graph,
+          createPostgresBackend(drizzle(live.setup)),
+        );
+        const x = await setup.nodes.LoNode.create({ name: "x" }, { id: "x" });
+        const y = await setup.nodes.LoNode.create({ name: "y" }, { id: "y" });
+        await setup.nodes.LoNode.create({ name: "z" }, { id: "z" });
+        await setup.edges.loPairs.create(x, y, {}, { id: "e-r" });
+        // Tombstoned: its claim rows survive until a hard delete releases
+        // them, and no live edge refuses the reusing create's probe.
+        await setup.edges.loPairs.delete("e-r" as never);
+
+        const reached = deferred();
+        const opened = deferred();
+        const [deleter] = await createStoreWithSchema(
+          graph,
+          gatedPurgeBackend(
+            createPostgresBackend(drizzle(live.deleter)),
+            reached,
+            opened,
+          ),
+        );
+        const [creator] = await createStoreWithSchema(
+          graph,
+          createPostgresBackend(drizzle(live.creator)),
+        );
+
+        const deletion = settle(
+          deleter.transaction(async (tx) => {
+            await tx.edges.loPairs.hardDelete("e-r" as never);
+          }),
+        );
+        await reached.promise;
+        const creation = settle(
+          creator.transaction(async (tx) => {
+            await tx.edges.loPairs.create(
+              { kind: "LoNode", id: "x" } as never,
+              { kind: "LoNode", id: "z" } as never,
+              {},
+              { id: "e-r" },
+            );
+          }),
+        );
+        const creatorWhileGated = await queuedOrSettled(live.setup, creation);
+        opened.resolve();
+        const outcomes = await Promise.all([deletion, creation]);
+
+        expect(creatorWhileGated).toBe("queued");
+        expectObservation({
+          lane: { server: "postgresql" },
+          observed: {
+            deadlockVictims: outcomes.filter(
+              (outcome) => outcome !== "ok" && outcome.sqlState === "40P01",
+            ).length,
+          },
+          correct: { deadlockVictims: 0 },
+          defects: [
+            {
+              label: "edge-id-reuse-purge-deadlock",
+              on: {},
+              today: { deadlockVictims: 1 },
+            },
+          ],
+        });
+      },
+    );
   },
 );
