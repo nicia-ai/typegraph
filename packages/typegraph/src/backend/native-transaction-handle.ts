@@ -35,6 +35,12 @@
  *   object bound on it during the span is that transaction or a savepoint
  *   inside it.
  *
+ * A backend built over a caller's transaction handle
+ * (`createPostgresTransactionBackend`) is recorded the same way when it is
+ * built: every statement it runs, and every savepoint it opens, is in that
+ * handle's native transaction, so a Store over it can reach the transaction's
+ * state before a write of its own opens a savepoint.
+ *
  * A savepoint is never recorded as a transaction of its own when the engine
  * can tell which transaction it is in. Where a nested handle comes from, and
  * what a bind on it records:

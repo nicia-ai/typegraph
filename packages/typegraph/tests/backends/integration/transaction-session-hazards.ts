@@ -488,16 +488,17 @@ export function registerTransactionSessionHazardTests(
           graph,
           context.getBackend(),
         );
-        let aliasWrite: Status | undefined;
-        // PostgreSQL refuses the alias's statement itself, and postgres-js
-        // then rejects the transaction too: its outcome is not the question.
-        await statusOf(
+        let aliasWrite: Refusal | undefined;
+        // The alias reads the read-only fact from the native transaction's
+        // state, so TypeGraph refuses its write before any statement: the
+        // engine never sees it, and the transaction commits.
+        const transaction = await statusOf(
           store.transaction(
             async (tx) => {
               const alias = store.withTransaction(
                 requireDefined((tx as Readonly<{ sql?: unknown }>).sql),
               );
-              aliasWrite = await statusOf(
+              aliasWrite = await refusalOf(
                 alias.nodes.HzNote.create(
                   { body: "through the alias" },
                   { id: "alias" },
@@ -509,15 +510,20 @@ export function registerTransactionSessionHazardTests(
         );
         expectOnLane(
           context,
-          { aliasWrite, notes: await ids(() => store.nodes.HzNote.find()) },
-          { aliasWrite: "rejected", notes: [] },
-          [
-            {
-              label: "hazard 1",
-              on: { driver: ["better-sqlite3", "libsql"] },
-              today: { aliasWrite: "fulfilled", notes: ["alias"] },
+          {
+            aliasWrite,
+            transaction,
+            notes: await ids(() => store.nodes.HzNote.find()),
+          },
+          {
+            aliasWrite: {
+              error: "UnsupportedBackendCapabilityError",
+              code: "UNSUPPORTED_BACKEND_CAPABILITY",
+              details: { capability: "write transaction access" },
             },
-          ],
+            transaction: "fulfilled",
+            notes: [],
+          },
         );
       });
     });

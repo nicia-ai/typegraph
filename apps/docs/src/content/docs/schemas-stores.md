@@ -2386,6 +2386,30 @@ every node and edge collection write, every `tx.identity` write, `tx.writeNodeUp
 store on every backend, so the transaction stays usable: reads after it run, and the transaction
 commits.
 
+The read-only fact belongs to the native transaction for as long as the callback runs, not to the
+`tx` object, so every TypeGraph context over that transaction refuses the same way, with the same
+error, before any statement:
+
+| Reached through | Refused as |
+| --- | --- |
+| `store.withTransaction(tx.sql)` | every collection and identity write and `writeNodeUpsertBatch()`, with the same `operation` names as on `tx` |
+| `store.withRecordedTransaction(tx.sql, fn)` | the same writes inside `fn`, and `applyMergePlanInTransaction()` with that context |
+| `store.withRecordedTransaction(tx.sql, fn)` on a history store | `store.withRecordedTransaction()`, before `fn` runs (it fences its writes first) |
+| `store.withEvolvedTransaction(tx.sql, plan, fn)` | `store.withEvolvedTransaction()`, before `fn` runs, for every plan |
+| a Store over `createPostgresTransactionBackend(tx.sql)` | its `store.nodes`, `store.edges` and `store.identity` writes (`store.nodes.Person.create()`), `importGraph()`, `importGraphStream()`, `trustedImportGraphStream()`, and the writes and provenance verbs in its own `store.transaction()` |
+
+A read-only `store.transaction()` on a Store over a caller's read-write transaction runs as a
+savepoint of that transaction: the caller's transaction refuses TypeGraph writes while that
+callback runs and accepts them again once it settles. A native read-only transaction the Store did
+not open (your own `db.transaction(fn, { accessMode: "read only" })`) carries no read-only fact:
+TypeGraph writes through it as before, so PostgreSQL rejects the write and aborts the transaction,
+and SQLite has no read-only transaction to refuse it.
+
+One handle is not recognized: a savepoint you open yourself with `tx.sql.transaction(...)` and hand
+to `withTransaction()` is, to TypeGraph, a transaction of its own on every driver but better-sqlite3,
+because the driver gives it a new object with no link to the enclosing transaction. Writes through
+it are not refused by TypeGraph: PostgreSQL rejects them, and libSQL commits them.
+
 The refusal covers what TypeGraph writes. A statement issued through the native `tx.sql` handle is
 not checked: PostgreSQL rejects a write there and aborts the transaction (which then rejects with
 `TransactionOutcomeUnknownError`, even if the callback caught the refusal, since the callback read

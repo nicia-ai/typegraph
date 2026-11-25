@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   asNodeId,
   ConfigurationError,
+  createAdapterStore,
   createAdapterStoreWithSchema,
   createStoreWithSchema,
   defineEdge,
@@ -16,6 +17,7 @@ import {
   deriveBackend,
   projectBackendWithout,
 } from "../../../src/backend/derive-backend";
+import { createPostgresTransactionBackend } from "../../../src/backend/postgres";
 import type {
   AdapterBackend,
   GraphBackend,
@@ -1534,6 +1536,71 @@ export function registerProvenanceIntegrationTests(
         fact("scoped-held"),
       ]);
       expect(outcome.result.receipt.writes.total).toBe(4);
+    });
+  });
+
+  // SQLite has no factory for a backend over a caller's transaction.
+  describe.runIf(
+    context.driver === "pglite" ||
+      context.driver === "node-postgres" ||
+      context.driver === "postgres-js",
+  )("provenance on a Store over a read-only transaction's handle", () => {
+    it("refuses retract and assertHolds as writes of the read-only transaction, which stays usable", async () => {
+      const { store } = await seedStore(context);
+      // A history store withholds tx.sql, so a plain store over the same
+      // graph opens the read-only transaction.
+      const [plain] = await createAdapterStoreWithSchema(
+        provenanceGraph,
+        context.getBackend(),
+      );
+      const outcome = await plain.transaction(
+        async (tx) => {
+          const overTransaction = createAdapterStore(
+            provenanceGraph,
+            createPostgresTransactionBackend(
+              requireDefined((tx as Readonly<{ sql?: unknown }>).sql) as never,
+            ),
+            { history: true },
+          );
+          const provenance = createRetractionCapability(
+            overTransaction,
+            config,
+          );
+          const retract = await captureRejection(
+            provenance.retract({ kind: "Source", id: "live-source" }),
+          );
+          const assertHolds = await captureRejection(
+            overTransaction.transaction((inner) =>
+              provenance.assertHolds(inner, [
+                { kind: "Fact", id: "live-fact" },
+              ]),
+            ),
+          );
+          return {
+            retract,
+            assertHolds,
+            live: await tx.nodes.Fact.getById(asNodeId("live-fact")),
+          };
+        },
+        { accessMode: "read_only" },
+      );
+      for (const [operation, refusal] of [
+        ["provenance retraction transition", outcome.retract],
+        ["provenance.assertHolds()", outcome.assertHolds],
+      ] as const) {
+        expect(refusal).toBeInstanceOf(UnsupportedBackendCapabilityError);
+        expect(
+          (refusal as UnsupportedBackendCapabilityError).details,
+        ).toMatchObject({
+          operation,
+          capability: "write transaction access",
+          accessMode: "read_only",
+        });
+      }
+      expect(outcome.live?.id).toBe("live-fact");
+      expect(
+        sortedIds(await createRetractionCapability(store, config).holding()),
+      ).toEqual(["live-fact"]);
     });
   });
 }

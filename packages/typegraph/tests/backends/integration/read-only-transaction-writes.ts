@@ -18,6 +18,8 @@ import { z } from "zod";
 
 import {
   asNodeId,
+  createAdapterStore,
+  createAdapterStoreWithSchema,
   createStore,
   defineEdge,
   defineGraph,
@@ -27,8 +29,13 @@ import {
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { GRAPH_BACKEND_PROJECTION_KEYS } from "../../../src/backend/graph-backend-keys";
-import { type TransactionBackend } from "../../../src/backend/types";
+import { createPostgresTransactionBackend } from "../../../src/backend/postgres";
+import {
+  type AdapterBackend,
+  type TransactionBackend,
+} from "../../../src/backend/types";
 import { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import { branch } from "../../../src/graph-merge/branch";
 import { MergeError } from "../../../src/graph-merge/errors";
 import {
@@ -36,12 +43,21 @@ import {
   planMerge,
 } from "../../../src/graph-merge/merge";
 import { asBranchId } from "../../../src/graph-merge/types";
+import {
+  exportGraph,
+  type GraphInterchangeChunk,
+  importGraph,
+  importGraphStream,
+  trustedImportGraphStream,
+} from "../../../src/interchange";
 import type {
   EDGE_WRITE_NAMES,
   IDENTITY_WRITE_NAMES,
   NODE_WRITE_NAMES,
 } from "../../../src/store/collection-surface";
+import { requireDefined } from "../../../src/utils/presence";
 import { unwrap } from "../../../src/utils/result";
+import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
 
 const RotPerson = defineNode("RotPerson", {
@@ -254,6 +270,90 @@ const CASES: readonly Case[] = [
   },
 ];
 
+/** `target`, reporting the name of every backend member called through it. */
+function instrumentTransactionTarget(
+  target: TransactionBackend,
+  record: (key: string) => void,
+): TransactionBackend {
+  const overrides: Record<string, unknown> = {};
+  for (const key of GRAPH_BACKEND_PROJECTION_KEYS) {
+    const member: unknown = (target as unknown as Record<string, unknown>)[key];
+    if (typeof member !== "function") continue;
+    overrides[key] = (...args: unknown[]) => {
+      record(key);
+      return (member as (...a: unknown[]) => unknown).apply(target, args);
+    };
+  }
+  return deriveBackend(target, overrides as never);
+}
+
+/**
+ * `backend`, with every backend member of a transaction it adopts counted in
+ * `calls` while `counting` is on.
+ */
+function countingAdoptionBackend(backend: AdapterBackend<unknown>): Readonly<{
+  backend: AdapterBackend<unknown>;
+  calls: string[];
+  setCounting: (on: boolean) => void;
+}> {
+  const calls: string[] = [];
+  let counting = false;
+  return {
+    backend: deriveBackend(backend, {
+      adoptTransaction: (externalTransaction) =>
+        instrumentTransactionTarget(
+          backend.adoptTransaction(externalTransaction),
+          (key) => {
+            if (counting) calls.push(key);
+          },
+        ),
+    }),
+    calls,
+    setCounting: (on) => {
+      counting = on;
+    },
+  };
+}
+
+/** The native handle a transaction context exposes as `tx.sql`. */
+function nativeHandle(tx: object): unknown {
+  return requireDefined((tx as Readonly<{ sql?: unknown }>).sql);
+}
+
+type AdoptingStore = Readonly<{
+  withTransaction: (externalTx: unknown) => unknown;
+  withRecordedTransaction: (
+    externalTx: unknown,
+    fn: (tx: unknown) => Promise<void>,
+  ) => Promise<unknown>;
+}>;
+
+type Adoption = Readonly<{
+  entry: string;
+  run: (
+    store: AdoptingStore,
+    externalTx: unknown,
+    body: (adopted: TransactionSurface) => Promise<void>,
+  ) => Promise<void>;
+}>;
+
+/** Every way a store builds a write context over a caller's native handle. */
+const ADOPTIONS: readonly Adoption[] = [
+  {
+    entry: "store.withTransaction(tx.sql)",
+    run: (store, externalTx, body) =>
+      body(store.withTransaction(externalTx) as TransactionSurface),
+  },
+  {
+    entry: "store.withRecordedTransaction(tx.sql, fn)",
+    run: async (store, externalTx, body) => {
+      await store.withRecordedTransaction(externalTx, (adopted) =>
+        body(adopted as TransactionSurface),
+      );
+    },
+  },
+];
+
 /**
  * `backend`, with every backend member a transaction target exposes counted
  * in `calls` while `counting` is on.
@@ -265,20 +365,10 @@ function countingBackend(backend: GraphBackend): Readonly<{
 }> {
   const calls: string[] = [];
   let counting = false;
-  function instrument(target: TransactionBackend): TransactionBackend {
-    const overrides: Record<string, unknown> = {};
-    for (const key of GRAPH_BACKEND_PROJECTION_KEYS) {
-      const member: unknown = (target as unknown as Record<string, unknown>)[
-        key
-      ];
-      if (typeof member !== "function") continue;
-      overrides[key] = (...args: unknown[]) => {
-        if (counting) calls.push(key);
-        return (member as (...a: unknown[]) => unknown).apply(target, args);
-      };
-    }
-    return deriveBackend(target, overrides as never);
-  }
+  const instrument = (target: TransactionBackend): TransactionBackend =>
+    instrumentTransactionTarget(target, (key) => {
+      if (counting) calls.push(key);
+    });
   return {
     backend: deriveBackend(backend, {
       transaction: (fn, options) =>
@@ -336,6 +426,15 @@ async function graphState(
     knows: knows.map((edge) => edge.id),
     memberOf: memberOf.map((edge) => edge.id),
     classes: await store.identity.classes({ limit: 100 }),
+  };
+}
+
+/** A chunk stream that fails the test if anything reads it. */
+function unreadChunks(): AsyncIterable<GraphInterchangeChunk> {
+  return {
+    [Symbol.asyncIterator]: () => {
+      throw new Error("the import read its stream before refusing");
+    },
   };
 }
 
@@ -455,4 +554,439 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
     // MUTATION CHECK: drop the `transactionAssertWritable` call from
     // `applyMergePlanInTransaction` — the apply is not refused.
   });
+
+  describe("writes through a context adopted over a read-only transaction's native handle", () => {
+    // `tx.sql` of `store.transaction(fn, { accessMode: "read_only" })`, handed
+    // back to the store, builds a NEW context. The read-only fact is bound to
+    // the handle's native session, so that context refuses exactly as the
+    // original does, before any statement, on every backend.
+    for (const adoption of ADOPTIONS) {
+      it(`refuses every write entry point through ${adoption.entry} before any backend call, and the transaction stays usable`, async () => {
+        const graph = buildGraph(nextGraphId());
+        const counted = countingAdoptionBackend(context.getBackend());
+        const [store] = await createAdapterStoreWithSchema(
+          graph,
+          counted.backend,
+        );
+        await seed(store);
+        const before = await graphState(store);
+
+        for (const { operation, invoke } of CASES) {
+          let refusal: unknown;
+          const committed = await store.transaction(
+            async (tx) => {
+              await adoption.run(store, nativeHandle(tx), async (adopted) => {
+                counted.setCounting(true);
+                refusal = await rejectionOf(invoke(adopted));
+                counted.setCounting(false);
+              });
+              // Still usable: on PostgreSQL an engine-rejected write would
+              // abort the transaction and fail this read.
+              return tx.nodes.RotPerson.getById(asNodeId("p1"));
+            },
+            { accessMode: "read_only" },
+          );
+          expectReadOnlyRefusal(refusal, operation, graph.id);
+          expect({ operation, calls: counted.calls }).toEqual({
+            operation,
+            calls: [],
+          });
+          expect(committed?.id).toBe("p1");
+        }
+        expect(await graphState(store)).toEqual(before);
+      });
+    }
+    // MUTATION CHECK: build the adopted contexts' write access from
+    // `transactionReadOnlyAccess(undefined)` instead of the handle — every
+    // case fails: SQLite commits the write, PostgreSQL reports its own
+    // read-only error and aborts the transaction.
+
+    it("refuses applyMergePlanInTransaction through store.withRecordedTransaction(tx.sql, fn)", async () => {
+      const graph = buildGraph(nextGraphId());
+      const backend = context.getBackend();
+      // A public merge plan needs revision tracking, which withholds tx.sql;
+      // a plain store over the same graph opens the read-only transaction.
+      const [plain] = await createAdapterStoreWithSchema(graph, backend);
+      const [target] = await createAdapterStoreWithSchema(graph, backend, {
+        revisionTracking: true,
+      });
+      await seed(target);
+      const source = unwrap(
+        await branch(target, () => context.createIsolatedBackend(), {
+          id: asBranchId("read-only-adopted-merge"),
+        }),
+      );
+      await source.store.nodes.RotPerson.create(
+        { name: "p5", email: "p5@example.test" },
+        { id: "p5" },
+      );
+      const artifact = unwrap(await planMerge(target, [source]));
+
+      let refusal: unknown;
+      const committed = await plain.transaction(
+        async (tx) => {
+          // Merge apply needs an active callback of its target, which an
+          // adopted withRecordedTransaction callback is.
+          await target.withRecordedTransaction(
+            nativeHandle(tx),
+            async (adopted) => {
+              refusal = await rejectionOf(
+                applyMergePlanInTransaction(target, adopted, artifact),
+              );
+            },
+          );
+          return tx.nodes.RotPerson.getById(asNodeId("p1"));
+        },
+        { accessMode: "read_only" },
+      );
+      expect(committed?.id).toBe("p1");
+      expect(refusal).toBeInstanceOf(MergeError);
+      expectReadOnlyRefusal(
+        (refusal as MergeError).cause,
+        "applyMergePlanInTransaction()",
+        graph.id,
+      );
+      expect(
+        await target.nodes.RotPerson.getById(asNodeId("p5")),
+      ).toBeUndefined();
+    });
+
+    for (const status of ["change", "noop"] as const) {
+      it(`refuses store.withEvolvedTransaction(tx.sql) with a ${status} plan before its callback`, async () => {
+        const graph = buildGraph(nextGraphId());
+        const backend = context.getBackend();
+        const [base] = await createAdapterStoreWithSchema(graph, backend);
+        await seed(base);
+        const extension = defineGraphExtension({
+          nodes: { RotExtra: { properties: { label: { type: "string" } } } },
+        });
+        // A no-op plan is the plan of an extension the store already has.
+        const store = status === "noop" ? await base.evolve(extension) : base;
+        const activeBefore = await backend.getActiveSchema(graph.id);
+        const version = activeBefore?.version;
+        const before = await graphState(base);
+        const plan = await store.planEvolution(extension);
+        // A changing plan is refused as read-only before any capability
+        // decision (SQLite cannot adopt a schema write at all), a no-op plan
+        // before its schema lock.
+        expect(plan.status).toBe(status);
+        let callbackRan = false;
+        let refusal: unknown;
+        const committed = await store.transaction(
+          async (tx) => {
+            refusal = await rejectionOf(
+              store.withEvolvedTransaction(nativeHandle(tx), plan, async () => {
+                callbackRan = true;
+                await Promise.resolve();
+              }),
+            );
+            return tx.nodes.RotPerson.getById(asNodeId("p1"));
+          },
+          { accessMode: "read_only" },
+        );
+        expectReadOnlyRefusal(
+          refusal,
+          "store.withEvolvedTransaction()",
+          graph.id,
+        );
+        expect(callbackRan).toBe(false);
+        expect(committed?.id).toBe("p1");
+        const active = await backend.getActiveSchema(graph.id);
+        expect(active?.version).toBe(version);
+        expect(await graphState(base)).toEqual(before);
+      });
+    }
+
+    it("refuses a history store's withRecordedTransaction(tx.sql) before its callback", async () => {
+      const graph = buildGraph(nextGraphId());
+      const backend = context.getBackend();
+      const [plain] = await createAdapterStoreWithSchema(graph, backend);
+      const [history] = await createAdapterStoreWithSchema(graph, backend, {
+        history: true,
+      });
+      await seed(plain);
+      const before = await graphState(plain);
+
+      let callbackRan = false;
+      let refusal: unknown;
+      const committed = await plain.transaction(
+        async (tx) => {
+          refusal = await rejectionOf(
+            history.withRecordedTransaction(nativeHandle(tx), async () => {
+              callbackRan = true;
+              await Promise.resolve();
+            }),
+          );
+          return tx.nodes.RotPerson.getById(asNodeId("p1"));
+        },
+        { accessMode: "read_only" },
+      );
+      expectReadOnlyRefusal(
+        refusal,
+        "store.withRecordedTransaction()",
+        graph.id,
+      );
+      expect(callbackRan).toBe(false);
+      expect(committed?.id).toBe("p1");
+      expect(await graphState(plain)).toEqual(before);
+    });
+
+    it("does not outlive the transaction: the same adoption writes in a read-write transaction afterwards", async () => {
+      const graph = buildGraph(nextGraphId());
+      const [store] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+      );
+      await seed(store);
+      await store.transaction(
+        async (tx) => tx.nodes.RotPerson.getById(asNodeId("p1")),
+        { accessMode: "read_only" },
+      );
+      await store.transaction(async (tx) => {
+        await store
+          .withTransaction(nativeHandle(tx))
+          .nodes.RotTeam.create({ name: "t3" }, { id: "t3" });
+      });
+      const team = await store.nodes.RotTeam.getById(asNodeId("t3"));
+      expect(team?.id).toBe("t3");
+    });
+
+    it("refuses a write through a savepoint the caller opens on tx.sql and adopts directly, where the engine can tell its transaction", async () => {
+      const graph = buildGraph(nextGraphId());
+      const [store] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+      );
+      await seed(store);
+      let write: unknown;
+      const transaction = await rejectionOf(
+        store.transaction(
+          async (tx) => {
+            const handle = nativeHandle(tx) as Readonly<{
+              transaction: (
+                fn: (savepoint: unknown) => Promise<unknown>,
+              ) => Promise<unknown>;
+            }>;
+            // The savepoint's own outcome is not the question: PostgreSQL
+            // refuses an unrefused write itself, and Drizzle then rolls the
+            // savepoint back. better-sqlite3 runs a nested transaction
+            // synchronously, so there the write is started inside it and
+            // awaited after it.
+            let pending: Promise<unknown> | undefined;
+            await rejectionOf(
+              (async () =>
+                handle.transaction((savepoint) => {
+                  pending = store
+                    .withTransaction(savepoint)
+                    .nodes.RotTeam.create({ name: "t3" }, { id: "t3" });
+                  return context.driver === "better-sqlite3" ?
+                      (undefined as never)
+                    : pending;
+                }))(),
+            );
+            write = await rejectionOf(requireDefined(pending));
+          },
+          { accessMode: "read_only" },
+        ),
+      );
+      const team = await store.nodes.RotTeam.getById(asNodeId("t3"));
+      const observed = {
+        write:
+          write === undefined ? "fulfilled"
+          : (
+            write instanceof UnsupportedBackendCapabilityError &&
+            write.details["capability"] === "write transaction access"
+          ) ?
+            "refused as read-only"
+          : "rejected by the engine",
+        transaction: transaction === undefined ? "fulfilled" : "rejected",
+        team: team === undefined ? undefined : String(team.id),
+      };
+      // A savepoint Drizzle opens on a transaction object gets a new object
+      // with no link to the enclosing one, and TypeGraph never saw it opened,
+      // so it is recorded as a native transaction of its own
+      // (`native-transaction-handle.ts`). Only better-sqlite3, whose
+      // savepoint runs on the connection the opener published its
+      // transaction on, resolves it to the read-only transaction.
+      expectObservation({
+        lane: { driver: context.driver },
+        observed,
+        correct: {
+          write: "refused as read-only",
+          transaction: "fulfilled",
+          team: undefined,
+        },
+        defects: [
+          {
+            label: "caller savepoint adopted directly",
+            on: { driver: ["libsql"] },
+            today: { write: "fulfilled", transaction: "fulfilled", team: "t3" },
+          },
+          {
+            label: "caller savepoint adopted directly",
+            on: { driver: ["pglite", "node-postgres", "postgres-js"] },
+            today: {
+              write: "rejected by the engine",
+              transaction: "fulfilled",
+              team: undefined,
+            },
+          },
+        ],
+      });
+    });
+
+    it("leaves a native read-only transaction the Store did not open to the engine", async () => {
+      const graph = buildGraph(nextGraphId());
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(graph, backend);
+      await seed(store);
+      // Opened on the backend directly, not by `store.transaction`: no
+      // read-only scope is open on it, so TypeGraph does not refuse; the
+      // engine decides (PostgreSQL rejects the statement, SQLite has no
+      // read-only transaction and writes).
+      const write = await rejectionOf(
+        backend.transactionWithNative(
+          async (_transaction, nativeTransaction) => {
+            await store
+              .withTransaction(nativeTransaction)
+              .nodes.RotTeam.create({ name: "t3" }, { id: "t3" });
+          },
+          { accessMode: "read_only" },
+        ),
+      );
+      expect(
+        write instanceof UnsupportedBackendCapabilityError &&
+          write.details["capability"] === "write transaction access",
+      ).toBe(false);
+      expect(write === undefined).toBe(backend.dialect === "sqlite");
+    });
+  });
+
+  // SQLite has no factory for a backend over a caller's transaction.
+  describe.runIf(
+    context.driver === "pglite" ||
+      context.driver === "node-postgres" ||
+      context.driver === "postgres-js",
+  )(
+    "writes through a Store over createPostgresTransactionBackend(tx.sql) of a read-only transaction",
+    () => {
+      type StoreOverTransaction = Awaited<
+        ReturnType<typeof createAdapterStoreWithSchema<RotGraph, unknown>>
+      >[0];
+      const WRITES: readonly Readonly<{
+        operation: string;
+        write: (
+          store: StoreOverTransaction,
+          data: Awaited<ReturnType<typeof exportGraph>>,
+        ) => Promise<unknown>;
+      }>[] = [
+        {
+          operation: "store.nodes.RotTeam.create()",
+          write: (store) => store.nodes.RotTeam.create({ name: "t3" }),
+        },
+        {
+          operation: "store.edges.rotKnows.create()",
+          write: (store) =>
+            store.edges.rotKnows.create(person("p2"), person("p1"), {}),
+        },
+        {
+          operation: "store.identity.assertSame()",
+          write: (store) =>
+            store.identity.assertSame(person("p1"), person("p2")),
+        },
+        {
+          operation: "tx.nodes.RotTeam.create()",
+          write: (store) =>
+            store.transaction((tx) => tx.nodes.RotTeam.create({ name: "t3" })),
+        },
+        {
+          operation: "importGraph()",
+          write: (store, data) =>
+            importGraph(store, data, {
+              onConflict: "update",
+              onUnknownProperty: "error",
+              validateReferences: true,
+              batchSize: 100,
+              refreshStatistics: false,
+            }),
+        },
+        {
+          operation: "importGraphStream()",
+          write: (store) =>
+            importGraphStream(store, unreadChunks(), { onConflict: "update" }),
+        },
+        {
+          operation: "trustedImportGraphStream()",
+          write: (store) => trustedImportGraphStream(store, unreadChunks()),
+        },
+      ];
+
+      for (const { operation, write } of WRITES) {
+        it(`refuses ${operation} before any statement, and the transaction stays usable`, async () => {
+          const graph = buildGraph(nextGraphId());
+          const backend = context.getBackend();
+          const [store] = await createAdapterStoreWithSchema(graph, backend);
+          await seed(store);
+          const data = await exportGraph(store);
+          const before = await graphState(store);
+
+          let refusal: unknown;
+          const committed = await store.transaction(
+            async (tx) => {
+              const overTransaction = createAdapterStore(
+                graph,
+                createPostgresTransactionBackend(nativeHandle(tx) as never),
+              ) as unknown as StoreOverTransaction;
+              refusal = await rejectionOf(write(overTransaction, data));
+              return tx.nodes.RotPerson.getById(asNodeId("p1"));
+            },
+            { accessMode: "read_only" },
+          );
+          expectReadOnlyRefusal(refusal, operation, graph.id);
+          expect(committed?.id).toBe("p1");
+          expect(await graphState(store)).toEqual(before);
+        });
+      }
+
+      it("reads a read-only savepoint as a scope: the caller's read-write transaction refuses only while it runs", async () => {
+        const graph = buildGraph(nextGraphId());
+        const [store] = await createAdapterStoreWithSchema(
+          graph,
+          context.getBackend(),
+        );
+        await seed(store);
+        let inside: unknown;
+        await store.transaction(async (tx) => {
+          const overTransaction = createAdapterStore(
+            graph,
+            createPostgresTransactionBackend(nativeHandle(tx) as never),
+          );
+          // A read-only store.transaction on this Store is a savepoint of the
+          // caller's transaction: the caller's own context is refused while
+          // it runs, not after.
+          await overTransaction.transaction(
+            async () => {
+              inside = await rejectionOf(
+                tx.nodes.RotTeam.create({ name: "t3" }, { id: "t3" }),
+              );
+            },
+            { accessMode: "read_only" },
+          );
+          await tx.nodes.RotTeam.create({ name: "t4" }, { id: "t4" });
+          await overTransaction.nodes.RotTeam.create(
+            { name: "t5" },
+            { id: "t5" },
+          );
+        });
+        expectReadOnlyRefusal(inside, "tx.nodes.RotTeam.create()", graph.id);
+        const teams = await store.nodes.RotTeam.find();
+        expect(teams.map((team) => team.id).toSorted()).toEqual([
+          "t1",
+          "t2",
+          "t4",
+          "t5",
+        ]);
+      });
+    },
+  );
 }

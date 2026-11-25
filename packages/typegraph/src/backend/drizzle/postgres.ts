@@ -1179,10 +1179,16 @@ export function createPostgresTransactionBackend(
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
   assertAdoptedDialect(tx, isPostgresTransactionHandle, "postgres");
-  return markAllocationBound(
+  const backend = markAllocationBound(
     createSqlBackend(buildPostgresEngineProfileInternal(tx, options, true)),
     options,
   );
+  // Every statement of this backend, and every savepoint it opens, runs in
+  // `tx`'s native transaction: recorded as for a bind, so a Store over this
+  // backend reaches that transaction's state before a write of its own opens
+  // a savepoint (`resolveBackendNativeTransactionState`).
+  recordNativeTransactionHandle(backend, postgresNativeHandle(tx));
+  return backend;
 }
 
 /** Records the allocation schema the backend's tables are bound to, so a working-copy manager can attest it. */

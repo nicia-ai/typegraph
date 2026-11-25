@@ -152,6 +152,10 @@ import {
   edgeMatchIdentityUpdateRefusal,
   resolveEdgeMatchIdentityStorage,
 } from "../store/edge-match-key";
+import {
+  isNativeTransactionReadOnly,
+  resolveBackendNativeTransactionState,
+} from "../store/native-transaction-state";
 import { compositionRowEndpoints } from "../store/operations/composition-cascade";
 import {
   assertCompositionExistencePreserved,
@@ -184,6 +188,7 @@ import {
 } from "../store/operations/write-session";
 import {
   constraintFenceRefusal,
+  refuseReadOnlyTransactionWrite,
   type WriteTransactionMode,
 } from "../store/operations/write-transaction";
 import { runRecordedTransactionSavepoint } from "../store/recorded-capture";
@@ -293,6 +298,7 @@ export async function importGraph<G extends GraphDef>(
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
   const store = resolveIngestionImportTarget<G>(target);
+  refuseImportIntoReadOnlyTransaction(store, "importGraph()");
   // Parse ONCE at the public boundary: schema defaults (batchSize, ...)
   // only exist after parsing, and every internal stage reads them
   // directly.
@@ -303,6 +309,25 @@ export async function importGraph<G extends GraphDef>(
   );
   return withImportStreamLease(store, () =>
     importGraphData(store, data, options),
+  );
+}
+
+/**
+ * Refuses an import into a Store whose backend runs inside a caller's native
+ * transaction (a Store over `createPostgresTransactionBackend(tx.sql)`) while
+ * that transaction is inside a read-only scope TypeGraph opened, before any
+ * statement, with the refusal a write in that transaction raises.
+ */
+export function refuseImportIntoReadOnlyTransaction<G extends GraphDef>(
+  store: Store<G>,
+  operation: string,
+): void {
+  const native = resolveBackendNativeTransactionState(storeBackend(store));
+  if (native === undefined || !isNativeTransactionReadOnly(native)) return;
+  refuseReadOnlyTransactionWrite(
+    operation,
+    store.graphId,
+    'Remove accessMode: "read_only" from the store.transaction whose native handle this store\'s backend was built over.',
   );
 }
 
@@ -871,6 +896,7 @@ export async function importGraphStream<G extends GraphDef>(
   rawOptions: ImportOptions,
 ): Promise<ImportResult> {
   const store = resolveIngestionImportTarget<G>(target);
+  refuseImportIntoReadOnlyTransaction(store, "importGraphStream()");
   const options = parseInterchangeOptions(
     "importGraphStream",
     ImportOptionsSchema,
