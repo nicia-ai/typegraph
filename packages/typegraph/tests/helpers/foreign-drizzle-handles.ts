@@ -11,7 +11,7 @@ import { BaseSQLiteDatabase, SQLiteTransaction } from "drizzle-orm/sqlite-core";
 class ForeignSqliteDatabase {
   static readonly [entityKind] = BaseSQLiteDatabase[entityKind];
 }
-export class ForeignSqliteTransaction extends ForeignSqliteDatabase {
+class ForeignSqliteTransaction extends ForeignSqliteDatabase {
   static override readonly [entityKind] = SQLiteTransaction[entityKind];
 }
 // eslint-disable-next-line @typescript-eslint/no-extraneous-class -- A Drizzle entity class is identified by its static entity kind alone.
