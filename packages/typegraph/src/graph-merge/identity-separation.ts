@@ -39,7 +39,6 @@
  */
 import { identityReferenceKey } from "../identity/reference";
 import { isCurrentIdentityAssertion } from "../identity/validity-window";
-import { legacyTransactionOperation } from "../store/operation-scope";
 import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
 import { entityRef } from "./evidence";
@@ -59,6 +58,7 @@ import {
   loadSpanningDifferentAssertion,
   separationClassPairKey,
   separationFactsEmpty,
+  storeBackend,
   storeRuntime,
 } from "./typegraph-internal";
 import { UnionFind } from "./union-find";
@@ -179,6 +179,8 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
     (assertion) => assertion.relation === "same",
   );
   const ctx = storeRuntime(target).identityContext();
+  // The Store's identity context is built on its root backend.
+  const backend = storeBackend(target);
   // A graph holding no `different` assertion can separate nothing, so the whole
   // capture — the class resolution AND the within-component pair enumeration,
   // which is quadratic in component size — is skipped for one existence probe.
@@ -197,7 +199,7 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   // assertion" as proof that an empty relation is correct. A store that does
   // hold one still reaches the refusal below.
   const ledgerSeparatesNothing = await separationFactsEmpty(
-    legacyTransactionOperation(ctx.backend),
+    backend,
     ctx.schema,
     ctx.graphId,
     ctx.registry,
@@ -214,7 +216,7 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
     ref: entityRef(key),
   }));
   const targetClasses = await loadCurrentStructuralClasses(
-    legacyTransactionOperation(ctx.backend),
+    backend,
     ctx.schema,
     ctx.graphId,
     resolvedEntries.map(({ ref }) => ref),
@@ -267,7 +269,7 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
   );
   if (targetPairs.length > 0) {
     const verdicts = await bulkIsSeparated(
-      legacyTransactionOperation(ctx.backend),
+      backend,
       ctx.schema,
       ctx.graphId,
       targetPairs.map(({ first, second }) => ({ first, second })),
@@ -278,7 +280,7 @@ export async function captureIdentitySeparationFacts<G extends GraphDef>(
       if (separatedClassPairs.has(targetPair.pairKey)) continue;
       separatedClassPairs.add(targetPair.pairKey);
       const witness = await loadSpanningDifferentAssertion(
-        legacyTransactionOperation(ctx.backend),
+        backend,
         ctx.schema,
         ctx.graphId,
         membersByTargetClassKey.get(targetPair.first) ?? [],

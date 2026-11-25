@@ -34,7 +34,8 @@ import {
   vectorIndexParams,
 } from "../store/materialize-indexes";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
   type StoreTransactionBackend,
 } from "../store/operation-scope";
 import { createStore, type Store } from "../store/store";
@@ -731,7 +732,9 @@ function namespaceForkResult<G extends GraphDef>(
     abort: async () => {
       await targetBackend.transaction(
         async (targetTransaction: StoreTransactionBackend) => {
-          const targetTx = legacyTransactionOperation(targetTransaction);
+          const targetTx = enterOperation(
+            openTransactionSession(targetTransaction),
+          ).backend;
           const ledger = await queryRows<LedgerRow>(
             targetTx,
             sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${proof.operationKey} FOR UPDATE`,
@@ -802,7 +805,9 @@ async function assertIndependentDatabase(
   );
   await targetBackend.transaction(
     async (targetTransaction: StoreTransactionBackend) => {
-      const targetTx = legacyTransactionOperation(targetTransaction);
+      const targetTx = enterOperation(
+        openTransactionSession(targetTransaction),
+      ).backend;
       const aliasProbe = await queryRows<LockRow>(
         targetTx,
         sql`SELECT pg_try_advisory_xact_lock(hashtext(${graphId}), hashtext(${aliasKey})) AS acquired`,
@@ -951,7 +956,7 @@ export async function forkGraphNamespace<G extends GraphDef>(
   await sourceBackend.transaction(
     async (sourceTx: StoreTransactionBackend) =>
       assertIndependentDatabase(
-        legacyTransactionOperation(sourceTx),
+        enterOperation(openTransactionSession(sourceTx)).backend,
         targetBackend,
         source.graphId,
       ),
@@ -966,7 +971,9 @@ export async function forkGraphNamespace<G extends GraphDef>(
   if (existing[0] !== undefined) {
     const ledgerProof = await targetBackend.transaction(
       async (targetTransaction: StoreTransactionBackend) => {
-        const targetTx = legacyTransactionOperation(targetTransaction);
+        const targetTx = enterOperation(
+          openTransactionSession(targetTransaction),
+        ).backend;
         const locked = await queryRows<LedgerRow>(
           targetTx,
           sql`SELECT graph_id, source_base, content_digest, copied_at::text FROM ${sql.identifier(FORK_LEDGER)} WHERE operation_key = ${operationKey} FOR UPDATE`,
@@ -1008,8 +1015,11 @@ export async function forkGraphNamespace<G extends GraphDef>(
   const proof = await sourceBackend.transaction(
     async (sourceTransaction: StoreTransactionBackend) => {
       // Two native transactions are open at once below — this one on the
-      // source and one on the target — so each gets its own handle.
-      const sourceTx = legacyTransactionOperation(sourceTransaction);
+      // source and one on the target — so each opens its own session where
+      // it opens, and the fork enters one operation of each.
+      const sourceTx = enterOperation(
+        openTransactionSession(sourceTransaction),
+      ).backend;
       const isolation = await queryRows<IsolationRow>(
         sourceTx,
         sql`SHOW transaction_isolation`,
@@ -1031,7 +1041,9 @@ export async function forkGraphNamespace<G extends GraphDef>(
       await assertIndependentDatabase(sourceTx, targetBackend, source.graphId);
       return targetBackend.transaction(
         async (targetTransaction: StoreTransactionBackend) => {
-          const targetTx = legacyTransactionOperation(targetTransaction);
+          const targetTx = enterOperation(
+            openTransactionSession(targetTransaction),
+          ).backend;
           await assertEmpty(targetTx, source.graph, relationTables);
           const copiedRows = new Map<string, readonly JsonRow[]>();
           for (const table of relationTables) {

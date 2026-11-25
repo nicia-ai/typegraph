@@ -9,7 +9,7 @@ import { parseRecordedInstant } from "../core/temporal";
 import { IdentityEndpointValidityError } from "../errors";
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import {
-  legacyTransactionOperation,
+  enterTransactionOperation,
   type OperationBackend,
   type StatementBackend,
 } from "../store/operation-scope";
@@ -316,7 +316,6 @@ import {
   storeCaptureEnabled,
   storeRuntime,
   transactionAssertWritable,
-  transactionBackend,
   transactionDeleteNodeWithPolicy,
   TypeGraphError,
   uncapturedGraphWriteLock,
@@ -2978,11 +2977,10 @@ export async function commitPlan<G extends GraphDef>(
       },
       () =>
         target.transaction(async (tx) => {
-          await lockMergeCommitFence(
-            legacyTransactionOperation(transactionBackend(tx)),
-            target,
-            expectedBaseVersion,
-          );
+          // The commit is one operation of the session of the transaction
+          // it opened; the collection writes it drives enter their own.
+          const txBackend = enterTransactionOperation(tx).backend;
+          await lockMergeCommitFence(txBackend, target, expectedBaseVersion);
           // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
           // transaction, so the target may have been written between the base@V
           // precondition and this commit. Revision-anchored stores check their
@@ -2990,27 +2988,19 @@ export async function commitPlan<G extends GraphDef>(
           // content fingerprint through this transaction's snapshot. Either proof
           // ensures the plan still describes the live target before committing.
           if (expectedBaseVersion !== undefined) {
-            await assertTargetUnchanged(
-              legacyTransactionOperation(transactionBackend(tx)),
-              target,
-              expectedBaseVersion,
-            );
+            await assertTargetUnchanged(txBackend, target, expectedBaseVersion);
           }
           // Identity ids are re-validated EXPLICITLY even under a base@V match:
           // the legacy fingerprint ranges over CURRENT assertions only, so a row
           // that claimed a planned id in the window and was then ended would pass
           // the token check and fail generically inside the applier.
-          await assertPlannedIdentityIdsFresh(
-            target,
-            legacyTransactionOperation(transactionBackend(tx)),
-            plan,
-          );
+          await assertPlannedIdentityIdsFresh(target, txBackend, plan);
           return applyInternalMergePlan(
             plan,
             tx.nodes as unknown as TxNodes,
             tx.edges as unknown as TxEdges,
             target,
-            legacyTransactionOperation(transactionBackend(tx)),
+            txBackend,
             (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
             decision,
           );
@@ -5022,9 +5012,10 @@ async function loadPlannedIdentityHistory<G extends GraphDef>(
   if (target.graph.identity === undefined || assertions.length === 0) return [];
   const ctx = storeRuntime(target).identityContext();
   try {
+    // The Store's identity context is built on its root backend.
     return await loadIdentityWindowHistory(
       ctx,
-      legacyTransactionOperation(ctx.backend),
+      storeBackend(target),
       assertions,
       nowIso(),
     );
@@ -6113,16 +6104,21 @@ export async function validateMergePlanForTarget<G extends GraphDef>(
   return artifact;
 }
 
+/**
+ * Applies a validated plan inside `tx`. `txBackend` is the handle of the one
+ * operation the public call entered in `tx`'s session: every statement the
+ * apply sends on the transaction directly goes through it.
+ */
 async function applyValidatedMergePlanInTransaction<G extends GraphDef>(
   target: Store<G>,
   tx: TransactionContext<G>,
+  txBackend: OperationBackend,
   artifact: MergePlanArtifactV3,
   options: MergePlanApplyOptions<G>,
   requireFreshSnapshot: boolean,
   decision: IdentityDecisionProvenance | undefined,
 ): Promise<MergedCounts> {
   const { beforeApply, afterApply } = options;
-  const txBackend = legacyTransactionOperation(transactionBackend(tx));
   await assertMergePlanFenceInsideTransaction(
     target,
     txBackend,
@@ -6216,6 +6212,7 @@ export async function applyMergePlan<G extends GraphDef>(
             applyValidatedMergePlanInTransaction(
               target,
               tx,
+              enterTransactionOperation(tx).backend,
               artifact,
               options,
               composed,
@@ -6322,16 +6319,19 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
         },
       );
     }
-    const txBackend = legacyTransactionOperation(transactionBackend(tx));
+    // One operation of the caller's transaction's session for the whole
+    // apply: its fences, savepoint and direct statements.
+    const txBackend = enterTransactionOperation(tx).backend;
     await assertMergeTransactionPristine(effectiveTarget, txBackend);
     const decision = mergeIdentityDecisionFromArtifact(artifact, options);
     const merged = await withAdoptedMergeApplySavepoint(
       effectiveTarget,
-      tx,
+      txBackend,
       () =>
         applyValidatedMergePlanInTransaction(
           effectiveTarget,
           tx,
+          txBackend,
           artifact,
           {},
           true,
@@ -7543,22 +7543,18 @@ async function commitIncrementalPlan<G extends GraphDef>(
       },
       () =>
         target.transaction(async (tx) => {
+          // The commit is one operation of the session of the transaction
+          // it opened; the collection writes it drives enter their own.
+          const txBackend = enterTransactionOperation(tx).backend;
           // The fork point carries no target base version to anchor on.
-          await lockMergeCommitFence(
-            legacyTransactionOperation(transactionBackend(tx)),
-            target,
-            undefined,
-          );
+          await lockMergeCommitFence(txBackend, target, undefined);
           // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
           // against is re-read here, so a write to it in the plan→commit window
           // refuses the merge instead of committing diffs against a fork point
           // that has moved. Runs first: it is the premise every later guard's
           // baseline was derived under, and on a revision-anchored fork point it
           // is an O(1) read.
-          await assertForkPointUnchanged(
-            guard.forkPoint,
-            legacyTransactionOperation(transactionBackend(tx)),
-          );
+          await assertForkPointUnchanged(guard.forkPoint, txBackend);
           const nodesApi = tx.nodes as unknown as TxNodes;
           const edgesApi = tx.edges as unknown as TxEdges;
           // Identity-resolution TOCTOU guard: the base-source lookups ran OUTSIDE
@@ -7574,14 +7570,10 @@ async function commitIncrementalPlan<G extends GraphDef>(
           // it), then the probe-based layers revalidate peers, classes, the
           // negative ledger, and finally re-run the full identity simulation on
           // the tx snapshot.
-          await assertPlannedIdentityIdsFresh(
-            target,
-            legacyTransactionOperation(transactionBackend(tx)),
-            plan,
-          );
+          await assertPlannedIdentityIdsFresh(target, txBackend, plan);
           await assertIdentityPeersStable(
             target,
-            legacyTransactionOperation(transactionBackend(tx)),
+            txBackend,
             guard.identityPeerProbe,
             plan,
           );
@@ -7595,7 +7587,7 @@ async function commitIncrementalPlan<G extends GraphDef>(
             nodesApi,
             edgesApi,
             target,
-            legacyTransactionOperation(transactionBackend(tx)),
+            txBackend,
             (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
             decision,
           );

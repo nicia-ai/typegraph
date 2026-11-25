@@ -59,7 +59,7 @@ const FAMILY_BASELINE = {
   "identity and search facades": 0,
   "capture and flush": 0,
   "schema and evolution": 0,
-  "merge and durable operations": 31,
+  "merge and durable operations": 0,
   "provenance and interchange": 0,
   "working copies": 0,
 } as const satisfies Record<Family, number>;
@@ -78,16 +78,13 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
   // node or edge write opens a transaction it opens a session for it
   // (`openTransactionSession`), and every public node or edge write inside a
   // transaction enters its own operation of the session the transaction
-  // context carries; see LEGACY_WRITE_ENTRY_INVENTORY for the callers outside
-  // those families that still hold no session.
-
+  // context carries.
   // --- query terminals and tx.backend: none. A query built inside a
   // transaction carries its session (`query-operation.ts`) and enters one
   // operation of it per execution, as does each `tx.backend` read member; a
   // target arriving through `executeOn` (and so `store.batch()` and the edge
   // batch finders) enters through `enterTargetOperation`, and an iterative
   // algorithm opens the session of the read transaction it opens.
-
   // --- identity and search facades: none. Each call of an identity facade
   // enters one operation of the facade's scope (the root, or the session of
   // the transaction context that offers it) after its refusals, and runs under
@@ -96,7 +93,6 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
   // through `enterTargetOperation`; and identity maintenance, the fulltext
   // rebuild and the contribution rebuild open a session where they open their
   // transaction.
-
   // --- capture and flush: none. A unit that opens its own transaction
   // (the recorded capture and recorded read overlays, the captured
   // autocommit write, anchor pruning, allocation-owner rotation, `clear`)
@@ -106,7 +102,6 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
   // transaction, bind the decoration their writes go through
   // (`openBoundTransactionSession`), and hand `#buildTransactionContext`
   // that session; their own statements go through one operation of it.
-
   // --- schema and evolution: none. Where an engine member opens a
   // schema-write or schema-commit transaction and hands the Store its
   // callback (a schema commit's or a reactivation's preflight, the derived
@@ -116,103 +111,23 @@ const SHIM_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
   // where it adopts the caller's transaction. A composed preflight step
   // (`identitySchemaPreflight`, `removeIdentityKindsInSchemaPreflight`)
   // takes the handle of the operation it runs under.
-
-  // --- merge and durable operations, including the Store runtime port the
-  // merge drives (its members' types are spelled by the public API report).
-  "src/graph-merge/merge.ts#commitPlan": {
-    count: 4,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/merge.ts#loadPlannedIdentityHistory": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/merge.ts#applyValidatedMergePlanInTransaction": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/merge.ts#applyMergePlanInTransaction": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/merge.ts#commitIncrementalPlan": {
-    count: 5,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/adopted-transaction.ts#withAdoptedMergeApplySavepoint": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/identity-separation.ts#captureIdentitySeparationFacts": {
-    count: 4,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/store-operation.ts#operateStore": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  // Two native transactions at once (source and target): one handle each.
-  "src/graph-merge/namespace-fork.ts#forkGraphNamespace": {
-    count: 4,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/namespace-fork.ts#namespaceForkResult": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  "src/graph-merge/namespace-fork.ts#assertIndependentDatabase": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-  "src/store/store.ts#StoreImplementation.constructor": {
-    count: 7,
-    family: "merge and durable operations",
-  },
-
+  // --- merge and durable operations: none. Merge apply and a durable Store
+  // operation enter one operation of the session the transaction context's
+  // runtime carries (`enterTransactionOperation`); the namespace fork opens a
+  // session where it opens each of its native transactions; the identity
+  // separation and planned-history reads run on the root. The Store runtime
+  // port's members that take a statement target (their types are spelled by
+  // the API reports) enter it after their early returns, a transaction as a
+  // binding of its own (`enterTargetOperation`), as the identity port
+  // members do.
   // --- provenance and interchange: none. Provenance enters an operation of
   // the session its transaction context carries (`enterTransactionOperation`);
   // the sidecar claim and the export open the session of the transaction they
   // open; the interchange identity read is handed its caller's target.
-
   // --- working copies: none. A durable operation enters an operation of the
   // session its transaction context carries, and the clone opens the session
   // of the source transaction it opens.
 };
-
-/**
- * The transitional `legacyWriteEntry` (`write-transaction.ts`): a write entry
- * for code that holds a bare handle and no session, which joins as a binding
- * of its own. Same counting rules as the shim. Every call wraps a shim call in
- * the same function, and is assigned the family that shim call is: that
- * family's conversion hands the call a session and removes both.
- * `LEGACY_WRITE_ENTRY_FAMILY_BASELINE` is its ratchet, and may only go down.
- */
-const LEGACY_WRITE_ENTRY = {
-  module: "src/store/operations/write-transaction.ts",
-  name: "legacyWriteEntry",
-} as const;
-
-const LEGACY_WRITE_ENTRY_INVENTORY: Readonly<Record<string, InventoryEntry>> = {
-  // The privileged runtime port's `deleteNodeWithPolicy(target, …)`, whose
-  // `target` parameter the public API report spells.
-  "src/store/store.ts#StoreImplementation.constructor": {
-    count: 1,
-    family: "merge and durable operations",
-  },
-};
-
-/** The legacy write entries each family's conversion removes. May only go down. */
-const LEGACY_WRITE_ENTRY_FAMILY_BASELINE = {
-  "node writes": 0,
-  "edge writes": 0,
-  "query terminals and tx.backend": 0,
-  "identity and search facades": 0,
-  "capture and flush": 0,
-  "schema and evolution": 0,
-  "merge and durable operations": 1,
-  "provenance and interchange": 0,
-  "working copies": 0,
-} as const satisfies Record<Family, number>;
 
 /** A module inside `src/store`, so it resolves the shim like a store module. */
 const SHIM_FIXTURE = "src/store/legacy-shim-reference.fixture.ts";
@@ -290,23 +205,6 @@ describe("legacyTransactionOperation ratchet", () => {
     },
   );
 
-  it(
-    "every legacy write entry in src is inventoried by file, function and count",
-    { timeout: 180_000 },
-    () => {
-      const sites = legacyShimSites(scan, scan.sourceFiles, LEGACY_WRITE_ENTRY);
-      expect(sites.filter((site) => site.form !== "call")).toEqual([]);
-      expect(countBy(sites, (site) => `${site.file}#${site.function}`)).toEqual(
-        Object.fromEntries(
-          Object.entries(LEGACY_WRITE_ENTRY_INVENTORY).map(([label, entry]) => [
-            label,
-            entry.count,
-          ]),
-        ),
-      );
-    },
-  );
-
   // A consistency check, not the ratchet: see the header.
   it("the family table is the inventory's per-family sum", () => {
     const totals = Object.fromEntries(
@@ -316,39 +214,6 @@ describe("legacyTransactionOperation ratchet", () => {
       totals[entry.family] += entry.count;
     }
     expect(totals).toEqual(FAMILY_BASELINE);
-  });
-
-  // Consistency checks, not the ratchet: the legacy write entry's family table
-  // is its inventory's per-family sum, and each of its sites belongs to the
-  // family of the shim call in the same function, so the conversion that
-  // removes that shim call is the one that removes the entry.
-  it("the legacy write entry family table is its inventory's per-family sum", () => {
-    const totals = Object.fromEntries(
-      Object.keys(LEGACY_WRITE_ENTRY_FAMILY_BASELINE).map((family) => [
-        family,
-        0,
-      ]),
-    ) as Record<Family, number>;
-    for (const entry of Object.values(LEGACY_WRITE_ENTRY_INVENTORY)) {
-      totals[entry.family] += entry.count;
-    }
-    expect(totals).toEqual(LEGACY_WRITE_ENTRY_FAMILY_BASELINE);
-  });
-
-  it("each legacy write entry belongs to the family of the shim call beside it", () => {
-    const families = Object.fromEntries(
-      Object.entries(LEGACY_WRITE_ENTRY_INVENTORY).map(([label, entry]) => [
-        label,
-        entry.family,
-      ]),
-    );
-    const shimFamilies = Object.fromEntries(
-      Object.keys(LEGACY_WRITE_ENTRY_INVENTORY).map((label) => [
-        label,
-        SHIM_INVENTORY[label]?.family,
-      ]),
-    );
-    expect(shimFamilies).toEqual(families);
   });
 
   it("finds every way of naming the shim, and allows only a direct call", () => {
