@@ -106,11 +106,6 @@ const RAW_STATEMENT_TARGET_BASELINE = {
 
 /** The forge sites `src` may contain: one assertion per mint. */
 const MINT_SITES = [
-  {
-    file: MINT_MODULE,
-    function: "legacyTransactionOperation",
-    route: "assertion",
-  },
   { file: MINT_MODULE, function: "openTransactionSession", route: "assertion" },
   { file: MINT_MODULE, function: "scopeWriteFrameTarget", route: "assertion" },
 ] as const;
@@ -290,11 +285,6 @@ export function forgeRenamedImport() { return executeEdgeCreate(ctx, input, raw 
   {
     route: "as, ReturnType of a mint",
     code: `export function forgeMintReturn() { return executeEdgeCreate(ctx, input, raw as ReturnType<typeof scopeWriteFrameTarget<TransactionBackend>>); }`,
-    refusal: refusal([], ["brand-ban"], ["assertion"]),
-  },
-  {
-    route: "as, ReturnType of a namespace-qualified mint",
-    code: `export function forgeQualifiedMintReturn() { return executeEdgeCreate(ctx, input, raw as ReturnType<typeof scope.legacyTransactionOperation<TransactionBackend>>); }`,
     refusal: refusal([], ["brand-ban"], ["assertion"]),
   },
   {
@@ -771,9 +761,9 @@ const RAW_TARGET_FIXTURE_COUNTED = [
  * The declarations outside `src/backend` still typed as the engine
  * transaction, by `file#declaring type or function`. Each is spelled by a
  * public API report, which this change keeps byte-identical; the value each
- * carries reaches statement work only through the shim (or, for
+ * carries reaches statement work only through an operation mint (or, for
  * `ExecutableAggregateQuery.executeOn`, by delegating to the relation's
- * `executeOn`, which shims).
+ * `executeOn`, which enters one).
  */
 const RAW_TRANSACTION_DECLARATIONS: Readonly<
   Record<
@@ -839,7 +829,7 @@ const RAW_TRANSACTION_DECLARATIONS: Readonly<
     sites: 1,
     route: "property",
     reason:
-      "`IdentityServiceContext.backend` appears in the reports through the runtime port's `identityContext`. A property has one type for every reader and no overload, so the type checker cannot narrow it for Store code; each read is checked by this scan instead, and every statement-issuing read goes through the shim.",
+      "`IdentityServiceContext.backend` appears in the reports through the runtime port's `identityContext`. A property has one type for every reader and no overload, so the type checker cannot narrow it for Store code; each read is checked by this scan instead, and every statement-issuing read goes through an operation mint.",
   },
 };
 
@@ -863,7 +853,8 @@ import type {
 } from "../backend/types";
 import type * as types from "../backend/types";
 import {
-  legacyTransactionOperation,
+  enterOperation,
+  openTransactionSession,
   storeSchemaWriteTransaction,
   type StoreSchemaWriteTransaction,
   type StoreTransactionBackend,
@@ -905,25 +896,17 @@ const RAW_TRANSACTION_CASES: readonly RawTransactionCase[] = [
   },
   {
     route: "a transaction callback that receives the Store-facing type",
-    code: `export function narrowedCallback() { return root.transaction(async (tx: StoreTransactionBackend) => legacyTransactionOperation(tx).getNode("graph", "Kind", "id")); }`,
+    code: `export function narrowedCallback() { return root.transaction(async (tx: StoreTransactionBackend) => enterOperation(openTransactionSession(tx)).backend.getNode("graph", "Kind", "id")); }`,
     typeErrors: [],
     scan: [],
     allowed:
-      "The callback narrows the transaction where it is opened, and its statement goes through the shim.",
+      "The callback narrows the transaction where it is opened, and its statement goes through an operation of the session it opens.",
   },
   {
     route: "a call producing the engine type",
     code: `export async function producedValue() { await engineTransaction().getNode("graph", "Kind", "id"); }`,
     typeErrors: [],
     scan: ["value"],
-  },
-  {
-    route: "the engine type handed straight to the shim",
-    code: `export async function shimmedValue() { await legacyTransactionOperation(engineTransaction()).getNode("graph", "Kind", "id"); }`,
-    typeErrors: [],
-    scan: [],
-    allowed:
-      "The shim consumes the value; what it returns is the counted handle.",
   },
   {
     route: "the engine type narrowed on arrival into an identity-only position",
@@ -960,26 +943,26 @@ const RAW_TRANSACTION_CASES: readonly RawTransactionCase[] = [
   },
   {
     route: "an assertion forging the engine type a Store transaction records",
-    code: `export async function forgedRecord() { await legacyTransactionOperation(narrowed as StoreTransactionBackend<SchemaWriteTransactionBackend>).executeSchemaDdl("SELECT 1"); }`,
+    code: `export async function forgedRecord() { await enterOperation(openTransactionSession<SchemaWriteTransactionBackend>(narrowed as StoreTransactionBackend<SchemaWriteTransactionBackend>)).backend.executeSchemaDdl("SELECT 1"); }`,
     typeErrors: [],
     scan: ["assertion"],
   },
   {
     route:
       "an ordinary transaction callback annotated as the schema-write transaction",
-    code: `export function claimedSchemaWrite() { return root.transaction(async (tx: StoreTransactionBackend<SchemaWriteTransactionBackend>) => legacyTransactionOperation(tx).executeSchemaDdl("SELECT 1")); }`,
+    code: `export function claimedSchemaWrite() { return root.transaction(async (tx: StoreTransactionBackend<SchemaWriteTransactionBackend>) => enterOperation(openTransactionSession<SchemaWriteTransactionBackend>(tx)).backend.executeSchemaDdl("SELECT 1")); }`,
     typeErrors: [2345],
     scan: [],
   },
   {
     route: "an ordinary transaction callback annotated as the preflight target",
-    code: `export function claimedPreflight() { return root.transaction(async (tx: StoreTransactionBackend<SchemaCommitPreflightBackend>) => legacyTransactionOperation(tx).executeSchemaDdl?.("SELECT 1")); }`,
+    code: `export function claimedPreflight() { return root.transaction(async (tx: StoreTransactionBackend<SchemaCommitPreflightBackend>) => enterOperation(openTransactionSession<SchemaCommitPreflightBackend>(tx)).backend.executeSchemaDdl?.("SELECT 1")); }`,
     typeErrors: [2345],
     scan: [],
   },
   {
     route: "the schema-write transaction through its boundary mint",
-    code: `export function mintedSchemaWrite() { return storeSchemaWriteTransaction(root.schemaWriteTransaction)?.("graph", async (tx) => legacyTransactionOperation(tx).executeSchemaDdl("SELECT 1")); }`,
+    code: `export function mintedSchemaWrite() { return storeSchemaWriteTransaction(root.schemaWriteTransaction)?.("graph", async (tx) => enterOperation(openTransactionSession<SchemaWriteTransactionBackend>(tx)).backend.executeSchemaDdl("SELECT 1")); }`,
     typeErrors: [],
     scan: [],
     allowed:
@@ -987,7 +970,7 @@ const RAW_TRANSACTION_CASES: readonly RawTransactionCase[] = [
   },
   {
     route: "an ordinary opener asserted to the schema-write opener",
-    code: `export function forgedOpener() { return (root.transaction as unknown as StoreSchemaWriteTransaction)("graph", async (tx) => legacyTransactionOperation(tx).executeSchemaDdl("SELECT 1")); }`,
+    code: `export function forgedOpener() { return (root.transaction as unknown as StoreSchemaWriteTransaction)("graph", async (tx) => enterOperation(openTransactionSession<SchemaWriteTransactionBackend>(tx)).backend.executeSchemaDdl("SELECT 1")); }`,
     typeErrors: [],
     scan: ["assertion"],
   },
@@ -1284,6 +1267,26 @@ describe("operation-scope ratchet", () => {
         route: site.route,
       })),
     ).toEqual(MINT_SITES);
+  });
+
+  // A whole-transaction handle (one handle for a native transaction, no
+  // session or operation) existed while Store paths were converted, and was
+  // deleted once none called it. Brought back under any name, in any module,
+  // it asserts the brand outside the mints and fails the test above; under
+  // its old name it also fails here.
+  it("no src module exports the deleted whole-transaction handle", () => {
+    const exporters = scan.sourceFiles.filter((file) => {
+      const source = scan.program.getSourceFile(file);
+      if (source === undefined) throw new Error(`${file} is not in program`);
+      const moduleSymbol = scan.checker.getSymbolAtLocation(source);
+      return (
+        moduleSymbol !== undefined &&
+        scan.checker
+          .getExportsOfModule(moduleSymbol)
+          .some((symbol) => symbol.name === "legacyTransactionOperation")
+      );
+    });
+    expect(exporters).toEqual([]);
   });
 
   it(

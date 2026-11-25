@@ -12,7 +12,6 @@ import {
   enterOperation,
   enterTargetOperation,
   type EntryScope,
-  legacyTransactionOperation,
   openTransactionSession,
   type Operation,
   type OperationBackend,
@@ -312,23 +311,6 @@ describe("a specialised Store transaction", () => {
     expectTypeOf<
       Parameters<StoreSchemaWriteTransaction>["length"]
     >().toEqualTypeOf<Parameters<EngineOpen>["length"]>();
-  });
-
-  it("becomes a handle to its engine type only through the shim", () => {
-    expectTypeOf(
-      legacyTransactionOperation<StoreTransactionBackend>,
-    ).returns.toEqualTypeOf<OperationBackend>();
-    expectTypeOf(
-      legacyTransactionOperation<
-        StoreTransactionBackend<SchemaWriteTransactionBackend>
-      >,
-    ).returns.toEqualTypeOf<OperationScoped<SchemaWriteTransactionBackend>>();
-    expectTypeOf(
-      legacyTransactionOperation<GraphBackend | StoreTransactionBackend>,
-    ).returns.toEqualTypeOf<StatementBackend>();
-    expectTypeOf(
-      legacyTransactionOperation<GraphBackend>,
-    ).returns.toEqualTypeOf<GraphBackend>();
   });
 
   // `executeOn` takes an outside target: the root, or an engine transaction
