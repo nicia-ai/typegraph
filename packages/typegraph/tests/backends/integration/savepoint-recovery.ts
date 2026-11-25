@@ -32,7 +32,10 @@ import {
 } from "../../../src/backend/derive-backend";
 import { type GraphBackend } from "../../../src/backend/types";
 import { type GraphData, importGraph } from "../../../src/interchange";
-import { legacyTransactionOperation } from "../../../src/store/operation-scope";
+import {
+  enterOperation,
+  openTransactionSession,
+} from "../../../src/store/operation-scope";
 import { runRecordedTransactionSavepoint } from "../../../src/store/recorded-capture";
 import { transactionBackend } from "../../../src/store/runtime-port";
 import { type MeasurableTransactionContext } from "../../../src/store/types";
@@ -167,13 +170,15 @@ export function registerSavepointRecoveryIntegrationTests(
           if (priorWrite)
             await tx.nodes.SavepointNote.create({ body: "survivor" });
           await runRecordedTransactionSavepoint(
-            legacyTransactionOperation(transactionBackend(tx)),
+            enterOperation(openTransactionSession(transactionBackend(tx)))
+              .backend,
             statements,
             "test_outer_rollback",
             async () => {
               await tx.nodes.SavepointNote.create({ body: "rolled back" });
               await runRecordedTransactionSavepoint(
-                legacyTransactionOperation(transactionBackend(tx)),
+                enterOperation(openTransactionSession(transactionBackend(tx)))
+                  .backend,
                 statements,
                 "test_inner_release",
                 async () => {
@@ -224,7 +229,8 @@ export function registerSavepointRecoveryIntegrationTests(
           );
           expect(ended).toEqual(["before"]);
           await runRecordedTransactionSavepoint(
-            legacyTransactionOperation(transactionBackend(tx)),
+            enterOperation(openTransactionSession(transactionBackend(tx)))
+              .backend,
             statements,
             "test_hooks_outer",
             async () => {
@@ -233,7 +239,8 @@ export function registerSavepointRecoveryIntegrationTests(
                 { id: "released" },
               );
               await runRecordedTransactionSavepoint(
-                legacyTransactionOperation(transactionBackend(tx)),
+                enterOperation(openTransactionSession(transactionBackend(tx)))
+                  .backend,
                 statements,
                 "test_hooks_inner",
                 async () => {
@@ -330,7 +337,8 @@ export function registerSavepointRecoveryIntegrationTests(
             );
             const { receipt: nested } = await scoped.measure(async (inner) => {
               const result = await runRecordedTransactionSavepoint(
-                legacyTransactionOperation(transactionBackend(tx)),
+                enterOperation(openTransactionSession(transactionBackend(tx)))
+                  .backend,
                 statements,
                 "test_effects_outer",
                 async () => {
@@ -343,7 +351,9 @@ export function registerSavepointRecoveryIntegrationTests(
                     patch: { body: "rolled back update" },
                   });
                   await runRecordedTransactionSavepoint(
-                    legacyTransactionOperation(transactionBackend(tx)),
+                    enterOperation(
+                      openTransactionSession(transactionBackend(tx)),
+                    ).backend,
                     statements,
                     "test_effects_inner",
                     async () => {
@@ -410,7 +420,8 @@ export function registerSavepointRecoveryIntegrationTests(
           throw new Error("Fixture requires statement execution");
         const run = (tx: MeasurableTransactionContext<typeof stampGraph>) =>
           runRecordedTransactionSavepoint(
-            legacyTransactionOperation(transactionBackend(tx)),
+            enterOperation(openTransactionSession(transactionBackend(tx)))
+              .backend,
             statements,
             "test_uncaught_failure",
             async () => {

@@ -54,7 +54,10 @@ import {
   instantiateGraphTemplate,
   registerGraphTemplate,
 } from "../src/schema/graph-templates";
-import { legacyTransactionOperation } from "../src/store/operation-scope";
+import {
+  enterOperation,
+  openTransactionSession,
+} from "../src/store/operation-scope";
 import {
   requiresOptimisticRetryUnit,
   resolveWriteTransactionMode,
@@ -481,10 +484,14 @@ describe("requiresOptimisticRetryUnit — the mode gate", () => {
         // transaction — it is the MODE that must gate the nested case.
         expect(isOptimisticRetryTier(tx)).toBe(true);
         expect(
-          resolveWriteTransactionMode(legacyTransactionOperation(tx)),
+          resolveWriteTransactionMode(
+            enterOperation(openTransactionSession(tx)).backend,
+          ),
         ).toBe("existing");
         expect(
-          requiresOptimisticRetryUnit(legacyTransactionOperation(tx)),
+          requiresOptimisticRetryUnit(
+            enterOperation(openTransactionSession(tx)).backend,
+          ),
         ).toBe(false);
       });
     } finally {

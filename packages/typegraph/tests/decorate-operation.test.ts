@@ -13,7 +13,6 @@ import type { TransactionBackend } from "../src/backend/types";
 import {
   decorateOperation,
   enterOperation,
-  legacyTransactionOperation,
   openTransactionSession,
   operationEntrySession,
 } from "../src/store/operation-scope";
@@ -45,7 +44,9 @@ describe("decorateOperation", () => {
 
   it("refuses a handle that is not derived from the operation's own", async () => {
     await withOperation((operation) => {
-      const unrelated = legacyTransactionOperation({} as TransactionBackend);
+      const unrelated = enterOperation(
+        openTransactionSession({} as TransactionBackend),
+      ).backend;
       expect(() => decorateOperation(operation, unrelated)).toThrow(
         new TypeError(
           "An operation's handle can only be replaced by a derivation of it.",

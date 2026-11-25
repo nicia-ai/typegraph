@@ -22,15 +22,15 @@ import {
 import { type SchemaTighteningPreflight } from "../src/schema/tightening-preflight";
 import {
   enterOperation,
-  legacyTransactionOperation,
   openTransactionSession,
+  type StoreTransactionBackend,
 } from "../src/store/operation-scope";
 
 /** An operation of a session over a stand-in preflight transaction. */
 function preflightOperation() {
   return enterOperation(
     openTransactionSession<SchemaCommitPreflightBackend>(
-      legacyTransactionOperation({} as SchemaCommitPreflightBackend),
+      {} as StoreTransactionBackend<SchemaCommitPreflightBackend>,
     ),
   );
 }
