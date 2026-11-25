@@ -14,7 +14,7 @@
  * The Store runtime port's members that take a statement target take the
  * caller's entry: the root, or the operation the caller holds. A member runs
  * in that operation, of the caller's session, and opens no session of its
- * own; it checks the entry (`requireOperationEntry`) after its early returns.
+ * own; it checks the entry (`portOperationEntry`) after its early returns.
  *
  * Operations change nothing a database can observe yet, so these cases watch
  * the mints themselves, wrapped with spies that call through.
@@ -54,11 +54,10 @@ import {
   openBoundTransactionSession,
   openTransactionSession,
   operationEntrySession,
-  requireOperationEntry,
+  portOperationEntry,
   type TransactionSession,
 } from "../../src/store/operation-scope";
 import { storeRuntime } from "../../src/store/runtime-port";
-import { TRANSACTION_RUNTIME } from "../../src/store/types";
 
 vi.mock("../../src/store/operation-scope", async (importOriginal) => {
   const actual: typeof OperationScopeModule = await importOriginal();
@@ -69,7 +68,7 @@ vi.mock("../../src/store/operation-scope", async (importOriginal) => {
     enterTransactionOperation: vi.fn(actual.enterTransactionOperation),
     openBoundTransactionSession: vi.fn(actual.openBoundTransactionSession),
     openTransactionSession: vi.fn(actual.openTransactionSession),
-    requireOperationEntry: vi.fn(actual.requireOperationEntry),
+    portOperationEntry: vi.fn(actual.portOperationEntry),
   };
 });
 
@@ -78,7 +77,7 @@ const enterTargetOperationSpy = vi.mocked(enterTargetOperation);
 const openTransactionSessionSpy = vi.mocked(openTransactionSession);
 const enterTransactionOperationSpy = vi.mocked(enterTransactionOperation);
 const openBoundTransactionSessionSpy = vi.mocked(openBoundTransactionSession);
-const requireOperationEntrySpy = vi.mocked(requireOperationEntry);
+const portOperationEntrySpy = vi.mocked(portOperationEntry);
 
 const Item = defineNode("Item", { schema: z.object({ name: z.string() }) });
 const graph = defineGraph({
@@ -95,7 +94,7 @@ function clearMints(): void {
   openTransactionSessionSpy.mockClear();
   enterTransactionOperationSpy.mockClear();
   openBoundTransactionSessionSpy.mockClear();
-  requireOperationEntrySpy.mockClear();
+  portOperationEntrySpy.mockClear();
 }
 
 /** The session a read inside `tx` enters its operation from. */
@@ -359,7 +358,9 @@ describe("the Store runtime port's statement targets", () => {
         [
           "queryBackend",
           () => {
-            runtime.queryBackend(operation);
+            // A hookless Store answers with the handle it ran in: the
+            // caller's own, never the pooled root.
+            expect(runtime.queryBackend(operation)).toBe(operation.backend);
           },
         ],
         [
@@ -392,12 +393,12 @@ describe("the Store runtime port's statement targets", () => {
       for (const [label, call] of calls) {
         clearMints();
         await call();
-        const [ranIn] = requireOperationEntrySpy.mock.calls.map(
+        const [ranIn] = portOperationEntrySpy.mock.calls.map(
           ([entry]) => entry,
         );
         observed.push({
           label,
-          entries: requireOperationEntrySpy.mock.calls.length,
+          entries: portOperationEntrySpy.mock.calls.length,
           ranInTheCallersOperation: ranIn === operation,
           // The session the member ran in is the caller's, by identity.
           ranInTheCallersSession:
@@ -423,21 +424,8 @@ describe("the Store runtime port's statement targets", () => {
     await runtime.liveNodesSharingIds(["kept"], root);
     expect(openTransactionSessionSpy).not.toHaveBeenCalled();
     expect(
-      requireOperationEntrySpy.mock.calls.map(([argument]) => argument),
+      portOperationEntrySpy.mock.calls.map(([argument]) => argument),
     ).toEqual([root, root]);
-  });
-
-  it("a member refuses an operation another copy of TypeGraph minted, before any statement", async () => {
-    const target = await createIdentityTarget();
-    const runtime = storeRuntime(target);
-    await target.transaction(async (tx) => {
-      // Another copy's operation carries that copy's private keys: to this
-      // copy it is an object that is neither a root nor an operation.
-      const foreign = { backend: tx[TRANSACTION_RUNTIME].backend } as never;
-      await expect(
-        runtime.liveNodesSharingIds(["kept"], foreign),
-      ).rejects.toThrow("incompatible TypeGraph version");
-    });
   });
 
   it("a member returns before it enters: a call that reads or writes nothing enters nothing", async () => {
@@ -460,7 +448,7 @@ describe("the Store runtime port's statement targets", () => {
           enterTargetOperationSpy.mock.calls.length +
           openTransactionSessionSpy.mock.calls.length +
           enterOperationSpy.mock.calls.length +
-          requireOperationEntrySpy.mock.calls.length,
+          portOperationEntrySpy.mock.calls.length,
       });
     };
     for (const [label, runtime] of [

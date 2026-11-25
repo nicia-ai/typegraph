@@ -478,17 +478,24 @@ export function decorateOperation<Engine extends TransactionBackend>(
 }
 
 /**
- * THE refusal of an entry handed across the Store runtime port that is
- * neither a root backend nor an {@link Operation} this module minted: an
- * operation another copy of TypeGraph minted carries that copy's private
- * keys, so this copy would otherwise take it for a root backend and send its
- * statements to an object that is not one. Returns `entry` itself.
+ * The entry a Store runtime port member runs in, for the entry its caller
+ * handed it: the root itself, or the caller's {@link Operation}, unchanged.
+ *
+ * An operation another copy of TypeGraph minted (the same release loaded as
+ * both an ES module and a CommonJS build) reaches this copy's Store through
+ * the port's global symbol but carries that copy's private keys, so its
+ * session is invisible here: its handle joins as a binding of its own
+ * ({@link enterTargetOperation}), exactly as a bare transaction handed across
+ * the port did. Read off the value handed in; nothing is looked up.
  */
-export function requireOperationEntry(entry: OperationEntry): OperationEntry {
-  if (isRootBackend(entry) || OPERATION_SESSION in entry) return entry;
-  throw new TypeError(
-    "Cannot run in this operation. It may come from an incompatible TypeGraph version.",
-  );
+export function portOperationEntry(entry: OperationEntry): OperationEntry {
+  if (isRootBackend(entry) || isOwnOperation(entry)) return entry;
+  return enterTargetOperation(entry.backend);
+}
+
+/** Whether `operation` was minted by this copy of the module. */
+function isOwnOperation(operation: Operation): boolean {
+  return OPERATION_SESSION in operation;
 }
 
 /** The session `entry` belongs to, or `undefined` for the root backend. */

@@ -81,8 +81,8 @@ export const STORE_RUNTIME: unique symbol =
  * {@link OperationEntry}: the root backend, or the {@link Operation} the
  * caller holds. It runs in that operation, of that operation's session, and
  * never opens a session of its own over a transaction its caller already
- * holds. An entry another copy of TypeGraph minted is refused
- * (`requireOperationEntry`). The import members below take the narrow
+ * holds. An operation another copy of TypeGraph minted joins as a binding of
+ * its own (`portOperationEntry`). The import members below take the narrow
  * statement projection of an import frame instead, and open no session.
  */
 export type StoreRuntime<G extends GraphDef> = Readonly<{

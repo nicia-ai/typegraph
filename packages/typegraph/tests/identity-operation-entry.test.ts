@@ -26,6 +26,8 @@ import {
   defineNode,
   searchable,
 } from "../src";
+import type * as ResolvedNodeClaimsModule from "../src/store/claims/resolved-node-claims";
+import { applyResolvedNodeClaims } from "../src/store/claims/resolved-node-claims";
 import type * as OperationScopeModule from "../src/store/operation-scope";
 import {
   enterOperation,
@@ -35,12 +37,20 @@ import {
   openTransactionSession,
   type OperationEntry,
   operationEntrySession,
-  requireOperationEntry,
+  portOperationEntry,
   type TransactionSession,
 } from "../src/store/operation-scope";
 import { storeRuntime } from "../src/store/runtime-port";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
+
+vi.mock("../src/store/claims/resolved-node-claims", async (importOriginal) => {
+  const actual: typeof ResolvedNodeClaimsModule = await importOriginal();
+  return {
+    ...actual,
+    applyResolvedNodeClaims: vi.fn(actual.applyResolvedNodeClaims),
+  };
+});
 
 vi.mock("../src/store/operation-scope", async (importOriginal) => {
   const actual: typeof OperationScopeModule = await importOriginal();
@@ -50,7 +60,7 @@ vi.mock("../src/store/operation-scope", async (importOriginal) => {
     enterTargetOperation: vi.fn(actual.enterTargetOperation),
     openTransactionSession: vi.fn(actual.openTransactionSession),
     operationEntrySession: vi.fn(actual.operationEntrySession),
-    requireOperationEntry: vi.fn(actual.requireOperationEntry),
+    portOperationEntry: vi.fn(actual.portOperationEntry),
   };
 });
 
@@ -58,7 +68,8 @@ const enterOperationSpy = vi.mocked(enterOperation);
 const enterTargetOperationSpy = vi.mocked(enterTargetOperation);
 const openTransactionSessionSpy = vi.mocked(openTransactionSession);
 const operationEntrySessionSpy = vi.mocked(operationEntrySession);
-const requireOperationEntrySpy = vi.mocked(requireOperationEntry);
+const applyResolvedNodeClaimsSpy = vi.mocked(applyResolvedNodeClaims);
+const portOperationEntrySpy = vi.mocked(portOperationEntry);
 
 const Person = defineNode("Person", {
   schema: z.object({ name: searchable() }),
@@ -399,7 +410,7 @@ describe("an identity call enters its operation", () => {
       ];
       for (const [label, call] of members) {
         clearMints();
-        requireOperationEntrySpy.mockClear();
+        portOperationEntrySpy.mockClear();
         operationEntrySessionSpy.mockClear();
         await call();
         observed.push({
@@ -423,11 +434,11 @@ describe("an identity call enters its operation", () => {
 
     // The pooled root as the entry enters as itself.
     clearMints();
-    requireOperationEntrySpy.mockClear();
+    portOperationEntrySpy.mockClear();
     await runtime.identityAssertionsAtTarget(runtime.backend);
-    expect(requireOperationEntrySpy.mock.calls.map(([entry]) => entry)).toEqual(
-      [runtime.backend],
-    );
+    expect(portOperationEntrySpy.mock.calls.map(([entry]) => entry)).toEqual([
+      runtime.backend,
+    ]);
     expect(openedSessions()).toEqual([]);
   });
 
@@ -441,8 +452,9 @@ describe("an identity call enters its operation", () => {
       const session = operationEntrySession(operation);
       if (session === undefined) throw new Error("no session entered");
       clearMints();
-      requireOperationEntrySpy.mockClear();
+      portOperationEntrySpy.mockClear();
       operationEntrySessionSpy.mockClear();
+      applyResolvedNodeClaimsSpy.mockClear();
       await runtime.applyResolvedNodeUniqueness(
         operation,
         {
@@ -451,9 +463,18 @@ describe("an identity call enters its operation", () => {
         },
         () => tx.nodes.Tagged.create({ tag: "x" }, { id: "t1" }),
       );
-      observed = runIn(operation, session);
+      observed = {
+        ...runIn(operation, session),
+        // The clear-and-rebuild claim work ran, on the caller's own handle.
+        claimWorkOn: applyResolvedNodeClaimsSpy.mock.calls.map(
+          ([, backend]) => backend === operation.backend,
+        ),
+      };
     });
-    expect(observed).toEqual(RAN_IN_THE_CALLERS_OPERATION);
+    expect(observed).toEqual({
+      ...RAN_IN_THE_CALLERS_OPERATION,
+      claimWorkOn: [true],
+    });
   });
 });
 
@@ -469,18 +490,18 @@ const RAN_IN_THE_CALLERS_OPERATION = {
 
 /**
  * Where one port member call (since the mints were last cleared) ran: the
- * entry it checked (`requireOperationEntry`), every session read through an
+ * entry it checked (`portOperationEntry`), every session read through an
  * entry during the call, and every session an operation was entered from,
  * each compared by identity with the caller's.
  */
 function runIn(operation: OperationEntry, session: TransactionSession) {
-  const [checked] = requireOperationEntrySpy.mock.calls.map(([entry]) => entry);
+  const [checked] = portOperationEntrySpy.mock.calls.map(([entry]) => entry);
   const sessionsRead = operationEntrySessionSpy.mock.results.map((result) => {
     if (result.type !== "return") throw new Error("read threw");
     return result.value;
   });
   return {
-    entries: requireOperationEntrySpy.mock.calls.length,
+    entries: portOperationEntrySpy.mock.calls.length,
     ranInTheCallersOperation: checked === operation,
     everySessionReadIsTheCallers: sessionsRead.every(
       (read) => read === undefined || read === session,

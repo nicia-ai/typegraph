@@ -378,7 +378,7 @@ import {
   type OperationEntry,
   operationEntryBackend,
   type OperationScoped,
-  requireOperationEntry,
+  portOperationEntry,
   type StatementBackend,
   storeAdoptSchemaWriteTransaction,
   type StoreTransactionBackend,
@@ -666,7 +666,7 @@ function rowMapperConfigFor(backend: StatementBackend) {
  * Called once per call, after the member's refusals.
  */
 function portEntryBackend(entry: OperationEntry): StatementBackend {
-  return operationEntryBackend(requireOperationEntry(entry));
+  return operationEntryBackend(portOperationEntry(entry));
 }
 
 /** {@link portEntryBackend}, or `undefined` for the member's own default. */
@@ -1778,7 +1778,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#createNodeOperationContext(),
           work.kind,
           work.id,
-          requireOperationEntry(target),
+          portOperationEntry(target),
           { policy },
         ),
       applyResolvedNodeUniqueness: async (
@@ -2447,7 +2447,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       );
     }
     // The caller's own operation: the identity writes run in its session.
-    const entry = requireOperationEntry(transaction);
+    const entry = portOperationEntry(transaction);
     return applyIdentityChangesForContext(
       this.#identityContext(operationEntryBackend(entry)),
       entry,
