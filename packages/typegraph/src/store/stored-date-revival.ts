@@ -15,10 +15,13 @@
  *    (including `z.coerce.date()` and a refined `z.date()`), reached from the
  *    props object through `.optional()`, `.nullable()`, `.default()`,
  *    `.prefault()`, `.catch()`, `.readonly()` and `.nonoptional()` wrappers,
- *    the shape of a nested `z.object()`, or the element of a `z.array()`;
- *  - the stored value is canonical ISO text ({@link isCanonicalIsoDate}) —
- *    exactly the text the store writes for a `Date`, so the revived `Date`
- *    serializes back to the same bytes.
+ *    the shape of a nested `z.object()`, or the element of a `z.array()`,
+ *    with no `.overwrite()` check on the way (one rewrites its value on every
+ *    parse, so it would rewrite the revived, untouched value);
+ *  - the stored value is portable timestamp text ({@link isPortableTimestamp}):
+ *    exactly the text the store writes for a `Date` it accepts (canonical UTC
+ *    ISO in the years 0001 to 9999), so the revived `Date` serializes back to
+ *    the same bytes and passes the store's own date-storability check.
  *
  * Every other value is returned as stored: a non-canonical string (which
  * `z.date()` still refuses, as before), a value under a union, record, tuple,
@@ -37,7 +40,9 @@
  */
 import { type z } from "zod";
 
-import { isCanonicalIsoDate } from "../utils/date";
+import { objectSchemaShape } from "../core/kind-schema";
+import { isPortableTimestamp } from "../utils/date";
+import { isPlainObject } from "../utils/object";
 
 /** The schema wrappers whose input is their inner schema's input. */
 const TRANSPARENT_WRAPPER_TYPES: ReadonlySet<string> = new Set([
@@ -52,21 +57,27 @@ const TRANSPARENT_WRAPPER_TYPES: ReadonlySet<string> = new Set([
 
 type SchemaDef = Readonly<{
   innerType?: z.ZodType;
-  shape?: Readonly<Record<string, z.ZodType>>;
   element?: z.ZodType;
+  checks?: readonly Readonly<{
+    _zod: Readonly<{ def: Readonly<{ check: string }> }>;
+  }>[];
 }>;
+
+/**
+ * Whether a schema carries an `.overwrite()` check: one that replaces the
+ * value on every parse, so parsing a revived stored value again would rewrite
+ * the untouched property instead of keeping it.
+ */
+function hasOverwriteCheck(schema: z.ZodType): boolean {
+  const checks = (schema.def as SchemaDef).checks ?? [];
+  return checks.some((check) => check._zod.def.check === "overwrite");
+}
 
 function unwrapTransparentWrappers(schema: z.ZodType): z.ZodType {
   const inner = (schema.def as SchemaDef).innerType;
   return TRANSPARENT_WRAPPER_TYPES.has(schema.type) && inner !== undefined ?
       unwrapTransparentWrappers(inner)
     : schema;
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null) return false;
-  const prototype = Object.getPrototypeOf(value) as unknown;
-  return prototype === Object.prototype || prototype === null;
 }
 
 function reviveObject(
@@ -95,16 +106,19 @@ function reviveObject(
  */
 export function reviveStoredDates(schema: z.ZodType, value: unknown): unknown {
   const unwrapped = unwrapTransparentWrappers(schema);
+  // A schema that rewrites its value on every parse — on the date itself or on
+  // an object or array holding it — would rewrite a revived stored value, so
+  // nothing at or below it is revived and the re-parse refuses as before.
+  if (hasOverwriteCheck(unwrapped)) return value;
   const def = unwrapped.def as SchemaDef;
   if (unwrapped.type === "date") {
-    return typeof value === "string" && isCanonicalIsoDate(value) ?
+    return typeof value === "string" && isPortableTimestamp(value) ?
         new Date(value)
       : value;
   }
-  if (unwrapped.type === "object") {
-    return def.shape !== undefined && isPlainRecord(value) ?
-        reviveObject(def.shape, value)
-      : value;
+  const shape = objectSchemaShape(unwrapped);
+  if (shape !== undefined) {
+    return isPlainObject(value) ? reviveObject(shape, value) : value;
   }
   if (unwrapped.type === "array") {
     const element = def.element;

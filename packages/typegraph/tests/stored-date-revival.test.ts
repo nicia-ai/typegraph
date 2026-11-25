@@ -43,6 +43,22 @@ describe("reviveStoredDates", () => {
     ["a record of dates", z.record(z.string(), z.date()), { at: TEXT }],
     ["a tuple of dates", z.tuple([z.date()]), [TEXT]],
     ["a lazy date", z.lazy(() => z.date()), TEXT],
+    // Canonical text no backend stores as a date: PostgreSQL refuses year 0000.
+    ["year-zero text", z.date(), "0000-01-01T00:00:00.000Z"],
+    // An overwrite runs on every parse, so a revived Date would be rewritten.
+    [
+      "a date with an overwrite",
+      z.date().overwrite((date) => new Date(date.getTime() + 1)),
+      TEXT,
+    ],
+    [
+      "an optional date with an overwrite",
+      z
+        .date()
+        .overwrite((date) => new Date(date.getTime() + 1))
+        .optional(),
+      TEXT,
+    ],
   ] as const)("leaves %s as stored", ([, schema, value]) => {
     expect(reviveStoredDates(schema, value)).toBe(value);
   });
@@ -85,6 +101,14 @@ describe("reviveStoredDates", () => {
     );
     expect(Object.getPrototypeOf(revived)).toBe(Object.prototype);
     expect(revived["other"]).toBe(TEXT);
+  });
+
+  it("revives nothing under an object that rewrites itself on every parse", () => {
+    const schema = z
+      .object({ at: z.date() })
+      .overwrite((value) => ({ at: new Date(value.at.getTime() + 1) }));
+    const stored = { at: TEXT };
+    expect(reviveStoredDateProps(schema, stored)).toBe(stored);
   });
 
   it("revives through a refined object schema", () => {

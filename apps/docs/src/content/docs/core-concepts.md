@@ -125,8 +125,8 @@ violation. Text is turned back into a `Date` only where the schema accepts
 nothing but a `Date` — a `z.date()`, possibly inside `.optional()`,
 `.nullable()`, `.default()`, `.catch()` and similar wrappers, a nested
 `z.object()` or a `z.array()` — and only when it is exactly the text the store
-writes. A date under a union, a record, a tuple or a `.transform()` is parsed
-as stored. A value you pass yourself is never converted: state a date
+writes. A date under a union, a record, a tuple, a `.transform()` or an
+`.overwrite()` is parsed as stored. A value you pass yourself is never converted: state a date
 property as a `Date`. The `getOrCreate…` forms parse the properties you state
 as a create first, so a property you omit that declares a `.default()` or
 `.catch()` takes that value rather than the stored one.

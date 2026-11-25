@@ -48,6 +48,14 @@ const CaughtDocument = defineNode("CaughtDoc", {
   }),
 });
 
+/** A date whose schema rewrites it on every parse. */
+const StampedDocument = defineNode("StampedDoc", {
+  schema: z.object({
+    title: z.string(),
+    stampedAt: z.date().overwrite((date) => new Date(date.getTime() + 1)),
+  }),
+});
+
 const datedCites = defineEdge("datedCites", {
   schema: z.object({
     note: z.string(),
@@ -60,6 +68,7 @@ const datedGraph = defineGraph({
   id: "stored_date_revalidation",
   nodes: {
     CaughtDoc: { type: CaughtDocument },
+    StampedDoc: { type: StampedDocument },
     DatedDoc: {
       type: DatedDocument,
       unique: [
@@ -167,6 +176,21 @@ export function registerStoredDateRevalidationIntegrationTests(
       expect(updated.checkedAt).toBe(REVIEWED.toISOString());
     });
 
+    it("node update still refuses a date its schema rewrites on every parse, rather than rewriting it", async () => {
+      const store = await context.createStore(datedGraph);
+      const document = await store.nodes.StampedDoc.create({
+        title: "a",
+        stampedAt: PUBLISHED,
+      });
+      const stored = document.stampedAt;
+      await expect(
+        store.nodes.StampedDoc.update(document.id, { title: "a2" }),
+      ).rejects.toThrow(/expected date, received string/u);
+      const read = await store.nodes.StampedDoc.getById(document.id);
+      expect(read?.title).toBe("a");
+      expect(read?.stampedAt).toBe(stored);
+    });
+
     it("node update inside a transaction", async () => {
       const { store, doc } = await seed(context);
       await store.transaction(async (tx) => {
@@ -179,12 +203,14 @@ export function registerStoredDateRevalidationIntegrationTests(
 
     it("node upsertById and bulkUpsertById of an existing node", async () => {
       const { store, doc, other } = await seed(context);
-      await store.nodes.DatedDoc.upsertById(doc.id, {
-        ...fullDocument("a2"),
-        publishedAt: PUBLISHED,
-      });
       // The required `publishedAt` is restated; every optional date is left
       // to the stored row.
+      const single = await store.nodes.DatedDoc.upsertById(doc.id, {
+        title: "a2",
+        publishedAt: PUBLISHED,
+      });
+      expect(single.title).toBe("a2");
+      expect(documentDates(single)).toEqual(STORED_DOC_DATES);
       await store.nodes.DatedDoc.bulkUpsertById([
         { id: other.id, props: { title: "b2", publishedAt: PUBLISHED } },
       ]);
