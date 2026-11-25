@@ -95,7 +95,6 @@ import { CONSTRAINT_FENCE_DECIDES_UNDER_LOCK_ONLY } from "../claims/backing";
 import { type ConstraintFenceReason } from "../constraints";
 import {
   enterOperation,
-  enterTargetOperation,
   openTransactionSession,
   type OperationBackend,
   type OperationEntry,
@@ -783,20 +782,6 @@ export async function runInWriteEntryTransaction<T>(
       fn(enterOperation(openTransactionSession(transaction))),
     options?.transaction,
   );
-}
-
-/**
- * TRANSITIONAL: the write entry for code that holds a bare handle and no
- * session (a family not yet converted to receive one). A root is returned as
- * itself; a transaction handle joins as a binding of its own, with a new
- * session, so its frames share the write executor's per-session state with
- * no other frame. That is what they shared before sessions existed for every
- * such caller: state was keyed by the handle object, and no frame on the same
- * object overlaps theirs. Its call sites are pinned in
- * `tests/legacy-transaction-operation-ratchet.test.ts`.
- */
-export function legacyWriteEntry(backend: StatementBackend): OperationEntry {
-  return enterTargetOperation(backend);
 }
 
 /**

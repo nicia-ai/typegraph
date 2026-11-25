@@ -127,6 +127,7 @@ export { registerRemovedEndpointExistenceIntegrationTests } from "./removed-endp
 export { registerReservedAliasPrefixIntegrationTests } from "./reserved-alias-prefix";
 export { registerSavepointRecoveryIntegrationTests } from "./savepoint-recovery";
 export { registerSchemaCheckedReadIntegrationTests } from "./schema-checked-read";
+export { registerSchemaOperationRoutingIntegrationTests } from "./schema-operation-routing";
 export { registerSelectiveRetryIntegrationTests } from "./selective-retry";
 export { registerSetNodeMutationIntegrationTests } from "./set-node-mutation";
 export { registerSetOperationIntegrationTests } from "./set-operations";

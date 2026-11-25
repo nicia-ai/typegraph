@@ -367,10 +367,10 @@ import {
 } from "./neighbors";
 import { readNodeByReference } from "./node-reference-read";
 import {
+  decorateOperation,
   enterOperation,
   enterTargetOperation,
   type EntryScope,
-  legacyTransactionOperation,
   openBoundTransactionSession,
   openTransactionSession,
   type Operation,
@@ -435,7 +435,6 @@ import {
   batchRefusalDetails,
   batchRefusalSuffix,
   diagnoseFusedSchemaFenceNoRow,
-  legacyWriteEntry,
   refuseReadOnlyTransactionWrite,
   resolveBatchWriteVerdict,
   runInWriteTransaction,
@@ -2106,12 +2105,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * `provisionDerivedRelations` carries the DDL `ensureIdentitySchemaStorage`
    * deliberately did not run outside this transaction, so an evolution that
    * fails leaves no half-published derived relation behind.
+   *
+   * A step of a composed schema-commit preflight: `target` is the handle of
+   * the operation the commit's preflight runs under, and this step runs under
+   * that same operation.
    */
   async identitySchemaPreflight(
-    transaction: StoreTransactionBackend<SchemaCommitPreflightBackend>,
+    target: OperationScoped<SchemaCommitPreflightBackend>,
     provisionDerivedRelations: readonly string[],
   ): Promise<void> {
-    const target = legacyTransactionOperation(transaction);
     await identitySchemaCommitPreflight(this.#identityContext(this.#backend), {
       enablement: false,
       provisionDerivedRelations,
@@ -2134,13 +2136,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     await validateIdentityForContext(this.#identityContext(this.#baseBackend));
   }
 
-  /** @internal Cascades removed kinds in the schema-commit transaction. */
+  /**
+   * @internal Cascades removed kinds in the schema-commit transaction, as a
+   * step of its preflight: `operation` is the operation the preflight runs
+   * under, and the cascade's write frames enter the write executor from it.
+   */
   async removeIdentityKindsInSchemaPreflight(
-    transaction: StoreTransactionBackend,
+    operation: Operation<SchemaCommitPreflightBackend>,
     kinds: readonly string[],
     options?: Readonly<{ repairClosure?: boolean }>,
   ): Promise<void> {
-    const target = legacyTransactionOperation(transaction);
+    const target = operation.backend;
     const scope =
       this.#captureEnabled ?
         createRecordedTransactionScope(
@@ -2150,13 +2156,15 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           transactionOwnsSqliteWriteLock(target),
         )
       : undefined;
-    const backend = scope?.backend ?? target;
-    // The schema-commit preflight hands this a bare handle and no session, so
-    // the cascade joins as a binding of its own until that family's
-    // conversion opens a session where the preflight's transaction opens.
+    // The cascade's write frames join the preflight's operation, through the
+    // capture overlay when this Store records.
+    const entry =
+      scope === undefined ? operation : (
+        decorateOperation(operation, scope.backend)
+      );
     await removeIdentityKindsForContext(
-      this.#identityContext(backend),
-      legacyWriteEntry(backend),
+      this.#identityContext(entry.backend),
+      entry,
       kinds,
       options,
     );
@@ -6339,7 +6347,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           "adoptTransaction",
           { graphId: this.graphId },
         );
-      const target = legacyTransactionOperation(adopt(externalTx));
+      // The Store joins the caller's transaction here: the session for this
+      // adoption, and the one operation the baseline check runs under. The
+      // recorded transaction below receives that operation's handle.
+      const target = enterOperation(
+        openTransactionSession(adopt(externalTx)),
+      ).backend;
       await lockSchemaVersionForStoreWrite(
         {
           graphId: this.graphId,
@@ -6413,11 +6426,20 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const ordinaryAdopt = requireDefined(
       this.#adapterBackend?.adoptTransaction,
     );
+    // The probe runs before the schema-write adoption takes the fence, on an
+    // ordinary adoption of its own: a binding of its own, with one operation.
     await assertRecordedCaptureTransactionIsolation(
-      legacyTransactionOperation(ordinaryAdopt(externalTx)),
+      enterOperation(openTransactionSession(ordinaryAdopt(externalTx))).backend,
     );
     const adopted = await adopt(externalTx, this.graphId, { waitBudgetMs });
-    const adoptedBackend = legacyTransactionOperation(adopted.backend);
+    // The Store joins the caller's transaction as a schema writer here: the
+    // session for this adoption, and the one operation the baseline check,
+    // the preflight, provisioning and the commit run under. The recorded
+    // transaction below receives that operation's handle.
+    const adoptedOperation = enterOperation(
+      openTransactionSession(adopted.backend),
+    );
+    const adoptedBackend = adoptedOperation.backend;
     const active = adopted.activeSchema;
     await assertEvolutionPlanBaseline(plan, active);
     await this.#assertNoPendingRemovalFor(
@@ -6439,7 +6461,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       identity:
         requirements.identityAffectedKinds.length === 0 ?
           undefined
-        : async (target: OperationScoped<SchemaCommitPreflightBackend>) => {
+        : async (operation: Operation<SchemaCommitPreflightBackend>) => {
             const storage = await inspectAdoptedIdentityStorage(
               adoptedBackend,
               this.#sqlSchema(),
@@ -6449,11 +6471,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               },
             );
             await candidate.identitySchemaPreflight(
-              target,
+              operation.backend,
               storage.provisionInCommit,
             );
           },
-    })(adoptedBackend);
+    })(adoptedOperation);
     if (requirements.vectorSlots.length > 0) {
       const provision = adoptedBackend.ensureVectorSlotContributions;
       if (provision === undefined) {
@@ -6824,9 +6846,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       tightening: schemaTighteningPreflight,
       identity:
         identityCandidate === undefined ? undefined : (
-          (target: OperationScoped<SchemaCommitPreflightBackend>) =>
+          (operation: Operation<SchemaCommitPreflightBackend>) =>
             identityCandidate.identitySchemaPreflight(
-              target,
+              operation.backend,
               identityProvisioning?.provisionInCommit ?? [],
             )
         ),
@@ -7774,7 +7796,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async #identityRemovalPreflight(
     finalGraph: G,
     removedNodeKinds: readonly string[],
-  ): Promise<((target: OperationBackend) => Promise<void>) | undefined> {
+  ): Promise<
+    | ((operation: Operation<SchemaCommitPreflightBackend>) => Promise<void>)
+    | undefined
+  > {
     if (removedNodeKinds.length === 0) return undefined;
     const repairClosure = finalGraph.identity !== undefined;
     if (
@@ -7789,10 +7814,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       return undefined;
     }
     const candidate = this.#cloneWithGraph(finalGraph, undefined);
-    return async (target: OperationBackend) =>
-      candidate.removeIdentityKindsInSchemaPreflight(target, removedNodeKinds, {
-        repairClosure,
-      });
+    return async (operation: Operation<SchemaCommitPreflightBackend>) =>
+      candidate.removeIdentityKindsInSchemaPreflight(
+        operation,
+        removedNodeKinds,
+        { repairClosure },
+      );
   }
 
   /**

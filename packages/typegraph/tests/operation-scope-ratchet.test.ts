@@ -159,6 +159,7 @@ import type { GraphDef } from "../core/define-graph";
 import type { EdgeCollectionConfig } from "./collections/edge-collection";
 import type * as scope from "./operation-scope";
 import {
+  enterTargetOperation,
   type OperationBackend,
   scopeWriteFrameTarget,
   type StatementBackend,
@@ -167,7 +168,6 @@ import {
   type EdgeOperationContext,
   executeEdgeCreate as executeEdgeCreateEntry,
 } from "./operations/edge-operations";
-import { legacyWriteEntry } from "./operations/write-transaction";
 import type { CreateEdgeInput, Edge } from "./types";
 
 // The brand's consumer: a statement-issuing Store function that takes the
@@ -178,7 +178,7 @@ function executeEdgeCreate(
   edge: CreateEdgeInput,
   backend: StatementBackend,
 ): Promise<Edge> {
-  return executeEdgeCreateEntry(context, edge, legacyWriteEntry(backend));
+  return executeEdgeCreateEntry(context, edge, enterTargetOperation(backend));
 }
 
 declare const raw: TransactionBackend;
