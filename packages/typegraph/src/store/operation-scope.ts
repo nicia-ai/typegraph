@@ -1,5 +1,5 @@
 /**
- * Operation-scoped statement targets.
+ * Operation-scoped statement targets: how a statement reaches a transaction.
  *
  * Store code (everything outside `src/backend`, the engine) never holds the
  * engine's transaction type. Where a transaction is opened or joined it
@@ -7,25 +7,41 @@
  * no statement member. A statement inside a transaction is issued only
  * through an {@link OperationBackend}, and a Store function that issues
  * statements declares its target as one (or as {@link StatementBackend},
- * which also admits the pooled root). A transaction backend becomes a handle
- * only by passing through one of this module's mints — {@link enterOperation}
- * at a public Store member, {@link scopeWriteFrameTarget} where the write
- * executor hands row work its target, or the transitional
- * {@link legacyTransactionOperation} — so every call path into statement work
- * is visible at a mint.
+ * which also admits the pooled root).
  *
- * Where a Store opens or joins a transaction it also opens a
- * {@link TransactionSession}: the value that stands for that transaction as
- * this binding holds it, handed down explicitly (never looked up from the
- * object a caller happens to hold). A public node or edge write made inside
- * the transaction enters its own {@link Operation} from that session, and the
- * write executor reads the session's state off the operation it was handed. `tests/operation-scope-ratchet.test.ts` also scans
- * Store code for any value still typed as the engine transaction: the
- * declarations whose type the public API spells are listed there, and
+ * The path has two steps, each a value handed down explicitly and never
+ * looked up from the object a caller happens to hold:
+ *
+ * - **Session.** Where a Store opens or joins a transaction it opens a
+ *   {@link TransactionSession}: that transaction as this binding holds it
+ *   ({@link openTransactionSession}, or {@link openBoundTransactionSession}
+ *   where the binding builds a statement surface over the transaction). A
+ *   transaction context carries its session to privileged internals on its
+ *   runtime ({@link transactionRuntimeSession}).
+ * - **Operation.** Each public Store call inside the transaction enters one
+ *   {@link Operation} of that session when it executes: {@link enterOperation}
+ *   from a session the caller holds, {@link enterTransactionOperation} from a
+ *   transaction context, {@link enterTargetOperation} for a target arriving
+ *   through a public signature (a transaction there joins as a binding of
+ *   its own). The operation carries the handle its statements go through;
+ *   work the call composes runs under the same operation.
+ *
+ * The other mints are narrower: {@link decorateOperation} replaces an
+ * operation's handle with a derivation of it, {@link scopeWriteFrameTarget}
+ * is the write executor's mint for the target it hands row work, and the
+ * boundary mints ({@link storeSchemaWriteTransaction},
+ * {@link storeCommitSchemaVersionWithPreflight},
+ * {@link storeSetActiveVersionWithPreflight},
+ * {@link storeAdoptSchemaWriteTransaction}) grant a specialised
+ * (schema-write or preflight) transaction at the engine member that opens
+ * it. No other function produces a handle, so every call path into
+ * statement work is visible at a mint. `tests/operation-scope-ratchet.test.ts`
+ * also scans Store code for any value still typed as the engine transaction:
+ * the declarations whose type the public API spells are listed there, and
  * nothing else may appear.
  *
  * The backend brand is a phantom: a minted backend is the SAME object it was
- * minted from. That is deliberate. Store state not yet carried by a session is
+ * minted from. That is deliberate. Store state not carried by a session is
  * keyed by the target object's identity (`writeTransactionSessions`, the
  * savepoint-state registry, schema fence leases), and the layers above
  * discriminate a root from a transaction with `"transaction" in target`; a
@@ -161,43 +177,6 @@ type EngineEvidence<Engine extends TransactionBackend> =
       unknown
     : EngineRecord<Engine>
   : EngineRecord<Engine>;
-
-/**
- * TRANSITIONAL: the handle for Store code not yet converted to mint one
- * operation per public call. It mints ONE handle for the whole native
- * transaction, which is how every statement in a transaction ran before
- * handles existed: no admission, no parentage, no per-call rollback unit. What
- * it adds is that each such site is visible and counted —
- * `tests/legacy-transaction-operation-ratchet.test.ts` pins its call sites by
- * the family that will remove them, and each family's conversion lowers that
- * count until this function is deleted.
- *
- * A target that may be the pooled root as well (`GraphBackend |
- * StoreTransactionBackend`) comes back as a {@link StatementBackend}: the
- * root passes through unchanged, the transaction becomes the handle — to its
- * engine type, so a schema-write transaction's handle keeps its DDL members.
- * Returns the same object it is given.
- */
-export function legacyTransactionOperation<
-  T extends GraphBackend | StoreTransactionBackend,
->(target: T): LegacyOperationTarget<T> {
-  // eslint-disable-next-line no-restricted-syntax -- This module is the mint: the transitional whole-transaction handle is asserted here and nowhere else.
-  return target as LegacyOperationTarget<T>;
-}
-
-/**
- * What {@link legacyTransactionOperation} returns for `T`: a root backend as
- * itself, a transaction as the operation-scoped form of its engine type.
- * Distributes over a union, so `GraphBackend | TransactionBackend` maps to
- * {@link StatementBackend}.
- */
-export type LegacyOperationTarget<T> =
-  T extends GraphBackend ? GraphBackend
-  : T extends TransactionBackend ? OperationScoped<T>
-  : T extends EngineRecord<infer Engine extends TransactionBackend> ?
-    OperationScoped<Engine>
-  : T extends StoreTransactionBackend ? OperationBackend
-  : never;
 
 // ---------------------------------------------------------------------------
 // Sessions and operations

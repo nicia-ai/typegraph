@@ -19,7 +19,10 @@ import { createSqliteBackend } from "../src/backend/drizzle/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
 import { buildKindRegistry } from "../src/registry";
 import { createStoreWithSchema, type Store } from "../src/store";
-import { legacyTransactionOperation } from "../src/store/operation-scope";
+import {
+  enterOperation,
+  openTransactionSession,
+} from "../src/store/operation-scope";
 import { resolveAtomicEdgeConvergenceExecutor } from "../src/store/operations/atomic-mutation-program";
 import { requireDefined } from "../src/utils/presence";
 
@@ -373,7 +376,8 @@ describe("atomic durable bulk edge convergence", () => {
         expect(
           resolveAtomicEdgeConvergenceExecutor({
             ...common,
-            backend: legacyTransactionOperation(transaction),
+            backend: enterOperation(openTransactionSession(transaction))
+              .backend,
             graph: durableGraph,
           }),
         ).toBeUndefined();

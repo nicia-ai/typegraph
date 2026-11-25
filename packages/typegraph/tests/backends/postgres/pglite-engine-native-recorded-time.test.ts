@@ -31,7 +31,10 @@ import {
   type TransactionBackend,
 } from "../../../src/backend/types";
 import { sql } from "../../../src/query/sql-fragment";
-import { legacyTransactionOperation } from "../../../src/store/operation-scope";
+import {
+  enterOperation,
+  openTransactionSession,
+} from "../../../src/store/operation-scope";
 import { createMutationWitness } from "../../../src/store/recorded-capture";
 import { attachEngineNativeRecordedTime } from "../../engine-native-recorded-time-fixture";
 import {
@@ -326,7 +329,9 @@ describe("engine-native recorded time: transaction receipts (PGlite)", () => {
     await backend.transaction((txBackend) => {
       capabilitiesSeen.push(txBackend.capabilities.execution.atomicBatch);
       const witness = createMutationWitness();
-      const wrapped = witness.wrap(legacyTransactionOperation(txBackend));
+      const wrapped = witness.wrap(
+        enterOperation(openTransactionSession(txBackend)).backend,
+      );
       capabilitiesSeen.push(wrapped.capabilities.execution.atomicBatch);
       return Promise.resolve();
     });

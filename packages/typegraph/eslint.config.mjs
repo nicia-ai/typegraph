@@ -255,8 +255,8 @@ const DETERMINISM_RESTRICTIONS = [
 const OPERATION_BRAND_MESSAGE =
   "Do not assert a value to OperationScoped / OperationBackend / " +
   "StatementBackend / Operation / TransactionSession / OperationEntry / " +
-  "EntryScope / LegacyOperationTarget / StoreTransactionBackend, or " +
-  "to a Store-facing schema opener (StoreSchemaWriteTransaction, " +
+  "EntryScope / StoreTransactionBackend, or to a Store-facing schema " +
+  "opener (StoreSchemaWriteTransaction, " +
   "StoreSchemaPreflightMember, StoreCommitSchemaVersionWithPreflight, " +
   "StoreSetActiveVersionWithPreflight, StoreAdoptSchemaWriteTransaction, " +
   "StoreAdoptedSchemaWriteTransaction) (by name, alias, namespace, import " +
@@ -264,9 +264,9 @@ const OPERATION_BRAND_MESSAGE =
   "raw transaction backend reaches a statement-issuing Store function only " +
   "through a mint in src/store/operation-scope.ts (openTransactionSession " +
   "where a transaction is opened or joined, enterOperation at a public " +
-  "Store member, scopeWriteFrameTarget in the write executor, the " +
-  "transitional legacyTransactionOperation), and a specialised (schema-" +
-  "write or preflight) transaction only through the boundary mint for the " +
+  "Store member, scopeWriteFrameTarget in the write executor), and a " +
+  "specialised (schema-write or preflight) transaction only through the " +
+  "boundary mint for the " +
   "engine member that opens it; an assertion anywhere else forges the " +
   "brand, or the engine type a StoreTransactionBackend records, and hides a " +
   "call path the type exists to expose. Call a mint instead. " +
@@ -274,9 +274,9 @@ const OPERATION_BRAND_MESSAGE =
   "type, to the mints.";
 
 const OPERATION_BRAND_TYPE_NAMES =
-  "/^(OperationScoped|OperationBackend|StatementBackend|Operation|TransactionSession|OperationEntry|EntryScope|LegacyOperationTarget|StoreTransactionBackend|StoreSchemaWriteTransaction|StoreSchemaPreflightMember|StoreCommitSchemaVersionWithPreflight|StoreSetActiveVersionWithPreflight|StoreAdoptSchemaWriteTransaction|StoreAdoptedSchemaWriteTransaction)$/";
+  "/^(OperationScoped|OperationBackend|StatementBackend|Operation|TransactionSession|OperationEntry|EntryScope|StoreTransactionBackend|StoreSchemaWriteTransaction|StoreSchemaPreflightMember|StoreCommitSchemaVersionWithPreflight|StoreSetActiveVersionWithPreflight|StoreAdoptSchemaWriteTransaction|StoreAdoptedSchemaWriteTransaction)$/";
 const OPERATION_MINT_NAMES =
-  "/^(enterOperation|openTransactionSession|scopeWriteFrameTarget|legacyTransactionOperation|storeSchemaWriteTransaction|storeCommitSchemaVersionWithPreflight|storeSetActiveVersionWithPreflight|storeAdoptSchemaWriteTransaction)$/";
+  "/^(enterOperation|openTransactionSession|scopeWriteFrameTarget|storeSchemaWriteTransaction|storeCommitSchemaVersionWithPreflight|storeSetActiveVersionWithPreflight|storeAdoptSchemaWriteTransaction)$/";
 const OPERATION_BRAND_CONTEXT =
   ":matches(TSAsExpression, TSTypeAssertion, TSTypePredicate)";
 

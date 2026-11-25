@@ -4,9 +4,6 @@
  * statement gate with `tsc` and every scan passing; each must now draw the
  * type error named here. A virtual file replaces the module at its own path,
  * so the edited module type-checks exactly as the real one would.
- *
- * The shim inventory's bracket-access edit lives with the shim ratchet's own
- * fixture (`tests/legacy-transaction-operation-ratchet.test.ts`).
  */
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -44,29 +41,16 @@ const ALLOCATION_OWNER = "src/store/allocation-owner.ts";
 const ALLOCATION_OWNER_CALLBACK = `backend.transaction(async (transaction: StoreTransactionBackend) => {`;
 
 /**
- * The module no longer calls the shim; each edit below imports it again, so
- * that a specialisation the callback annotation claims reaches the handle.
- */
-const ALLOCATION_OWNER_SHIM_IMPORT = [
-  `  enterOperation,
-  openTransactionSession,`,
-  `  enterOperation,
-  legacyTransactionOperation,
-  openTransactionSession,`,
-] as const;
-
-/**
  * P2: an ordinary transaction callback annotated as the schema-write
- * transaction, then DDL through the shim it already calls.
+ * transaction, then DDL through an operation of the session it opens over it.
  */
 const SCHEMA_WRITE_ANNOTATION: Edit = {
   file: ALLOCATION_OWNER,
   replacements: [
-    ALLOCATION_OWNER_SHIM_IMPORT,
     [
       ALLOCATION_OWNER_CALLBACK,
       `backend.transaction(async (transaction: StoreTransactionBackend<import("../backend/types").SchemaWriteTransactionBackend>) => {
-          await legacyTransactionOperation(transaction).executeSchemaDdl("SELECT 1");`,
+          await enterOperation(openTransactionSession<import("../backend/types").SchemaWriteTransactionBackend>(transaction)).backend.executeSchemaDdl("SELECT 1");`,
     ],
   ],
 };
@@ -75,11 +59,10 @@ const SCHEMA_WRITE_ANNOTATION: Edit = {
 const PREFLIGHT_ANNOTATION: Edit = {
   file: ALLOCATION_OWNER,
   replacements: [
-    ALLOCATION_OWNER_SHIM_IMPORT,
     [
       ALLOCATION_OWNER_CALLBACK,
       `backend.transaction(async (transaction: StoreTransactionBackend<import("../backend/types").SchemaCommitPreflightBackend>) => {
-          await legacyTransactionOperation(transaction).executeSchemaDdl?.("SELECT 1");`,
+          await enterOperation(openTransactionSession<import("../backend/types").SchemaCommitPreflightBackend>(transaction)).backend.executeSchemaDdl?.("SELECT 1");`,
     ],
   ],
 };
@@ -88,11 +71,10 @@ const PREFLIGHT_ANNOTATION: Edit = {
 const PREFLIGHT_HANDLE_ANNOTATION: Edit = {
   file: ALLOCATION_OWNER,
   replacements: [
-    ALLOCATION_OWNER_SHIM_IMPORT,
     [
       ALLOCATION_OWNER_CALLBACK,
       `backend.transaction(async (transaction: StoreTransactionBackend) => {
-          const preflight: import("./operation-scope").OperationScoped<import("../backend/types").SchemaCommitPreflightBackend> = legacyTransactionOperation(transaction);
+          const preflight: import("./operation-scope").OperationScoped<import("../backend/types").SchemaCommitPreflightBackend> = enterOperation(openTransactionSession(transaction)).backend;
           await preflight.executeSchemaDdl?.("SELECT 1");`,
     ],
   ],

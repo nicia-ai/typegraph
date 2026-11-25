@@ -30,9 +30,6 @@ const SOURCE_ROOT = path.join(PACKAGE_ROOT, "src");
 const STORE_ROOT = path.join(SOURCE_ROOT, "store");
 export const MINT_MODULE = "src/store/operation-scope.ts";
 
-/** The transitional whole-transaction shim, counted by its own ratchet. */
-const LEGACY_SHIM_NAME = "legacyTransactionOperation";
-
 /** The module-private unique symbol that keys the brand property. */
 const BRAND_KEY_NAME = "OPERATION_SCOPED";
 
@@ -1113,7 +1110,7 @@ export type RawTransactionRoute =
   /**
    * A property declared with the raw type. The declaration is not a use;
    * every read of it is, and is reported as a `"value"` unless it reaches
-   * the shim, an identity member or an identity-only position. Each such
+   * an identity member or an identity-only position. Each such
    * property therefore rests on this scan rather than on the type checker.
    */
   | "property"
@@ -1307,25 +1304,6 @@ export function rawTransactionSites(
       : isRawConstituent(target);
   }
 
-  /** `node` is the argument of a call to the transitional shim, which consumes it. */
-  function isShimArgument(node: ts.Node): boolean {
-    const argument = skipOuterParentheses(node);
-    const call = argument.parent;
-    if (
-      !ts.isCallExpression(call) ||
-      !call.arguments.includes(argument as ts.Expression)
-    ) {
-      return false;
-    }
-    const declaration = checker.getResolvedSignature(call)?.getDeclaration();
-    return (
-      declaration !== undefined &&
-      ts.isFunctionDeclaration(declaration) &&
-      declaration.name?.text === LEGACY_SHIM_NAME &&
-      relativeToPackage(declaration.getSourceFile().fileName) === MINT_MODULE
-    );
-  }
-
   /**
    * `node` is only the receiver of a member the Store-facing transaction type
    * carries (`ctx.backend.dialect`, `ctx.backend.compileSql`): reading what
@@ -1417,7 +1395,6 @@ export function rawTransactionSites(
         ts.isAwaitExpression(node) ||
         ts.isElementAccessExpression(node) ||
         (ts.isPropertyAccessExpression(node) && !isCallee(node))) &&
-      !isShimArgument(node) &&
       !readsOnlyIdentity(node) &&
       !narrowedOnArrival(node) &&
       holdsRaw(checker.getTypeAtLocation(node))
@@ -1453,206 +1430,6 @@ export function rawTransactionSites(
           : node
           ).getText(source),
         });
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(source);
-  }
-  return sites;
-}
-
-// ---------------------------------------------------------------------------
-// The transitional shim's call sites
-// ---------------------------------------------------------------------------
-
-/**
- * How a shim site names the shim. Only `"call"` is an inventoried call; every
- * other form is refused, because it is a way to reach the shim that a reader
- * of the call sites would not see.
- */
-type LegacyShimForm =
-  /** `legacyTransactionOperation(tx)`, or the same through a renamed import. */
-  | "call"
-  /** `scope.legacyTransactionOperation`, a namespace member, called or not. */
-  | "namespace"
-  /** `scope["legacyTransactionOperation"]`, called or not. */
-  | "element-access"
-  /** A namespace import of the mint module used as a value: `scope[key]`, `f(scope)`, `{ ...scope }`. */
-  | "namespace-value"
-  /** `export { legacyTransactionOperation … }`, or `export *` of the mint module. */
-  | "re-export"
-  /** A destructured binding, `const { legacyTransactionOperation: f } = scope`. */
-  | "alias"
-  /** A call that reaches the shim through a value rather than its name: `f(tx)` after `const f = legacyTransactionOperation`. */
-  | "indirect-call"
-  /** Any other reference: a stored value, an argument, `.call` / `.apply`. */
-  | "value";
-
-export type LegacyShimSite = Readonly<{
-  file: string;
-  /** The enclosing named function, method or variable, or `<module>`. */
-  function: string;
-  /** 1-based line of the site, for a failure message. */
-  line: number;
-  form: LegacyShimForm;
-}>;
-
-/**
- * Every site in `files` that reaches the transitional shim
- * `legacyTransactionOperation`. References are resolved by symbol, not by
- * name — an identifier, a string-literal element access, an export
- * specifier, a destructured property — and every call is resolved by the
- * signature the checker picks, so a call through any value of the shim's
- * type is found as surely as a call by name. A namespace import of the mint
- * module may only be read through a static member name: any other use hands
- * out every export at once, the shim included, and is a site of its own.
- * The shim module's own declaration is excluded. `transitional` names another
- * transitional function to find the same way (default: the shim).
- */
-export function legacyShimSites(
-  scan: ScanProgram,
-  files: readonly string[],
-  transitional?: Readonly<{ module: string; name: string }>,
-): readonly LegacyShimSite[] {
-  const shimOf = transitional ?? {
-    module: MINT_MODULE,
-    name: LEGACY_SHIM_NAME,
-  };
-  const { checker } = scan;
-  const mint = requireSourceFile(scan, shimOf.module);
-  const moduleSymbol = checker.getSymbolAtLocation(mint);
-  const shim =
-    moduleSymbol === undefined ? undefined : (
-      checker
-        .getExportsOfModule(moduleSymbol)
-        .find((symbol) => symbol.name === shimOf.name)
-    );
-  if (moduleSymbol === undefined || shim === undefined) {
-    throw new Error(`${shimOf.name} is not exported from ${shimOf.module}`);
-  }
-  const shimDeclaration = shim.declarations?.find((declaration) =>
-    ts.isFunctionDeclaration(declaration),
-  );
-  if (shimDeclaration === undefined) {
-    throw new Error(`${shimOf.name} is not a function declaration`);
-  }
-
-  function resolved(node: ts.Node): ts.Symbol | undefined {
-    const symbol = checker.getSymbolAtLocation(node);
-    if (symbol === undefined) return undefined;
-    return (symbol.flags & ts.SymbolFlags.Alias) === 0 ?
-        symbol
-      : checker.getAliasedSymbol(symbol);
-  }
-
-  function callsShim(call: ts.CallExpression): boolean {
-    return (
-      checker.getResolvedSignature(call)?.getDeclaration() === shimDeclaration
-    );
-  }
-
-  /** `node` is the whole callee of a call, under any parentheses. */
-  function calleeOf(node: ts.Node): ts.CallExpression | undefined {
-    const outer = skipOuterParentheses(node);
-    const parent = outer.parent;
-    return ts.isCallExpression(parent) && parent.expression === outer ?
-        parent
-      : undefined;
-  }
-
-  function isMintModuleSpecifier(node: ts.Expression | undefined): boolean {
-    return node !== undefined && resolved(node) === moduleSymbol;
-  }
-
-  /** The form a reference to the shim at `node` takes, or `undefined` when `node` is not one. */
-  function referenceForm(node: ts.Node): LegacyShimForm | undefined {
-    if (ts.isIdentifier(node)) {
-      if (ts.isFunctionDeclaration(node.parent) && node.parent.name === node) {
-        return undefined;
-      }
-      if (resolved(node) !== shim) return undefined;
-      const parent = node.parent;
-      if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
-        return "namespace";
-      }
-      if (ts.isBindingElement(parent)) return "alias";
-      return calleeOf(node) === undefined ? "value" : "call";
-    }
-    if (
-      ts.isStringLiteralLike(node) &&
-      ts.isElementAccessExpression(node.parent) &&
-      node.parent.argumentExpression === node &&
-      resolved(node) === shim
-    ) {
-      return "element-access";
-    }
-    return undefined;
-  }
-
-  const sites: LegacyShimSite[] = [];
-  for (const file of files) {
-    const source = scan.program.getSourceFile(file);
-    if (source === undefined) throw new Error(`${file} is not in program`);
-    const relative = relativeToPackage(file);
-    const report = (node: ts.Node, form: LegacyShimForm): void => {
-      sites.push({
-        file: relative,
-        function: enclosingName(node),
-        line:
-          source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
-        form,
-      });
-    };
-    const visit = (node: ts.Node): void => {
-      // An import binding is a declaration, not a use: a renamed one is
-      // counted wherever it is referenced, and a namespace one wherever it
-      // is used as a value.
-      if (ts.isImportDeclaration(node)) return;
-      if (ts.isExportDeclaration(node)) {
-        const fromMint = isMintModuleSpecifier(node.moduleSpecifier);
-        const clause = node.exportClause;
-        const reExportsShim =
-          clause === undefined || ts.isNamespaceExport(clause) ?
-            fromMint
-          : clause.elements.some((element) =>
-              [element.propertyName, element.name].some(
-                (name) => name !== undefined && resolved(name) === shim,
-              ),
-            );
-        if (reExportsShim) report(node, "re-export");
-        return;
-      }
-      const form = referenceForm(node);
-      if (form !== undefined) report(node, form);
-      if (
-        ts.isIdentifier(node) &&
-        resolved(node) === moduleSymbol &&
-        !(
-          ts.isPropertyAccessExpression(node.parent) &&
-          node.parent.expression === node
-        ) &&
-        !(
-          ts.isElementAccessExpression(node.parent) &&
-          node.parent.expression === node &&
-          ts.isStringLiteralLike(node.parent.argumentExpression)
-        ) &&
-        !ts.isQualifiedName(node.parent) &&
-        !ts.isTypeQueryNode(node.parent)
-      ) {
-        report(node, "namespace-value");
-      }
-      if (ts.isCallExpression(node) && callsShim(node)) {
-        // A call by the shim's own name is reported at that name; any other
-        // callee reaches it through a value.
-        let callee: ts.Expression = node.expression;
-        while (ts.isParenthesizedExpression(callee)) callee = callee.expression;
-        const named =
-          referenceForm(callee) !== undefined ||
-          (ts.isPropertyAccessExpression(callee) &&
-            referenceForm(callee.name) !== undefined) ||
-          (ts.isElementAccessExpression(callee) &&
-            referenceForm(callee.argumentExpression) !== undefined);
-        if (!named) report(node, "indirect-call");
       }
       ts.forEachChild(node, visit);
     };

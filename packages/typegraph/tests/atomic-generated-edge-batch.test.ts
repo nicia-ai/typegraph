@@ -36,7 +36,10 @@ import { buildKindRegistry } from "../src/registry";
 import { migrateSchema } from "../src/schema";
 import type { Store } from "../src/store";
 import { createStoreWithSchema, createVerifiedStore } from "../src/store";
-import { legacyTransactionOperation } from "../src/store/operation-scope";
+import {
+  enterOperation,
+  openTransactionSession,
+} from "../src/store/operation-scope";
 import {
   resolveAtomicEdgeBatchExecutor,
   resolveAtomicEdgeDeleteBatchExecutor,
@@ -414,7 +417,8 @@ describe("generated edge batch store consumer", () => {
       await realBackend.transaction(async (transactionBackend) => {
         expect(
           resolveAtomicEdgeBatchExecutor({
-            backend: legacyTransactionOperation(transactionBackend),
+            backend: enterOperation(openTransactionSession(transactionBackend))
+              .backend,
             graph,
             registry: buildKindRegistry(graph),
             inputs: [input],

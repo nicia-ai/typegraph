@@ -45,7 +45,10 @@ import {
   renderSqlite,
   type SqlFragment,
 } from "../../../src/query/sql-fragment";
-import { legacyTransactionOperation } from "../../../src/store/operation-scope";
+import {
+  enterOperation,
+  openTransactionSession,
+} from "../../../src/store/operation-scope";
 import { queryConnectedEdgeIds } from "../../../src/store/recorded-capture/flush";
 import { requireDefined } from "../../../src/utils/presence";
 
@@ -177,7 +180,7 @@ describe("edge lookups by endpoint on the SQLite delete path", () => {
         },
       } as unknown as TransactionBackend;
       await queryConnectedEdgeIds(
-        legacyTransactionOperation(recordingTarget),
+        enterOperation(openTransactionSession(recordingTarget)).backend,
         createSqlSchema(),
         {
           graphId: "edge_endpoint_delete_plan",
