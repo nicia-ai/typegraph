@@ -145,6 +145,11 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
     keyedBy: "callback-context",
     reason: "The evolved callback's original Store: per binding/view.",
   },
+  "store/runtime-port.ts#storeRuntimeTokens": {
+    keyedBy: "other",
+    reason:
+      "One identity token per Store runtime, so the owner maps compare tokens rather than hold a runtime whose members demand an operation.",
+  },
   "store/runtime-port.ts#evolvedTransactionStores": {
     keyedBy: "callback-context",
     reason: "The evolved callback's temporary view: per binding/view.",

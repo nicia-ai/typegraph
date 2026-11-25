@@ -5,8 +5,8 @@
  * `Operation` of the facade's scope after its statement-free refusals: the
  * session of the transaction whose context offers the facade (`tx.identity`),
  * or the pooled root itself (`store.identity`), which allocates no session. A
- * Store identity port call whose target arrives through a signature carrying
- * no session enters through `enterTargetOperation`. Identity maintenance, the
+ * Store identity port member runs in the operation its caller hands it, of
+ * the caller's session, and opens none of its own. Identity maintenance, the
  * fulltext rebuild and the contribution rebuild open a session where they
  * open their transaction. The session always arrives as a value; nothing is
  * looked up.
@@ -26,20 +26,31 @@ import {
   defineNode,
   searchable,
 } from "../src";
+import type * as ResolvedNodeClaimsModule from "../src/store/claims/resolved-node-claims";
+import { applyResolvedNodeClaims } from "../src/store/claims/resolved-node-claims";
 import type * as OperationScopeModule from "../src/store/operation-scope";
 import {
   enterOperation,
   enterTargetOperation,
+  enterTransactionOperation,
   type EntryScope,
   openTransactionSession,
   type OperationEntry,
   operationEntrySession,
+  portOperationEntry,
   type TransactionSession,
 } from "../src/store/operation-scope";
 import { storeRuntime } from "../src/store/runtime-port";
-import { TRANSACTION_RUNTIME } from "../src/store/types";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
+
+vi.mock("../src/store/claims/resolved-node-claims", async (importOriginal) => {
+  const actual: typeof ResolvedNodeClaimsModule = await importOriginal();
+  return {
+    ...actual,
+    applyResolvedNodeClaims: vi.fn(actual.applyResolvedNodeClaims),
+  };
+});
 
 vi.mock("../src/store/operation-scope", async (importOriginal) => {
   const actual: typeof OperationScopeModule = await importOriginal();
@@ -48,12 +59,17 @@ vi.mock("../src/store/operation-scope", async (importOriginal) => {
     enterOperation: vi.fn(actual.enterOperation),
     enterTargetOperation: vi.fn(actual.enterTargetOperation),
     openTransactionSession: vi.fn(actual.openTransactionSession),
+    operationEntrySession: vi.fn(actual.operationEntrySession),
+    portOperationEntry: vi.fn(actual.portOperationEntry),
   };
 });
 
 const enterOperationSpy = vi.mocked(enterOperation);
 const enterTargetOperationSpy = vi.mocked(enterTargetOperation);
 const openTransactionSessionSpy = vi.mocked(openTransactionSession);
+const operationEntrySessionSpy = vi.mocked(operationEntrySession);
+const applyResolvedNodeClaimsSpy = vi.mocked(applyResolvedNodeClaims);
+const portOperationEntrySpy = vi.mocked(portOperationEntry);
 
 const Person = defineNode("Person", {
   schema: z.object({ name: searchable() }),
@@ -63,6 +79,20 @@ const graph = defineGraph({
   nodes: { Person: { type: Person } },
   edges: {},
   identity: { sameIdAcrossKinds: "fold" },
+});
+
+const Tagged = defineNode("Tagged", { schema: z.object({ tag: z.string() }) });
+const uniqueGraph = defineGraph({
+  id: "identity_operation_entry_unique",
+  nodes: {
+    Tagged: {
+      type: Tagged,
+      unique: [
+        { name: "tag", fields: ["tag"], scope: "kind", collation: "binary" },
+      ],
+    },
+  },
+  edges: {},
 });
 
 const a = { kind: "Person" as const, id: "a" };
@@ -313,74 +343,176 @@ describe("an identity call enters its operation", () => {
     );
   });
 
-  it("an identity port call whose target arrives with no session joins as a binding of its own", async () => {
-    const { store } = await createIdentityStore(false);
+  it("an identity port member runs in the operation its caller hands it, and opens no session", async () => {
+    const { store } = await createIdentityStore(true);
     await store.identity.assertSame(a, b);
     const runtime = storeRuntime(store);
+    const [assertion] = await runtime.identityAssertionsAtTarget(
+      runtime.backend,
+    );
+    if (assertion === undefined) throw new Error("no assertion stored");
+    const observed: unknown[] = [];
     await store.transaction(async (tx) => {
-      const session = await sessionOf(() =>
-        tx.nodes.Person.create({ name: "Dee" }, { id: "d" }),
-      );
-      const target = tx[TRANSACTION_RUNTIME].backend;
-      const reads: readonly (readonly [string, () => Promise<unknown>])[] = [
+      // What merge apply and export hand a member: an operation of the
+      // session of the transaction they hold.
+      const operation = enterTransactionOperation(tx);
+      const session = operationEntrySession(operation);
+      if (session === undefined) throw new Error("no session entered");
+      const members: readonly (readonly [string, () => Promise<unknown>])[] = [
         [
           "identityAssertionsAtTarget",
-          () => runtime.identityAssertionsAtTarget(target),
+          () => runtime.identityAssertionsAtTarget(operation),
         ],
         [
           "identityAssertionsTouchingAtTarget",
           () =>
-            requirePort(runtime.identityAssertionsTouchingAtTarget)(target, [
+            requirePort(runtime.identityAssertionsTouchingAtTarget)(operation, [
               a,
             ]),
         ],
         [
           "readIdentityAssertionPageAtTarget",
           () =>
-            runtime.readIdentityAssertionPageAtTarget(target, "state", {
+            runtime.readIdentityAssertionPageAtTarget(operation, "state", {
               limit: 10,
             }),
         ],
         [
+          "readIdentityTransitionPageAtTarget",
+          () =>
+            runtime.readIdentityTransitionPageAtTarget(operation, {
+              limit: 10,
+            }),
+        ],
+        [
+          "identityTransitionRetentionAtTarget",
+          () => runtime.identityTransitionRetentionAtTarget(operation),
+        ],
+        [
           "assertIdentityClassesConsistentAtTarget",
-          () => runtime.assertIdentityClassesConsistentAtTarget(target, [a]),
+          () => runtime.assertIdentityClassesConsistentAtTarget(operation, [a]),
+        ],
+        [
+          // A write: its identity mutation's write frame runs under the
+          // caller's operation, so every session it reads is the caller's.
+          "applyIdentityMergeAtTarget",
+          () =>
+            runtime.applyIdentityMergeAtTarget(
+              operation,
+              [{ ...assertion, validTo: new Date().toISOString() }],
+              [],
+            ),
+        ],
+        [
+          "deleteNodeWithPolicy",
+          () => runtime.deleteNodeWithPolicy(operation, c),
         ],
       ];
-      const observed: unknown[] = [];
-      for (const [label, read] of reads) {
+      for (const [label, call] of members) {
         clearMints();
-        await read();
-        const [entry] = targetEntries();
+        portOperationEntrySpy.mockClear();
+        operationEntrySessionSpy.mockClear();
+        await call();
         observed.push({
           at: label,
-          targetEntries: targetEntries().length,
-          ofTheTarget: enterTargetOperationSpy.mock.calls.every(
-            ([argument]) => argument === target,
-          ),
-          // A binding of its own: a new session, never the transaction's.
-          ownBinding:
-            entry !== undefined &&
-            operationEntrySession(entry) !== undefined &&
-            operationEntrySession(entry) !== session,
+          ...runIn(operation, session),
         });
       }
-      expect(observed).toEqual(
-        reads.map(([label]) => ({
-          at: label,
-          targetEntries: 1,
-          ofTheTarget: true,
-          ownBinding: true,
-        })),
-      );
     });
+    expect(observed).toEqual(
+      [
+        "identityAssertionsAtTarget",
+        "identityAssertionsTouchingAtTarget",
+        "readIdentityAssertionPageAtTarget",
+        "readIdentityTransitionPageAtTarget",
+        "identityTransitionRetentionAtTarget",
+        "assertIdentityClassesConsistentAtTarget",
+        "applyIdentityMergeAtTarget",
+        "deleteNodeWithPolicy",
+      ].map((label) => ({ at: label, ...RAN_IN_THE_CALLERS_OPERATION })),
+    );
 
-    // The pooled root as the target enters as itself.
+    // The pooled root as the entry enters as itself.
     clearMints();
+    portOperationEntrySpy.mockClear();
     await runtime.identityAssertionsAtTarget(runtime.backend);
-    expect(targetEntries()).toEqual([runtime.backend]);
+    expect(portOperationEntrySpy.mock.calls.map(([entry]) => entry)).toEqual([
+      runtime.backend,
+    ]);
     expect(openedSessions()).toEqual([]);
   });
+
+  it("the resolved-uniqueness member runs its claim work in the caller's operation", async () => {
+    const backend = createTestBackend();
+    const [store] = await createAdapterStoreWithSchema(uniqueGraph, backend);
+    const runtime = storeRuntime(store);
+    let observed: unknown;
+    await store.transaction(async (tx) => {
+      const operation = enterTransactionOperation(tx);
+      const session = operationEntrySession(operation);
+      if (session === undefined) throw new Error("no session entered");
+      clearMints();
+      portOperationEntrySpy.mockClear();
+      operationEntrySessionSpy.mockClear();
+      applyResolvedNodeClaimsSpy.mockClear();
+      await runtime.applyResolvedNodeUniqueness(
+        operation,
+        {
+          upserts: [{ kind: "Tagged", id: "t1", props: { tag: "x" } }],
+          releases: [],
+        },
+        () => tx.nodes.Tagged.create({ tag: "x" }, { id: "t1" }),
+      );
+      observed = {
+        ...runIn(operation, session),
+        // The clear-and-rebuild claim work ran, on the caller's own handle.
+        claimWorkOn: applyResolvedNodeClaimsSpy.mock.calls.map(
+          ([, backend]) => backend === operation.backend,
+        ),
+      };
+    });
+    expect(observed).toEqual({
+      ...RAN_IN_THE_CALLERS_OPERATION,
+      claimWorkOn: [true],
+    });
+  });
 });
+
+/** What {@link runIn} reports for a member that ran in its caller's operation. */
+const RAN_IN_THE_CALLERS_OPERATION = {
+  entries: 1,
+  ranInTheCallersOperation: true,
+  everySessionReadIsTheCallers: true,
+  openedSessions: 0,
+  targetEntries: 0,
+  otherSessionsEntered: 0,
+} as const;
+
+/**
+ * Where one port member call (since the mints were last cleared) ran: the
+ * entry it checked (`portOperationEntry`), every session read through an
+ * entry during the call, and every session an operation was entered from,
+ * each compared by identity with the caller's.
+ */
+function runIn(operation: OperationEntry, session: TransactionSession) {
+  const [checked] = portOperationEntrySpy.mock.calls.map(([entry]) => entry);
+  const sessionsRead = operationEntrySessionSpy.mock.results.map((result) => {
+    if (result.type !== "return") throw new Error("read threw");
+    return result.value;
+  });
+  return {
+    entries: portOperationEntrySpy.mock.calls.length,
+    ranInTheCallersOperation: checked === operation,
+    everySessionReadIsTheCallers: sessionsRead.every(
+      (read) => read === undefined || read === session,
+    ),
+    openedSessions: openedSessions().length,
+    targetEntries: enterTargetOperationSpy.mock.calls.length,
+    otherSessionsEntered: enteredScopes().filter(
+      (scope) => "heldGraphWriteLocks" in scope && scope !== session,
+    ).length,
+  };
+}
 
 function requirePort<T>(port: T | undefined): T {
   if (port === undefined) throw new Error("the runtime port lacks this member");

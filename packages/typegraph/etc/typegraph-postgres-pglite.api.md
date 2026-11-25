@@ -2136,6 +2136,14 @@ const ENGINE_RECORDED_READ_SOURCE: unique symbol;
 // @public (undocumented)
 const ENGINE_REVISION_BRAND: unique symbol;
 
+// @public (undocumented)
+const ENGINE_TRANSACTION: unique symbol;
+
+// @public
+type EngineRecord<Engine extends TransactionBackend> = Readonly<{
+    [ENGINE_TRANSACTION]: Engine;
+}>;
+
 // @public
 type EngineRecordedInstantParts = Readonly<{
     kind: "engine";
@@ -2161,6 +2169,13 @@ type EngineRecordedTimeMembers = Readonly<{
     source: (this: void, table: RecordedSourceTable, revision: EngineRecordedRevision) => SqlFragment;
     revisionNow: (this: void, session: RecordedTimeSession) => Promise<EngineRecordedRevision>;
 }>;
+
+// @public
+type EngineRecordOf<T> = [
+T
+] extends [GraphBackend] ? unknown : [T] extends [TransactionBackend] ? [
+Exclude<keyof T, keyof TransactionBackend>
+] extends [never] ? unknown : EngineRecord<T> : unknown;
 
 // @public
 type EngineRevision = string & Readonly<{
@@ -3115,6 +3130,9 @@ const GRAPH_COMMAND_COORDINATION_BRAND: unique symbol;
 // @public
 const GRAPH_DEF_BRAND: "__graphDef";
 
+// @public
+const GRAPH_WRITE_LOCK_BRAND: unique symbol;
+
 // @public (undocumented)
 type GraphAlgorithms<G extends GraphDef> = Readonly<{
     shortestPath: (from: NodeIdentifier, to: NodeIdentifier, options: ShortestPathOptions<G>) => Promise<ShortestPathResult | undefined>;
@@ -3475,6 +3493,12 @@ type GraphWithoutOntology = GraphDef<Record<string, NodeRegistration>, Record<st
 type GraphWriteFenceAcquisition = Readonly<{
     isolation: GraphCommandIsolation;
     fenceRow: "advanced" | "none";
+}>;
+
+// @public (undocumented)
+type GraphWriteLock = Readonly<{
+    [GRAPH_WRITE_LOCK_BRAND]: true;
+    coordination: GraphCommandCoordination | undefined;
 }>;
 
 // @public
@@ -5199,6 +5223,21 @@ type OntologyRelation = Readonly<{
 }> & CompositionRealization;
 
 // @public
+type Operation<Engine extends TransactionBackend = TransactionBackend> = OperationScoped<Readonly<{
+    [OPERATION_SESSION]: TransactionSession<Engine>;
+    backend: OperationScoped<Engine>;
+}>>;
+
+// @public (undocumented)
+const OPERATION_SCOPED: unique symbol;
+
+// @public (undocumented)
+const OPERATION_SESSION: unique symbol;
+
+// @public
+type OperationEntry = GraphBackend | Operation;
+
+// @public
 type OperationHookContext = HookContext & OperationOutcomeFacts & Readonly<{
     operation: "create" | "update" | "delete";
     entity: KindEntity;
@@ -5210,6 +5249,11 @@ type OperationHookContext = HookContext & OperationOutcomeFacts & Readonly<{
 type OperationOutcomeFacts = Readonly<{
     cascadedParts?: readonly CompositionCascadedPart[];
 }>;
+
+// @public
+type OperationScoped<T extends object> = T & Readonly<{
+    [OPERATION_SCOPED]: "operation";
+}> & EngineRecordOf<T>;
 
 // @public
 type OptionalGraphBackendMember = OptionalKeys<GraphBackend>;
@@ -6577,6 +6621,9 @@ type SerializedUniqueConstraint = Readonly<{
     collation: Collation;
 }>;
 
+// @public (undocumented)
+const SESSION_TRANSACTION: unique symbol;
+
 // @public
 type SetActiveVersionParams = Readonly<{
     graphId: string;
@@ -6936,7 +6983,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     uniqueSidecarBatch?: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH> | undefined;
     batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
     endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>;
-    queryBackend: (target?: GraphBackend | TransactionBackend) => GraphBackend;
+    queryBackend: (target?: OperationEntry) => GraphBackend;
     sealedQuery: (coordinate: ReadCoordinate) => InitialQueryBuilder<G, "sealed">;
     recordedNodeGetById: <N extends NodeType>(kind: string, id: NodeId<N>, coordinate: ReadCoordinate) => Promise<Node<N> | undefined>;
     recordedNodeGetByIds: <N extends NodeType>(kind: string, ids: readonly NodeId<N>[], coordinate: ReadCoordinate) => Promise<readonly (Node<N> | undefined)[]>;
@@ -6960,11 +7007,11 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     identityContext: () => IdentityServiceContext<G>;
     rebuildIdentityClosure: () => Promise<void>;
     validateIdentity: () => Promise<void>;
-    deleteNodeWithPolicy: (target: GraphBackend | TransactionBackend, work: Readonly<{
+    deleteNodeWithPolicy: (target: OperationEntry, work: Readonly<{
         kind: string;
         id: string;
     }>, policy?: NodeDeletePolicy) => Promise<void>;
-    applyResolvedNodeUniqueness: <Output>(target: TransactionBackend, writes: Readonly<{
+    applyResolvedNodeUniqueness: <Output>(target: Operation, writes: Readonly<{
         upserts: readonly Readonly<{
             kind: string;
             id: string;
@@ -6996,11 +7043,11 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }> | undefined;
     }>[]>;
-    liveNodesSharingIds: (ids: readonly string[], target?: GraphBackend | TransactionBackend) => Promise<readonly Readonly<{
+    liveNodesSharingIds: (ids: readonly string[], target?: OperationEntry) => Promise<readonly Readonly<{
         kind: string;
         id: string;
     }>[]>;
-    identityAssertionRowsByIds: (ids: readonly string[], target?: GraphBackend | TransactionBackend) => Promise<ReadonlyMap<string, Readonly<{
+    identityAssertionRowsByIds: (ids: readonly string[], target?: OperationEntry) => Promise<ReadonlyMap<string, Readonly<{
         id: string;
         relation: "same" | "different";
         a: Readonly<{
@@ -7021,11 +7068,11 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
     structuralIdentityClasses: (references: readonly Readonly<{
         kind: string;
         id: string;
-    }>[], target?: GraphBackend | TransactionBackend) => Promise<ReadonlyMap<string, readonly Readonly<{
+    }>[], target?: OperationEntry) => Promise<ReadonlyMap<string, readonly Readonly<{
         kind: string;
         id: string;
     }>[]>>;
-    identityAssertionsAtTarget: (target: GraphBackend | TransactionBackend, mode?: "state" | "archival") => Promise<readonly Readonly<{
+    identityAssertionsAtTarget: (target: OperationEntry, mode?: "state" | "archival") => Promise<readonly Readonly<{
         id: string;
         relation: "same" | "different";
         a: Readonly<{
@@ -7043,7 +7090,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }> | undefined;
     }>[]>;
-    identityAssertionsTouchingAtTarget?: (target: GraphBackend | TransactionBackend, references: readonly Readonly<{
+    identityAssertionsTouchingAtTarget?: (target: OperationEntry, references: readonly Readonly<{
         kind: string;
         id: string;
     }>[], mode?: "state" | "archival", options?: Readonly<{
@@ -7066,7 +7113,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }> | undefined;
     }>[]>;
-    interchangeIdentityAssertionsByIdsAtTarget?: (target: GraphBackend | TransactionBackend, ids: readonly string[], mode: "state" | "archival", options?: Readonly<{
+    interchangeIdentityAssertionsByIdsAtTarget?: (target: OperationEntry, ids: readonly string[], mode: "state" | "archival", options?: Readonly<{
         includeDeleted?: boolean;
     }>) => Promise<readonly Readonly<{
         id: string;
@@ -7086,7 +7133,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
             id: string;
         }> | undefined;
     }>[]>;
-    readIdentityAssertionPageAtTarget: (target: GraphBackend | TransactionBackend, mode: "state" | "archival", options: Readonly<{
+    readIdentityAssertionPageAtTarget: (target: OperationEntry, mode: "state" | "archival", options: Readonly<{
         nodeKinds?: readonly string[];
         includeDeleted?: boolean;
         after?: string;
@@ -7148,7 +7195,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         created: number;
         skipped: number;
     }>>;
-    readIdentityTransitionPageAtTarget: (target: GraphBackend | TransactionBackend, options: Readonly<{
+    readIdentityTransitionPageAtTarget: (target: OperationEntry, options: Readonly<{
         after?: IdentityTransitionCursor;
         limit: number;
     }>) => Promise<Readonly<{
@@ -7156,11 +7203,11 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         nextAfter?: IdentityTransitionCursor;
         done: boolean;
     }>>;
-    identityTransitionRetentionAtTarget: (target: GraphBackend | TransactionBackend) => Promise<IdentityTransitionRetention>;
+    identityTransitionRetentionAtTarget: (target: OperationEntry) => Promise<IdentityTransitionRetention>;
     importIdentityTransitionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, transitions: readonly IdentityTransitionTransfer[], carriedCut: IdentityTransitionCut | undefined) => Promise<Readonly<{
         created: number;
     }>>;
-    applyIdentityMergeAtTarget: (target: GraphBackend | TransactionBackend, retractions: readonly Readonly<{
+    applyIdentityMergeAtTarget: (target: OperationEntry, retractions: readonly Readonly<{
         id: string;
         relation: "same" | "different";
         a: Readonly<{
@@ -7198,7 +7245,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         created: number;
         retracted: number;
     }>>;
-    assertIdentityClassesConsistentAtTarget: (target: GraphBackend | TransactionBackend, seeds: readonly Readonly<{
+    assertIdentityClassesConsistentAtTarget: (target: OperationEntry, seeds: readonly Readonly<{
         kind: string;
         id: string;
     }>[]) => Promise<void>;
@@ -7702,6 +7749,13 @@ type TransactionRuntime = Readonly<{
     acquireReadFences: () => Promise<void>;
     assertWritable: (operation: string) => void;
 }>;
+
+// @public
+type TransactionSession<Engine extends TransactionBackend = TransactionBackend> = OperationScoped<{
+    [SESSION_TRANSACTION]: OperationScoped<Engine>;
+} & Readonly<{
+    heldGraphWriteLocks: Map<string, Promise<GraphWriteLock>>;
+}>>;
 
 // @public (undocumented)
 const TRANSITION_PAGE_CURSOR_BRAND: unique symbol;

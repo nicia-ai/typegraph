@@ -850,7 +850,8 @@ async function cloneRelations<Transaction extends TransactionBackend>(
   vectorSlots: readonly VectorSlot[],
   sourceVectorStrategy: VectorStrategy | undefined,
   targetVectorStrategy: VectorStrategy | undefined,
-  assertSourceVersion: (transaction: Transaction) => Promise<void>,
+  // Checks the source version on the same transaction, after the table lock.
+  assertSourceVersion: () => Promise<void>,
 ): Promise<void> {
   const source = postgresContributions(sourceTables);
   const target = postgresContributions(targetTables);
@@ -873,7 +874,7 @@ async function cloneRelations<Transaction extends TransactionBackend>(
       "share",
     ),
   );
-  await assertSourceVersion(transaction);
+  await assertSourceVersion();
   const sourceMarker = getTableName(sourceTables.baseSchemaVersions);
   const marker = await rows<Readonly<{ version: number }>>(
     transaction,
@@ -1573,9 +1574,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       await sourceBackend.transaction(async (sourceTransaction) => {
         // The clone opened this transaction on the source: its session opens
         // here, and the clone is its one operation.
-        const transaction = enterOperation(
+        const operation = enterOperation(
           openTransactionSession(sourceTransaction),
-        ).backend;
+        );
+        const transaction = operation.backend;
         await assertAllocationSession(
           transaction,
           allocationId,
@@ -1590,10 +1592,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           vectorSlots,
           sourceVectorStrategy,
           targetVectorStrategy,
-          async (lockedTransaction) => {
+          async () => {
             const comparison = await compareBaseVersionAtTarget(
               source,
-              lockedTransaction,
+              operation,
               base,
             );
             if (!comparison.matches) {

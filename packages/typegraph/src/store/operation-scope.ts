@@ -369,22 +369,32 @@ export function enterOperation(scope: EntryScope): OperationEntry {
 
 /**
  * The mint where an outside target enters through a public signature
- * (`executeOn`, which `store.batch()` also goes through): the root backend as
- * itself, or the first {@link Operation} of a NEW session for a transaction.
+ * (`executeOn`, which `store.batch()` also goes through), or where a Store
+ * opener receives a bare target from `runOptionallyInTransaction`: the
+ * root backend as itself, or the first {@link Operation} of a NEW session for
+ * a transaction. The Store runtime port never enters here: its members take
+ * the caller's {@link OperationEntry} and run in that operation.
  * The public type carries no session and none is looked up from the object,
  * so whatever transaction the caller holds — one of this Store's, another
  * Store's, or one built on the engine directly — joins as a binding of its
  * own.
- *
- * THE one owner of the root-or-transaction decision for a target held as a
- * backend.
  */
 export function enterTargetOperation(
   target: GraphBackend | StoreTransactionBackend,
 ): OperationEntry {
-  return "transaction" in target ? target : (
+  return isRootBackend(target) ? target : (
       enterOperation(openTransactionSession(target))
     );
+}
+
+/**
+ * THE one owner of the root-or-transaction decision for a value held as a
+ * backend or an entry: only the pooled root has a `transaction` member.
+ */
+function isRootBackend(
+  target: GraphBackend | StoreTransactionBackend | OperationEntry,
+): target is GraphBackend {
+  return "transaction" in target;
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +490,27 @@ export function decorateOperation<Engine extends TransactionBackend>(
   /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
   return { [OPERATION_SESSION]: session, backend: decorated } as Operation;
   /* eslint-enable no-restricted-syntax */
+}
+
+/**
+ * The entry a Store runtime port member runs in, for the entry its caller
+ * handed it: the root itself, or the caller's {@link Operation}, unchanged.
+ *
+ * An operation another copy of TypeGraph minted (the same release loaded as
+ * both an ES module and a CommonJS build) reaches this copy's Store through
+ * the port's global symbol but carries that copy's private keys, so its
+ * session is invisible here: its handle joins as a binding of its own
+ * ({@link enterTargetOperation}), exactly as a bare transaction handed across
+ * the port did. Read off the value handed in; nothing is looked up.
+ */
+export function portOperationEntry(entry: OperationEntry): OperationEntry {
+  if (isRootBackend(entry) || isOwnOperation(entry)) return entry;
+  return enterTargetOperation(entry.backend);
+}
+
+/** Whether `operation` was minted by this copy of the module. */
+function isOwnOperation(operation: Operation): boolean {
+  return OPERATION_SESSION in operation;
 }
 
 /** The session `entry` belongs to, or `undefined` for the root backend. */

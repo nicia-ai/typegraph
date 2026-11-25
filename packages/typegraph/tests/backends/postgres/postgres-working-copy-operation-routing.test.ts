@@ -55,7 +55,7 @@ type RoutedStatement = Readonly<{
 
 /**
  * One source-version check (`compareBaseVersionAtTarget`): the operation
- * whose handle it was given (`undefined` for any other target), and how many
+ * it was given, by its handle (`undefined` for any other target), and how many
  * statements had gone through a recording handle when it began.
  */
 type VersionCheck = Readonly<{
@@ -130,7 +130,7 @@ function routeOperationsThroughRecordingHandles(): Recording {
       .spyOn(baseVersion, "compareBaseVersionAtTarget")
       .mockImplementation((store, target, expected) => {
         versionChecks.push({
-          operation: operationOfHandle.get(target),
+          operation: operationOfHandle.get(target.backend),
           afterStatements: statements.length,
         });
         return compareBaseVersionAtTarget(store, target, expected);

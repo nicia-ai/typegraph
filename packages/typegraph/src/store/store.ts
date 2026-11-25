@@ -378,6 +378,7 @@ import {
   type OperationEntry,
   operationEntryBackend,
   type OperationScoped,
+  portOperationEntry,
   type StatementBackend,
   storeAdoptSchemaWriteTransaction,
   type StoreTransactionBackend,
@@ -659,17 +660,20 @@ function rowMapperConfigFor(backend: StatementBackend) {
 }
 
 /**
- * An optional statement target handed to a public Store runtime member, whose
- * type carries no session: the root as itself, a transaction as the first
- * operation of a new session (`enterTargetOperation`), or `undefined` for the
- * member's own default.
+ * What a Store runtime port member's statements go through for the entry its
+ * caller handed it: the root itself, or the handle of the caller's own
+ * operation, so the member runs in that operation's session and opens none.
+ * Called once per call, after the member's refusals.
  */
-function outsideStatementTarget(
-  target: GraphBackend | StoreTransactionBackend | undefined,
+function portEntryBackend(entry: OperationEntry): StatementBackend {
+  return operationEntryBackend(portOperationEntry(entry));
+}
+
+/** {@link portEntryBackend}, or `undefined` for the member's own default. */
+function portStatementTarget(
+  entry: OperationEntry | undefined,
 ): StatementBackend | undefined {
-  return target === undefined ? undefined : (
-      operationEntryBackend(enterTargetOperation(target))
-    );
+  return entry === undefined ? undefined : portEntryBackend(entry);
 }
 
 // ============================================================
@@ -1738,9 +1742,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // The query path's own construction, not a second spelling of it: a
       // caller that could only rebuild this object could not observe the one
       // the queries actually run on.
-      queryBackend: (target?: GraphBackend | StoreTransactionBackend) =>
+      queryBackend: (target?: OperationEntry) =>
         this.#createHookedQueryBackend(
-          outsideStatementTarget(target) ?? this[STORE_RUNTIME].backend,
+          portStatementTarget(target) ?? this[STORE_RUNTIME].backend,
         ),
       sealedQuery: (coordinate) => this.sealedQuery(coordinate),
       recordedNodeGetById: (kind, id, coordinate) =>
@@ -1769,20 +1773,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       },
       rebuildIdentityClosure: () => this.rebuildIdentityClosure(),
       validateIdentity: () => this.validateIdentity(),
-      deleteNodeWithPolicy: (
-        target: GraphBackend | StoreTransactionBackend,
-        work,
-        policy,
-      ) =>
+      deleteNodeWithPolicy: (target: OperationEntry, work, policy) =>
         executeNodeDelete(
           this.#createNodeOperationContext(),
           work.kind,
           work.id,
-          enterTargetOperation(target),
+          portOperationEntry(target),
           { policy },
         ),
       applyResolvedNodeUniqueness: async (
-        transaction: StoreTransactionBackend,
+        operation: Operation,
         writes,
         apply,
       ) => {
@@ -1798,11 +1798,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // they are outside a merge — this branch is what keeps that true.
           return apply();
         }
-        // The transaction arrives through a signature the public API spells,
-        // with no session: it joins as a binding of its own.
-        const target = enterOperation(
-          openTransactionSession(transaction),
-        ).backend;
+        // The caller's own operation: the claim work runs in its session.
+        const target = portEntryBackend(operation);
         // The per-graph write lock, before any claim or sidecar work: the
         // rebuild below writes claim rows, and the lock is what the claim
         // discipline requires ahead of them. It is reentrant and memoized per
@@ -1822,11 +1819,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           apply,
         );
       },
-      liveNodesSharingIds: async (
-        ids,
-        target?: GraphBackend | StoreTransactionBackend,
-      ) => {
-        const backend = outsideStatementTarget(target) ?? this.#baseBackend;
+      liveNodesSharingIds: async (ids, target?: OperationEntry) => {
+        const backend = portStatementTarget(target) ?? this.#baseBackend;
         const liveKindsById = await liveNodeKindsSharingIds(
           this.#identityContext(backend),
           backend,
@@ -1838,13 +1832,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         }
         return peers;
       },
-      identityAssertionRowsByIds: async (
-        ids,
-        target?: GraphBackend | StoreTransactionBackend,
-      ) => {
+      identityAssertionRowsByIds: async (ids, target?: OperationEntry) => {
         // An identity-disabled graph has no assertions table to read from.
         if (this.#graph.identity === undefined) return new Map();
-        const backend = outsideStatementTarget(target) ?? this.#baseBackend;
+        const backend = portStatementTarget(target) ?? this.#baseBackend;
         const ctx = this.#identityContext(backend);
         const rows = await loadAssertionsByIds(
           backend,
@@ -1858,11 +1849,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       },
       structuralIdentityClasses: async (
         references,
-        target?: GraphBackend | StoreTransactionBackend,
+        target?: OperationEntry,
       ) => {
         // An identity-disabled graph has no closure table to read from.
         if (this.#graph.identity === undefined) return new Map();
-        const backend = outsideStatementTarget(target) ?? this.#baseBackend;
+        const backend = portStatementTarget(target) ?? this.#baseBackend;
         const ctx = this.#identityContext(backend);
         return loadCurrentStructuralClasses(
           backend,
@@ -1873,12 +1864,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       },
       readCurrentIdentityAssertions: (mode, options) =>
         this.readCurrentIdentityAssertions(mode, options),
-      identityAssertionsAtTarget: (
-        target: GraphBackend | StoreTransactionBackend,
-        mode,
-      ) => this.identityAssertionsAtTarget(target, mode),
+      identityAssertionsAtTarget: (target: OperationEntry, mode) =>
+        this.identityAssertionsAtTarget(target, mode),
       identityAssertionsTouchingAtTarget: (
-        target: GraphBackend | StoreTransactionBackend,
+        target: OperationEntry,
         references,
         mode,
         options,
@@ -1890,14 +1879,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           options,
         ),
       interchangeIdentityAssertionsByIdsAtTarget: async (
-        transaction: GraphBackend | StoreTransactionBackend,
+        transaction: OperationEntry,
         ids,
         mode,
         options,
       ) => {
         // Returns before entry: an empty read enters nothing.
         if (this.#graph.identity === undefined || ids.length === 0) return [];
-        const target = this.#identityTargetBackend(transaction);
+        const target = portEntryBackend(transaction);
         return readIdentityAssertionsByIdsAtTarget(
           this.#identityContext(target),
           target,
@@ -1907,7 +1896,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         );
       },
       readIdentityAssertionPageAtTarget: (
-        target: GraphBackend | StoreTransactionBackend,
+        target: OperationEntry,
         mode,
         options,
       ) => this.readIdentityAssertionPageAtTarget(target, mode, options),
@@ -1921,17 +1910,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.detachDeletedImportedIdentityNode(target, reference),
       importIdentityAssertionsAtTarget: (target, assertions, mode) =>
         this.importIdentityAssertionsAtTarget(target, assertions, mode),
-      readIdentityTransitionPageAtTarget: (
-        target: GraphBackend | StoreTransactionBackend,
-        options,
-      ) => this.readIdentityTransitionPageAtTarget(target, options),
-      identityTransitionRetentionAtTarget: (
-        target: GraphBackend | StoreTransactionBackend,
-      ) => this.identityTransitionRetentionAtTarget(target),
+      readIdentityTransitionPageAtTarget: (target: OperationEntry, options) =>
+        this.readIdentityTransitionPageAtTarget(target, options),
+      identityTransitionRetentionAtTarget: (target: OperationEntry) =>
+        this.identityTransitionRetentionAtTarget(target),
       importIdentityTransitionsAtTarget: (target, transitions, carriedCut) =>
         this.importIdentityTransitionsAtTarget(target, transitions, carriedCut),
       applyIdentityMergeAtTarget: (
-        target: GraphBackend | StoreTransactionBackend,
+        target: OperationEntry,
         retractions,
         assertions,
         decision,
@@ -1943,7 +1929,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           decision,
         ),
       assertIdentityClassesConsistentAtTarget: (
-        target: GraphBackend | StoreTransactionBackend,
+        target: OperationEntry,
         seeds,
       ) => this.assertIdentityClassesConsistentAtTarget(target, seeds),
     };
@@ -2194,11 +2180,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Reads identity truth through an already-bound transaction. */
   identityAssertionsAtTarget(
-    transaction: GraphBackend | StoreTransactionBackend,
+    transaction: OperationEntry,
     mode: "state" | "archival" = "state",
   ): Promise<readonly IdentityTransferAssertion[]> {
     if (this.#graph.identity === undefined) return Promise.resolve([]);
-    const target = this.#identityTargetBackend(transaction);
+    const target = portEntryBackend(transaction);
     return readIdentityAssertionsForInterchange(
       this.#identityContext(target),
       target,
@@ -2208,7 +2194,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Reads current or archival identity truth incident to endpoints. */
   identityAssertionsTouchingAtTarget(
-    transaction: GraphBackend | StoreTransactionBackend,
+    transaction: OperationEntry,
     references: readonly Readonly<{ kind: string; id: string }>[],
     mode: "state" | "archival" = "state",
     options?: Readonly<{ includeDeleted?: boolean }>,
@@ -2216,7 +2202,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     if (this.#graph.identity === undefined || references.length === 0) {
       return Promise.resolve([]);
     }
-    const target = this.#identityTargetBackend(transaction);
+    const target = portEntryBackend(transaction);
     return readIdentityAssertionsTouchingAtTarget(
       this.#identityContext(target),
       target,
@@ -2228,7 +2214,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Reads one bounded identity-assertion page at a bound target. */
   readIdentityAssertionPageAtTarget(
-    transaction: GraphBackend | StoreTransactionBackend,
+    transaction: OperationEntry,
     mode: "state" | "archival",
     options: Readonly<{
       nodeKinds?: readonly string[];
@@ -2240,7 +2226,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     if (this.#graph.identity === undefined) {
       return Promise.resolve({ assertions: [], done: true });
     }
-    const target = this.#identityTargetBackend(transaction);
+    const target = portEntryBackend(transaction);
     return readIdentityAssertionPageAtTarget(
       this.#identityContext(target),
       target,
@@ -2339,7 +2325,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Reads one bounded page of a graph's ARCHIVAL identity transitions, oldest first. */
   async readIdentityTransitionPageAtTarget(
-    transaction: GraphBackend | StoreTransactionBackend,
+    transaction: OperationEntry,
     options: Readonly<{ after?: IdentityTransitionCursor; limit: number }>,
   ): Promise<
     Readonly<{
@@ -2352,7 +2338,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       return { transitions: [], done: true };
     }
     const page = await readIdentityTransitionPageForInterchange(
-      this.#identityTargetBackend(transaction),
+      portEntryBackend(transaction),
       this.#sqlSchema(),
       this.graphId,
       options,
@@ -2366,11 +2352,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Reads a graph's identity transition retention for archival export. */
   identityTransitionRetentionAtTarget(
-    transaction: GraphBackend | StoreTransactionBackend,
+    transaction: OperationEntry,
   ): Promise<IdentityTransitionRetention> {
     if (this.#graph.identity === undefined) return Promise.resolve({});
     return readIdentityTransitionRetention(
-      this.#identityTargetBackend(transaction),
+      portEntryBackend(transaction),
       this.#sqlSchema(),
       this.graphId,
     );
@@ -2430,13 +2416,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * the merge just wrote, inside the merge's own transaction.
    */
   assertIdentityClassesConsistentAtTarget(
-    transaction: GraphBackend | StoreTransactionBackend,
+    transaction: OperationEntry,
     seeds: readonly Readonly<{ kind: string; id: string }>[],
   ): Promise<void> {
     if (this.#graph.identity === undefined || seeds.length === 0) {
       return Promise.resolve();
     }
-    const target = this.#identityTargetBackend(transaction);
+    const target = portEntryBackend(transaction);
     return assertAffectedIdentityClassesConsistent(
       this.#identityContext(target),
       target,
@@ -2446,7 +2432,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Mechanical graph-merge apply through the mutation coordinator. */
   applyIdentityMergeAtTarget(
-    transaction: GraphBackend | StoreTransactionBackend,
+    transaction: OperationEntry,
     retractions: readonly IdentityTransferAssertion[],
     assertions: readonly IdentityTransferAssertion[],
     decision?: IdentityDecisionProvenance,
@@ -2460,7 +2446,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         { code: "IDENTITY_MERGE_REQUIRES_PROFILE", graphId: this.graphId },
       );
     }
-    const entry = enterTargetOperation(transaction);
+    // The caller's own operation: the identity writes run in its session.
+    const entry = portOperationEntry(transaction);
     return applyIdentityChangesForContext(
       this.#identityContext(operationEntryBackend(entry)),
       entry,
@@ -4779,9 +4766,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // resolves a session/lease the raw `txBackend` registered under.
           const {
             session,
-            binding: { txBackend, mutationWitness, writeTarget },
+            binding: { txOperation, mutationWitness, writeTarget },
           } = await openBoundTransactionSession(transaction, (opened, held) => {
-            const txBackend = enterOperation(opened).backend;
+            const txOperation = enterOperation(opened);
             const mutationWitness =
               this.#engineNativeHistory && receiptRequested ?
                 createMutationWitness()
@@ -4802,7 +4789,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             }
             return {
               statements: writeTarget,
-              binding: { txBackend, mutationWitness, writeTarget },
+              binding: { txOperation, mutationWitness, writeTarget },
             };
           });
           const runHooks = this.#createBufferedHookRunner(pending, writeTarget);
@@ -4832,7 +4819,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             );
           const output = await withWriteTransactionSession(
             writeTarget,
-            txBackend,
+            txOperation.backend,
             {
               graphId: this.graphId,
               schemaVersion: this.#schemaMetadata.schemaVersion,
@@ -4848,10 +4835,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // Fires the pre-commit hook here, once the write session has advanced
           // the revision clock, unless the recorded-capture backend claimed it
           // to fire after its own flush.
-          await settleTransactionPreCommitHook(transactionOptions, txBackend);
+          await settleTransactionPreCommitHook(transactionOptions, txOperation);
           // The engine-native counterpart to capture's flush observer: read
           // inside the transaction (before its outer COMMIT), on the SAME
-          // committing session `txBackend` is, so `recordedTime.revisionNow`
+          // committing session `txOperation` is, so `recordedTime.revisionNow`
           // answers with the PENDING revision this transaction's writes will
           // land at once it commits, not the last one already committed
           // before it opened. Exactly once — never once per graph, since an
@@ -4863,8 +4850,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // or an empty-body `transactionWithReceipt()` neither takes the
           // extra round trip nor stamps an instant nothing earned.
           if (mutationWitness?.mutated === true) {
-            recordedByGraph =
-              await this.#engineRecordedFlushInstants(txBackend);
+            recordedByGraph = await this.#engineRecordedFlushInstants(
+              txOperation.backend,
+            );
           }
           return output;
         };
@@ -5961,18 +5949,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.#identityContext(target)
       : { ...this.#identityContext(target), ...view };
     return { context: contextAt(backend), scope, callContext: contextAt };
-  }
-
-  /**
-   * The statement target of one identity port call whose `target` arrives
-   * through a signature the public API spells, with no session: the root
-   * itself, or the handle of the first operation of a binding of its own
-   * (`enterTargetOperation`). Called once per call, after its refusals.
-   */
-  #identityTargetBackend(
-    target: GraphBackend | StoreTransactionBackend,
-  ): StatementBackend {
-    return operationEntryBackend(enterTargetOperation(target));
   }
 
   #identityContext(backend: StatementBackend): IdentityCallContext<G> {

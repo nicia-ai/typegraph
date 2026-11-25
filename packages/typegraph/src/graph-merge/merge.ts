@@ -10,6 +10,7 @@ import { IdentityEndpointValidityError } from "../errors";
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import {
   enterTransactionOperation,
+  type Operation,
   type OperationBackend,
   type StatementBackend,
 } from "../store/operation-scope";
@@ -2388,7 +2389,7 @@ function plannedAssertionEndsByNode(
 
 async function applyNodeRows<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   nodesApi: TxNodes,
   deletions: readonly MergePlanEntityRef[],
   upserts: readonly MechanicalNodeWrite[],
@@ -2430,7 +2431,7 @@ async function applyNodeRows<G extends GraphDef>(
     }
   }
   return storeRuntime(target).applyResolvedNodeUniqueness(
-    txBackend,
+    operation,
     {
       upserts: upserts.map((upsert) => ({
         kind: upsert.kind,
@@ -2663,13 +2664,14 @@ type MergeGraphRows = Readonly<{
  */
 async function applyGraphRows<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   nodesApi: TxNodes,
   edgesApi: TxEdges,
   rows: MergeGraphRows,
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
   decision: IdentityDecisionProvenance | undefined,
 ): Promise<Readonly<{ nodes: number; retracted: number; edges: number }>> {
+  const txBackend = operation.backend;
   // Authoritative re-verification, before any row work below: a part
   // attached to a deleted whole after the branch point (and neither deleted
   // nor moved away by this plan) must abort the WHOLE apply.
@@ -2700,7 +2702,7 @@ async function applyGraphRows<G extends GraphDef>(
           () =>
             applyNodeWritePhase(
               target,
-              txBackend,
+              operation,
               nodesApi,
               rows.nodePhase,
               deleteNodeWithPolicy,
@@ -2723,7 +2725,7 @@ async function applyGraphRows<G extends GraphDef>(
 
 async function applyIdentityRows<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   assertions: readonly IdentityTransferAssertion[],
   retractions: readonly IdentityTransferAssertion[],
   // The governing merge decision every transition this apply causes carries.
@@ -2734,7 +2736,7 @@ async function applyIdentityRows<G extends GraphDef>(
 ): Promise<Readonly<{ asserted: number; retracted: number }>> {
   try {
     const applied = await storeRuntime(target).applyIdentityMergeAtTarget(
-      txBackend,
+      operation,
       retractions,
       assertions,
       decision,
@@ -2773,12 +2775,13 @@ type MergeNodeWritePhase = Readonly<{
  */
 async function applyNodeWritePhase<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   nodesApi: TxNodes,
   phase: MergeNodeWritePhase,
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
   decision: IdentityDecisionProvenance | undefined,
 ): Promise<Readonly<{ nodes: number; retracted: number }>> {
+  const txBackend = operation.backend;
   const validityEndedNodes = new Set(
     phase.upserts
       .filter((write) => "validTo" in write)
@@ -2786,7 +2789,7 @@ async function applyNodeWritePhase<G extends GraphDef>(
   );
   const earlyIdentity = await applyIdentityRows(
     target,
-    txBackend,
+    operation,
     [],
     phase.identityRetractions.filter(
       (retraction) =>
@@ -2798,7 +2801,7 @@ async function applyNodeWritePhase<G extends GraphDef>(
   const applyRows = (): Promise<number> =>
     applyNodeRows(
       target,
-      txBackend,
+      operation,
       nodesApi,
       phase.deletions,
       phase.upserts,
@@ -2828,7 +2831,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
   nodesApi: TxNodes,
   edgesApi: TxEdges,
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
   decision: IdentityDecisionProvenance | undefined,
 ): Promise<MergedCounts> {
@@ -2862,7 +2865,7 @@ async function applyInternalMergePlan<G extends GraphDef>(
   }
   const rows = await applyGraphRows(
     target,
-    txBackend,
+    operation,
     nodesApi,
     edgesApi,
     {
@@ -2891,11 +2894,11 @@ async function applyInternalMergePlan<G extends GraphDef>(
   // both commit through here.
   const appliedIdentity = await applyIdentityRows(
     target,
-    txBackend,
+    operation,
     plan.identityAssertions,
     plan.identityRetractions,
     decision,
-    () => assertMergedIdentityClassesConsistent(target, txBackend, plan),
+    () => assertMergedIdentityClassesConsistent(target, operation, plan),
   );
 
   return {
@@ -2979,7 +2982,8 @@ export async function commitPlan<G extends GraphDef>(
         target.transaction(async (tx) => {
           // The commit is one operation of the session of the transaction
           // it opened; the collection writes it drives enter their own.
-          const txBackend = enterTransactionOperation(tx).backend;
+          const operation = enterTransactionOperation(tx);
+          const txBackend = operation.backend;
           await lockMergeCommitFence(txBackend, target, expectedBaseVersion);
           // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
           // transaction, so the target may have been written between the base@V
@@ -2988,19 +2992,19 @@ export async function commitPlan<G extends GraphDef>(
           // content fingerprint through this transaction's snapshot. Either proof
           // ensures the plan still describes the live target before committing.
           if (expectedBaseVersion !== undefined) {
-            await assertTargetUnchanged(txBackend, target, expectedBaseVersion);
+            await assertTargetUnchanged(operation, target, expectedBaseVersion);
           }
           // Identity ids are re-validated EXPLICITLY even under a base@V match:
           // the legacy fingerprint ranges over CURRENT assertions only, so a row
           // that claimed a planned id in the window and was then ended would pass
           // the token check and fail generically inside the applier.
-          await assertPlannedIdentityIdsFresh(target, txBackend, plan);
+          await assertPlannedIdentityIdsFresh(target, operation, plan);
           return applyInternalMergePlan(
             plan,
             tx.nodes as unknown as TxNodes,
             tx.edges as unknown as TxEdges,
             target,
-            txBackend,
+            operation,
             (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
             decision,
           );
@@ -3113,13 +3117,13 @@ async function lockMergeCommitFence<G extends GraphDef>(
  * establishes read dependencies on the graph state used by the plan.
  */
 async function assertTargetUnchanged<G extends GraphDef>(
-  txBackend: OperationBackend,
+  operation: Operation,
   target: Store<G>,
   expectedBaseVersion: BaseVersion,
 ): Promise<void> {
   const comparison = await compareBaseVersionAtTarget(
     target,
-    txBackend,
+    operation,
     expectedBaseVersion,
   );
   if (comparison.matches) return;
@@ -5937,18 +5941,19 @@ async function applyWireMergeWrites<G extends GraphDef>(
   target: Store<G>,
   nodesApi: TxNodes,
   edgesApi: TxEdges,
-  txBackend: OperationBackend,
+  operation: Operation,
   artifact: MergePlanArtifactV3,
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
   decision: IdentityDecisionProvenance | undefined,
 ): Promise<MergedCounts> {
+  const txBackend = operation.backend;
   const identityAssertions = artifact.writes
     .identityAssertions as readonly IdentityTransferAssertion[];
   const identityRetractions = artifact.writes
     .identityRetractions as readonly IdentityTransferAssertion[];
   const rows = await applyGraphRows(
     target,
-    txBackend,
+    operation,
     nodesApi,
     edgesApi,
     {
@@ -5987,13 +5992,13 @@ async function applyWireMergeWrites<G extends GraphDef>(
 
   const appliedIdentity = await applyIdentityRows(
     target,
-    txBackend,
+    operation,
     identityAssertions,
     identityRetractions,
     decision,
     () =>
       storeRuntime(target).assertIdentityClassesConsistentAtTarget(
-        txBackend,
+        operation,
         identityConsistencySeeds(
           artifact,
           target.graph.identity?.sameIdAcrossKinds,
@@ -6112,12 +6117,13 @@ export async function validateMergePlanForTarget<G extends GraphDef>(
 async function applyValidatedMergePlanInTransaction<G extends GraphDef>(
   target: Store<G>,
   tx: TransactionContext<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   artifact: MergePlanArtifactV3,
   options: MergePlanApplyOptions<G>,
   requireFreshSnapshot: boolean,
   decision: IdentityDecisionProvenance | undefined,
 ): Promise<MergedCounts> {
+  const txBackend = operation.backend;
   const { beforeApply, afterApply } = options;
   await assertMergePlanFenceInsideTransaction(
     target,
@@ -6137,7 +6143,7 @@ async function applyValidatedMergePlanInTransaction<G extends GraphDef>(
     tx.edges as unknown as TxEdges,
     artifact,
   );
-  await assertPlannedIdentityIdsFresh(target, txBackend, {
+  await assertPlannedIdentityIdsFresh(target, operation, {
     identityAssertions: artifact.writes.identityAssertions,
     identityRetractions: artifact.writes.identityRetractions,
   });
@@ -6145,7 +6151,7 @@ async function applyValidatedMergePlanInTransaction<G extends GraphDef>(
     target,
     tx.nodes as unknown as TxNodes,
     tx.edges as unknown as TxEdges,
-    txBackend,
+    operation,
     artifact,
     (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
     decision,
@@ -6212,7 +6218,7 @@ export async function applyMergePlan<G extends GraphDef>(
             applyValidatedMergePlanInTransaction(
               target,
               tx,
-              enterTransactionOperation(tx).backend,
+              enterTransactionOperation(tx),
               artifact,
               options,
               composed,
@@ -6321,7 +6327,8 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
     }
     // One operation of the caller's transaction's session for the whole
     // apply: its fences, savepoint and direct statements.
-    const txBackend = enterTransactionOperation(tx).backend;
+    const operation = enterTransactionOperation(tx);
+    const txBackend = operation.backend;
     await assertMergeTransactionPristine(effectiveTarget, txBackend);
     const decision = mergeIdentityDecisionFromArtifact(artifact, options);
     const merged = await withAdoptedMergeApplySavepoint(
@@ -6331,7 +6338,7 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
         applyValidatedMergePlanInTransaction(
           effectiveTarget,
           tx,
-          txBackend,
+          operation,
           artifact,
           {},
           true,
@@ -7545,7 +7552,8 @@ async function commitIncrementalPlan<G extends GraphDef>(
         target.transaction(async (tx) => {
           // The commit is one operation of the session of the transaction
           // it opened; the collection writes it drives enter their own.
-          const txBackend = enterTransactionOperation(tx).backend;
+          const operation = enterTransactionOperation(tx);
+          const txBackend = operation.backend;
           // The fork point carries no target base version to anchor on.
           await lockMergeCommitFence(txBackend, target, undefined);
           // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
@@ -7570,10 +7578,10 @@ async function commitIncrementalPlan<G extends GraphDef>(
           // it), then the probe-based layers revalidate peers, classes, the
           // negative ledger, and finally re-run the full identity simulation on
           // the tx snapshot.
-          await assertPlannedIdentityIdsFresh(target, txBackend, plan);
+          await assertPlannedIdentityIdsFresh(target, operation, plan);
           await assertIdentityPeersStable(
             target,
-            txBackend,
+            operation,
             guard.identityPeerProbe,
             plan,
           );
@@ -7587,7 +7595,7 @@ async function commitIncrementalPlan<G extends GraphDef>(
             nodesApi,
             edgesApi,
             target,
-            txBackend,
+            operation,
             (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
             decision,
           );

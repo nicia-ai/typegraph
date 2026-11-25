@@ -17,6 +17,7 @@ import {
 } from "../../src/graph-merge/base-version";
 import {
   enterOperation,
+  enterTransactionOperation,
   openTransactionSession,
 } from "../../src/store/operation-scope";
 import {
@@ -25,7 +26,6 @@ import {
   settleTransactionPreCommitHook,
   withTransactionPreCommitHook,
 } from "../../src/store/recorded-capture";
-import { transactionBackend } from "../../src/store/runtime-port";
 import { createStore, type Store } from "../../src/store/store";
 import { createTestBackend } from "../test-utils";
 
@@ -53,9 +53,9 @@ async function commitWithPreCommitBase(store: Store<typeof graph>) {
     async (transaction) => {
       await transaction.nodes.Person.create({ name: "Alice" });
     },
-    withTransactionPreCommitHook(undefined, async (target) => {
+    withTransactionPreCommitHook(undefined, async (operation) => {
       hookCalls += 1;
-      observed.push(await computeBaseVersionAtTarget(store, target));
+      observed.push(await computeBaseVersionAtTarget(store, operation));
     }),
   );
   return { observed, hookCalls };
@@ -67,11 +67,7 @@ describe.each(MODES)("$label", ({ options }) => {
     await store.nodes.Person.create({ name: "Seed" });
     const expected = await computeBaseVersion(store);
     const observed = await store.transaction(async (transaction) =>
-      computeBaseVersionAtTarget(
-        store,
-        enterOperation(openTransactionSession(transactionBackend(transaction)))
-          .backend,
-      ),
+      computeBaseVersionAtTarget(store, enterTransactionOperation(transaction)),
     );
     expect(observed).toBe(expected);
   });
@@ -136,11 +132,11 @@ describe("the pre-commit hook's single firing owner", () => {
     await withTarget(async (target) => {
       await settleTransactionPreCommitHook(
         attempt,
-        enterOperation(openTransactionSession(target)).backend,
+        enterOperation(openTransactionSession(target)),
       );
       await settleTransactionPreCommitHook(
         attempt,
-        enterOperation(openTransactionSession(target)).backend,
+        enterOperation(openTransactionSession(target)),
       );
     });
     expect(hookCalls).toBe(1);
@@ -160,13 +156,13 @@ describe("the pre-commit hook's single firing owner", () => {
     await withTarget(async (target) => {
       await settleTransactionPreCommitHook(
         attempt,
-        enterOperation(openTransactionSession(target)).backend,
+        enterOperation(openTransactionSession(target)),
       );
       expect(hookCalls).toBe(0);
-      await fire?.(enterOperation(openTransactionSession(target)).backend);
+      await fire?.(enterOperation(openTransactionSession(target)));
       expect(hookCalls).toBe(1);
       await expect(
-        fire?.(enterOperation(openTransactionSession(target)).backend),
+        fire?.(enterOperation(openTransactionSession(target))),
       ).rejects.toBeInstanceOf(CompilerInvariantError);
     });
     expect(hookCalls).toBe(1);
@@ -177,7 +173,7 @@ describe("the pre-commit hook's single firing owner", () => {
       expect(claimTransactionPreCommitHook(undefined)).toBeUndefined();
       await settleTransactionPreCommitHook(
         undefined,
-        enterOperation(openTransactionSession(target)).backend,
+        enterOperation(openTransactionSession(target)),
       );
     });
   });

@@ -61,6 +61,7 @@ import {
 import {
   enterOperation,
   openTransactionSession,
+  type Operation,
   type OperationBackend,
   type StatementBackend,
   type StoreTransactionBackend,
@@ -244,10 +245,11 @@ const TRANSACTION_PRE_COMMIT_HOOK = Symbol(
  * after every write-side bookkeeping step — the recorded-time capture flush or
  * the revision-clock advance — and before COMMIT, so it observes the state the
  * commit will publish. A throw rolls the whole transaction back.
+ *
+ * It receives the operation of the layer that fires it, and runs in that
+ * operation: a Store runtime port member it calls is handed the same one.
  */
-export type TransactionPreCommitHook = (
-  target: OperationBackend,
-) => Promise<void>;
+export type TransactionPreCommitHook = (operation: Operation) => Promise<void>;
 
 /**
  * One transaction attempt's pre-commit hook and which layer answers for firing
@@ -285,7 +287,7 @@ function readPreCommitHookSlot(
 
 async function firePreCommitHook(
   slot: PreCommitHookSlot,
-  target: OperationBackend,
+  operation: Operation,
 ): Promise<void> {
   if (slot.state === "fired") {
     throw new CompilerInvariantError(
@@ -293,7 +295,7 @@ async function firePreCommitHook(
     );
   }
   slot.state = "fired";
-  await slot.hook(target);
+  await slot.hook(operation);
 }
 
 /**
@@ -320,11 +322,11 @@ export function beginPreCommitHookAttempt(
  */
 export function claimTransactionPreCommitHook(
   options: InternalTransactionOptions | undefined,
-): ((target: OperationBackend) => Promise<void>) | undefined {
+): ((operation: Operation) => Promise<void>) | undefined {
   const slot = readPreCommitHookSlot(options);
   if (slot?.state !== "pending") return undefined;
   slot.state = "claimed";
-  return (target) => firePreCommitHook(slot, target);
+  return (operation) => firePreCommitHook(slot, operation);
 }
 
 /**
@@ -336,10 +338,10 @@ export function claimTransactionPreCommitHook(
  */
 export async function settleTransactionPreCommitHook(
   options: InternalTransactionOptions | undefined,
-  target: OperationBackend,
+  operation: Operation,
 ): Promise<void> {
   const slot = readPreCommitHookSlot(options);
-  if (slot?.state === "pending") await firePreCommitHook(slot, target);
+  if (slot?.state === "pending") await firePreCommitHook(slot, operation);
 }
 
 function stripRecordedFlushOptions(
@@ -1457,9 +1459,8 @@ export function createRecordedBackend(
           // the isolation check, the capture flush and the pre-commit hook
           // run as one operation of it. The Store the callback belongs to
           // joins the transaction it is handed as a binding of its own.
-          const target = enterOperation(
-            openTransactionSession(transaction),
-          ).backend;
+          const operation = enterOperation(openTransactionSession(transaction));
+          const target = operation.backend;
           await assertRecordedCaptureTransactionIsolation(
             target,
             backendOptions,
@@ -1474,7 +1475,7 @@ export function createRecordedBackend(
           const result = await fn(scope.backend);
           const instants = await scope.flush();
           observer?.(instants);
-          await firePreCommitHook?.(target);
+          await firePreCommitHook?.(operation);
           return result;
         },
         backendOptions,

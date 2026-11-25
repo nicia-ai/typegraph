@@ -45,9 +45,11 @@
  * the real store surface.
  */
 
-import type {
-  OperationBackend,
-  StatementBackend,
+import {
+  type Operation,
+  type OperationEntry,
+  operationEntryBackend,
+  type StatementBackend,
 } from "../store/operation-scope";
 import { canonicalizeProps, parseRowProps } from "./canonical-props";
 import { compareStrings } from "./node-key";
@@ -349,9 +351,13 @@ function mintRevisionOrigin<G extends GraphDef>(
  */
 export async function computeBaseVersionAtTarget<G extends GraphDef>(
   store: Store<G>,
-  target: OperationBackend,
+  operation: Operation,
 ): Promise<BaseVersion> {
-  return computeBaseVersionOn(store, target, targetAnchorReads(store, target));
+  return computeBaseVersionOn(
+    store,
+    operation,
+    targetAnchorReads(store, operation.backend),
+  );
 }
 
 /** How one base-version computation reads the graph's revision anchor. */
@@ -375,7 +381,7 @@ type TargetAnchorReads = RevisionAnchorReads &
  */
 function targetAnchorReads<G extends GraphDef>(
   store: Store<G>,
-  target: OperationBackend,
+  target: Operation["backend"],
 ): TargetAnchorReads {
   return {
     mintOrigin: () =>
@@ -405,17 +411,18 @@ async function readLiveSchemaHalf<G extends GraphDef>(
 
 /**
  * THE one owner of the content half of a live base version: the live-content
- * fingerprint, current identity assertions included, read through `target`.
+ * fingerprint, current identity assertions included, read in `entry` (the
+ * root, or the caller's operation, which the identity read also runs in).
  */
 async function readLiveContentComponent<G extends GraphDef>(
   store: Store<G>,
-  target: StatementBackend,
+  entry: OperationEntry,
 ): Promise<string> {
   return computeContentComponent(
-    target,
+    operationEntryBackend(entry),
     store.graphId,
     store.graph,
-    await storeRuntime(store).identityAssertionsAtTarget(target, "state"),
+    await storeRuntime(store).identityAssertionsAtTarget(entry, "state"),
   );
 }
 
@@ -428,9 +435,10 @@ async function readLiveContentComponent<G extends GraphDef>(
  */
 async function computeBaseVersionOn<G extends GraphDef>(
   store: Store<G>,
-  target: StatementBackend,
+  entry: OperationEntry,
   reads: RevisionAnchorReads,
 ): Promise<BaseVersion> {
+  const target = operationEntryBackend(entry);
   // The document hash is deliberately version-blind, and the revision
   // clock does not advance on schema commits — so a schema ROUND-TRIP
   // (migrate away and back) would otherwise restore the exact token while
@@ -454,7 +462,7 @@ async function computeBaseVersionOn<G extends GraphDef>(
   }
   // Without TypeGraph revision tracking, the complete graph fingerprint is
   // the commit-spanning fence, including current identity assertions.
-  const contentComponent = await readLiveContentComponent(store, target);
+  const contentComponent = await readLiveContentComponent(store, entry);
   const originsSupported = recordedRevisionOriginsVerdict(
     storeBackend(store),
   ).supported;
@@ -522,9 +530,10 @@ export type BaseVersionTargetComparison =
  */
 export async function compareBaseVersionAtTarget<G extends GraphDef>(
   store: Store<G>,
-  target: OperationBackend,
+  operation: Operation,
   expected: BaseVersion,
 ): Promise<BaseVersionTargetComparison> {
+  const target = operation.backend;
   const { activeVersion, schemaComponent } = await readLiveSchemaHalf(
     store,
     target,
@@ -577,7 +586,7 @@ export async function compareBaseVersionAtTarget<G extends GraphDef>(
       };
     }
   }
-  const liveContent = await readLiveContentComponent(store, target);
+  const liveContent = await readLiveContentComponent(store, operation);
   const expectedContent = contentFingerprintOf(expected);
   return liveContent === expectedContent ?
       { matches: true }
