@@ -883,6 +883,16 @@ const RESOLVED_NODE_UPDATE_LOCK_CLAUSES = {
   sqlite: sql.empty(),
 } satisfies Record<SqlDialect, SQL>;
 
+/**
+ * The lock a claim purge takes on the rows it is about to delete, in
+ * claim-target order (see `buildPurgeEdgeClaims`). SQLite owns its single
+ * writer before the statement runs, so its token is deliberately empty.
+ */
+const CLAIM_PURGE_LOCK_CLAUSES = {
+  postgres: sql`FOR UPDATE`,
+  sqlite: sql.empty(),
+} satisfies Record<SqlDialect, SQL>;
+
 function postgresRowLock(strength: "FOR KEY SHARE" | "FOR UPDATE") {
   return (of?: readonly string[]): SQL =>
     of === undefined || of.length === 0 ?
@@ -1468,7 +1478,12 @@ function createCommonOperationStrategy(
       return buildTakeOverEdgeClaimGuarded(tables, params, timestamp);
     },
     buildPurgeEdgeClaims(params: PurgeEdgeClaimsParams): SQL {
-      return buildPurgeEdgeClaims(tables, params);
+      return buildPurgeEdgeClaims(
+        tables,
+        params,
+        dialect,
+        CLAIM_PURGE_LOCK_CLAUSES[dialect],
+      );
     },
     buildContendedUniqueRowAudit(
       graphId: string,

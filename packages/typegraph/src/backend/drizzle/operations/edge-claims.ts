@@ -1020,19 +1020,52 @@ export function buildTakeOverEdgeClaimGuarded(
  * A hard delete or a `clearGraph` removes the edges a claim's liveness
  * predicate reads, so the claim would already be takeable; this only stops the
  * relation from growing without bound.
+ *
+ * The rows are locked in claim-target order (code point on axis, then key —
+ * the order `compareClaimTargets` gives every claim write) before they are
+ * deleted, by `rowLockClause` on the ordered sub-select. A plain
+ * `DELETE ... WHERE edge_id IN (...)` locks rows in whatever order it scans
+ * them, so against an edge create that holds one of the same claim rows and
+ * waits for another it could take the second first: each session then waits
+ * for the other and PostgreSQL aborts one with `40P01`. A row a concurrent
+ * writer took over while this statement waited no longer names a listed edge
+ * when it is re-checked, so it is skipped rather than purged. SQLite admits one
+ * writer at a time and passes an empty clause.
  */
 export function buildPurgeEdgeClaims(
   tables: Tables,
   params: PurgeEdgeClaimsParams,
+  dialect: SqlDialect,
+  rowLockClause: SQL,
 ): SQL {
   const { edgeClaims } = tables;
+  const claimsName = getTableName(edgeClaims);
+  const relation = claimsName.replaceAll('"', '""');
+  const orderKey = (column: string): SQL =>
+    codePointOrderKey(
+      fragmentSql.raw(`"${relation}"."${column.replaceAll('"', '""')}"`),
+      dialect,
+    );
   return sql`
     DELETE FROM ${edgeClaims}
-    WHERE ${edgeClaims.graphId} = ${params.graphId}
-      AND ${edgeClaims.edgeId} IN (${sql.join(
-        params.edgeIds.map((edgeId) => sql`${edgeId}`),
-        sql`, `,
-      )})
+    WHERE (
+      ${quotedColumn(edgeClaims.graphId)},
+      ${quotedColumn(edgeClaims.axis)},
+      ${quotedColumn(edgeClaims.key)}
+    ) IN (
+      SELECT
+        ${qualifiedColumn(claimsName, edgeClaims.graphId)},
+        ${qualifiedColumn(claimsName, edgeClaims.axis)},
+        ${qualifiedColumn(claimsName, edgeClaims.key)}
+      FROM ${edgeClaims}
+      WHERE ${qualifiedColumn(claimsName, edgeClaims.graphId)} = ${params.graphId}
+        AND ${qualifiedColumn(claimsName, edgeClaims.edgeId)} IN (${sql.join(
+          params.edgeIds.map((edgeId) => sql`${edgeId}`),
+          sql`, `,
+        )})
+      ORDER BY ${orderKey(edgeClaims.axis.name)}, ${orderKey(edgeClaims.key.name)}
+      ${rowLockClause}
+    )
   `;
 }
 
