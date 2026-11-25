@@ -47,10 +47,17 @@
  * object with no link to the enclosing one, so its sessions share a state of
  * their own.
  *
- * Residual: better-sqlite3 reports THAT a transaction is open, not WHICH. If
- * the engine's transaction ends implicitly (a trigger's `RAISE(ROLLBACK)`)
- * and the caller opens another before any lookup or engine publish observes
- * the end, a lookup inside that one still honours the ended token.
+ * Residuals, where the driver exposes no signal that would close them:
+ *
+ * - better-sqlite3 reports THAT a transaction is open, not WHICH. If the
+ *   engine's transaction ends implicitly (a trigger's `RAISE(ROLLBACK)`) and
+ *   the caller opens another before any lookup or engine publish observes the
+ *   end, a lookup inside that one still honours the ended token.
+ * - node-postgres keeps the pooled client on a Drizzle transaction object
+ *   after its transaction ends and the client returns to the pool. A caller
+ *   who keeps using that object past its callback runs statements on
+ *   whatever the client does next, a later transaction included, while the
+ *   object still resolves the transaction it was opened for.
  *
  * The dialect decides which proof a handle offers (`sqliteNativeHandle`,
  * `postgresNativeHandle`), with the one transaction-object classifier its

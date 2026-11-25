@@ -1343,7 +1343,30 @@ function buildPostgresEngineProfileInternal(
   }
   // A backend built over a transaction handle opens savepoints on that
   // transaction, not transactions of its own: whether they commit is decided
-  // by whoever opened the enclosing transaction, so it declares no evidence.
+  // by whoever opened the enclosing transaction, so it declares no evidence,
+  // and refuses a declaration of it (a root backend's forwarded capabilities)
+  // rather than mark a savepoint as if its RELEASE were the COMMIT.
+  // The override type has no `commitOutcome`; a forwarded `capabilities`
+  // object carries one anyway, so it is read as what it may be.
+  const requestedCommitOutcome: unknown = (
+    options.capabilities?.execution as
+      | Readonly<{ commitOutcome?: unknown }>
+      | undefined
+  )?.commitOutcome;
+  if (transactionScoped && requestedCommitOutcome === "commit-reply") {
+    throw new ConfigurationError(
+      `A PostgreSQL backend over a caller's transaction cannot declare execution.commitOutcome: "commit-reply": its transactions are savepoints of the caller's transaction, whose commit only the caller observes.`,
+      {
+        code: "TRANSACTION_SCOPED_COMMIT_OUTCOME",
+        capability: "execution.commitOutcome",
+        requestedCommitOutcome,
+      },
+      {
+        suggestion:
+          "Omit execution.commitOutcome when forwarding a root backend's capabilities to createPostgresBackend(tx) or createPostgresTransactionBackend(tx).",
+      },
+    );
+  }
   const { commitOutcome: baseCommitOutcome, ...baseExecution } =
     baseCapabilities.execution;
   const declaredCapabilities = sealCapabilityDeclaration(

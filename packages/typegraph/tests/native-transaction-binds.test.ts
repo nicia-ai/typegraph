@@ -461,6 +461,35 @@ describe("engine binds on PGlite", () => {
     });
   });
 
+  it.each([
+    { name: "own copy", foreign: false },
+    { name: "another loaded copy", foreign: true },
+  ])(
+    "refuses a commit-reply declaration on a backend over a caller's transaction ($name), whose savepoints cannot report a commit",
+    async ({ foreign }) => {
+      const local = await createLocalPgliteBackend({ vector: false });
+      cleanups.push(() => local.backend.close());
+      const root = createPostgresBackend(local.db, { vector: false });
+      expect(root.capabilities.execution.commitOutcome).toBe("commit-reply");
+      const refusal = await root.transactionWithNative((_target, native) => {
+        const handle =
+          foreign ? asForeignTransaction(native, ForeignPgTransaction) : native;
+        return rejectionOf(() =>
+          Promise.resolve().then(() =>
+            createPostgresBackend(handle, {
+              vector: false,
+              capabilities: root.capabilities,
+            }),
+          ),
+        );
+      });
+      expect(
+        (refusal as { details?: { code?: unknown } } | undefined)?.details
+          ?.code,
+      ).toBe("TRANSACTION_SCOPED_COMMIT_OUTCOME");
+    },
+  );
+
   it("resolves a caller-opened transaction and its caller savepoint to one state through the PGlite transaction client they share", async () => {
     const local = await createLocalPgliteBackend({ vector: false });
     cleanups.push(() => local.backend.close());
