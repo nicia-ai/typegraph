@@ -2855,7 +2855,11 @@ async function runThenCloseView<T>(
   run: () => Promise<T>,
   recordEngineEnd?: RecordEngineEnd,
 ): Promise<T> {
-  const settled = await run().then(
+  // `run` is invoked inside the promise whose settlement ends the view, so a
+  // callback that throws synchronously (rather than rejecting) ends it too.
+  const settled = await new Promise<T>((resolve) => {
+    resolve(run());
+  }).then(
     (value) => ({ threw: false, value }) as const,
     (error: unknown) => ({ threw: true, error }) as const,
   );

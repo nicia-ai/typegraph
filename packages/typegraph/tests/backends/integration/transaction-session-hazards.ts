@@ -1961,6 +1961,100 @@ export function registerTransactionSessionHazardTests(
         });
       });
 
+      // A callback that keeps its backend and then fails, whichever way it
+      // fails: a synchronous throw from the call itself, or a rejection. The
+      // runner rolls back either way, and the kept backend's next write must
+      // be refused rather than reach the connection after that ROLLBACK, in
+      // autocommit.
+      it.each([
+        ["throws synchronously", "sync"],
+        ["rejects", "async"],
+      ] as const)(
+        "refuses a kept backend's write once a callback that %s rolled its transaction back, on every runner",
+        async (_failure, mode) => {
+          const backend = context.getBackend();
+          const graphId = buildGraph().id;
+          const abort = new Error("the callback fails");
+          /** Keeps its argument, then fails the way this case says. */
+          function failingCallback<TKept>(
+            keep: (kept: TKept) => void,
+          ): (kept: TKept) => Promise<never> {
+            return (kept) => {
+              keep(kept);
+              if (mode === "sync") throw abort;
+              return Promise.reject(abort);
+            };
+          }
+          const outcomes: Record<string, Refusal> = {};
+          const lateWrites: Record<string, Refusal> = {};
+
+          // First: trusted import refuses a database that already holds a row.
+          const trustedImport = backend.trustedImport;
+          if (trustedImport !== undefined) {
+            let session: TrustedImportSession | undefined;
+            outcomes["trustedImport"] = await refusalOf(
+              trustedImport(
+                failingCallback<TrustedImportSession>((kept) => {
+                  session = kept;
+                }),
+              ),
+            );
+            lateWrites["trustedImport"] = await refusalOf(
+              requireDefined(session).insertNodes([
+                importedNode(graphId, "after-import"),
+              ]),
+            );
+          }
+
+          let transactionBackend: TransactionBackend | undefined;
+          outcomes["transaction"] = await refusalOf(
+            backend.transaction(
+              failingCallback<TransactionBackend>((kept) => {
+                transactionBackend = kept;
+              }),
+            ),
+          );
+          lateWrites["transaction"] = await refusalOf(
+            requireDefined(transactionBackend).insertNode(
+              importedNode(graphId, "after-transaction"),
+            ),
+          );
+
+          const schemaWriteTransaction = backend.schemaWriteTransaction;
+          if (schemaWriteTransaction !== undefined) {
+            let schemaWriteBackend: TransactionBackend | undefined;
+            outcomes["schemaWriteTransaction"] = await refusalOf(
+              schemaWriteTransaction(
+                graphId,
+                failingCallback<TransactionBackend>((kept) => {
+                  schemaWriteBackend = kept;
+                }),
+              ),
+            );
+            lateWrites["schemaWriteTransaction"] = await refusalOf(
+              requireDefined(schemaWriteBackend).insertNode(
+                importedNode(graphId, "after-schema-write"),
+              ),
+            );
+          }
+
+          const runners = Object.keys(outcomes);
+          expect({
+            outcomes,
+            lateWrites,
+            nodes: await countRows(backend, "nodes", graphId),
+          }).toEqual({
+            outcomes: Object.fromEntries(
+              runners.map((runner) => [runner, String(abort)]),
+            ),
+            lateWrites: Object.fromEntries(
+              runners.map((runner) => [runner, TRANSACTION_CLOSED]),
+            ),
+            nodes: 0,
+          });
+        },
+      );
+
       it("commits a trusted-import batch still in flight when its callback returns", async () => {
         const backend = context.getBackend();
         const trustedImport = backend.trustedImport;
