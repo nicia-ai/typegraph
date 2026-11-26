@@ -10,8 +10,11 @@ import type { GraphBackend } from "../../src/backend/types";
 import { ConfigurationError, SchemaFenceTimeoutError } from "../../src/errors";
 import { requireDefined } from "../../src/utils/presence";
 
-/** Rolls back an attempt whose adoption fit inside the one-millisecond budget. */
-class AdoptedWithinBudget extends Error {}
+/**
+ * Rolls back an attempt that did not reach the schema-row phase inside the
+ * one-millisecond budget: it was adopted, or refused before any acquisition.
+ */
+class RetriedAttempt extends Error {}
 
 const openedBackends: GraphBackend[] = [];
 
@@ -86,10 +89,11 @@ describe("schema-write transaction adoption", () => {
     const adopt = requireDefined(backend.adoptSchemaWriteTransaction);
 
     // A one-millisecond budget runs out between the fence's acquisitions, so
-    // the refusal comes from TypeGraph's own deadline check after the first
-    // acquisition shortened lock_timeout, and the caller's transaction stays
-    // usable. The rare attempt that fits in the budget is rolled back and
-    // retried.
+    // the refusal comes from TypeGraph's own deadline check, and the caller's
+    // transaction stays usable. Only a refusal in the `schema-row` phase
+    // proves the advisory acquisition before it shortened lock_timeout; an
+    // attempt refused before that, or one that fits in the budget, is rolled
+    // back and retried.
     const refusals: Readonly<{ error: unknown; setting: unknown }>[] = [];
     for (let attempt = 0; attempt < 20 && refusals.length === 0; attempt++) {
       const observed = await db
@@ -100,15 +104,21 @@ describe("schema-write transaction adoption", () => {
           try {
             await adopt(nativeTx, "adoption_budget", { waitBudgetMs: 1 });
           } catch (error) {
+            if (
+              error instanceof SchemaFenceTimeoutError &&
+              error.details.phase !== "schema-row"
+            ) {
+              throw new RetriedAttempt();
+            }
             const rows = await nativeTx.execute(
               sql`SELECT current_setting('lock_timeout') AS setting`,
             );
             return { error, setting: rows.rows[0] };
           }
-          throw new AdoptedWithinBudget();
+          throw new RetriedAttempt();
         })
         .catch((error: unknown) => {
-          if (error instanceof AdoptedWithinBudget) return;
+          if (error instanceof RetriedAttempt) return;
           throw error;
         });
       if (observed !== undefined) refusals.push(observed);

@@ -99,7 +99,6 @@ import {
 import { resolveStampedValidityLowerBound } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import {
-  carriesEngineSqlState,
   isInsufficientResourcesError,
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
@@ -2956,6 +2955,22 @@ function buildPostgresEngineProfileInternal(
                   externalTx.execute(
                     sql`SELECT set_config('lock_timeout', ${previousTimeout}, true)`,
                   );
+                // The refusals this fence's own deadline checks raise. Each is
+                // thrown between statements, with none in flight on the
+                // session and the transaction not aborted, so only these leave
+                // a session that can take a restore.
+                const deadlineRefusals = new WeakSet<SchemaFenceTimeoutError>();
+                const deadlineRefusal = (
+                  refusedPhase: "schema-advisory" | "schema-row",
+                ): SchemaFenceTimeoutError => {
+                  const refusal = new SchemaFenceTimeoutError(
+                    graphId,
+                    refusedPhase,
+                    options.waitBudgetMs,
+                  );
+                  deadlineRefusals.add(refusal);
+                  return refusal;
+                };
                 try {
                   await acquireSchemaWriteFence(
                     externalTx,
@@ -2969,11 +2984,7 @@ function buildPostgresEngineProfileInternal(
                       phase = acquisitionPhase;
                       const remainingMs = deadline - performance.now();
                       if (remainingMs <= 0) {
-                        throw new SchemaFenceTimeoutError(
-                          graphId,
-                          acquisitionPhase,
-                          options.waitBudgetMs,
-                        );
+                        throw deadlineRefusal(acquisitionPhase);
                       }
                       const effectiveMs =
                         callerTimeout === 0 ? remainingMs : (
@@ -2987,11 +2998,7 @@ function buildPostgresEngineProfileInternal(
                   // A lock_timeout is per acquisition, so confirm that the entire
                   // ordered advisory/row sequence respected the caller's deadline.
                   if (performance.now() >= deadline) {
-                    throw new SchemaFenceTimeoutError(
-                      graphId,
-                      phase,
-                      options.waitBudgetMs,
-                    );
+                    throw deadlineRefusal(phase);
                   }
                   await restoreCallerLockTimeout();
                 } catch (error) {
@@ -3005,13 +3012,24 @@ function buildPostgresEngineProfileInternal(
                       error,
                     );
                   }
-                  // A refusal raised here rather than by the engine, such as the
-                  // deadline checks above, leaves the caller's transaction usable,
-                  // and the caller may go on with it. It gets its own lock_timeout
-                  // back, not the shortened one of the last acquisition. An engine
-                  // error has aborted the session, which takes no restore.
-                  if (!carriesEngineSqlState(error)) {
-                    await restoreCallerLockTimeout();
+                  // A deadline refusal leaves the caller's transaction usable, and
+                  // the caller may go on with it, so it gets its own lock_timeout
+                  // back rather than the shortened one of the last acquisition.
+                  // Any other failure takes no restore: an engine error has
+                  // aborted the session, and a driver-side failure (a client
+                  // query timeout) can leave the fence statement still running
+                  // on it. The refusal stays the error reported even when the
+                  // restore fails; the documented response to it is to roll the
+                  // transaction back.
+                  if (
+                    error instanceof SchemaFenceTimeoutError &&
+                    deadlineRefusals.has(error)
+                  ) {
+                    try {
+                      await restoreCallerLockTimeout();
+                    } catch {
+                      /* Preserve the refusal. */
+                    }
                   }
                   throw error;
                 }
