@@ -82,6 +82,10 @@ import {
   expectObservation,
   type KnownDefect,
 } from "../../helpers/known-defect";
+import {
+  prefixedTableNames,
+  type TracedStatement,
+} from "../../helpers/traced-connection";
 import type {
   IntegrationLaneDriver,
   IntegrationTestContext,
@@ -420,6 +424,41 @@ async function installHeldInsertTrigger(
     await executeDdl(`DROP TRIGGER ${trigger} ON ${nodesTable}`);
     await executeDdl(`DROP FUNCTION ${trigger}()`);
   };
+}
+
+/**
+ * The import batches into `graphId` (as `insert <node id>`) and the
+ * transaction-control statements among `statements`, in the order they
+ * reached the client.
+ */
+function importStatementsOf(
+  statements: readonly TracedStatement[],
+  graphId: string,
+): readonly string[] {
+  return statements.flatMap((statement) => {
+    const text = statement.text.trim();
+    if (/^(?:COMMIT|ROLLBACK)\b/i.test(text)) return [text.toUpperCase()];
+    // A batch binds its columns as arrays (`UNNEST`), which a driver may
+    // record as array literals: match the serialized parameters.
+    const params = statement.params
+      .map((parameter) =>
+        typeof parameter === "string" ? parameter : JSON.stringify(parameter),
+      )
+      .join(" ");
+    if (!/^INSERT\b/i.test(text) || !params.includes(graphId)) return [];
+    return [HELD_INSERT_ID, "queued"]
+      .filter((id) => params.includes(`"${id}"`))
+      .map((id) => `insert ${id}`);
+  });
+}
+
+/** Resolves once `condition` holds, checking every few milliseconds. */
+async function waitUntil(condition: () => boolean): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("condition never held");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 /** Whether `pending` has settled once every queued microtask has run. */
@@ -2073,69 +2112,109 @@ export function registerTransactionSessionHazardTests(
         }).toEqual({ inFlight: "fulfilled", nodes: 1 });
       });
 
-      it("settles every trusted-import batch the callback left running before its ROLLBACK, so none lands", async () => {
-        const backend = context.getBackend();
-        if (!HELD_STATEMENT_DRIVERS.has(context.driver)) return;
-        const trustedImport = requireDefined(backend.trustedImport);
-        const graphId = buildGraph().id;
-        const removeTrigger = await installHeldInsertTrigger(backend, graphId);
-        const holding = createGate();
-        const release = createGate();
-        // Another session holds the lock the trigger waits for, so the first
-        // batch stays on the wire until the test releases it.
-        const holder = backend.transaction(async (tx) => {
-          await tx.execute(
-            asCompiledRowsSql(
-              sql`SELECT pg_advisory_xact_lock(${HELD_INSERT_LOCK_KEY})`,
-            ),
+      // The import runs on a traced connection of its own, so the order in
+      // which its statements reach the pinned client is observable. On
+      // node-postgres the trace records each statement as it is handed to the
+      // client, so a batch that skipped the transaction's queue would show
+      // before the release; postgres-js records a statement as it is written
+      // to the wire, and holds each until the previous one completed, so
+      // there only the order is observable.
+      it.each([
+        ["ROLLBACK, so none lands", "ROLLBACK"],
+        ["COMMIT, so both land", "COMMIT"],
+      ] as const)(
+        "settles every trusted-import batch the callback left running before its %s",
+        async (_outcome, frameEnd) => {
+          const backend = context.getBackend();
+          if (!HELD_STATEMENT_DRIVERS.has(context.driver)) return;
+          const graphId = buildGraph().id;
+          const traced = await context.openTracedConnection([
+            prefixedTableNames(`hz_held_import_${graphCounter}`),
+          ]);
+          const importBackend = requireDefined(traced.backends[0]);
+          const trustedImport = requireDefined(importBackend.trustedImport);
+          const removeTrigger = await installHeldInsertTrigger(
+            importBackend,
+            graphId,
           );
-          holding.open();
-          await release.opened;
-        });
-        try {
-          await holding.opened;
-          const abort = new Error("abort the import");
-          let held: Promise<Status> = Promise.resolve("rejected");
-          let queued: Promise<Status> = Promise.resolve("rejected");
-          const imported = statusOf(
-            trustedImport((session) => {
-              held = statusOf(
-                session.insertNodes([importedNode(graphId, HELD_INSERT_ID)]),
-              );
-              // Queued behind the held batch on the transaction's statement
-              // queue: without the drain it would reach the client after
-              // the ROLLBACK, in autocommit.
-              queued = statusOf(
-                session.insertNodes([importedNode(graphId, "queued")]),
-              );
-              return Promise.reject(abort);
-            }),
-          );
-          // The callback has rejected; the import cannot settle while the
-          // held batch is on the wire.
-          await new Promise((resolve) => setTimeout(resolve, 20));
-          const settledWhileHeld = await hasSettled(imported);
-          release.open();
-          await holder;
-          expect({
-            settledWhileHeld,
-            imported: await imported,
-            held: await held,
-            queued: await queued,
-            nodes: await countRows(backend, "nodes", graphId),
-          }).toEqual({
-            settledWhileHeld: false,
-            imported: "rejected",
-            held: "fulfilled",
-            queued: "fulfilled",
-            nodes: 0,
+          const holding = createGate();
+          const release = createGate();
+          // Another session holds the lock the trigger waits for, so the first
+          // batch stays on the wire until the test releases it.
+          const holder = backend.transaction(async (tx) => {
+            await tx.execute(
+              asCompiledRowsSql(
+                sql`SELECT pg_advisory_xact_lock(${HELD_INSERT_LOCK_KEY})`,
+              ),
+            );
+            holding.open();
+            await release.opened;
           });
-        } finally {
-          release.open();
-          await holder;
-          await removeTrigger();
-        }
-      });
+          try {
+            await holding.opened;
+            traced.reset();
+            const abort = new Error("abort the import");
+            let held: Promise<Status> = Promise.resolve("rejected");
+            let queued: Promise<Status> = Promise.resolve("rejected");
+            let callbackReturned = false;
+            const imported = statusOf(
+              trustedImport((session) => {
+                held = statusOf(
+                  session.insertNodes([importedNode(graphId, HELD_INSERT_ID)]),
+                );
+                // Queued behind the held batch on the transaction's statement
+                // queue: without the queue it would reach the client while the
+                // held batch is on the wire, and without the drain after the
+                // ROLLBACK, in autocommit.
+                queued = statusOf(
+                  session.insertNodes([importedNode(graphId, "queued")]),
+                );
+                callbackReturned = true;
+                return frameEnd === "ROLLBACK" ?
+                    Promise.reject(abort)
+                  : Promise.resolve();
+              }),
+            );
+            // Wait until the callback has rejected and the held batch has
+            // reached the client: the import cannot settle while it is held.
+            await waitUntil(
+              () =>
+                callbackReturned &&
+                importStatementsOf(traced.statements(), graphId).length > 0,
+            );
+            const settledWhileHeld = await hasSettled(imported);
+            const reachedBeforeRelease = importStatementsOf(
+              traced.statements(),
+              graphId,
+            );
+            release.open();
+            await holder;
+            const importOutcome = await imported;
+            expect({
+              settledWhileHeld,
+              reachedBeforeRelease,
+              reached: importStatementsOf(traced.statements(), graphId),
+              imported: importOutcome,
+              held: await held,
+              queued: await queued,
+              nodes: await countRows(importBackend, "nodes", graphId),
+            }).toEqual({
+              settledWhileHeld: false,
+              reachedBeforeRelease: [`insert ${HELD_INSERT_ID}`],
+              reached: [`insert ${HELD_INSERT_ID}`, "insert queued", frameEnd],
+              imported: frameEnd === "ROLLBACK" ? "rejected" : "fulfilled",
+              held: "fulfilled",
+              queued: "fulfilled",
+              nodes: frameEnd === "ROLLBACK" ? 0 : 2,
+            });
+          } finally {
+            release.open();
+            await holder;
+            await removeTrigger();
+            await traced.close();
+          }
+        },
+      );
 
       it("refuses a write the callback issues after the engine ended its transaction, and saves nothing", async () => {
         const graph = buildGraph();
