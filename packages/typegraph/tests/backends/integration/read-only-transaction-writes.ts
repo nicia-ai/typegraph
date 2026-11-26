@@ -58,7 +58,6 @@ import type {
 } from "../../../src/store/collection-surface";
 import { requireDefined } from "../../../src/utils/presence";
 import { unwrap } from "../../../src/utils/result";
-import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
 
 const RotPerson = defineNode("RotPerson", {
@@ -449,6 +448,44 @@ async function rejectionOf(pending: Promise<unknown>): Promise<unknown> {
   }
 }
 
+/**
+ * What a write's rejection says: TypeGraph's read-only refusal; else a
+ * SQLSTATE anywhere on the error's cause chain, else the first other code
+ * there (a driver code), else the innermost cause's message.
+ * `"fulfilled"` when the write resolved.
+ */
+function writeOutcome(write: unknown): string {
+  if (write === undefined) return "fulfilled";
+  if (
+    write instanceof UnsupportedBackendCapabilityError &&
+    write.details["capability"] === "write transaction access"
+  ) {
+    return "refused as read-only";
+  }
+  const codes: string[] = [];
+  let message = "a rejection that is not an Error";
+  let current: unknown = write;
+  while (typeof current === "object" && current !== null) {
+    const code = (current as Readonly<{ code?: unknown }>).code;
+    if (typeof code === "string") codes.push(code);
+    if (current instanceof Error) message = current.message;
+    current = (current as Readonly<{ cause?: unknown }>).cause;
+  }
+  const sqlState = codes.find((code) => /^[0-9A-Z]{5}$/.test(code));
+  return `rejected: ${sqlState ?? codes[0] ?? message}`;
+}
+
+/**
+ * What a write through a handle retained from an ended transaction does
+ * inside a later read-only transaction, on the lanes that run every
+ * transaction on one connection.
+ */
+const RETAINED_HANDLE_WRITE: Readonly<Record<string, string>> = {
+  "better-sqlite3": "refused as read-only",
+  libsql: "rejected: TRANSACTION_CLOSED",
+  pglite: "rejected: Transaction is closed",
+};
+
 function expectReadOnlyRefusal(
   error: unknown,
   operation: string,
@@ -732,6 +769,114 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
       expect(await graphState(plain)).toEqual(before);
     });
 
+    it("refuses a write through a second Store's adoption of the same handle", async () => {
+      const graph = buildGraph(nextGraphId());
+      const otherGraph = buildGraph(nextGraphId());
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(graph, backend);
+      const [otherStore] = await createAdapterStoreWithSchema(
+        otherGraph,
+        backend,
+      );
+      await seed(store);
+      let refusal: unknown;
+      const committed = await store.transaction(
+        async (tx) => {
+          // The first binding of the handle, then a second one through a
+          // Store of another graph: both are sessions of the one native
+          // transaction, so the second reads its read-only scope too.
+          await store
+            .withTransaction(nativeHandle(tx))
+            .nodes.RotPerson.getById(asNodeId("p1"));
+          refusal = await rejectionOf(
+            otherStore
+              .withTransaction(nativeHandle(tx))
+              .nodes.RotTeam.create({ name: "t3" }, { id: "t3" }),
+          );
+          return tx.nodes.RotPerson.getById(asNodeId("p1"));
+        },
+        { accessMode: "read_only" },
+      );
+      expectReadOnlyRefusal(
+        refusal,
+        "tx.nodes.RotTeam.create()",
+        otherGraph.id,
+      );
+      expect(committed?.id).toBe("p1");
+      expect(await otherStore.nodes.RotTeam.getById(asNodeId("t3"))).toBe(
+        undefined,
+      );
+    });
+
+    it("never writes through a handle retained from an earlier transaction and adopted inside a later read-only one on a one-connection backend", async () => {
+      const graph = buildGraph(nextGraphId());
+      // Server PostgreSQL needs a one-client pool for the later transaction
+      // to run on the retained handle's connection; the other lanes already
+      // run every transaction on one connection.
+      const serialized =
+        context.serverLaneConcurrency ?
+          await context.createSerializedBackend()
+        : undefined;
+      try {
+        const [store] = await createAdapterStoreWithSchema(
+          graph,
+          serialized?.backend ?? context.getBackend(),
+        );
+        await seed(store);
+        let retained: unknown;
+        await store.transaction(async (tx) => {
+          retained = nativeHandle(tx);
+          await tx.nodes.RotPerson.getById(asNodeId("p1"));
+        });
+        let write: unknown;
+        const later = await rejectionOf(
+          store.transaction(
+            async () => {
+              write = await rejectionOf(
+                (async () =>
+                  store
+                    .withTransaction(retained)
+                    .nodes.RotTeam.create({ name: "t3" }, { id: "t3" }))(),
+              );
+            },
+            { accessMode: "read_only" },
+          ),
+        );
+        const team = await store.nodes.RotTeam.getById(asNodeId("t3"));
+        // better-sqlite3's handle is the connection, which proves the later
+        // transaction (proof 4), so the adoption is refused as read-only.
+        // libSQL and PGlite pin the earlier transaction's driver handle, which
+        // reports itself closed, so the driver refuses the statement. On
+        // server PostgreSQL the retained object still resolves the ended
+        // transaction (a residual `native-transaction-handle.ts` names), so
+        // TypeGraph does not refuse; the later transaction is READ ONLY at the
+        // engine, which refuses the statement instead.
+        const outcome = writeOutcome(write);
+        expect({
+          written: outcome === "fulfilled" || team !== undefined,
+          // The exact outcome on the lanes this test could observe it on.
+          exact:
+            context.serverLaneConcurrency ? undefined : (
+              {
+                write: outcome,
+                later: later === undefined ? "fulfilled" : "rejected",
+              }
+            ),
+        }).toEqual({
+          written: false,
+          exact:
+            context.serverLaneConcurrency ? undefined : (
+              {
+                write: RETAINED_HANDLE_WRITE[context.driver],
+                later: "fulfilled",
+              }
+            ),
+        });
+      } finally {
+        await serialized?.close();
+      }
+    });
+
     it("leaves a later read-write transaction writable through the same adoption (a native transaction of its own)", async () => {
       const graph = buildGraph(nextGraphId());
       const [store] = await createAdapterStoreWithSchema(
@@ -752,7 +897,7 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
       expect(team?.id).toBe("t3");
     });
 
-    it("refuses a write through a savepoint the caller opens on tx.sql and adopts directly, where the engine can tell its transaction", async () => {
+    it("refuses a write through a savepoint the caller opens on tx.sql and adopts directly, where the driver proves its transaction, and leaves it to the read-only engine transaction where none does", async () => {
       const graph = buildGraph(nextGraphId());
       const [store] = await createAdapterStoreWithSchema(
         graph,
@@ -791,48 +936,25 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
         ),
       );
       const team = await store.nodes.RotTeam.getById(asNodeId("t3"));
-      const observed = {
-        write:
-          write === undefined ? "fulfilled"
-          : (
-            write instanceof UnsupportedBackendCapabilityError &&
-            write.details["capability"] === "write transaction access"
-          ) ?
-            "refused as read-only"
-          : "rejected by the engine",
+      // A caller's savepoint resolves the read-only transaction where the
+      // driver proves which transaction it is in: better-sqlite3 runs it on
+      // the connection the opener published its transaction on, and libSQL
+      // and PGlite keep the transaction's pinned driver handle in it
+      // (`native-transaction-handle.ts`, proofs 2 and 4). node-postgres and
+      // postgres-js give it a new transaction object with no link to the
+      // enclosing one, so its sessions get a state of their own; the engine
+      // transaction is READ ONLY there, so the engine refuses the write
+      // (SQLSTATE 25006) and Drizzle rolls the savepoint back.
+      const engineDecides =
+        context.driver === "node-postgres" || context.driver === "postgres-js";
+      expect({
+        write: writeOutcome(write),
         transaction: transaction === undefined ? "fulfilled" : "rejected",
         team: team === undefined ? undefined : String(team.id),
-      };
-      // A savepoint Drizzle opens on a transaction object gets a new object
-      // with no link to the enclosing one, and TypeGraph never saw it opened,
-      // so it is recorded as a native transaction of its own
-      // (`native-transaction-handle.ts`). Only better-sqlite3, whose
-      // savepoint runs on the connection the opener published its
-      // transaction on, resolves it to the read-only transaction.
-      expectObservation({
-        lane: { driver: context.driver },
-        observed,
-        correct: {
-          write: "refused as read-only",
-          transaction: "fulfilled",
-          team: undefined,
-        },
-        defects: [
-          {
-            label: "caller savepoint adopted directly",
-            on: { driver: ["libsql"] },
-            today: { write: "fulfilled", transaction: "fulfilled", team: "t3" },
-          },
-          {
-            label: "caller savepoint adopted directly",
-            on: { driver: ["pglite", "node-postgres", "postgres-js"] },
-            today: {
-              write: "rejected by the engine",
-              transaction: "fulfilled",
-              team: undefined,
-            },
-          },
-        ],
+      }).toEqual({
+        write: engineDecides ? "rejected: 25006" : "refused as read-only",
+        transaction: "fulfilled",
+        team: undefined,
       });
     });
 

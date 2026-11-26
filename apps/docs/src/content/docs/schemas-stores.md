@@ -2405,10 +2405,16 @@ not open (your own `db.transaction(fn, { accessMode: "read only" })`) carries no
 TypeGraph writes through it as before, so PostgreSQL rejects the write and aborts the transaction,
 and SQLite has no read-only transaction to refuse it.
 
-One handle is not recognized: a savepoint you open yourself with `tx.sql.transaction(...)` and hand
-to `withTransaction()` is, to TypeGraph, a transaction of its own on every driver but better-sqlite3,
-because the driver gives it a new object with no link to the enclosing transaction. Writes through
-it are not refused by TypeGraph: PostgreSQL rejects them, and libSQL commits them.
+A savepoint you open yourself with `tx.sql.transaction(...)` and hand to `withTransaction()` is
+refused the same way on better-sqlite3, libSQL and PGlite, whose drivers show which transaction it
+runs in. On node-postgres and postgres-js the driver gives it a new object with no link to the
+enclosing transaction, so TypeGraph does not refuse its writes; the engine transaction is read-only,
+so PostgreSQL rejects them and rolls the savepoint back.
+
+On a driver that cannot report whether a transaction is open (`@libsql/client` before 0.18, sql.js,
+Durable Object storage), TypeGraph cannot show which transaction an adoption of `tx.sql` runs in.
+While the read-only callback runs, such an adoption is refused anyway, because every statement on
+that one connection runs inside the read-only transaction.
 
 The refusal covers what TypeGraph writes. A statement issued through the native `tx.sql` handle is
 not checked: PostgreSQL rejects a write there and aborts the transaction (which then rejects with
