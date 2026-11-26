@@ -154,6 +154,21 @@ function boundGraphCommandCoordination(
 }
 
 /**
+ * Whether `coordination` was earned on this graph and on the transaction
+ * session behind `port`: the ownership test every reader of coordination
+ * evidence applies (see {@link graphCommandCoordinationAcquisition}).
+ */
+export function isGraphCommandCoordinationOf(
+  port: GraphCommandPort,
+  coordination: GraphCommandCoordination,
+  graphId: string,
+): boolean {
+  return (
+    boundGraphCommandCoordination(port, coordination, graphId) !== undefined
+  );
+}
+
+/**
  * What the acquisition behind `coordination` observed and did, when it was
  * earned on this graph and transaction; an unobserved acquisition otherwise —
  * coordination minted for another graph or session is evidence of nothing.

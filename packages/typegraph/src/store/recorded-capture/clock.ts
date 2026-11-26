@@ -11,6 +11,7 @@ import {
 import {
   assertFencedSnapshotIsFresh,
   graphCommandCoordinationAcquisition,
+  isGraphCommandCoordinationOf,
   mintGraphCommandCoordination,
   normalizeGraphCommandIsolation,
   readGraphWriteFenceAcquisition,
@@ -423,11 +424,25 @@ function advancedFenceRow(
  * resolved in favour of either.
  */
 function decisionGraphLockMemo(
+  target: GraphWriteFenceTarget,
   graphId: string,
   held: GraphWriteLock | undefined,
   sessionGraphLocks: RecordedGraphLockMemo | undefined,
 ): RecordedGraphLockMemo | undefined {
   const heldGraphLocks = held?.graphLocks;
+  // The memo a lock carries belongs to the transaction that earned the
+  // lock. A lock earned on another transaction would hand this one that
+  // transaction's acquisitions, minted here as if they were this one's.
+  if (
+    heldGraphLocks !== undefined &&
+    held?.coordination !== undefined &&
+    !isGraphCommandCoordinationOf(target.commands, held.coordination, graphId)
+  ) {
+    throw new CompilerInvariantError(
+      "A graph write lock earned on another transaction cannot serve a lock-only decision of this one.",
+      { graphId },
+    );
+  }
   if (
     heldGraphLocks !== undefined &&
     sessionGraphLocks !== undefined &&
@@ -474,7 +489,7 @@ export async function lockRecordedGraphDecision(
   // into, and must be that one when both are present.
   sessionGraphLocks?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
-  const memo = decisionGraphLockMemo(graphId, held, sessionGraphLocks);
+  const memo = decisionGraphLockMemo(target, graphId, held, sessionGraphLocks);
   // Decided before the plan is resolved: evidence with no coordination is a
   // frame that holds no keyed fence, whatever its target could take.
   if (held !== undefined && held.coordination === undefined) return held;

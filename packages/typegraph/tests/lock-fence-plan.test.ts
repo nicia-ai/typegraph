@@ -465,6 +465,36 @@ describe("T15 — J1 a lock-only decision reads the memo of the session its lock
   });
 });
 
+describe("T15 — J1 a lock-only decision never takes a memo from another transaction's lock", () => {
+  it("refuses a held lock earned on another transaction, before any statement on the deciding one", async () => {
+    const first = await createLoggedPostgresBackend();
+    const second = await createLoggedPostgresBackend();
+    try {
+      await first.backend.transaction(async (firstTarget) => {
+        // An advanced fence in the first transaction's memo.
+        const firstMemo = createRecordedGraphLockMemo();
+        const firstLock = await lockRecordedGraphDecision(
+          firstTarget,
+          "graph-a",
+          undefined,
+          firstMemo,
+        );
+        expect(firstLock.graphLocks).toBe(firstMemo);
+        await second.backend.transaction(async (secondTarget) => {
+          second.reset();
+          await expect(
+            lockRecordedGraphDecision(secondTarget, "graph-a", firstLock),
+          ).rejects.toBeInstanceOf(CompilerInvariantError);
+          expect(second.statements).toHaveLength(0);
+        });
+      });
+    } finally {
+      await first.close();
+      await second.close();
+    }
+  });
+});
+
 describe("T15 — J2 lockRecordedClock (via allocateRecordedCommit)", () => {
   const schema = createSqlSchema();
 
