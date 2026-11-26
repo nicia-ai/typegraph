@@ -17,6 +17,17 @@
  * SQLite transaction wraps its execution adapter in one. A fresh view is made
  * per transaction attempt, so a retry never inherits a closed one.
  *
+ * A transaction can also end before its boundary: on SQLite a failing
+ * statement can take the transaction with it (a trigger's `RAISE(ROLLBACK)`),
+ * and a callback that catches the failure and carries on would otherwise run
+ * its next statement in autocommit. Where the driver reports transaction
+ * state, the view asks it right after an admitted statement fails; once it
+ * reports no transaction, every later statement is refused with a
+ * {@link TransactionRolledBackError} — distinct from the
+ * {@link TransactionClosedError} of a statement issued after the boundary —
+ * and `drainAndClose` hands that error to the runner as the transaction's
+ * outcome, so no `COMMIT` is sent.
+ *
  * This is the driver-level guard: no statement reaches a transaction that has
  * ended. The open/closed fact lives here, in the closure of the one view the
  * engine builds per transaction it opens, and is carried to every statement
@@ -34,21 +45,45 @@
  *
  * Edge-safe: no `node:*` imports.
  */
-import { TransactionClosedError } from "../../../errors";
+import {
+  TransactionClosedError,
+  TransactionRolledBackError,
+} from "../../../errors";
 
 export type TransactionView = Readonly<{
   /**
    * Runs `task` if the view is open, remembering it until it settles; once
    * closed, returns a {@link TransactionClosedError} rejection without
-   * running it. `task` starts synchronously, exactly as an unwrapped call.
+   * running it, and once the engine ended the transaction (see
+   * {@link TransactionViewOptions.isTransactionOpen}) a
+   * {@link TransactionRolledBackError} rejection. `task` starts
+   * synchronously, exactly as an unwrapped call.
    */
   admit: <T>(task: () => Promise<T>) => Promise<T>;
   /**
    * Refuses every later statement, then waits until every admitted one has
    * settled. Never rejects: a statement's outcome belongs to its own caller.
-   * Idempotent.
+   * Resolves to the transaction's outcome when the engine ended it before
+   * the boundary — a {@link TransactionRolledBackError} the runner rejects
+   * with instead of committing — and to `undefined` otherwise. Idempotent.
    */
-  drainAndClose: () => Promise<void>;
+  drainAndClose: () => Promise<TransactionRolledBackError | undefined>;
+}>;
+
+export type TransactionViewOptions = Readonly<{
+  /**
+   * How the driver reports whether the transaction this view runs in is
+   * still open, read once right after an admitted statement fails. A
+   * failing statement can end the transaction in the engine itself (on
+   * SQLite a trigger's `RAISE(ROLLBACK)`, or an error SQLite answers by
+   * rolling back), and a statement admitted afterwards would run in
+   * autocommit. Once the probe reports no transaction, every later
+   * statement is refused with {@link TransactionRolledBackError}.
+   * Omitted where the driver reports no transaction state, and on
+   * PostgreSQL, where the server itself refuses every statement of an
+   * aborted transaction.
+   */
+  isTransactionOpen?: () => boolean;
 }>;
 
 /**
@@ -59,27 +94,74 @@ function ignoreOutcome(): void {
   // Intentionally empty: see above.
 }
 
-export function createTransactionView(): TransactionView {
+/** The outcome of a transaction the engine ended when `failure` failed. */
+function engineEndedTransaction(failure: unknown): TransactionRolledBackError {
+  return new TransactionRolledBackError(
+    { conflict: false, detectedBy: "statement-failure", causeObserved: true },
+    { cause: failure },
+  );
+}
+
+export function createTransactionView(
+  options: TransactionViewOptions = {},
+): TransactionView {
+  const { isTransactionOpen } = options;
   let closed = false;
+  // The statement failure the engine ended the transaction with, once seen.
+  let engineEnd: Readonly<{ failure: unknown }> | undefined;
   const inFlight = new Set<Promise<void>>();
+
+  function observeFailure(failure: unknown): void {
+    if (engineEnd !== undefined || isTransactionOpen === undefined) return;
+    if (!isTransactionOpen()) engineEnd = { failure };
+  }
+
+  /**
+   * Starts `task`. A synchronous driver (better-sqlite3) can throw from the
+   * call itself rather than reject: that failure is observed too, and
+   * rethrown as the unwrapped call would.
+   */
+  function startObserved<T>(task: () => Promise<T>): Promise<T> {
+    try {
+      return task();
+    } catch (error) {
+      observeFailure(error);
+      throw error;
+    }
+  }
 
   return {
     admit<T>(task: () => Promise<T>): Promise<T> {
       if (closed) return Promise.reject(new TransactionClosedError());
-      const result = task();
+      if (engineEnd !== undefined) {
+        return Promise.reject(engineEndedTransaction(engineEnd.failure));
+      }
+      const started = startObserved(task);
+      // The probe is read before the caller sees the failure, so a caller
+      // that catches it and carries on is refused on its next statement.
+      const result =
+        isTransactionOpen === undefined ? started : (
+          started.catch((error: unknown) => {
+            observeFailure(error);
+            throw error;
+          })
+        );
       const settled = result.then(ignoreOutcome, ignoreOutcome);
       inFlight.add(settled);
       void settled.then(() => inFlight.delete(settled));
       return result;
     },
 
-    async drainAndClose(): Promise<void> {
+    async drainAndClose(): Promise<TransactionRolledBackError | undefined> {
       closed = true;
       // An admitted statement cannot admit another once closed, so the set
       // only shrinks from here.
       while (inFlight.size > 0) {
         await Promise.all(inFlight);
       }
+      return engineEnd === undefined ? undefined : (
+          engineEndedTransaction(engineEnd.failure)
+        );
     },
   };
 }

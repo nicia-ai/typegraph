@@ -23,7 +23,10 @@ import { createSqliteTransactionExecutionView } from "../src/backend/drizzle/exe
 import { createTransactionView } from "../src/backend/drizzle/execution/transaction-view";
 import { resolveNativeTransactionHandle } from "../src/backend/native-transaction-handle";
 import { createSqliteBackend } from "../src/backend/sqlite";
-import { TransactionClosedError } from "../src/errors";
+import {
+  TransactionClosedError,
+  TransactionRolledBackError,
+} from "../src/errors";
 import { sql as portableSql } from "../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { requireDefined } from "../src/utils/presence";
@@ -90,6 +93,94 @@ describe("createTransactionView", () => {
     ).rejects.toThrow(TransactionClosedError);
     expect(ran).toBe(false);
     // Idempotent.
+    await expect(view.drainAndClose()).resolves.toBeUndefined();
+  });
+});
+
+/** A view whose driver reports the transaction open until `end()`. */
+function probedView() {
+  const state = { open: true, probes: 0 };
+  const view = createTransactionView({
+    isTransactionOpen: () => {
+      state.probes += 1;
+      return state.open;
+    },
+  });
+  return {
+    view,
+    state,
+    end: () => {
+      state.open = false;
+    },
+  };
+}
+
+function rejectsWith(failure: Error): () => Promise<never> {
+  return () => Promise.reject(failure);
+}
+
+describe("createTransactionView after a statement failure", () => {
+  it("refuses every later statement with TransactionRolledBackError once a failure ended the transaction, and makes it the outcome", async () => {
+    const { view, end } = probedView();
+    const failure = new Error("trigger raised ROLLBACK");
+    await expect(
+      view.admit(() => {
+        end();
+        return Promise.reject(failure);
+      }),
+    ).rejects.toBe(failure);
+    let ran = false;
+    const later = view.admit(() => {
+      ran = true;
+      return Promise.resolve();
+    });
+    await expect(later).rejects.toThrow(TransactionRolledBackError);
+    await expect(later).rejects.toMatchObject({
+      details: { detectedBy: "statement-failure", conflict: false },
+      cause: failure,
+    });
+    expect(ran).toBe(false);
+    const outcome = await view.drainAndClose();
+    expect(outcome).toBeInstanceOf(TransactionRolledBackError);
+    expect(outcome?.cause).toBe(failure);
+    // Closed by the boundary: a statement after it is a late one.
+    await expect(view.admit(() => Promise.resolve())).rejects.toThrow(
+      TransactionClosedError,
+    );
+  });
+
+  it("observes a failure a synchronous driver throws from the call itself, and rethrows it synchronously", async () => {
+    const { view, end } = probedView();
+    const failure = new Error("thrown by a synchronous driver");
+    expect(() =>
+      view.admit(() => {
+        end();
+        throw failure;
+      }),
+    ).toThrow(failure);
+    await expect(view.admit(() => Promise.resolve())).rejects.toThrow(
+      TransactionRolledBackError,
+    );
+  });
+
+  it("keeps admitting after a failure that left the transaction open, and asks only after failures", async () => {
+    const { view, state } = probedView();
+    await view.admit(() => Promise.resolve());
+    expect(state.probes).toBe(0);
+    await expect(
+      view.admit(rejectsWith(new Error("constraint failed"))),
+    ).rejects.toThrow("constraint failed");
+    expect(state.probes).toBe(1);
+    await expect(view.admit(() => Promise.resolve("row"))).resolves.toBe("row");
+    await expect(view.drainAndClose()).resolves.toBeUndefined();
+  });
+
+  it("without a probe, a failure never ends the view", async () => {
+    const view = createTransactionView();
+    await expect(
+      view.admit(rejectsWith(new Error("statement failed"))),
+    ).rejects.toThrow("statement failed");
+    await expect(view.admit(() => Promise.resolve("row"))).resolves.toBe("row");
     await expect(view.drainAndClose()).resolves.toBeUndefined();
   });
 });
@@ -257,11 +348,17 @@ describe("a SQLite transaction TypeGraph frames itself", () => {
       const heldArrived = createGate();
       const heldRelease = createGate();
       let token: object | undefined;
-      /** Whether a bind on the connection now records this transaction. */
+      let opener: object | undefined;
+      /**
+       * Whether the transaction's token is still published. `sqlite-proxy`
+       * reports no transaction state, so the token resolves only through the
+       * opener's own bind, and only until its span ends.
+       */
       function published(): boolean {
-        const probe = backend.adoptTransaction(database);
         return (
-          token !== undefined && resolveNativeTransactionHandle(probe) === token
+          token !== undefined &&
+          opener !== undefined &&
+          resolveNativeTransactionHandle(opener) === token
         );
       }
       const database = createProxyDatabase(async (query) => {
@@ -280,6 +377,7 @@ describe("a SQLite transaction TypeGraph frames itself", () => {
       });
       try {
         const settled = backend.transaction(async (tx) => {
+          opener = tx;
           token = resolveNativeTransactionHandle(tx);
           void tx.execute(asCompiledRowsSql(portableSql.raw(HELD_STATEMENT)));
           await heldArrived.opened;

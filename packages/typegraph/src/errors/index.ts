@@ -1955,9 +1955,17 @@ export type TransactionRolledBackErrorDetails = Readonly<{
    *   TypeGraph's own after the callback returned, or the callback's — was
    *   refused because the transaction was already aborted (`25P02`);
    * - `"driver"`: the driver refused to commit because a statement of the
-   *   transaction had failed, and rolled back instead (postgres-js).
+   *   transaction had failed, and rolled back instead (postgres-js);
+   * - `"statement-failure"`: a statement of the transaction failed and the
+   *   database ended the transaction with it (SQLite: a trigger's
+   *   `RAISE(ROLLBACK)`, or an error SQLite answers by rolling back), as the
+   *   driver confirmed right after the failure. Every later statement of the
+   *   transaction is refused with this error and TypeGraph sends no
+   *   `COMMIT`. Detected where the driver reports transaction state
+   *   (better-sqlite3, bun:sqlite, libSQL 0.18+).
    */
-  detectedBy: "commit-reply" | "refused-statement" | "driver";
+  detectedBy:
+    "commit-reply" | "refused-statement" | "driver" | "statement-failure";
   /**
    * Whether TypeGraph observed an engine error in the transaction; when it
    * did, the first one is the `cause`. `false` when the failure that aborted
@@ -1977,7 +1985,10 @@ export type TransactionRolledBackErrorDetails = Readonly<{
  * client-side timeout that abandoned a statement which then failed on the
  * server): every later statement is refused, and the database answers the
  * closing `COMMIT` with `ROLLBACK`. TypeGraph reads that reply and rejects
- * with this error instead of reporting success. Nothing the transaction wrote
+ * with this error instead of reporting success. On SQLite, some failures end
+ * the transaction in the engine (a trigger's `RAISE(ROLLBACK)`): TypeGraph
+ * refuses every later statement of the transaction with this error, so none
+ * runs in autocommit, and rejects the transaction with it. Nothing the transaction wrote
  * was saved. `cause` is the first engine error the transaction observed, if
  * any (`details.causeObserved`).
  */
@@ -1997,7 +2008,7 @@ export class TransactionRolledBackError extends TypeGraphError {
         details,
         category: "system",
         suggestion:
-          "A database error inside a PostgreSQL transaction ends it, even when the callback catches the error or a client-side timeout abandoned the statement. Let the error propagate, or run the failing statement inside a savepoint and roll back to it before continuing; then re-run the transaction.",
+          "A database error inside a PostgreSQL transaction ends it, even when the callback catches the error or a client-side timeout abandoned the statement; on SQLite a trigger's RAISE(ROLLBACK) and some engine errors end it too. Let the error propagate, or run the failing statement inside a savepoint and roll back to it before continuing; then re-run the transaction.",
         cause: options?.cause,
       },
     );

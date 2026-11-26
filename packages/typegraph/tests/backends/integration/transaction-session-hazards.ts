@@ -376,6 +376,74 @@ function importedEdge(graphId: string, id: string): InsertEdgeParams {
   };
 }
 
+/** The node id whose insert the engine-rollback trigger answers. */
+const ENGINE_ROLLBACK_ID = "engine-rollback";
+
+/**
+ * Installs a trigger under which inserting node `ENGINE_ROLLBACK_ID` into
+ * `graphId` fails in the engine, ending (SQLite's `RAISE(ROLLBACK)`) or
+ * aborting (PostgreSQL) the transaction it runs in. Returns the teardown.
+ */
+async function installEngineRollbackTrigger(
+  backend: Pick<GraphBackend, "dialect" | "executeDdl" | "tableNames">,
+  graphId: string,
+): Promise<() => Promise<void>> {
+  const executeDdl = requireDefined(backend.executeDdl);
+  const nodesTable = `"${requireDefined(backend.tableNames).nodes}"`;
+  const trigger = `tg_engine_rollback_${graphCounter}`;
+  const when = `graph_id = '${graphId.replaceAll("'", "''")}' AND NEW.id = '${ENGINE_ROLLBACK_ID}'`;
+  if (backend.dialect === "postgres") {
+    await executeDdl(
+      `CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN RAISE EXCEPTION 'engine ended the transaction'; END $$`,
+    );
+    await executeDdl(
+      `CREATE TRIGGER ${trigger} BEFORE INSERT ON ${nodesTable}
+       FOR EACH ROW WHEN (NEW.${when}) EXECUTE FUNCTION ${trigger}()`,
+    );
+    return async () => {
+      await executeDdl(`DROP TRIGGER ${trigger} ON ${nodesTable}`);
+      await executeDdl(`DROP FUNCTION ${trigger}()`);
+    };
+  }
+  await executeDdl(
+    `CREATE TRIGGER ${trigger} BEFORE INSERT ON ${nodesTable}
+     WHEN NEW.${when}
+     BEGIN SELECT RAISE(ROLLBACK, 'engine ended the transaction'); END`,
+  );
+  return async () => {
+    await executeDdl(`DROP TRIGGER ${trigger}`);
+  };
+}
+
+/**
+ * How a write the callback issues after the engine ended (SQLite) or aborted
+ * (PostgreSQL) its transaction is refused.
+ */
+const ENGINE_ROLLBACK_LATER_REFUSAL: Readonly<
+  Record<IntegrationLaneDriver, string>
+> = {
+  "better-sqlite3": "TransactionRolledBackError",
+  libsql: "TransactionRolledBackError",
+  // The server refuses every statement of an aborted transaction itself
+  // (`25P02`); the refusal reaches the caller as the driver raised it.
+  pglite: "untyped driver error",
+  "node-postgres": "untyped driver error",
+  "postgres-js": "untyped driver error",
+};
+
+/** Whether `refusal` records a call that succeeded. */
+function isFulfilled(refusal: Refusal): boolean {
+  return typeof refusal === "object" && "fulfilled" in refusal;
+}
+
+/** A refusal as its error class, `"fulfilled"`, or `"untyped driver error"`. */
+function typedOutcome(refusal: Refusal | undefined): string {
+  if (refusal === undefined) return "never issued";
+  if (typeof refusal === "string") return "untyped driver error";
+  return "fulfilled" in refusal ? "fulfilled" : refusal.error;
+}
+
 /** Whether a relation named `name` exists in the backend's catalog. */
 async function relationExists(
   backend: GraphBackend,
@@ -1841,6 +1909,48 @@ export function registerTransactionSessionHazardTests(
           inFlight: await inFlight,
           nodes: await countRows(backend, "nodes", graphId),
         }).toEqual({ inFlight: "fulfilled", nodes: 1 });
+      });
+
+      it("refuses a write the callback issues after the engine ended its transaction, and saves nothing", async () => {
+        const graph = buildGraph();
+        const backend = context.getBackend();
+        const [store] = await createStoreWithSchema(graph, backend);
+        const removeTrigger = await installEngineRollbackTrigger(
+          backend,
+          graph.id,
+        );
+        try {
+          let failed: Refusal | undefined;
+          let later: Refusal | undefined;
+          const transaction = await refusalOf(
+            store.transaction(async (tx) => {
+              await tx.nodes.HzItem.create({ label: "first" }, { id: "first" });
+              // The callback catches the statement's failure and carries on.
+              failed = await refusalOf(
+                tx.nodes.HzItem.create(
+                  { label: ENGINE_ROLLBACK_ID },
+                  { id: ENGINE_ROLLBACK_ID },
+                ),
+              );
+              later = await refusalOf(
+                tx.nodes.HzItem.create({ label: "later" }, { id: "later" }),
+              );
+            }),
+          );
+          expect({
+            failed: failed !== undefined && !isFulfilled(failed),
+            later: typedOutcome(later),
+            transaction: typedOutcome(transaction),
+            nodes: await countRows(backend, "nodes", graph.id),
+          }).toEqual({
+            failed: true,
+            later: ENGINE_ROLLBACK_LATER_REFUSAL[context.driver],
+            transaction: "TransactionRolledBackError",
+            nodes: 0,
+          });
+        } finally {
+          await removeTrigger();
+        }
       });
 
       it("refuses vector index creation through a transaction backend, open or ended, and creates no storage", async () => {

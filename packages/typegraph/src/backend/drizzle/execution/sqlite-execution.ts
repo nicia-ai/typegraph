@@ -11,7 +11,11 @@ import {
 } from "../../types";
 import { isLibsqlClient, type LibsqlClient } from "../libsql-client";
 import { getOrCreateLru } from "./lru";
-import { createTransactionView, type TransactionView } from "./transaction-view";
+import {
+  createTransactionView,
+  type TransactionView,
+  type TransactionViewOptions,
+} from "./transaction-view";
 import {
   type CompiledSqlQuery,
   compileQueryWithDialect,
@@ -807,7 +811,7 @@ export type SqliteTransactionExecutionView = Readonly<{
    */
   admit: TransactionView["admit"];
   /** Ends the view: see `TransactionView.drainAndClose` in `./transaction-view`. */
-  drainAndClose: () => Promise<void>;
+  drainAndClose: TransactionView["drainAndClose"];
 }>;
 
 /**
@@ -816,11 +820,14 @@ export type SqliteTransactionExecutionView = Readonly<{
  * runner calls `drainAndClose` (before COMMIT / ROLLBACK) a late statement is
  * refused instead of running outside the transaction that issued it. The
  * runner's own frame statements go through the unwrapped adapter.
+ * `options.isTransactionOpen` is the driver's report of whether the
+ * transaction is still open (see `TransactionViewOptions`).
  */
 export function createSqliteTransactionExecutionView(
   adapter: SqliteExecutionAdapter,
+  options: TransactionViewOptions = {},
 ): SqliteTransactionExecutionView {
-  const view = createTransactionView();
+  const view = createTransactionView(options);
   function viewMember(
     role: (typeof SQLITE_ADAPTER_MEMBER_ROLES)[keyof SqliteExecutionAdapter],
     member: unknown,
