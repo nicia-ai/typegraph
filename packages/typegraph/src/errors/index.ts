@@ -1958,11 +1958,13 @@ export type TransactionRolledBackErrorDetails = Readonly<{
    *   transaction had failed, and rolled back instead (postgres-js);
    * - `"statement-failure"`: a statement of the transaction failed and the
    *   database ended the transaction with it (SQLite: a trigger's
-   *   `RAISE(ROLLBACK)`, or an error SQLite answers by rolling back), as the
-   *   driver's engine-state flag or SQLite itself answered right after the
-   *   failure (on Durable Object storage, which cannot be asked, any failure
-   *   counts). Every later statement of the transaction is refused with this
-   *   error and TypeGraph sends no `COMMIT`.
+   *   `RAISE(ROLLBACK)`, an `ON CONFLICT ROLLBACK` constraint, or an error
+   *   SQLite answers by rolling back), as the driver's engine-state flag
+   *   (read before every statement where it reflects the engine) or SQLite
+   *   itself answered right after the failure (on Durable Object storage,
+   *   which cannot be asked, any SQL failure counts; a typed TypeGraph
+   *   refusal never does). Every later statement of the transaction is
+   *   refused with this error and TypeGraph sends no `COMMIT`.
    */
   detectedBy:
     "commit-reply" | "refused-statement" | "driver" | "statement-failure";
@@ -2026,7 +2028,11 @@ export type TransactionOutcomeUnknownErrorDetails = Readonly<{
    * - `"transaction-ended"`: the callback returned, but the marker TypeGraph
    *   set when the native handle was read was gone before its `COMMIT`, so
    *   the session was no longer inside the transaction TypeGraph opened.
-   *   TypeGraph sent no `COMMIT`.
+   *   TypeGraph sent no `COMMIT`. On SQLite, the driver's engine-state flag
+   *   reported the transaction ended although no statement TypeGraph ran had
+   *   failed (a statement through the native handle, or transaction control
+   *   sent as raw SQL): every later statement of the transaction is refused
+   *   with this error, and TypeGraph sends no `COMMIT`.
    * - `"native-handle-released"`: the attempt failed after the native handle
    *   (or another raw-SQL port) was handed out — the transaction was
    *   aborted, or a serialization failure or deadlock rejected the callback
