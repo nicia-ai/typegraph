@@ -365,8 +365,8 @@ export type TransactionSessionBinding<
  * own holding, not an operation's handle, so a later operation's
  * statements go through that operation alone — and returns it; from then on
  * every operation entered from the session hands out that surface. The
- * session reaches no one but `bind` before it is bound, and is never
- * rebound.
+ * session reaches no one but `bind` before it is bound, and is rebound
+ * only by narrowing ({@link narrowSessionSurface}).
  *
  * `Engine` is as for {@link openTransactionSession}: the session it opens is
  * that mint's, specialised only when `transaction` carries the evidence of
@@ -424,6 +424,34 @@ export function withSessionOpener(
 ): GraphBackend["transaction"] {
   Object.defineProperty(transaction, SESSION_OPENER, { value: opener });
   return transaction;
+}
+
+/**
+ * Narrows the statement surface `session`'s later operations hand out to
+ * `surface`, a derivation of the surface it hands out now, and returns the
+ * session. For a backend layer that opened the transaction with its session
+ * ({@link openRootTransaction}) and guards the statements its caller issues
+ * (the recorded read overlay's origin checks) before it hands the session on
+ * through its own opener ({@link withSessionOpener}): the caller runs in that
+ * one session, not in a second one opened over the guarded surface.
+ * Operations entered before the narrowing keep the surface they hold; the
+ * undecorated holding ({@link Operation.control}) is unchanged.
+ *
+ * Refuses a `surface` that is not derived from the current one through
+ * `src/backend/derive-backend.ts`: anything else would drop the layers
+ * beneath it, a capture surface among them.
+ */
+export function narrowSessionSurface<Engine extends TransactionBackend>(
+  session: TransactionSession<Engine>,
+  surface: OperationScoped<Engine>,
+): TransactionSession<Engine> {
+  if (!isBackendDerivedFrom(surface, session[SESSION_TRANSACTION])) {
+    throw new TypeError(
+      "A session's statement surface can only be narrowed to a derivation of it.",
+    );
+  }
+  session[SESSION_TRANSACTION] = surface;
+  return session;
 }
 
 /**

@@ -40,9 +40,7 @@ import {
 import {
   enterOperation,
   openRootTransaction,
-  openTransactionSession,
   type OperationBackend,
-  type StoreTransactionBackend,
 } from "../operation-scope";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import { resolveReadSchema, resolveTemporalOptions } from "./context";
@@ -350,15 +348,10 @@ export async function withInlineIterativeGraphOperation<T>(
   run: (operation: IterativeGraphOperation) => Promise<T>,
 ): Promise<T> {
   if (ctx.backend.capabilities.execution.interactiveTransactions) {
-    return ctx.backend.transaction(
-      async (backend: StoreTransactionBackend) =>
-        run(
-          createOperation(
-            ctx,
-            options,
-            enterOperation(openTransactionSession(backend)).backend,
-          ),
-        ),
+    return openRootTransaction(
+      ctx.backend,
+      async (session) =>
+        run(createOperation(ctx, options, enterOperation(session).backend)),
       {
         isolationLevel: "repeatable_read",
         accessMode: "read_only",

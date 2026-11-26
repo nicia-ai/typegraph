@@ -485,11 +485,11 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
         const components = await view.algorithms.weaklyConnectedComponents({
           edges: ["routedLink"],
         });
-        // Two sessions over the read transaction: the one the capture
-        // overlay opens and hands the recorded read overlay above it, and
-        // the one the algorithm opens over the read overlay's surface. Each
-        // statement the algorithm sends goes through an operation of each,
-        // and the read overlay's own origin checks through the first.
+        // One session over the read transaction: the one the capture
+        // overlay opens and hands the recorded read overlay above it, which
+        // narrows it to its guarded surface and hands it to the algorithm.
+        // The read overlay's origin checks and every statement the algorithm
+        // sends go through operations of that session.
         const perSession = routing.sessions.map(
           (session) =>
             routing.calls.filter((call) => call.session === session).length,
@@ -498,7 +498,7 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
           found: components.some((component) => component.size === 2),
           sessions: routing.sessions.length,
           everySessionRouted: perSession.every((count) => count > 0),
-        }).toEqual({ found: true, sessions: 2, everySessionRouted: true });
+        }).toEqual({ found: true, sessions: 1, everySessionRouted: true });
       } finally {
         routing.restore();
       }

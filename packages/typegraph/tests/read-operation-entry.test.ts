@@ -19,6 +19,7 @@ import { z } from "zod";
 import {
   count,
   createStore,
+  createStoreWithSchema,
   defineEdge,
   defineGraph,
   defineNode,
@@ -543,6 +544,57 @@ describe("a read enters its operation at execution", () => {
         opened: 1,
       });
       expectEnteredFrom(label, requireDefined(opened[0]), 1);
+    }
+  });
+
+  it("an iterative algorithm at a recorded instant runs in the one session the recorded read opens with its transaction", async () => {
+    for (const [label, historyBackend] of [
+      ["working table", createTestBackend()],
+      [
+        "inline",
+        projectBackendWithout(createTestBackend(), [
+          "executeTemporaryStatement",
+        ]),
+      ],
+    ] as const) {
+      const [historyStore] = await createStoreWithSchema(
+        graph,
+        historyBackend,
+        { history: true },
+      );
+      const first = await historyStore.nodes.Person.create({
+        name: "Ada",
+        age: 36,
+      });
+      const second = await historyStore.nodes.Person.create({
+        name: "Bea",
+        age: 37,
+      });
+      await historyStore.edges.knows.create(first, second);
+      const now = requireDefined(await historyStore.recordedNow());
+      const view = historyStore.asOfRecorded(now);
+      clearMints();
+      const reached = await view.algorithms.reachable(first, {
+        edges: ["knows"],
+        maxHops: 2,
+      });
+      expect({ at: label, depths: reached.map((node) => node.depth) }).toEqual({
+        at: label,
+        depths: [0, 1],
+      });
+      // The recorded read's transaction member opens the transaction and its
+      // session; the algorithm receives that session rather than opening a
+      // second one over the surface the member hands out.
+      const opened = new Set(openedSessions());
+      expect({ at: label, sessions: opened.size }).toEqual({
+        at: label,
+        sessions: 1,
+      });
+      const [session] = opened;
+      // Beneath the history Store's capture overlay: the overlay's own
+      // isolation check and flush, the recorded read's origin checks, then
+      // the algorithm's rounds, each one operation of that session.
+      expectEnteredFrom(label, requireDefined(session), 3);
     }
   });
 
