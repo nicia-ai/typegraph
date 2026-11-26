@@ -18,7 +18,17 @@ import {
   SQLITE_CAPABILITIES,
 } from "../src/backend/types";
 import { UnsupportedBackendCapabilityError } from "../src/errors";
-import { defineEdgeIndex, defineNodeIndex } from "../src/indexes";
+import {
+  defineEdgeIndex,
+  defineNodeIndex,
+  generateEdgeIndexDDL,
+  generateIndexDDL,
+  generateNodeIndexDDL,
+} from "../src/indexes";
+import {
+  buildPostgresEdgeIndexBuilders,
+  buildPostgresNodeIndexBuilders,
+} from "../src/indexes/drizzle";
 
 const Event = defineNode("Event", {
   schema: z.object({ at: z.date(), label: z.string() }),
@@ -104,5 +114,59 @@ describe("dateIndexExpressions outside the store", () => {
     expect(() => {
       assertDateIndexExpressionsSupported(undeclared, [atIndex], "custom()");
     }).not.toThrow();
+  });
+  it("generateIndexDDL refuses a date-typed index for PostgreSQL and builds it for SQLite", () => {
+    const atIndex = defineNodeIndex(Event, {
+      name: "event_at",
+      fields: ["at"],
+    });
+    const error = refusal(() => generateIndexDDL(atIndex, "postgres"));
+    expect(error.message).toBe(
+      `generateIndexDDL() requires backend capability 'dateIndexExpressions'. Index "event_at" on node kind "Event" reads date-typed field "/at" in its key; this backend cannot build an index over a date property (on PostgreSQL, the text-to-timestamptz cast it needs is not immutable).`,
+    );
+    expect(generateIndexDDL(atIndex, "sqlite")).toContain(`"event_at"`);
+  });
+
+  it("generateNodeIndexDDL and generateEdgeIndexDDL refuse for PostgreSQL", () => {
+    const nodeIndex = defineNodeIndex(Event, {
+      name: "event_at",
+      fields: ["at"],
+    });
+    const edgeIndex = defineEdgeIndex(scheduled, {
+      name: "scheduled_at",
+      fields: ["at"],
+    });
+    expect(
+      refusal(() => generateNodeIndexDDL(nodeIndex, "postgres")).details,
+    ).toMatchObject({ operation: "generateNodeIndexDDL()", kind: "Event" });
+    expect(
+      refusal(() => generateEdgeIndexDDL(edgeIndex, "postgres")).details,
+    ).toMatchObject({ operation: "generateEdgeIndexDDL()", kind: "scheduled" });
+  });
+
+  it("the PostgreSQL Drizzle index builders refuse a date-typed index", () => {
+    const tables = createPostgresTables();
+    const nodeIndex = defineNodeIndex(Event, {
+      name: "event_at",
+      fields: ["at"],
+    });
+    const edgeIndex = defineEdgeIndex(scheduled, {
+      name: "scheduled_at",
+      fields: ["at"],
+    });
+    expect(
+      refusal(() => buildPostgresNodeIndexBuilders(tables.nodes, [nodeIndex]))
+        .details,
+    ).toMatchObject({
+      operation: "buildPostgresNodeIndexBuilders()",
+      indexName: "event_at",
+    });
+    expect(
+      refusal(() => buildPostgresEdgeIndexBuilders(tables.edges, [edgeIndex]))
+        .details,
+    ).toMatchObject({
+      operation: "buildPostgresEdgeIndexBuilders()",
+      indexName: "scheduled_at",
+    });
   });
 });

@@ -6,7 +6,12 @@
 import { UnsupportedBackendCapabilityError } from "../../errors";
 import { findDateIndexExpression } from "../../indexes/compiler";
 import { type IndexDeclaration } from "../../indexes/types";
-import { type BackendCapabilities } from "../types";
+import { type SqlDialect } from "../../query/dialect/types";
+import {
+  type BackendCapabilities,
+  POSTGRES_CAPABILITIES,
+  SQLITE_CAPABILITIES,
+} from "../types";
 
 const POSITION_LABELS = {
   key: "key",
@@ -48,4 +53,34 @@ export function assertDateIndexExpressionsSupported(
       ` Index "${declaration.name}" on ${declaration.entity} kind "${declaration.kind}" reads date-typed field "${found.field}" in its ${POSITION_LABELS[found.position]}; this backend cannot build an index over a date property (on PostgreSQL, the text-to-timestamptz cast it needs is not immutable).`,
     );
   }
+}
+
+/**
+ * The capabilities a bundled backend of each dialect declares, for the entry
+ * points that turn a declaration into DDL for a dialect with no backend in
+ * hand (`generateIndexDDL`, the PostgreSQL Drizzle schema and its index
+ * builders). Those emit DDL for the bundled engine, so its declaration
+ * decides; a store-owned path decides on its own backend's capabilities.
+ */
+const BUNDLED_DIALECT_CAPABILITIES: Readonly<
+  Record<SqlDialect, BackendCapabilities>
+> = {
+  postgres: POSTGRES_CAPABILITIES,
+  sqlite: SQLITE_CAPABILITIES,
+};
+
+/**
+ * {@link assertDateIndexExpressionsSupported} against the bundled backend of
+ * `dialect`, for a DDL entry point that has a dialect but no backend.
+ */
+export function assertBundledDialectDateIndexExpressionsSupported(
+  dialect: SqlDialect,
+  declarations: readonly IndexDeclaration[],
+  operation: string,
+): void {
+  assertDateIndexExpressionsSupported(
+    BUNDLED_DIALECT_CAPABILITIES[dialect],
+    declarations,
+    operation,
+  );
 }

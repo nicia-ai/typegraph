@@ -1,3 +1,4 @@
+import { assertBundledDialectDateIndexExpressionsSupported } from "../backend/capabilities/date-index-expressions";
 import { getDialect } from "../query/dialect";
 import { type SqlDialect } from "../query/dialect/types";
 import { renderSqlInline, sql, type SqlFragment } from "../query/sql-fragment";
@@ -54,10 +55,12 @@ export function generateIndexDDL(
   dialect: SqlDialect,
   options: GenerateIndexDdlOptions = {},
 ): string {
-  if (index.entity === "node") {
-    return generateNodeIndexDDL(index, dialect, options);
-  }
-  return generateEdgeIndexDDL(index, dialect, options);
+  assertBundledDialectDateIndexExpressionsSupported(
+    dialect,
+    [index],
+    "generateIndexDDL()",
+  );
+  return compileIndexDDL(index, dialect, options);
 }
 
 export function generateNodeIndexDDL(
@@ -65,8 +68,12 @@ export function generateNodeIndexDDL(
   dialect: SqlDialect,
   options: GenerateIndexDdlOptions = {},
 ): string {
-  const tableName = options.nodesTableName ?? "typegraph_nodes";
-  return generateTableIndexDDL(index, dialect, tableName, options);
+  assertBundledDialectDateIndexExpressionsSupported(
+    dialect,
+    [index],
+    "generateNodeIndexDDL()",
+  );
+  return compileIndexDDL(index, dialect, options);
 }
 
 export function generateEdgeIndexDDL(
@@ -74,7 +81,32 @@ export function generateEdgeIndexDDL(
   dialect: SqlDialect,
   options: GenerateIndexDdlOptions = {},
 ): string {
-  const tableName = options.edgesTableName ?? "typegraph_edges";
+  assertBundledDialectDateIndexExpressionsSupported(
+    dialect,
+    [index],
+    "generateEdgeIndexDDL()",
+  );
+  return compileIndexDDL(index, dialect, options);
+}
+
+/**
+ * The DDL of {@link generateIndexDDL} without its capability check, for a
+ * caller that already decided on its own backend's capabilities:
+ * `materializeIndexes` (through `preflightIndexMaterialization`, against the
+ * backend it runs on, which may be a custom backend of either dialect) and
+ * the namespace fork's replay of indexes a source already materialized.
+ *
+ * @internal
+ */
+export function compileIndexDDL(
+  index: RelationalIndexDeclaration,
+  dialect: SqlDialect,
+  options: GenerateIndexDdlOptions = {},
+): string {
+  const tableName =
+    index.entity === "node" ?
+      (options.nodesTableName ?? "typegraph_nodes")
+    : (options.edgesTableName ?? "typegraph_edges");
   return generateTableIndexDDL(index, dialect, tableName, options);
 }
 

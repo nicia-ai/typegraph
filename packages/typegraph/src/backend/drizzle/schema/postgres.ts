@@ -53,9 +53,8 @@ import {
   type IndexDeclaration,
   type RelationalIndexDeclaration,
 } from "../../../indexes/types";
-import { assertDateIndexExpressionsSupported } from "../../capabilities/date-index-expressions";
+import { assertBundledDialectDateIndexExpressionsSupported } from "../../capabilities/date-index-expressions";
 import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../../recorded-storage";
-import { POSTGRES_CAPABILITIES } from "../../types";
 import { regconfig, tsvector } from "../columns/fulltext";
 import { carryAllocationSchemaToTables } from "../postgres-allocation-schema";
 import { defaultPostgresTableNames } from "./postgres-table-names";
@@ -122,8 +121,8 @@ export function createPostgresTables(
   const indexes = options.indexes ?? [];
   // These tables are the bundled PostgreSQL schema, so its declaration
   // decides; refused here, before drizzle-kit can emit the DDL.
-  assertDateIndexExpressionsSupported(
-    POSTGRES_CAPABILITIES,
+  assertBundledDialectDateIndexExpressionsSupported(
+    "postgres",
     indexes,
     "createPostgresTables()",
   );

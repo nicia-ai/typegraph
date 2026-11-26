@@ -14,7 +14,7 @@ import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../backend/recorded-storage";
 import type { GraphBackend } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
-import { generateIndexDDL } from "../indexes/ddl";
+import { compileIndexDDL } from "../indexes/ddl";
 import type { IndexDeclaration } from "../indexes/types";
 import { tsvectorStrategy } from "../query/dialect/fulltext-strategy";
 import {
@@ -878,7 +878,7 @@ export async function prepareNamespaceForkTarget<G extends GraphDef>(
     if (declaration.method === "trigram")
       await ensureTrigramExtension(targetBackend);
     await executeDdl(
-      generateIndexDDL(
+      compileIndexDDL(
         declaration,
         targetBackend.dialect,
         relationalIndexDdlOptions(targetBackend, false),

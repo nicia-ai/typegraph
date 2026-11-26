@@ -4,7 +4,7 @@
  * `typegraph_index_materializations`.
  *
  * Reads `IndexDeclaration[]` from `GraphDef.indexes`, generates DDL via
- * `generateIndexDDL`, executes via `backend.executeDdl` (Postgres path
+ * `compileIndexDDL`, executes via `backend.executeDdl` (Postgres path
  * uses `CREATE INDEX CONCURRENTLY`, which cannot run inside a
  * transaction — `executeDdl` runs at the top-level backend, never inside
  * `transaction(...)`), and upserts a status row per index.
@@ -43,6 +43,7 @@ import {
   runRetriedUnit,
 } from "../backend/capabilities/retried-unit";
 import {
+  type BackendCapabilities,
   type CreateVectorIndexParams,
   type GraphBackend,
   type IndexMaterializationRow,
@@ -51,7 +52,7 @@ import {
 import { type GraphDef, isKnownKind } from "../core/define-graph";
 import type { IndexEntity } from "../core/types";
 import { ConfigurationError, KindNotFoundError } from "../errors";
-import { generateIndexDDL } from "../indexes/ddl";
+import { compileIndexDDL } from "../indexes/ddl";
 import {
   prepareRelationalIndexNames,
   relationalIndexPhysicalName,
@@ -213,17 +214,26 @@ type MaterializeIndexesContext = Readonly<{
   schemaVersion: number;
 }>;
 
-export async function materializeIndexes(
-  context: MaterializeIndexesContext,
+/**
+ * The declarations a `materializeIndexes(options)` call on `graph` acts on,
+ * after refusing everything such a call refuses before its first statement:
+ * an unknown kind in `options.kinds`, and a declaration the backend's
+ * `dateIndexExpressions` capability cannot build. Pure — no I/O.
+ *
+ * `materializeIndexes` selects its candidates through this, and
+ * `store.evolve({ eager })` runs it against the evolved graph before the
+ * schema commit, so an eager evolution whose materialization would be
+ * refused is refused before it changes the schema.
+ */
+export function preflightIndexMaterialization(
+  target: Readonly<{
+    graph: GraphDef;
+    graphId: string;
+    capabilities: BackendCapabilities;
+  }>,
   options: MaterializeIndexesOptions = {},
-): Promise<MaterializeIndexesResult> {
-  const { graph, graphId, backend, schemaVersion } = context;
-
-  assertBackendSupportsIndexMaterialization(
-    backend,
-    "store.materializeIndexes()",
-  );
-
+): readonly IndexDeclaration[] {
+  const { graph, graphId } = target;
   const declared = graph.indexes ?? [];
   const kindFilter =
     options.kinds === undefined ? undefined : new Set(options.kinds);
@@ -251,9 +261,27 @@ export async function materializeIndexes(
   // Refused before any I/O, so no status table, status row or sibling index
   // is created for a call that cannot honor every candidate it was given.
   assertDateIndexExpressionsSupported(
-    backend.capabilities,
+    target.capabilities,
     candidates,
     "store.materializeIndexes()",
+  );
+  return candidates;
+}
+
+export async function materializeIndexes(
+  context: MaterializeIndexesContext,
+  options: MaterializeIndexesOptions = {},
+): Promise<MaterializeIndexesResult> {
+  const { graph, graphId, backend, schemaVersion } = context;
+
+  assertBackendSupportsIndexMaterialization(
+    backend,
+    "store.materializeIndexes()",
+  );
+
+  const candidates = preflightIndexMaterialization(
+    { graph, graphId, capabilities: backend.capabilities },
+    options,
   );
 
   // Short-circuit before any I/O when there's nothing to do. The
@@ -477,7 +505,7 @@ async function materializeRelationalIndex(
     };
   }
 
-  const ddl = generateIndexDDL(declaration, dialect, {
+  const ddl = compileIndexDDL(declaration, dialect, {
     ...ddlOptions,
     physicalName,
   });
