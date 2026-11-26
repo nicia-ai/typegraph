@@ -399,33 +399,34 @@ function computeAffectedFactKeys(
     // whole folds out of the same walk. A whole reached with neither change
     // (another of its justifications still fires and its row is in step)
     // leaves its parts alone: their existence dependency has the same
-    // verdict before and after. The one exception is a part that is closed
-    // although it is supported after: a caught failure between the whole's
-    // reopen and the part's leaves exactly that state (the reopen pass runs
-    // every whole before its parts), and a re-run that reaches the part only
-    // through the whole must reopen it to complete the transition. A live
-    // part without support is not carried in: no prefix of a transition
-    // leaves one (the close pass closes every part before its whole and
-    // before any flag), and closing it is the business of a transition that
-    // moves its support. Only a fact whole propagates: a transition flips
-    // source properties, so a non-fact whole's liveness is the same before
-    // and after.
+    // verdict before and after. The one exception is a part, at any depth
+    // below that whole, that is closed although it is supported after: a
+    // caught failure part-way through the reopen pass (which runs every whole
+    // before its parts) leaves exactly that state under a chain of wholes
+    // already live, and a re-run that reaches the part only through them must
+    // reopen it to complete the transition. A live part without support is
+    // not carried in: no prefix of a transition leaves one (the close pass
+    // closes every part before its whole and before any flag), and closing
+    // it is the business of a transition that moves its support. Only a fact
+    // whole propagates: a transition flips source properties, so a non-fact
+    // whole's liveness is the same before and after.
     const wholeRow = roles.facts.get(current);
     if (wholeRow === undefined) continue;
     const wholeMoves =
       supportedBefore.has(current) !== supportedAfter.has(current) ||
       currencyMovesWithSupport(wholeRow, supportedAfter.has(current));
-    const requiredParts =
-      compositionDependencies.partKeysByWholeKey.get(current) ?? [];
-    for (const partKey of requiredParts) {
-      const partRow = roles.facts.get(partKey);
-      if (partRow === undefined) continue;
-      if (
-        !wholeMoves &&
-        !(supportedAfter.has(partKey) && isTombstonedNodeRow(partRow))
-      ) {
-        continue;
-      }
+    const carriedParts =
+      wholeMoves ?
+        (compositionDependencies.partKeysByWholeKey.get(current) ?? []).filter(
+          (partKey) => roles.facts.has(partKey),
+        )
+      : interruptedReopenPartKeys(
+          current,
+          roles,
+          compositionDependencies,
+          supportedAfter,
+        );
+    for (const partKey of carriedParts) {
       affected.add(partKey);
       if (seen.has(partKey)) continue;
       seen.add(partKey);
@@ -434,4 +435,41 @@ function computeAffectedFactKeys(
   }
 
   return affected;
+}
+
+/**
+ * The facts below a whole that does not move which a re-run must reopen: a
+ * required part, at any depth, that is closed although it is supported
+ * after. The descent passes through parts that are in step (a live part is
+ * the whole of the next level, and its own parts may be the closed ones) and
+ * stops at each part it returns: the affected-fact walk carries that part,
+ * and a closed part that is supported after moves, so the walk carries its
+ * whole subtree from there.
+ */
+function interruptedReopenPartKeys(
+  wholeKey: string,
+  roles: ProvenanceRows,
+  compositionDependencies: CompositionExistenceDependencies,
+  supportedAfter: ReadonlySet<string>,
+): readonly string[] {
+  const reopen: string[] = [];
+  const visited = new Set<string>([wholeKey]);
+  const pending = [wholeKey];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === undefined) continue;
+    const parts = compositionDependencies.partKeysByWholeKey.get(current) ?? [];
+    for (const partKey of parts) {
+      if (visited.has(partKey)) continue;
+      visited.add(partKey);
+      const partRow = roles.facts.get(partKey);
+      if (partRow === undefined) continue;
+      if (supportedAfter.has(partKey) && isTombstonedNodeRow(partRow)) {
+        reopen.push(partKey);
+      } else {
+        pending.push(partKey);
+      }
+    }
+  }
+  return reopen;
 }

@@ -159,6 +159,49 @@ const compositionGraph = defineGraph({
   ],
 });
 
+const Paragraph = defineNode("Paragraph", {
+  schema: z.object({ label: z.string() }),
+});
+
+const paragraphOf = defineEdge("paragraphOf");
+
+// Report → Section → Paragraph, each part required: a composition two
+// levels deep, for a reopen interrupted below a whole that is already live.
+const nestedCompositionGraph = defineGraph({
+  id: "provenance_nested_composition_integration",
+  nodes: {
+    Source: { type: Source },
+    Report: { type: Report },
+    Section: { type: Section },
+    Paragraph: { type: Paragraph },
+    Justification: { type: Justification },
+  },
+  edges: {
+    premiseOf: { type: premiseOf, from: [Source], to: [Justification] },
+    derives: {
+      type: derives,
+      from: [Justification],
+      to: [Report, Section, Paragraph],
+    },
+    sectionOf: {
+      type: sectionOf,
+      from: [Section],
+      to: [Report],
+      cardinality: "one",
+    },
+    paragraphOf: {
+      type: paragraphOf,
+      from: [Paragraph],
+      to: [Section],
+      cardinality: "one",
+    },
+  },
+  ontology: [
+    partOf(Section, Report, { via: sectionOf, existence: "required" }),
+    partOf(Paragraph, Section, { via: paragraphOf, existence: "required" }),
+  ],
+});
+
 // An unrelated kind: evolving the provenance graph with it leaves every role
 // the capability maps in place, so the evolved graph still validates.
 const noteExtension = defineGraphExtension({
@@ -3062,6 +3105,111 @@ export function registerProvenanceIntegrationTests(
         await provenance.unRetract(sourceOne);
         expect(await liveFactIds(store)).toEqual(ALL_FACTS);
         expect(sortedIds(await provenance.holding())).toEqual(ALL_FACTS);
+        expect(await store.verifyConstraintFences()).toEqual([]);
+      },
+    );
+
+    // The same interruption two levels down: the report and its section
+    // reopen, the paragraph does not. A re-run reaches the report with
+    // nothing to change and the section, held through a source of its own,
+    // is already live, so the paragraph is reached only through a chain of
+    // wholes that do not move and must still come into the re-run's scope.
+    // `tests/property/provenance-interrupted-composition.test.ts` checks the
+    // same law over random trees and failure points.
+    // Revert check: in `interruptedReopenPartKeys`
+    // (`src/provenance/support.ts`) return only the closed direct parts of
+    // the whole instead of descending through its live parts, and the re-run
+    // leaves `paragraph` closed.
+    it.each([
+      { order: "whole first", factKinds: ["Report", "Section", "Paragraph"] },
+      { order: "part first", factKinds: ["Paragraph", "Section", "Report"] },
+    ] as const)(
+      "($order) re-running a reopen interrupted below a live whole and a live part reopens the deeper part",
+      async ({ factKinds }) => {
+        const armed = { on: false, started: 0 };
+        const [store] = await createAdapterStoreWithSchema(
+          nestedCompositionGraph,
+          context.getBackend(),
+          {
+            history: true,
+            hooks: {
+              onOperationStart: () => {
+                if (!armed.on) return;
+                armed.started += 1;
+                // Write 1 restores `sourceOne`, write 2 reopens the report,
+                // write 3 the section; write 4 would reopen the paragraph.
+                if (armed.started === 4) throw new Error(REJECTED_WRITE);
+              },
+            },
+          },
+        );
+        for (const { id } of [sourceOne, sourceOther]) {
+          await store.nodes.Source.create(
+            { label: id, retracted: false },
+            { id },
+          );
+        }
+        await store.nodes.Report.create({ label: "report" }, { id: "report" });
+        await store.nodes.Section.create(
+          { label: "section" },
+          { id: "section", partOf: { whole: report("report") } },
+        );
+        await store.nodes.Paragraph.create(
+          { label: "paragraph" },
+          {
+            id: "paragraph",
+            partOf: { whole: { kind: "Section", id: "section" } },
+          },
+        );
+        for (const [id, premise, kind] of [
+          ["report", sourceOne, "Report"],
+          ["section", sourceOther, "Section"],
+          ["paragraph", sourceOther, "Paragraph"],
+        ] as const) {
+          await store.nodes.Justification.create(
+            { label: `${id}-j` },
+            { id: `${id}-j` },
+          );
+          await store.edges.premiseOf.create(
+            premise,
+            { kind: "Justification", id: `${id}-j` },
+            {},
+          );
+          await store.edges.derives.create(
+            { kind: "Justification", id: `${id}-j` },
+            { kind, id },
+            {},
+          );
+        }
+        const provenance = createRetractionCapability(store, {
+          ...config,
+          fact: { kinds: factKinds },
+        });
+        const liveIds = async () =>
+          sortedIds([
+            ...(await store.nodes.Report.find()),
+            ...(await store.nodes.Section.find()),
+            ...(await store.nodes.Paragraph.find()),
+          ]);
+        await provenance.retract(sourceOne);
+        expect(await liveIds()).toEqual([]);
+
+        const caught = await store.transaction(async (tx) => {
+          armed.on = true;
+          try {
+            return await captureRejection(provenance.unRetract(sourceOne, tx));
+          } finally {
+            armed.on = false;
+          }
+        });
+        expect(String(caught)).toContain(REJECTED_WRITE);
+        expect(await liveIds()).toEqual(["report", "section"]);
+        expect(await store.verifyConstraintFences()).toEqual([]);
+
+        await provenance.unRetract(sourceOne);
+        const everything = ["paragraph", "report", "section"];
+        expect(await liveIds()).toEqual(everything);
+        expect(sortedIds(await provenance.holding())).toEqual(everything);
         expect(await store.verifyConstraintFences()).toEqual([]);
       },
     );
