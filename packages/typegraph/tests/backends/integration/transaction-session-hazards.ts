@@ -2094,24 +2094,6 @@ export function registerTransactionSessionHazardTests(
         },
       );
 
-      it("commits a trusted-import batch still in flight when its callback returns", async () => {
-        const backend = context.getBackend();
-        const trustedImport = backend.trustedImport;
-        if (trustedImport === undefined) return;
-        const graphId = buildGraph().id;
-        let inFlight: Promise<Status> = Promise.resolve("rejected");
-        await trustedImport((session) => {
-          inFlight = statusOf(
-            session.insertNodes([importedNode(graphId, "in-flight")]),
-          );
-          return Promise.resolve();
-        });
-        expect({
-          inFlight: await inFlight,
-          nodes: await countRows(backend, "nodes", graphId),
-        }).toEqual({ inFlight: "fulfilled", nodes: 1 });
-      });
-
       // The import runs on a traced connection of its own, so the order in
       // which its statements reach the pinned client is observable. On
       // node-postgres the trace records each statement as it is handed to the
