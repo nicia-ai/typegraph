@@ -4564,7 +4564,10 @@ const NATIVE_TRANSACTION_STATE: unique symbol;
 // @public
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
-    exclusiveSections: Map<string, string>;
+    sections: Map<string, Readonly<{
+        mode: "exclusive" | "shared";
+        operations: string[];
+    }>>;
 }>;
 
 // @public

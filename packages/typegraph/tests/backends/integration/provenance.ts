@@ -450,6 +450,7 @@ function holdNoCall(): Promise<void> | undefined {
 function recordingTransactionTarget(
   target: TransactionBackend,
   calls: string[],
+  holdCall: (name: string) => Promise<void> | undefined = holdNoCall,
 ): TransactionBackend {
   const overlay: Record<string, unknown> = {};
   for (const name of functionMemberNames(target)) {
@@ -458,7 +459,9 @@ function recordingTransactionTarget(
     ) => unknown;
     overlay[name] = (...args: readonly unknown[]) => {
       calls.push(name);
-      return member(...args);
+      const held = holdCall(name);
+      if (held === undefined) return member(...args);
+      return held.then(() => member(...args));
     };
   }
   const { commands } = target;
@@ -476,20 +479,66 @@ function recordingTransactionTarget(
  * `backend` with every transaction it opens handing its callback a
  * {@link recordingTransactionTarget}, so a test can count the statements a
  * call inside a store transaction issued.
+ *
+ * `park(member, occurrence)` holds the `occurrence`-th call of `member`
+ * from then on, before it reaches the database, until `release()`;
+ * `reached` resolves once that call is held. A call parked so stops its
+ * caller between two statements, so a test can start another call while the
+ * first is provably mid-way.
  */
-function recordTransactionCalls(
-  backend: AdapterBackend<unknown>,
-): Readonly<{ backend: AdapterBackend<unknown>; calls: string[] }> {
+function recordTransactionCalls(backend: AdapterBackend<unknown>): Readonly<{
+  backend: AdapterBackend<unknown>;
+  calls: string[];
+  park: (
+    member: string,
+    occurrence?: number,
+  ) => Readonly<{ reached: Promise<void>; release: () => void }>;
+}> {
   const calls: string[] = [];
+  const parking: {
+    current?:
+      | {
+          member: string;
+          remaining: number;
+          reached: () => void;
+          gate: Promise<void>;
+        }
+      | undefined;
+  } = {};
+  const holdCall = (name: string): Promise<void> | undefined => {
+    const armed = parking.current;
+    if (armed?.member !== name) return undefined;
+    armed.remaining -= 1;
+    if (armed.remaining > 0) return undefined;
+    parking.current = undefined;
+    armed.reached();
+    return armed.gate;
+  };
   return {
     calls,
     backend: deriveBackend(backend, {
       transaction: (fn, options) =>
         backend.transaction(
-          (target) => fn(recordingTransactionTarget(target, calls)),
+          (target) => fn(recordingTransactionTarget(target, calls, holdCall)),
           options,
         ),
     }),
+    park: (member, occurrence = 1) => {
+      const signals: { reached?: () => void; release?: () => void } = {};
+      const reached = new Promise<void>((resolve) => {
+        signals.reached = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        signals.release = resolve;
+      });
+      parking.current = {
+        member,
+        remaining: occurrence,
+        reached: () => signals.reached?.(),
+        gate,
+      };
+      return { reached, release: () => signals.release?.() };
+    },
   };
 }
 
@@ -2234,33 +2283,41 @@ export function registerProvenanceIntegrationTests(
     // Load-bearing: two verbs overlapping on one transaction would each
     // decide from a support read that predates the other's writes, so
     // retracting both sources of `shared-fact` at once would keep it live on
-    // the support each believed the other left. The second call is refused
-    // before any statement, the transaction stays usable, and an awaited
-    // verb after it runs. Revert check: run `transitionInExclusiveSection`
-    // directly from `transitionInTransaction` (`src/provenance/transition.ts`)
-    // and both calls commit their flags with `shared-fact` still live.
+    // the support each believed the other left. The first verb is parked at
+    // its first fact close, so the second provably starts while it is
+    // mid-way; the second is refused before any statement, the transaction
+    // stays usable, and an awaited verb after it runs. Revert checks: run
+    // `transitionInExclusiveSection` directly from `transitionInTransaction`
+    // (`src/provenance/transition.ts`) and both calls commit their flags with
+    // `shared-fact` still live; read the first source before entering the
+    // section and `issued` records the refused verb's `getNode`.
     it("refuses a verb that overlaps another verb on the same transaction, before any statement, leaving the transaction usable", async () => {
+      const recorded = recordTransactionCalls(context.getBackend());
       const [store] = await createAdapterStoreWithSchema(
         provenanceGraph,
-        context.getBackend(),
+        recorded.backend,
         { history: true },
       );
       const provenance = await seedCallerWorld(store);
 
       const settled = await store.transaction(async (tx) => {
-        const outcomes = await Promise.allSettled([
-          provenance.retract(keepSource, tx),
+        const parked = recorded.park("deleteNode");
+        const running = provenance.retract(keepSource, tx);
+        await parked.reached;
+        const issuedBefore = recorded.calls.length;
+        const refusal = await captureRejection(
           provenance.retract(dropSource, tx),
-        ]);
+        );
+        const issued = recorded.calls.slice(issuedBefore);
+        parked.release();
+        await running;
         // The transaction is still usable for an awaited verb.
         const afterwards = await provenance.retract(dropSource, tx);
-        return { outcomes, afterwards };
+        return { refusal, issued, afterwards };
       });
 
-      const [first, second] = settled.outcomes;
-      expect(first.status).toBe("fulfilled");
-      expect(second.status).toBe("rejected");
-      const refusal = (second as PromiseRejectedResult).reason as unknown;
+      expect(settled.issued, "statements of the refused verb").toEqual([]);
+      const { refusal } = settled;
       expect(refusal).toBeInstanceOf(ConfigurationError);
       expect((refusal as ConfigurationError).details).toMatchObject({
         code: "PROVENANCE_TRANSITION_OVERLAPPING",
@@ -2275,6 +2332,92 @@ export function registerProvenanceIntegrationTests(
       await expect(sourceFlag(store, dropSource.id)).resolves.toBe(true);
       const live = sortedIds([...(await store.nodes.Fact.find())]);
       expect(live).toEqual([]);
+      expect(await provenance.holding()).toEqual([]);
+    });
+
+    // Load-bearing: a support read on a transaction a verb is writing can
+    // observe a state no order of the two calls produces, and a verb started
+    // while a read runs can close what the read is vouching for. A verb
+    // parked between two of its fact closes refuses `holding(tx)` and
+    // `assertHolds(tx)`, and a read parked at its support read refuses a
+    // verb, each before any statement; two reads may overlap. Revert check:
+    // run the two reads outside `runInProvenanceSection`
+    // (`src/provenance/holds.ts`) and `holding(tx)` beside the parked
+    // `retractMany` answers `["keep-fact", "shared-fact"]`: one of the three
+    // closes applied, believed neither before the verb (all three) nor once
+    // it completes (none).
+    it("refuses holding(tx) and assertHolds(tx) while a verb runs on the same transaction, and a verb while either reads, before any statement; two reads overlap", async () => {
+      const recorded = recordTransactionCalls(context.getBackend());
+      const [store] = await createAdapterStoreWithSchema(
+        provenanceGraph,
+        recorded.backend,
+        { history: true },
+      );
+      const provenance = await seedCallerWorld(store);
+      const everything = ["drop-fact", "keep-fact", "shared-fact"];
+      const expectOverlap = (
+        error: unknown,
+        operation: string,
+        runningOperation: string,
+      ) => {
+        expect(error).toBeInstanceOf(ConfigurationError);
+        expect((error as ConfigurationError).details).toMatchObject({
+          code: "PROVENANCE_TRANSITION_OVERLAPPING",
+          operation,
+          runningOperation,
+        });
+      };
+
+      const duringRead = await store.transaction(async (tx) => {
+        const parked = recorded.park("findNodesByKind");
+        const reading = provenance.holding(tx);
+        await parked.reached;
+        const issuedBefore = recorded.calls.length;
+        const verbRefusal = await captureRejection(
+          provenance.retract(dropSource, tx),
+        );
+        const issued = recorded.calls.slice(issuedBefore);
+        const asserted = await provenance.assertHolds(tx, [dropFact]);
+        parked.release();
+        return { verbRefusal, issued, asserted, believed: await reading };
+      });
+
+      expect(duringRead.issued, "statements of the refused verb").toEqual([]);
+      expectOverlap(
+        duringRead.verbRefusal,
+        "provenance.retract(source, tx)",
+        "provenance.holding(tx)",
+      );
+      expect(duringRead.asserted.map((held) => held.fact)).toEqual([dropFact]);
+      expect(sortedIds(duringRead.believed)).toEqual(everything);
+      await expect(sourceFlag(store, dropSource.id)).resolves.toBe(false);
+
+      const duringVerb = await store.transaction(async (tx) => {
+        const parked = recorded.park("deleteNode", 2);
+        const running = provenance.retractMany([keepSource, dropSource], tx);
+        await parked.reached;
+        const issuedBefore = recorded.calls.length;
+        const holdingRefusal = await captureRejection(provenance.holding(tx));
+        const assertRefusal = await captureRejection(
+          provenance.assertHolds(tx, [keepFact]),
+        );
+        const issued = recorded.calls.slice(issuedBefore);
+        parked.release();
+        return { holdingRefusal, assertRefusal, issued, report: await running };
+      });
+
+      expect(duringVerb.issued, "statements of the refused reads").toEqual([]);
+      expectOverlap(
+        duringVerb.holdingRefusal,
+        "provenance.holding(tx)",
+        "provenance.retractMany(sources, tx)",
+      );
+      expectOverlap(
+        duringVerb.assertRefusal,
+        "provenance.assertHolds()",
+        "provenance.retractMany(sources, tx)",
+      );
+      expect(sortedIds(duringVerb.report.died)).toEqual(everything);
       expect(await provenance.holding()).toEqual([]);
     });
 

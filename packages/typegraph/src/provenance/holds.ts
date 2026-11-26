@@ -35,6 +35,7 @@ import {
   acquireCapabilityWriteLocks,
 } from "./locks";
 import { type CapabilityScope, type TransactionScopeResolver } from "./scope";
+import { runInProvenanceSection } from "./section";
 import {
   appendGroupedValue,
   availableSourceKeys,
@@ -75,8 +76,12 @@ export async function believedFactsInOwnTransaction<
  * under the graph lock alone when it is read-only. A transaction that can
  * write must also prove that its reads observe every earlier holder of the
  * graph lock, or it is refused before the first read, naming `operation`.
+ *
+ * The read holds the transaction's provenance section shared (`./section.ts`),
+ * so it is refused before any statement while a retraction verb runs on the
+ * same transaction, and a verb started while it reads is refused.
  */
-export async function believedFactsInCallerTransaction<
+export function believedFactsInCallerTransaction<
   G extends GraphDef,
   FactKind extends NodeKind<G>,
 >(
@@ -84,8 +89,14 @@ export async function believedFactsInCallerTransaction<
   tx: TransactionContext<G>,
   operation: string,
 ): Promise<readonly ProvenanceFactRef<G, FactKind>[]> {
-  await acquireCallerTransactionReadLocks(tx, operation);
-  return readBelievedFacts<G, FactKind>(scope, enterTransactionOperation(tx));
+  return runInProvenanceSection(
+    tx,
+    { graphId: scope.graphId, operation, mode: "shared" },
+    async (readOperation) => {
+      await acquireCallerTransactionReadLocks(tx, operation);
+      return readBelievedFacts<G, FactKind>(scope, readOperation);
+    },
+  );
 }
 
 async function readBelievedFacts<
@@ -118,7 +129,11 @@ async function readBelievedFacts<
  * fact kinds. Only then are the capability's write locks taken, before the
  * first read, so the verdict cannot be invalidated by a concurrent retraction
  * and the caller's own writes take their locks in the canonical order whether
- * they come before or after this call.
+ * they come before or after this call. The judgment holds the transaction's
+ * provenance section shared (`./section.ts`): a retraction verb running on
+ * the same transaction refuses it before any statement, and a verb started
+ * while it judges is refused, so no verb on the transaction can be between
+ * its decision and its writes while the verdict is read.
  *
  * An empty list is checked for ownership only and returns `[]`: there is
  * nothing to judge, so it takes no lock, reads nothing, and is not refused in
@@ -139,19 +154,29 @@ export async function assertFactsHold<
   if (named.length === 0) return [];
   assertFactKinds(scope.config, named);
 
-  await acquireCapabilityWriteLocks(tx, ASSERT_HOLDS_OPERATION);
-  const graph = await loadSupportClosure(
-    enterTransactionOperation(tx).backend,
-    scope.registry,
-    scope.graphId,
-    scope.config,
-    named,
-    scope,
-  );
-  return judgeNamedFacts<G, FactKind, JustificationKind>(
-    scope.config,
-    graph,
-    named,
+  return runInProvenanceSection(
+    tx,
+    {
+      graphId: scope.graphId,
+      operation: ASSERT_HOLDS_OPERATION,
+      mode: "shared",
+    },
+    async (readOperation) => {
+      await acquireCapabilityWriteLocks(tx, ASSERT_HOLDS_OPERATION);
+      const graph = await loadSupportClosure(
+        readOperation.backend,
+        scope.registry,
+        scope.graphId,
+        scope.config,
+        named,
+        scope,
+      );
+      return judgeNamedFacts<G, FactKind, JustificationKind>(
+        scope.config,
+        graph,
+        named,
+      );
+    },
   );
 }
 
