@@ -42,8 +42,8 @@
  *
  * The backend brand is a phantom: a minted backend is the SAME object it was
  * minted from. That is deliberate. Store state not carried by a session is
- * keyed by the target object's identity (`writeTransactionSessions`, the
- * savepoint-state registry, schema fence leases), and the layers above
+ * keyed by the target object's identity (the savepoint-state registry,
+ * recorded capture's bindings), and the layers above
  * discriminate a root from a transaction with `"transaction" in target`; a
  * derived object per operation would change both. An {@link Operation} is
  * therefore a separate small value that CARRIES the handle and its session,
@@ -76,6 +76,7 @@ import {
   type NativeTransactionState,
   resolveNativeTransactionState,
 } from "./native-transaction-state";
+import type { ManagedWriteState } from "./operations/managed-write-state";
 import type { GraphWriteLock } from "./recorded-capture/clock";
 import { TRANSACTION_RUNTIME } from "./types";
 
@@ -207,7 +208,9 @@ const OPERATION_SESSION: unique symbol = Symbol("typegraph.operation");
  *
  * What it carries today is the write executor's per-binding state: the graph
  * write locks its frames hold or are acquiring
- * ({@link GraphWriteLock}, see `write-transaction.ts`). It never hands out
+ * ({@link GraphWriteLock}, see `write-transaction.ts`), and the managed
+ * write state of the `store.transaction` attempt that opened it with the
+ * schema fences it leased (`managed-write-state.ts`). It never hands out
  * its transaction; an operation entered from it does.
  *
  * State about the native transaction alone, shared by every binding of it,
@@ -230,6 +233,12 @@ export type TransactionSession<
      * is still acquiring, by graph id: owned by `write-transaction.ts`.
      */
     heldGraphWriteLocks: Map<string, Promise<GraphWriteLock>>;
+    /**
+     * The managed write session and the schema-fence leases of this session,
+     * read through `managedWriteState` from the operation a reader holds:
+     * owned by `write-transaction.ts`.
+     */
+    managedWrite: ManagedWriteState;
     /**
      * The state every session of this session's native transaction shares
      * (`native-transaction-state.ts`): the same object for every binding
@@ -287,6 +296,7 @@ export function openTransactionSession<
   return {
     [SESSION_TRANSACTION]: transaction,
     heldGraphWriteLocks: new Map<string, Promise<GraphWriteLock>>(),
+    managedWrite: { writeSession: undefined, schemaFenceLeases: undefined },
     native: resolveNativeTransactionState(transaction),
   } as TransactionSession<Engine>;
   /* eslint-enable no-restricted-syntax */

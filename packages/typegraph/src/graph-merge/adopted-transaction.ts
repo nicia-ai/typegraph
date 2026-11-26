@@ -1,7 +1,10 @@
 import { statementExecutionVerdict } from "../backend/capabilities/resolve";
 import { resolveWriteFencePlan } from "../backend/capabilities/write-fence";
 import type { GraphDef } from "../core/define-graph";
-import { type OperationBackend } from "../store/operation-scope";
+import {
+  type Operation,
+  type OperationBackend,
+} from "../store/operation-scope";
 import {
   ensureEngineSerializedWriterSlot,
   hasPendingWriteTransactionRevision,
@@ -17,11 +20,12 @@ import { MergePlanCapabilityError } from "./errors";
 /** A plan's durable revision cannot fence changes still awaiting capture flush. */
 export async function assertMergeTransactionPristine<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
 ): Promise<void> {
+  const txBackend = operation.backend;
   if (
     hasPendingRecordedGraphWrites(txBackend, target.graphId) ||
-    hasPendingWriteTransactionRevision(txBackend)
+    hasPendingWriteTransactionRevision(operation)
   ) {
     throw new MergePlanCapabilityError(
       "Apply the merge plan before writing to its target graph in this transaction.",
