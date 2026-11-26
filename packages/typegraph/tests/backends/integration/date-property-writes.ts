@@ -74,6 +74,50 @@ function buildDatedGraph(id: string) {
 
 const sourceGraph = buildDatedGraph("date_property_writes");
 
+/** A date the schema also accepts as a string: its stored text reads back as one. */
+const UnionDateDocument = defineNode("UnionDateDoc", {
+  schema: z.object({
+    title: z.string(),
+    at: z.union([z.date(), z.string()]),
+  }),
+});
+
+const DAY_MS = 86_400_000;
+
+/** A date whose OPTIONAL wrapper rewrites it on every parse. */
+const ShiftedDateDocument = defineNode("ShiftedDateDoc", {
+  schema: z.object({
+    title: z.string(),
+    at: z
+      .date()
+      .optional()
+      .overwrite((date) =>
+        date === undefined ? date : new Date(date.getTime() + DAY_MS),
+      ),
+  }),
+});
+
+function buildEdgeCaseGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: {
+      UnionDateDoc: {
+        type: UnionDateDocument,
+        unique: [
+          {
+            name: "union_date_doc_at",
+            fields: ["at"],
+            scope: "kind",
+            collation: "binary",
+          },
+        ],
+      },
+      ShiftedDateDoc: { type: ShiftedDateDocument },
+    },
+    edges: {},
+  });
+}
+
 function fullDocument(title: string, publishedAt: Date) {
   return {
     title,
@@ -327,6 +371,75 @@ export function registerDatePropertyWriteIntegrationTests(
       expect(result.errors.map((error) => error.error)).toEqual([
         expect.stringMatching(/publishedAt: .*expected date, received string/u),
         expect.stringMatching(/publishedAt: .*expected date, received string/u),
+      ]);
+    });
+  });
+
+  describe("a stored date the schema would not read back as the same Date", () => {
+    it("a set update refuses a Date under a union, writing nothing", async () => {
+      const store = await context.createStore(
+        buildEdgeCaseGraph("date_property_union"),
+      );
+      const first = await store.nodes.UnionDateDoc.create({
+        title: "a",
+        at: PUBLISHED,
+      });
+      const second = await store.nodes.UnionDateDoc.create({
+        title: "b",
+        at: REVISED,
+      });
+      // Stored as text, the patched Date would read back as the string branch
+      // and claim a key that differs from the first row's Date key, so both
+      // rows would hold the same instant under a unique constraint.
+      await expect(
+        store.nodes.UnionDateDoc.updateWhere({
+          where: (node) => node.id.eq(second.id),
+          patch: { at: PUBLISHED },
+        }),
+      ).rejects.toThrow(
+        /Set update property "at" holds a Date at at that its schema does not read back as a Date/u,
+      );
+      await expect(
+        store.nodes.UnionDateDoc.compareAndSet(second.id, {
+          expected: { at: REVISED },
+          patch: { title: "b2" },
+        }),
+      ).rejects.toThrow(/does not read back as a Date/u);
+      const rows = await store.nodes.UnionDateDoc.find();
+      expect(rows.map((row) => [row.id, row.title, row.at]).toSorted()).toEqual(
+        [
+          [first.id, "a", PUBLISHED.toISOString()],
+          [second.id, "b", REVISED.toISOString()],
+        ].toSorted(),
+      );
+    });
+
+    it("update and import refuse a date whose wrapper rewrites it, rather than rewriting it", async () => {
+      const source = await context.createStore(
+        buildEdgeCaseGraph("date_property_shifted_source"),
+      );
+      const document = await source.nodes.ShiftedDateDoc.create({
+        title: "a",
+        at: PUBLISHED,
+      });
+      const stored = new Date(PUBLISHED.getTime() + DAY_MS).toISOString();
+      expect(document.at).toBe(stored);
+      await expect(
+        source.nodes.ShiftedDateDoc.update(document.id, { title: "a2" }),
+      ).rejects.toThrow(/expected date, received string/u);
+      const unchanged = await source.nodes.ShiftedDateDoc.getById(document.id);
+      expect(unchanged?.at).toBe(stored);
+
+      const target = await context.createStore(
+        buildEdgeCaseGraph("date_property_shifted_target"),
+      );
+      const result = await importGraph(target, await exportGraph(source), {
+        onConflict: "error",
+        onUnknownProperty: "error",
+      });
+      expect(result.nodes.created).toBe(0);
+      expect(result.errors.map((error) => error.error)).toEqual([
+        expect.stringMatching(/at: .*expected date, received string/u),
       ]);
     });
   });

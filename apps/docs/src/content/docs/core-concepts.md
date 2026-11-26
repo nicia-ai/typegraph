@@ -126,20 +126,24 @@ nothing but a `Date` — a `z.date()`, possibly inside `.optional()`,
 `.nullable()`, `.default()`, `.catch()` and similar wrappers, a nested
 `z.object()` or a `z.array()` — and only when it is exactly the text the store
 writes. A date under a union, a record, a tuple, a `.transform()` or an
-`.overwrite()` is parsed as stored. A value you pass yourself is never converted: state a date
-property as a `Date`. The `getOrCreate…` forms parse the properties you state
-as a create first, so a property you omit that declares a `.default()` or
-`.catch()` takes that value rather than the stored one.
+`.overwrite()` (on the date or on a wrapper around it) is parsed as stored. A
+value you pass yourself is never converted: state a date property as a `Date`.
+The `getOrCreate…` forms parse the properties you state as a create first, so a
+property you omit that declares a `.default()` or `.catch()` takes that value
+rather than the stored one.
 
 Every write stores a `Date` you state the same way. `updateWhere()` and
 `compareAndSet()` accept a `Date` in their `patch`, at any depth of a nested
-object or array, and store the same text `create()` and `update()` store. A
-`compareAndSet()` `expected` value may be a `Date`; it matches when the stored
-text is that `Date`'s ISO text. `importGraph()` reads the stored text an export
-wrote back as a `Date` by the same rule as the updates above
+object or array, and store the same text `create()` and `update()` store. They
+refuse a `Date` at a position whose schema would read that text back as
+something else, such as under a union, a record or `z.any()`, with a
+`ValidationError`, since the row would then hold a string where you wrote a
+`Date`. A `compareAndSet()` `expected` value may be a `Date`; it matches when
+the stored text is that `Date`'s ISO text. `importGraph()` reads the stored
+text an export wrote back as a `Date` by the same rule as the updates above
 ([Date properties in interchange](/interchange#date-properties)). Applying a
-[graph merge](/graph-merge) plan does not yet do this: a plan whose node or edge write holds a stored
-date is refused as invalid.
+[graph merge](/graph-merge) plan does not yet do this: a plan whose node or
+edge write holds a stored date is refused as invalid.
 
 ### Node Operations
 

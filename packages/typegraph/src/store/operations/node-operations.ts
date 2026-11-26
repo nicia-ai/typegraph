@@ -229,7 +229,7 @@ import {
 } from "../resolved-mutation-set";
 import { type NodeRow, rowToEdge, rowToNode } from "../row-mappers";
 import {
-  encodeStoredDates,
+  encodeStoredDatesFor,
   reviveStoredDateProps,
 } from "../stored-date-revival";
 import {
@@ -6410,6 +6410,42 @@ function validateNodePropertySubset(
   );
 }
 
+/**
+ * A set update's validated patch or expectation value, encoded as the JSON the
+ * backend receives (`encodeStoredDatesFor`). A `Date` its property's schema
+ * would not read back as a `Date` is refused: the after-image would hold a
+ * string where the caller stated a `Date`, and the uniqueness claim rebuilt
+ * from it would not match the one a create takes for that `Date`.
+ */
+function encodeSetUpdateValue(
+  schema: z.ZodObject<z.ZodRawShape>,
+  kind: string,
+  property: string,
+  value: unknown,
+): unknown {
+  // Encoded as a one-property props object, so the kind schema states the
+  // property's position and the reported path starts at the property.
+  const encoding = encodeStoredDatesFor(schema, { [property]: value }, "");
+  if (encoding.kind === "encoded") {
+    return (encoding.value as Record<string, unknown>)[property];
+  }
+  throw new ValidationError(
+    `Set update property "${property}" holds a Date at ${encoding.path} that its schema does not read back as a Date`,
+    {
+      entityType: "node",
+      kind,
+      operation: "update",
+      issues: [
+        {
+          path: encoding.path,
+          message:
+            "A set update stores a Date as its ISO text, which only a position whose schema accepts nothing but a Date reads back as a Date",
+        },
+      ],
+    },
+  );
+}
+
 function normalizeCompareAndSetExpectations(
   schema: z.ZodObject<z.ZodRawShape>,
   kind: string,
@@ -6481,7 +6517,12 @@ function normalizeCompareAndSetExpectations(
     { kind, operation: "update" },
   );
   for (const property of Object.keys(scalarExpectedInput)) {
-    const value = encodeStoredDates(parsedExpected[property]);
+    const value = encodeSetUpdateValue(
+      schema,
+      kind,
+      property,
+      parsedExpected[property],
+    );
     if (value === undefined || (typeof value === "object" && value !== null)) {
       throw new ValidationError(
         `compareAndSet() expected property "${property}" did not resolve to a JSON scalar`,
@@ -6586,7 +6627,7 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
     }
     // The backend receives JSON, so a validated `Date` is encoded here as the
     // text every other write stores for it; anything else non-JSON is refused.
-    const encoded = encodeStoredDates(value);
+    const encoded = encodeSetUpdateValue(schema, kind, property, value);
     assertJsonValue(encoded, property, `Node "${kind}" ${operation} patch`);
     patch[property] = encoded as JsonValue;
   }

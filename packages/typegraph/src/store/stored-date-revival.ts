@@ -17,8 +17,9 @@
  *    props object through `.optional()`, `.nullable()`, `.default()`,
  *    `.prefault()`, `.catch()`, `.readonly()` and `.nonoptional()` wrappers,
  *    the shape of a nested `z.object()`, or the element of a `z.array()`,
- *    with no `.overwrite()` check on the way (one rewrites its value on every
- *    parse, so it would rewrite the revived, untouched value);
+ *    with no `.overwrite()` check on the way, on a wrapper or on the schema
+ *    it wraps (one rewrites its value on every parse, so it would rewrite the
+ *    revived, untouched value);
  *  - the stored value is portable timestamp text ({@link isPortableTimestamp}):
  *    exactly the text the store writes for a `Date` it accepts (canonical UTC
  *    ISO in the years 0001 to 9999), so the revived `Date` serializes back to
@@ -83,10 +84,17 @@ function hasOverwriteCheck(schema: z.ZodType): boolean {
   return checks.some((check) => check._zod.def.check === "overwrite");
 }
 
-function unwrapTransparentWrappers(schema: z.ZodType): z.ZodType {
+/**
+ * The schema under every transparent wrapper, or `undefined` when the schema
+ * or any wrapper on the way carries an `.overwrite()` check: one on a wrapper
+ * (`z.date().optional().overwrite(…)`) rewrites the date on every parse just
+ * as one on the date itself does.
+ */
+function unwrapRevivable(schema: z.ZodType): z.ZodType | undefined {
+  if (hasOverwriteCheck(schema)) return undefined;
   const inner = (schema.def as SchemaDef).innerType;
   return TRANSPARENT_WRAPPER_TYPES.has(schema.type) && inner !== undefined ?
-      unwrapTransparentWrappers(inner)
+      unwrapRevivable(inner)
     : schema;
 }
 
@@ -115,11 +123,12 @@ function reviveObject(
  * to that `Date`. Returns `value` itself when nothing is revived.
  */
 export function reviveStoredDates(schema: z.ZodType, value: unknown): unknown {
-  const unwrapped = unwrapTransparentWrappers(schema);
-  // A schema that rewrites its value on every parse — on the date itself or on
-  // an object or array holding it — would rewrite a revived stored value, so
-  // nothing at or below it is revived and the re-parse refuses as before.
-  if (hasOverwriteCheck(unwrapped)) return value;
+  const unwrapped = unwrapRevivable(schema);
+  // A schema that rewrites its value on every parse — on the date itself, on a
+  // wrapper around it, or on an object or array holding it — would rewrite a
+  // revived stored value, so nothing at or below it is revived and the
+  // re-parse refuses as before.
+  if (unwrapped === undefined) return value;
   const def = unwrapped.def as SchemaDef;
   if (unwrapped.type === "date") {
     return typeof value === "string" && isPortableTimestamp(value) ?
@@ -184,4 +193,76 @@ export function encodeStoredDates(value: unknown): unknown {
   // `Object.fromEntries` defines own data properties, so a `__proto__` key
   // stays a property rather than reaching the setter.
   return changed ? Object.fromEntries(entries) : value;
+}
+
+/** A value encoded for storage, or the first `Date` it would not read back. */
+export type StoredDateEncoding =
+  | Readonly<{ kind: "encoded"; value: unknown }>
+  | Readonly<{ kind: "not-revivable"; path: string }>;
+
+function propsPath(parent: string, key: string | number): string {
+  if (typeof key === "number") return `${parent}[${key}]`;
+  return parent === "" ? key : `${parent}.${key}`;
+}
+
+/** The first position where `original` holds a `Date` and `revived` does not. */
+function findUnrevivedDate(
+  original: unknown,
+  revived: unknown,
+  path: string,
+): string | undefined {
+  if (original instanceof Date) {
+    return revived instanceof Date ? undefined : path;
+  }
+  if (Array.isArray(original)) {
+    const revivedItems = revived as readonly unknown[];
+    for (const [index, item] of (original as readonly unknown[]).entries()) {
+      const found = findUnrevivedDate(
+        item,
+        revivedItems[index],
+        propsPath(path, index),
+      );
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (!isPlainObject(original)) return undefined;
+  const revivedObject = revived as Record<string, unknown>;
+  for (const [key, element] of Object.entries(original)) {
+    const found = findUnrevivedDate(
+      element,
+      revivedObject[key],
+      propsPath(path, key),
+    );
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/**
+ * `value`, validated by `schema`, encoded for a write that hands the backend
+ * JSON ({@link encodeStoredDates}) — but only when every `Date` it holds sits
+ * where {@link reviveStoredDates} reads the stored text back as that `Date`.
+ * Anywhere else (a union, a record, `z.any()`, an `.overwrite()`) the stored
+ * text would be read back as a string, so the row would hold a value the
+ * schema distinguishes from the `Date` that was written, and a uniqueness
+ * claim rebuilt from it would not match the claim a create takes for that
+ * `Date`. Such a value is reported with the path of the first such `Date`, for
+ * the caller to refuse.
+ */
+export function encodeStoredDatesFor(
+  schema: z.ZodType,
+  value: unknown,
+  path: string,
+): StoredDateEncoding {
+  const encoded = encodeStoredDates(value);
+  if (encoded === value) return { kind: "encoded", value };
+  const unrevived = findUnrevivedDate(
+    value,
+    reviveStoredDates(schema, encoded),
+    path,
+  );
+  return unrevived === undefined ?
+      { kind: "encoded", value: encoded }
+    : { kind: "not-revivable", path: unrevived };
 }
