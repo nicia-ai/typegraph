@@ -322,6 +322,7 @@ type BackendCapabilities = Readonly<{
     graphAnalytics?: GraphAnalyticsCapabilities | undefined;
     contributions?: ContributionCapabilities | undefined;
     recursiveTraversal?: RecursiveTraversalCapability | undefined;
+    dateIndexExpressions?: boolean | undefined;
     writeFence?: WriteFenceDeclaration | undefined;
 }>;
 

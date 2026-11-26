@@ -36,6 +36,7 @@ export { registerConstraintFenceVerificationIntegrationTests } from "./constrain
 export { registerContributionDiagnosticIntegrationTests } from "./contribution-diagnostics";
 export { registerCrossBackendConsistencyTests } from "./cross-backend";
 export { registerDatabaseExpressionQueryIntegrationTests } from "./database-expression-queries";
+export { registerDateIndexExpressionIntegrationTests } from "./date-index-expressions";
 export { registerDatePredicateIntegrationTests } from "./date-predicates";
 export { registerDurableEdgeMatchIdentityIntegrationTests } from "./durable-edge-match-identity";
 export { registerEdgeAcyclicityIntegrationTests } from "./edge-acyclicity";

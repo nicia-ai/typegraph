@@ -16,6 +16,7 @@ import {
   type IndexWhereOp,
   type IndexWhereOperand,
   type NodeIndexDeclaration,
+  type RelationalIndexDeclaration,
   type SystemColumnName,
 } from "./types";
 
@@ -171,6 +172,90 @@ export function compileNodeIndexFieldKeys(
     keys.push(sql`(${extracted})`);
   }
   return keys;
+}
+
+/**
+ * Where a relational index declaration reads a date-typed property: a lookup
+ * or ordered key, a covering column (also an index key column), or an operand
+ * of its partial-index `where` clause.
+ */
+export type DateIndexExpression = Readonly<{
+  field: JsonPointer;
+  position: "key" | "coveringField" | "where";
+}>;
+
+/**
+ * The first place a relational index declaration reads a date-typed property,
+ * or `undefined` when it reads none.
+ *
+ * The one classifier behind the `dateIndexExpressions` capability. It walks
+ * exactly the `(pointer, valueType)` pairs the DDL compilation above hands to
+ * {@link compileIndexKeyValue} and {@link compileIndexWhereOperand}, the two
+ * places a `"date"` value type becomes `jsonExtractDate` — the cast PostgreSQL
+ * refuses in an index. A GIN-family declaration indexes one array or string
+ * field and has no partial clause (both enforced at declaration), so it never
+ * reaches a date extraction.
+ */
+export function findDateIndexExpression(
+  index: RelationalIndexDeclaration,
+): DateIndexExpression | undefined {
+  if (index.method !== undefined) return undefined;
+  if (index.entity === "node") {
+    for (const key of index.keys ?? []) {
+      if (key.type === "field" && key.valueType === "date") {
+        return { field: key.pointer, position: "key" };
+      }
+    }
+  }
+  for (const [position, pointer] of index.fields.entries()) {
+    if (index.fieldValueTypes[position] === "date") {
+      return { field: pointer, position: "key" };
+    }
+  }
+  for (const [position, pointer] of index.coveringFields.entries()) {
+    if (index.coveringFieldValueTypes[position] === "date") {
+      return { field: pointer, position: "coveringField" };
+    }
+  }
+  const whereField =
+    index.where === undefined ? undefined : findDateWhereOperand(index.where);
+  return whereField === undefined ? undefined : (
+      { field: whereField, position: "where" }
+    );
+}
+
+function findDateWhereOperand(
+  expression: IndexWhereExpression,
+): JsonPointer | undefined {
+  switch (expression.__type) {
+    case "index_where_and":
+    case "index_where_or": {
+      for (const predicate of expression.predicates) {
+        const found = findDateWhereOperand(predicate);
+        if (found !== undefined) return found;
+      }
+      return undefined;
+    }
+    case "index_where_not": {
+      return findDateWhereOperand(expression.predicate);
+    }
+    case "index_where_null_check": {
+      return dateWhereOperandField(expression.operand);
+    }
+    case "index_where_comparison": {
+      return dateWhereOperandField(expression.left);
+    }
+  }
+}
+
+function dateWhereOperandField(
+  operand: IndexWhereOperand,
+): JsonPointer | undefined {
+  return (
+      operand.__type === "index_operand_prop" && operand.valueType === "date"
+    ) ?
+      jsonPointer([operand.field])
+    : undefined;
 }
 
 function compileIndexKeyValue(

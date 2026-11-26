@@ -36,6 +36,7 @@ import {
   type BackendCatalogProbes,
   requireCatalog,
 } from "../backend/capabilities/catalog";
+import { assertDateIndexExpressionsSupported } from "../backend/capabilities/date-index-expressions";
 import {
   isOptimisticRetryTier,
   OPTIMISTIC_RETRY_ATTEMPTS,
@@ -245,6 +246,14 @@ export async function materializeIndexes(
 
   const candidates = declared.filter((index) =>
     kindFilter === undefined ? true : kindFilter.has(index.kind),
+  );
+
+  // Refused before any I/O, so no status table, status row or sibling index
+  // is created for a call that cannot honor every candidate it was given.
+  assertDateIndexExpressionsSupported(
+    backend.capabilities,
+    candidates,
+    "store.materializeIndexes()",
   );
 
   // Short-circuit before any I/O when there's nothing to do. The
