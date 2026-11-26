@@ -2847,8 +2847,8 @@ function readSqliteInTransaction(client: object): boolean {
  * (`@libsql/client` before 0.18 hides its connection, sql.js and Durable
  * Object storage expose no transaction state): its token is never honoured
  * through the connection, and an adoption on that connection during the
- * transaction's span sees it only as unverified
- * (`resolveUnverifiedNativeTransaction`).
+ * transaction's span is refused while a read-only scope is open on it
+ * (`resolveNativeTransactionConnection`).
  */
 function sqliteConnectionProbe(
   db: AnySqliteDatabase,

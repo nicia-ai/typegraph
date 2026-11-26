@@ -40,11 +40,11 @@
  * sessions a state of its own: wrongly sharing is the worse error, wrongly
  * splitting is what every binding had before this record existed.
  *
- * One fact must fail closed instead: a read-only scope TypeGraph opened. A
- * bind without proof on a connection whose driver reports no transaction
- * state, during the span of an engine transaction opened on it, records that
- * transaction as unverified ({@link resolveUnverifiedNativeTransaction}). It
- * is never shared state; the Store's read-only predicate alone consults it.
+ * Every bind also records the driver connection it runs on, where the
+ * dialect names one ({@link resolveNativeTransactionConnection}), proof or
+ * not. That is never proof of a transaction and never shares state: it is
+ * what a fact that must fail closed (a read-only scope TypeGraph opened)
+ * consults, because a connection runs one transaction at a time.
  *
  * A savepoint a caller opens resolves the enclosing transaction only where
  * proof 2 or 4 covers it (libSQL and PGlite keep the pinned handle;
@@ -85,8 +85,7 @@ import { backendDerivationChain } from "./derive-backend";
  * confirms, at a lookup, that the connection still has a transaction open.
  * `isTransactionOpen` is `undefined` for a driver that reports no
  * transaction state: its token is then never honoured through the
- * connection, and only counts as an unverified engine transaction there
- * ({@link resolveUnverifiedNativeTransaction}).
+ * connection.
  */
 export type ConnectionTransactionProbe = Readonly<{
   connection: object;
@@ -96,9 +95,14 @@ export type ConnectionTransactionProbe = Readonly<{
 /** A bound backend's native handle, as its dialect classifies its proof. */
 export type NativeHandle =
   | Readonly<{
-      /** Proof 3: `handle` is one per BEGIN or savepoint. */
+      /**
+       * Proof 3: `handle` is one per BEGIN or savepoint. `connection` is
+       * the driver connection it runs on (node-postgres' pooled client,
+       * which a caller savepoint of it keeps), when the dialect can name it.
+       */
       kind: "transaction";
       handle: object;
+      connection?: object | undefined;
     }>
   | Readonly<{
       /**
@@ -142,17 +146,16 @@ const ENDED_TOKENS = new WeakSet<object>();
 const PUBLISHED_TOKENS = new WeakMap<object, object>();
 
 /**
- * Connection whose driver reports no transaction state → the token of the
- * engine transaction whose span is running on it. Never proof: it is read
- * only by {@link resolveUnverifiedNativeTransaction}.
+ * Bound backend → the driver connection it runs on. Never proof of a
+ * transaction: read only by {@link resolveNativeTransactionConnection}.
  */
-const UNVERIFIED_SPANS = new WeakMap<object, object>();
+const BOUND_CONNECTIONS = new WeakMap<object, object>();
 
 /**
- * Bound backend with no proof → the unverified engine transaction whose span
- * was running on its connection when it was bound.
+ * Driver connection → how many read-only scopes the Store has open on
+ * transactions running on it ({@link holdConnectionReadOnlyScope}).
  */
-const BOUND_UNVERIFIED_TRANSACTIONS = new WeakMap<object, object>();
+const READ_ONLY_CONNECTIONS = new WeakMap<object, number>();
 
 /**
  * Whether `token` still identifies the transaction open on its connection:
@@ -231,13 +234,9 @@ export function recordNativeTransactionHandle(
   const nativeTransaction = identifyNativeTransaction(handle);
   if (nativeTransaction !== undefined) {
     BOUND_NATIVE_TRANSACTIONS.set(backend, nativeTransaction);
-    return;
   }
-  if (handle.kind !== "connection") return;
-  const unverified = UNVERIFIED_SPANS.get(handle.connection);
-  if (unverified !== undefined && !ENDED_TOKENS.has(unverified)) {
-    BOUND_UNVERIFIED_TRANSACTIONS.set(backend, unverified);
-  }
+  const connection = handle.kind === "pinned" ? undefined : handle.connection;
+  if (connection !== undefined) BOUND_CONNECTIONS.set(backend, connection);
 }
 
 /**
@@ -249,6 +248,8 @@ export function recordOpenedNativeTransaction(
   token: object,
 ): void {
   BOUND_NATIVE_TRANSACTIONS.set(backend, token);
+  const connection = TOKEN_PROBES.get(token)?.connection;
+  if (connection !== undefined) BOUND_CONNECTIONS.set(backend, connection);
 }
 
 /**
@@ -295,21 +296,20 @@ export async function publishConnectionNativeTransaction<T>(
   run: () => Promise<T>,
 ): Promise<T> {
   const probe = TOKEN_PROBES.get(token);
-  // A driver that can confirm the transaction publishes it as proof; one
-  // that cannot only marks its span, which never proves an identity.
-  const spans =
-    probe?.isTransactionOpen === undefined ?
-      UNVERIFIED_SPANS
-    : PUBLISHED_TOKENS;
-  if (probe !== undefined) {
-    spans.set(probe.connection, token);
+  // Only a driver that can confirm the transaction publishes it as proof.
+  const published = probe?.isTransactionOpen === undefined ? undefined : probe;
+  if (published !== undefined) {
+    PUBLISHED_TOKENS.set(published.connection, token);
   }
   try {
     return await run();
   } finally {
     ENDED_TOKENS.add(token);
-    if (probe !== undefined && spans.get(probe.connection) === token) {
-      spans.delete(probe.connection);
+    if (
+      published !== undefined &&
+      PUBLISHED_TOKENS.get(published.connection) === token
+    ) {
+      PUBLISHED_TOKENS.delete(published.connection);
     }
   }
 }
@@ -330,28 +330,52 @@ export function resolveNativeTransactionHandle(
 }
 
 /**
- * The engine transaction that was running, unverified, on the connection
- * `backend` was bound on when nothing proved which transaction `backend`
- * runs in: a transaction the engine opened on a connection-level handle of a
- * driver that reports no transaction state (`@libsql/client` before 0.18,
- * sql.js, Durable Object storage), whose span had not ended. `undefined` once
- * that span has ended, and for a backend with a record of its own.
+ * The driver connection `backend` runs on, as the nearest link of its
+ * derivation chain that has one recorded: the connection-level handle's
+ * connection (better-sqlite3's database, `@libsql/client` before 0.18,
+ * sql.js, Durable Object storage), the connection a token was opened on, or
+ * the pooled client a node-postgres transaction object runs on. `undefined`
+ * where the dialect names none (a per-transaction pinned handle).
  *
- * This is never proof that `backend` runs in that transaction, so its state
- * is never shared: it is what a fact that must fail closed (a read-only scope
- * TypeGraph opened) consults, because on such a connection every statement
- * issued during the span runs in that transaction unless the engine ended it
- * early.
+ * This is never proof of which transaction `backend` runs in, so no state
+ * is shared through it. A connection runs one transaction at a time, so it is
+ * what a fact that must fail closed consults: a read-only scope TypeGraph has
+ * open on a transaction running on this connection.
  */
-export function resolveUnverifiedNativeTransaction(
+export function resolveNativeTransactionConnection(
   backend: object,
 ): object | undefined {
   for (const link of backendDerivationChain(backend)) {
-    if (BOUND_NATIVE_TRANSACTIONS.has(link)) return undefined;
-    const unverified = BOUND_UNVERIFIED_TRANSACTIONS.get(link);
-    if (unverified !== undefined) {
-      return ENDED_TOKENS.has(unverified) ? undefined : unverified;
-    }
+    const connection = BOUND_CONNECTIONS.get(link);
+    if (connection !== undefined) return connection;
   }
   return undefined;
+}
+
+/**
+ * Holds a read-only scope on `connection` until the returned release is
+ * called. The Store holds one for as long as a read-only scope it opened on a
+ * transaction running on that connection is open: a connection runs one
+ * transaction at a time, so meanwhile every statement on it runs in that
+ * transaction ({@link isConnectionInReadOnlyScope}).
+ */
+export function holdConnectionReadOnlyScope(connection: object): () => void {
+  READ_ONLY_CONNECTIONS.set(
+    connection,
+    (READ_ONLY_CONNECTIONS.get(connection) ?? 0) + 1,
+  );
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    READ_ONLY_CONNECTIONS.set(
+      connection,
+      (READ_ONLY_CONNECTIONS.get(connection) ?? 1) - 1,
+    );
+  };
+}
+
+/** Whether a read-only scope is held on `connection` right now. */
+export function isConnectionInReadOnlyScope(connection: object): boolean {
+  return (READ_ONLY_CONNECTIONS.get(connection) ?? 0) > 0;
 }

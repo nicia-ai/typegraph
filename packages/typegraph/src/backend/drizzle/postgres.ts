@@ -1157,7 +1157,14 @@ function postgresNativeHandle(db: object): NativeHandle {
   }
   const pinned = getPinnedPgliteTransaction(db);
   return pinned === undefined ?
-      { kind: "transaction", handle: db }
+      {
+        kind: "transaction",
+        handle: db,
+        // The driver connection the object runs on: node-postgres keeps the
+        // pooled client on the session a caller savepoint of the object
+        // shares, so it names the connection for both.
+        connection: getPinnedPostgresTransactionConnection(db),
+      }
     : {
         kind: "pinned",
         handle: db,

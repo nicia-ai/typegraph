@@ -152,10 +152,7 @@ import {
   edgeMatchIdentityUpdateRefusal,
   resolveEdgeMatchIdentityStorage,
 } from "../store/edge-match-key";
-import {
-  isNativeTransactionReadOnly,
-  resolveBackendNativeTransactionState,
-} from "../store/native-transaction-state";
+import { isBackendNativeTransactionReadOnly } from "../store/native-transaction-state";
 import { compositionRowEndpoints } from "../store/operations/composition-cascade";
 import {
   assertCompositionExistencePreserved,
@@ -322,8 +319,7 @@ export function refuseImportIntoReadOnlyTransaction<G extends GraphDef>(
   store: Store<G>,
   operation: string,
 ): void {
-  const native = resolveBackendNativeTransactionState(storeBackend(store));
-  if (native === undefined || !isNativeTransactionReadOnly(native)) return;
+  if (!isBackendNativeTransactionReadOnly(storeBackend(store))) return;
   refuseReadOnlyTransactionWrite(
     operation,
     store.graphId,

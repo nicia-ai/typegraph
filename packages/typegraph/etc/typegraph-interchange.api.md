@@ -968,6 +968,9 @@ export const ConflictStrategySchema: z.ZodEnum<{
     update: "update";
 }>;
 
+// @public (undocumented)
+const CONNECTION: unique symbol;
+
 // @public
 type ConstrainedCardinality = Exclude<Cardinality, "many">;
 
@@ -5179,9 +5182,9 @@ const NATIVE_TRANSACTION_STATE: unique symbol;
 // @public
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
-    [UNVERIFIED_TRANSACTION]: NativeTransactionState | undefined;
 }> & {
     [READ_ONLY_SCOPES]: number;
+    [CONNECTION]: object | undefined;
 };
 
 // @public
@@ -8691,9 +8694,6 @@ export const UnknownPropertyStrategySchema: z.ZodEnum<{
     allow: "allow";
     strip: "strip";
 }>;
-
-// @public (undocumented)
-const UNVERIFIED_TRANSACTION: unique symbol;
 
 // @public
 type UpdateEdgeParams = Readonly<{

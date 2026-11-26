@@ -2083,6 +2083,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** Rebuilds derived current identity closure without advancing revision. */
   async rebuildIdentityClosure(): Promise<void> {
+    this.#ownWriteGate()?.assertWritable("store.rebuildIdentityClosure()");
     this.#requireIdentityEnabled();
     await rebuildIdentityClosureWithSchemaFence(
       this.#identityContext(this.#baseBackend),
@@ -6770,6 +6771,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       eager?: MaterializeIndexesOptions;
     }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
+    this.#ownWriteGate()?.assertWritable("store.evolve()");
     assertFixedSchemaWorkingCopyAllows(this.#baseBackend, "evolve");
     // Catch up to the persisted state first (extension AND deprecated
     // set). Without this, a stale store applying an extension on top
@@ -7003,6 +7005,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     names: readonly string[],
     options?: Readonly<{ ref?: StoreRef<TRefStore> }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
+    this.#ownWriteGate()?.assertWritable("store.deprecateKinds()");
     return this.#updateDeprecatedKinds("add", names, options);
   }
 
@@ -7026,6 +7029,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     names: readonly string[],
     options?: Readonly<{ ref?: StoreRef<TRefStore> }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
+    this.#ownWriteGate()?.assertWritable("store.undeprecateKinds()");
     return this.#updateDeprecatedKinds("remove", names, options);
   }
 
@@ -7060,6 +7064,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async materializeIndexes(
     options?: MaterializeIndexesOptions,
   ): Promise<MaterializeIndexesResult> {
+    this.#ownWriteGate()?.assertWritable("store.materializeIndexes()");
     const { activeRow, baseline } = await this.#loadCaughtUp("materialize");
     return materializeIndexesImpl(
       {
@@ -7425,6 +7430,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *   backend cannot probe and repair strategy-owned contributions.
    */
   async repairContributions(): Promise<ContributionRepairResult> {
+    this.#ownWriteGate()?.assertWritable("store.repairContributions()");
     const backend = this.#baseBackend;
     requireExtras(
       CONTRIBUTION_HEALTH,
@@ -7713,6 +7719,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       eager?: MaterializeRemovalsOptions;
     }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
+    this.#ownWriteGate()?.assertWritable("store.removeKinds()");
     assertFixedSchemaWorkingCopyAllows(this.#baseBackend, "removeKinds");
     const { activeRow, storedSchema, baseline } =
       await this.#loadCaughtUp("remove");
@@ -7899,6 +7906,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async materializeRemovals(
     options?: MaterializeRemovalsOptions,
   ): Promise<MaterializeRemovalsResult> {
+    this.#ownWriteGate()?.assertWritable("store.materializeRemovals()");
     return materializeRemovalsImpl(
       {
         graphId: this.graphId,

@@ -26,15 +26,17 @@
  * token's state is never handed out once its transaction has ended.
  *
  * What it holds: whether TypeGraph has a read-only scope open on the
- * transaction ({@link runInReadOnlyScope}, {@link isNativeTransactionReadOnly}).
- * A state of its own, given to a session nothing proved, also holds the state
- * of the unverified engine transaction that was running on its connection
- * (`resolveUnverifiedNativeTransaction`), so a read-only scope there fails
- * closed for it without the two sessions sharing a state.
+ * transaction ({@link runInReadOnlyScope}, {@link isNativeTransactionReadOnly}),
+ * and the driver connection its sessions run on, where the engine recorded
+ * one (`resolveNativeTransactionConnection`). A read-only scope is also held
+ * by that connection while it is open, so it fails closed for a session on
+ * the same connection whose state nothing proved to be this one.
  */
 import {
+  holdConnectionReadOnlyScope,
+  isConnectionInReadOnlyScope,
+  resolveNativeTransactionConnection,
   resolveNativeTransactionHandle,
-  resolveUnverifiedNativeTransaction,
 } from "../backend/native-transaction-handle";
 
 // Module-private: only this module builds a state, so no other value (a
@@ -49,36 +51,35 @@ const READ_ONLY_SCOPES: unique symbol = Symbol(
   "typegraph.nativeTransactionReadOnlyScopes",
 );
 
-// Module-private: only `resolveNativeTransactionState` sets it and only
-// `isNativeTransactionReadOnly` reads it.
-const UNVERIFIED_TRANSACTION: unique symbol = Symbol(
-  "typegraph.nativeTransactionUnverifiedTransaction",
+// Module-private: only `resolveNativeTransactionState` writes it, and only
+// `runInReadOnlyScope` and `isNativeTransactionReadOnly` read it.
+const CONNECTION: unique symbol = Symbol(
+  "typegraph.nativeTransactionConnection",
 );
 
 /** State every session of one native transaction shares. */
 export type NativeTransactionState = Readonly<{
   [NATIVE_TRANSACTION_STATE]: true;
-  /**
-   * For a state of its own given to a session nothing proved: the state of
-   * the unverified engine transaction that was running on its connection,
-   * whose read-only scope this session's writes are refused under too.
-   */
-  [UNVERIFIED_TRANSACTION]: NativeTransactionState | undefined;
 }> & {
   /**
    * How many read-only scopes TypeGraph has open on the transaction
    * ({@link runInReadOnlyScope}). Written only by this module.
    */
   [READ_ONLY_SCOPES]: number;
+  /**
+   * The driver connection the transaction's sessions run on, once a binding
+   * that names one resolves the state. Written only by this module.
+   */
+  [CONNECTION]: object | undefined;
 };
 
 function createNativeTransactionState(
-  unverifiedTransaction?: NativeTransactionState,
+  connection: object | undefined,
 ): NativeTransactionState {
   return {
     [NATIVE_TRANSACTION_STATE]: true,
-    [UNVERIFIED_TRANSACTION]: unverifiedTransaction,
     [READ_ONLY_SCOPES]: 0,
+    [CONNECTION]: connection,
   };
 }
 
@@ -88,10 +89,14 @@ const nativeTransactionStates = new WeakMap<object, NativeTransactionState>();
 /** The state of the native transaction the engine identified, created once. */
 function stateOfNativeTransaction(
   nativeTransaction: object,
+  connection: object | undefined,
 ): NativeTransactionState {
   const existing = nativeTransactionStates.get(nativeTransaction);
-  if (existing !== undefined) return existing;
-  const created = createNativeTransactionState();
+  if (existing !== undefined) {
+    existing[CONNECTION] ??= connection;
+    return existing;
+  }
+  const created = createNativeTransactionState(connection);
   nativeTransactionStates.set(nativeTransaction, created);
   return created;
 }
@@ -99,23 +104,18 @@ function stateOfNativeTransaction(
 /**
  * The state of the native transaction `transaction` runs on, created by the
  * first session that asks; a state of its own when the engine recorded no
- * native transaction for `transaction` or any backend it derives from. That
- * state of its own keeps the state of the unverified engine transaction that
- * was running on `transaction`'s connection, if any
- * (`resolveUnverifiedNativeTransaction`), for
- * {@link isNativeTransactionReadOnly} alone.
+ * native transaction for `transaction` or any backend it derives from. Either
+ * way it knows the driver connection `transaction` runs on, where the engine
+ * recorded one, for {@link isNativeTransactionReadOnly} alone.
  */
 export function resolveNativeTransactionState(
   transaction: object,
 ): NativeTransactionState {
   const nativeTransaction = resolveNativeTransactionHandle(transaction);
-  if (nativeTransaction !== undefined) {
-    return stateOfNativeTransaction(nativeTransaction);
-  }
-  const unverified = resolveUnverifiedNativeTransaction(transaction);
-  return createNativeTransactionState(
-    unverified === undefined ? undefined : stateOfNativeTransaction(unverified),
-  );
+  const connection = resolveNativeTransactionConnection(transaction);
+  return nativeTransaction === undefined ?
+      createNativeTransactionState(connection)
+    : stateOfNativeTransaction(nativeTransaction, connection);
 }
 
 /**
@@ -131,8 +131,23 @@ export function resolveBackendNativeTransactionState(
 ): NativeTransactionState | undefined {
   const nativeTransaction = resolveNativeTransactionHandle(backend);
   return nativeTransaction === undefined ? undefined : (
-      stateOfNativeTransaction(nativeTransaction)
+      stateOfNativeTransaction(
+        nativeTransaction,
+        resolveNativeTransactionConnection(backend),
+      )
     );
+}
+
+/**
+ * Whether a Store's own backend runs inside a caller's native transaction
+ * that is inside a read-only scope TypeGraph opened
+ * ({@link resolveBackendNativeTransactionState},
+ * {@link isNativeTransactionReadOnly}). `false` for a backend over a database
+ * or a pool.
+ */
+export function isBackendNativeTransactionReadOnly(backend: object): boolean {
+  const native = resolveBackendNativeTransactionState(backend);
+  return native !== undefined && isNativeTransactionReadOnly(native);
 }
 
 /**
@@ -142,7 +157,8 @@ export function resolveBackendNativeTransactionState(
  * (the opener's own context, a context adopted over `tx.sql`, a Store over a
  * backend built on that handle, a savepoint the engine opened in it) reads
  * the transaction as read-only through {@link isNativeTransactionReadOnly}
- * until `run` settles.
+ * until `run` settles. The connection the transaction runs on holds the
+ * scope too, for as long.
  *
  * The fact is a scope, not a property set for the transaction's life: a
  * read-only `store.transaction` on a backend built over a caller's
@@ -154,11 +170,17 @@ export async function runInReadOnlyScope<T>(
   state: NativeTransactionState,
   run: () => Promise<T>,
 ): Promise<T> {
+  const connection = state[CONNECTION];
   state[READ_ONLY_SCOPES] += 1;
+  const releaseConnection =
+    connection === undefined ? undefined : (
+      holdConnectionReadOnlyScope(connection)
+    );
   try {
     return await run();
   } finally {
     state[READ_ONLY_SCOPES] -= 1;
+    releaseConnection?.();
   }
 }
 
@@ -171,19 +193,20 @@ export async function runInReadOnlyScope<T>(
  * native read-only transaction TypeGraph did not open has no scope here: the
  * engine decides.
  *
- * It fails closed where nothing proves the transaction: a session of a state
- * of its own also reads as read-only while the unverified engine transaction
- * that was running on its connection has a read-only scope open. On a
- * connection whose driver reports no transaction state, every statement
- * during that transaction's span runs in it, so a write there would
- * otherwise commit inside a transaction TypeGraph opened read-only.
+ * It fails closed where nothing proves the transaction: a session also reads
+ * as read-only while a read-only scope is open on its driver connection. A
+ * connection runs one transaction at a time, so the session's statements run
+ * inside that scope's transaction whatever state the session holds: a handle
+ * on a driver that reports no transaction state, a context bound in an
+ * earlier transaction on the same connection, or a caller savepoint on the
+ * same pooled client.
  */
 export function isNativeTransactionReadOnly(
   state: NativeTransactionState,
 ): boolean {
-  const unverified = state[UNVERIFIED_TRANSACTION];
+  const connection = state[CONNECTION];
   return (
     state[READ_ONLY_SCOPES] > 0 ||
-    (unverified !== undefined && unverified[READ_ONLY_SCOPES] > 0)
+    (connection !== undefined && isConnectionInReadOnlyScope(connection))
   );
 }

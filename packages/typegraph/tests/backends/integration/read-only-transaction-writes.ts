@@ -44,6 +44,7 @@ import {
   planMerge,
 } from "../../../src/graph-merge/merge";
 import { asBranchId } from "../../../src/graph-merge/types";
+import { rebuildIdentityClosure } from "../../../src/identity";
 import {
   exportGraph,
   type GraphInterchangeChunk,
@@ -58,6 +59,7 @@ import type {
 } from "../../../src/store/collection-surface";
 import { requireDefined } from "../../../src/utils/presence";
 import { unwrap } from "../../../src/utils/result";
+import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
 
 const RotPerson = defineNode("RotPerson", {
@@ -808,6 +810,69 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
       );
     });
 
+    it("never writes through a context bound in an earlier transaction and used inside a later read-only one on a one-connection backend", async () => {
+      const graph = buildGraph(nextGraphId());
+      const serialized =
+        context.serverLaneConcurrency ?
+          await context.createSerializedBackend()
+        : undefined;
+      try {
+        const [store] = await createAdapterStoreWithSchema(
+          graph,
+          serialized?.backend ?? context.getBackend(),
+        );
+        await seed(store);
+        let bound: ReturnType<typeof store.withTransaction> | undefined;
+        await store.transaction(async (tx) => {
+          bound = store.withTransaction(nativeHandle(tx));
+          await bound.nodes.RotPerson.getById(asNodeId("p1"));
+        });
+        let write: unknown;
+        const later = await rejectionOf(
+          store.transaction(
+            async () => {
+              write = await rejectionOf(
+                (async () =>
+                  requireDefined(bound).nodes.RotTeam.create(
+                    { name: "t3" },
+                    { id: "t3" },
+                  ))(),
+              );
+            },
+            { accessMode: "read_only" },
+          ),
+        );
+        const team = await store.nodes.RotTeam.getById(asNodeId("t3"));
+        // The context's session holds the earlier transaction's state. On
+        // better-sqlite3 its statements now run in the later transaction on
+        // the same connection, which holds the later read-only scope, so the
+        // write is refused. libSQL and PGlite report the earlier
+        // transaction's handle closed.
+        const outcome = writeOutcome(write);
+        expect({
+          written: outcome === "fulfilled" || team !== undefined,
+          exact:
+            context.serverLaneConcurrency ? undefined : (
+              {
+                write: outcome,
+                later: later === undefined ? "fulfilled" : "rejected",
+              }
+            ),
+        }).toEqual({
+          written: false,
+          exact:
+            context.serverLaneConcurrency ? undefined : (
+              {
+                write: RETAINED_HANDLE_WRITE[context.driver],
+                later: "fulfilled",
+              }
+            ),
+        });
+      } finally {
+        await serialized?.close();
+      }
+    });
+
     it("never writes through a handle retained from an earlier transaction and adopted inside a later read-only one on a one-connection backend", async () => {
       const graph = buildGraph(nextGraphId());
       // Server PostgreSQL needs a one-client pool for the later transaction
@@ -940,13 +1005,14 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
       // driver proves which transaction it is in: better-sqlite3 runs it on
       // the connection the opener published its transaction on, and libSQL
       // and PGlite keep the transaction's pinned driver handle in it
-      // (`native-transaction-handle.ts`, proofs 2 and 4). node-postgres and
-      // postgres-js give it a new transaction object with no link to the
-      // enclosing one, so its sessions get a state of their own; the engine
-      // transaction is READ ONLY there, so the engine refuses the write
-      // (SQLSTATE 25006) and Drizzle rolls the savepoint back.
-      const engineDecides =
-        context.driver === "node-postgres" || context.driver === "postgres-js";
+      // (`native-transaction-handle.ts`, proofs 2 and 4). node-postgres gives
+      // it a new transaction object with no link to the enclosing one, so it
+      // gets a state of its own, but it keeps the pooled client, which holds
+      // the read-only scope while it runs. postgres-js gives it a new client
+      // as well, so TypeGraph does not refuse; the engine transaction is READ
+      // ONLY, so the engine refuses the write (SQLSTATE 25006) and Drizzle
+      // rolls the savepoint back.
+      const engineDecides = context.driver === "postgres-js";
       expect({
         write: writeOutcome(write),
         transaction: transaction === undefined ? "fulfilled" : "rejected",
@@ -1058,6 +1124,45 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
           operation: "store.clear()",
           write: (store) => store.clear(),
         },
+        {
+          operation: "store.evolve()",
+          write: (store) =>
+            store.evolve(
+              defineGraphExtension({
+                nodes: {
+                  RotExtra: { properties: { label: { type: "string" } } },
+                },
+              }),
+            ),
+        },
+        {
+          operation: "store.deprecateKinds()",
+          write: (store) => store.deprecateKinds(["RotTeam"]),
+        },
+        {
+          operation: "store.undeprecateKinds()",
+          write: (store) => store.undeprecateKinds(["RotTeam"]),
+        },
+        {
+          operation: "store.removeKinds()",
+          write: (store) => store.removeKinds(["RotTeam"]),
+        },
+        {
+          operation: "store.materializeRemovals()",
+          write: (store) => store.materializeRemovals(),
+        },
+        {
+          operation: "store.materializeIndexes()",
+          write: (store) => store.materializeIndexes(),
+        },
+        {
+          operation: "store.rebuildIdentityClosure()",
+          write: (store) => rebuildIdentityClosure(store),
+        },
+        {
+          operation: "store.repairContributions()",
+          write: (store) => store.repairContributions(),
+        },
       ];
 
       for (const { operation, write } of WRITES) {
@@ -1086,6 +1191,95 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
           expect(await graphState(store)).toEqual(before);
         });
       }
+
+      it("refuses a write in a history Store's own store.transaction() before its isolation check, at repeatable read", async () => {
+        const graph = buildGraph(nextGraphId());
+        const [store] = await createAdapterStoreWithSchema(
+          graph,
+          context.getBackend(),
+        );
+        await seed(store);
+        let refusal: unknown;
+        const committed = await store.transaction(
+          async (tx) => {
+            const overTransaction = createAdapterStore(
+              graph,
+              backendOverTransaction(nativeHandle(tx)),
+              { history: true },
+            );
+            refusal = await rejectionOf(
+              overTransaction.transaction((inner) =>
+                inner.nodes.RotTeam.create({ name: "t3" }),
+              ),
+            );
+            return tx.nodes.RotPerson.getById(asNodeId("p1"));
+          },
+          { accessMode: "read_only", isolationLevel: "repeatable_read" },
+        );
+        expectReadOnlyRefusal(refusal, "tx.nodes.RotTeam.create()", graph.id);
+        expect(committed?.id).toBe("p1");
+      });
+
+      it("refuses a write through a savepoint the caller opens while a read-only savepoint of its transaction runs", async () => {
+        const graph = buildGraph(nextGraphId());
+        const [store] = await createAdapterStoreWithSchema(
+          graph,
+          context.getBackend(),
+        );
+        await seed(store);
+        let write: unknown;
+        await store.transaction(async (tx) => {
+          const handle = nativeHandle(tx) as Readonly<{
+            transaction: (
+              fn: (savepoint: unknown) => Promise<unknown>,
+            ) => Promise<unknown>;
+          }>;
+          const overTransaction = createAdapterStore(
+            graph,
+            backendOverTransaction(handle),
+          );
+          // The read-only store.transaction is a savepoint of the caller's
+          // read-write transaction, so the engine accepts writes; the caller's
+          // own savepoint, opened while it runs, must still be refused.
+          await overTransaction.transaction(
+            async () => {
+              await rejectionOf(
+                handle.transaction(async (savepoint) => {
+                  write = await rejectionOf(
+                    (async () =>
+                      store
+                        .withTransaction(savepoint)
+                        .nodes.RotTeam.create({ name: "t3" }, { id: "t3" }))(),
+                  );
+                }),
+              );
+            },
+            { accessMode: "read_only" },
+          );
+        });
+        const team = await store.nodes.RotTeam.getById(asNodeId("t3"));
+        // libSQL and PGlite keep the transaction's pinned driver handle in
+        // the caller's savepoint, and node-postgres its pooled client, which
+        // holds the read-only scope while it runs. postgres-js gives the
+        // savepoint a client of its own, and the engine does not refuse a
+        // write in a savepoint of a read-write transaction.
+        expectObservation({
+          lane: { driver: context.driver },
+          observed: {
+            write: writeOutcome(write),
+            team: team === undefined ? undefined : String(team.id),
+          },
+          correct: { write: "refused as read-only", team: undefined },
+          defects: [
+            {
+              label:
+                "postgres-js caller savepoint under a read-only savepoint scope",
+              on: { driver: ["postgres-js"] },
+              today: { write: "fulfilled", team: "t3" },
+            },
+          ],
+        });
+      });
 
       it("reads a read-only savepoint as a scope: the caller's read-write transaction refuses only while it runs", async () => {
         const graph = buildGraph(nextGraphId());

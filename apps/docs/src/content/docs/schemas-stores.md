@@ -2396,7 +2396,7 @@ error, before any statement:
 | `store.withRecordedTransaction(tx.sql, fn)` | the same writes inside `fn`, and `applyMergePlanInTransaction()` with that context |
 | `store.withRecordedTransaction(tx.sql, fn)` on a history store | `store.withRecordedTransaction()`, before `fn` runs (it fences its writes first) |
 | `store.withEvolvedTransaction(tx.sql, plan, fn)` | `store.withEvolvedTransaction()`, before `fn` runs, for every plan |
-| a Store over `createPostgresTransactionBackend(tx.sql)`, or over `createSqliteBackend(tx.sql)` on a libSQL transaction | its `store.nodes`, `store.edges` and `store.identity` writes (`store.nodes.Person.create()`), `store.clear()`, `importGraph()`, `importGraphStream()`, `trustedImportGraphStream()`, and the writes and provenance verbs in its own `store.transaction()` |
+| a Store over `createPostgresTransactionBackend(tx.sql)`, or over `createSqliteBackend(tx.sql)` on a libSQL transaction | its `store.nodes`, `store.edges` and `store.identity` writes (`store.nodes.Person.create()`), `store.clear()`, `evolve()`, `deprecateKinds()`, `undeprecateKinds()`, `removeKinds()`, `materializeRemovals()`, `materializeIndexes()`, `repairContributions()`, `rebuildIdentityClosure(store)`, `importGraph()`, `importGraphStream()`, `trustedImportGraphStream()`, and the writes and provenance verbs in its own `store.transaction()` (a history store refuses them before its isolation check) |
 
 A read-only `store.transaction()` on a Store over a caller's read-write transaction runs as a
 savepoint of that transaction: the caller's transaction refuses TypeGraph writes while that
@@ -2405,16 +2405,19 @@ not open (your own `db.transaction(fn, { accessMode: "read only" })`) carries no
 TypeGraph writes through it as before, so PostgreSQL rejects the write and aborts the transaction,
 and SQLite has no read-only transaction to refuse it.
 
-A savepoint you open yourself with `tx.sql.transaction(...)` and hand to `withTransaction()` is
-refused the same way on better-sqlite3, libSQL and PGlite, whose drivers show which transaction it
-runs in. On node-postgres and postgres-js the driver gives it a new object with no link to the
-enclosing transaction, so TypeGraph does not refuse its writes; the engine transaction is read-only,
-so PostgreSQL rejects them and rolls the savepoint back.
+While the callback runs, the driver connection the transaction runs on holds the read-only fact
+too. A connection runs one transaction at a time, so a context TypeGraph cannot tie to the
+transaction is still refused when its statements would run on that connection: an adoption of
+`tx.sql` on a driver that cannot report whether a transaction is open (`@libsql/client` before
+0.18, sql.js, Durable Object storage), a context you bound in an earlier transaction on the same
+better-sqlite3 connection, or a savepoint you open yourself with `tx.sql.transaction(...)` on
+node-postgres, which keeps the pooled client.
 
-On a driver that cannot report whether a transaction is open (`@libsql/client` before 0.18, sql.js,
-Durable Object storage), TypeGraph cannot show which transaction an adoption of `tx.sql` runs in.
-While the read-only callback runs, such an adoption is refused anyway, because every statement on
-that one connection runs inside the read-only transaction.
+A savepoint you open yourself and hand to `withTransaction()` is refused the same way on
+better-sqlite3, libSQL and PGlite, whose drivers show which transaction it runs in. On postgres-js
+it gets a client of its own, so TypeGraph does not refuse its writes. In a read-only transaction
+PostgreSQL rejects them and rolls the savepoint back; in a read-only `store.transaction()` that runs
+as a savepoint of your read-write transaction, they run and commit with it.
 
 The refusal covers what TypeGraph writes. A statement issued through the native `tx.sql` handle is
 not checked: PostgreSQL rejects a write there and aborts the transaction (which then rejects with
