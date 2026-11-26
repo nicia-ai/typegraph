@@ -7,7 +7,11 @@ import { createPostgresBackend } from "../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
 import { createLocalSqliteBackend } from "../../src/backend/sqlite/local";
 import type { GraphBackend } from "../../src/backend/types";
-import { ConfigurationError } from "../../src/errors";
+import { ConfigurationError, SchemaFenceTimeoutError } from "../../src/errors";
+import { requireDefined } from "../../src/utils/presence";
+
+/** Rolls back an attempt whose adoption fit inside the one-millisecond budget. */
+class AdoptedWithinBudget extends Error {}
 
 const openedBackends: GraphBackend[] = [];
 
@@ -74,6 +78,44 @@ describe("schema-write transaction adoption", () => {
     await expect(
       adopt(endedTransaction, "adoption_test", { waitBudgetMs: 1000 }),
     ).rejects.toBeInstanceOf(ConfigurationError);
+  });
+
+  it("hands a PostgreSQL caller its own lock_timeout back after a wait-budget refusal", async () => {
+    const { backend, db } = await createLocalPgliteBackend({ vector: false });
+    openedBackends.push(backend);
+    const adopt = requireDefined(backend.adoptSchemaWriteTransaction);
+
+    // A one-millisecond budget runs out between the fence's acquisitions, so
+    // the refusal comes from TypeGraph's own deadline check after the first
+    // acquisition shortened lock_timeout, and the caller's transaction stays
+    // usable. The rare attempt that fits in the budget is rolled back and
+    // retried.
+    const refusals: Readonly<{ error: unknown; setting: unknown }>[] = [];
+    for (let attempt = 0; attempt < 20 && refusals.length === 0; attempt++) {
+      const observed = await db
+        .transaction(async (nativeTx) => {
+          await nativeTx.execute(
+            sql`SELECT set_config('lock_timeout', '7s', true)`,
+          );
+          try {
+            await adopt(nativeTx, "adoption_budget", { waitBudgetMs: 1 });
+          } catch (error) {
+            const rows = await nativeTx.execute(
+              sql`SELECT current_setting('lock_timeout') AS setting`,
+            );
+            return { error, setting: rows.rows[0] };
+          }
+          throw new AdoptedWithinBudget();
+        })
+        .catch((error: unknown) => {
+          if (error instanceof AdoptedWithinBudget) return;
+          throw error;
+        });
+      if (observed !== undefined) refusals.push(observed);
+    }
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]?.error).toBeInstanceOf(SchemaFenceTimeoutError);
+    expect(refusals[0]?.setting).toEqual({ setting: "7s" });
   });
 
   it("exposes transactional policy only when adapters opt in", async () => {

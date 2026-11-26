@@ -746,7 +746,8 @@ Interactive PostgreSQL adapters validate the active session, retain the existing
 schema advisory lock → schema row → recorded-write lock order, and use
 transaction-scoped advisory locks. This lock lifetime is suitable for transaction
 poolers such as Hyperdrive. The adapter restores temporary timeout settings before
-the callback. A PostgreSQL schema write needs a `READ COMMITTED` session: the caller's
+the callback, and before it throws a `SchemaFenceTimeoutError` that its own deadline
+check raised rather than the database. A PostgreSQL schema write needs a `READ COMMITTED` session: the caller's
 transaction is refused with `SCHEMA_WRITE_REQUIRES_READ_COMMITTED` when it runs at
 `REPEATABLE READ` or `SERIALIZABLE`, before the adapter acquires anything.
 Noninteractive HTTP drivers cannot adopt schema transactions.

@@ -99,6 +99,7 @@ import {
 import { resolveStampedValidityLowerBound } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import {
+  carriesEngineSqlState,
   isInsufficientResourcesError,
   isMissingTableError,
   isPostgresConcurrentDdlRaceError,
@@ -2951,6 +2952,10 @@ function buildPostgresEngineProfileInternal(
 
                 const deadline = performance.now() + options.waitBudgetMs;
                 let phase: "schema-advisory" | "schema-row" = "schema-advisory";
+                const restoreCallerLockTimeout = () =>
+                  externalTx.execute(
+                    sql`SELECT set_config('lock_timeout', ${previousTimeout}, true)`,
+                  );
                 try {
                   await acquireSchemaWriteFence(
                     externalTx,
@@ -2988,9 +2993,7 @@ function buildPostgresEngineProfileInternal(
                       options.waitBudgetMs,
                     );
                   }
-                  await externalTx.execute(
-                    sql`SELECT set_config('lock_timeout', ${previousTimeout}, true)`,
-                  );
+                  await restoreCallerLockTimeout();
                 } catch (error) {
                   // A database lock timeout aborts the native transaction. Do not
                   // issue a restore or diagnostic statement on that failed session.
@@ -3001,6 +3004,14 @@ function buildPostgresEngineProfileInternal(
                       options.waitBudgetMs,
                       error,
                     );
+                  }
+                  // A refusal raised here rather than by the engine, such as the
+                  // deadline checks above, leaves the caller's transaction usable,
+                  // and the caller may go on with it. It gets its own lock_timeout
+                  // back, not the shortened one of the last acquisition. An engine
+                  // error has aborted the session, which takes no restore.
+                  if (!carriesEngineSqlState(error)) {
+                    await restoreCallerLockTimeout();
                   }
                   throw error;
                 }
