@@ -1959,10 +1959,10 @@ export type TransactionRolledBackErrorDetails = Readonly<{
    * - `"statement-failure"`: a statement of the transaction failed and the
    *   database ended the transaction with it (SQLite: a trigger's
    *   `RAISE(ROLLBACK)`, or an error SQLite answers by rolling back), as the
-   *   driver confirmed right after the failure. Every later statement of the
-   *   transaction is refused with this error and TypeGraph sends no
-   *   `COMMIT`. Detected where the driver reports transaction state
-   *   (better-sqlite3, bun:sqlite, libSQL 0.18+).
+   *   driver's engine-state flag or SQLite itself answered right after the
+   *   failure (on Durable Object storage, which cannot be asked, any failure
+   *   counts). Every later statement of the transaction is refused with this
+   *   error and TypeGraph sends no `COMMIT`.
    */
   detectedBy:
     "commit-reply" | "refused-statement" | "driver" | "statement-failure";

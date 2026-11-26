@@ -820,8 +820,8 @@ export type SqliteTransactionExecutionView = Readonly<{
  * runner calls `drainAndClose` (before COMMIT / ROLLBACK) a late statement is
  * refused instead of running outside the transaction that issued it. The
  * runner's own frame statements go through the unwrapped adapter.
- * `options.isTransactionOpen` is the driver's report of whether the
- * transaction is still open (see `TransactionViewOptions`).
+ * `options.transactionState` answers whether the transaction is still open
+ * after a statement fails (see `TransactionViewOptions`).
  */
 export function createSqliteTransactionExecutionView(
   adapter: SqliteExecutionAdapter,

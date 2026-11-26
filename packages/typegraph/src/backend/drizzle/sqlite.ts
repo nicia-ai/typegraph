@@ -77,6 +77,7 @@ import {
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
+  isSqliteNestedTransactionError,
   isSqliteNotAuthorizedError,
   isSqliteWriterSlotBusy,
 } from "../../utils/sql-errors";
@@ -167,6 +168,7 @@ import {
   type SqliteExecutionProfileHints,
   type SqliteTransactionExecutionView,
 } from "./execution/sqlite-execution";
+import type { TransactionState } from "./execution/transaction-view";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
 import {
   copyGraphTemplateContributionMarkersStatement,
@@ -838,20 +840,20 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
    */
   nativeTransaction?: object | undefined;
   /**
-   * Whether TypeGraph opened this transaction holding SQLite's writer slot
-   * (`BEGIN IMMEDIATE`). While it is open no other connection can commit, so
-   * a root marker read sees what this transaction sees even when it runs on
-   * a session of its own. Absent for an adopted transaction and for one
-   * opened deferred: such a transaction on a libSQL session of its own can
-   * hold a snapshot older than the root's reads.
+   * Whether TypeGraph asked for SQLite's writer slot when it opened this
+   * transaction (`BEGIN IMMEDIATE`). A request, not evidence: the marker gate
+   * shares the root's reads only where the driver also reports, from the
+   * engine's state, that the transaction has begun
+   * (`createTransactionBackend`). Absent for an adopted transaction and for
+   * one opened deferred.
    */
-  beganWithWriterSlot?: boolean | undefined;
+  requestedWriterSlot?: boolean | undefined;
 }>;
 
 /** What a runner knows about an owned transaction when it binds it. */
 type OwnedTransactionBinding = Pick<
   CreateSqliteTransactionBackendOptions,
-  "nativeTransaction" | "beganWithWriterSlot"
+  "nativeTransaction" | "requestedWriterSlot"
 >;
 
 function createSqliteOperationBackend(
@@ -2179,7 +2181,7 @@ export function buildSqliteEngineProfile(
                     recordedTime: provisioning.recordedTime,
                     isFirstParty,
                     // BEGIN IMMEDIATE, below.
-                    beganWithWriterSlot: true,
+                    requestedWriterSlot: true,
                   }),
                   fn,
                   recordEngineEnd,
@@ -2430,7 +2432,7 @@ export function buildSqliteEngineProfile(
                   return runOnOwnedTransaction(
                     tx,
                     (txBackend, route) => fn(txBackend, tx, route),
-                    { beganWithWriterSlot: behavior === "immediate" },
+                    { requestedWriterSlot: behavior === "immediate" },
                     recordEngineEnd,
                   );
                 },
@@ -2518,8 +2520,7 @@ export function buildSqliteEngineProfile(
                   typeof rootClient !== "object" ||
                   rootClient === null ||
                   rootClient !== transactionClient ||
-                  !("inTransaction" in rootClient) ||
-                  rootClient.inTransaction !== true
+                  readSqliteInTransaction(rootClient) !== "open"
                 ) {
                   throw new ConfigurationError(
                     "Schema adoption requires the active transaction on this backend's exact SQLite connection.",
@@ -2916,32 +2917,40 @@ function createTransactionBackend(
 ): BoundTransactionBackend {
   // A fresh view per transaction (and per retried attempt): the runner closes
   // it at the boundary, and a later transaction on the same connection gets
-  // its own. After a statement fails, the view asks the driver whether the
-  // transaction is still open, so a failure that ended it in the engine
-  // refuses every later statement instead of letting it autocommit.
-  const isTransactionOpen = sqliteTransactionStateProbe(options.db);
+  // its own. After a statement fails, the view asks whether the transaction
+  // is still open before any later statement starts, so a failure that ended
+  // it in the engine refuses every later statement instead of letting it
+  // autocommit.
   const sessionAdapter =
     options.executionAdapter ??
     createSqliteExecutionAdapter(options.db, {
       profileHints: options.profileHints,
     });
-  const view = createSqliteTransactionExecutionView(
-    sessionAdapter,
-    isTransactionOpen === undefined ? {} : { isTransactionOpen },
-  );
+  const driverState = sqliteDriverTransactionState(options.db);
+  const view = createSqliteTransactionExecutionView(sessionAdapter, {
+    transactionState: () =>
+      sqliteTransactionStateAfterFailure(driverState, sessionAdapter),
+  });
   const txExecutionAdapter = view.adapter;
   // Marker reads are admitted through this transaction's view, and
   // administration is refused. Where the transaction runs on the root's own
-  // connection, or that TypeGraph opened holding the writer slot (no other
-  // connection can commit while it is open), its reads share the root
-  // materializer's cache: the root reads what this transaction reads. Any
-  // other transaction on a libSQL session of its own (a caller's adopted
-  // transaction, one opened deferred) can hold a snapshot older than the
-  // root's reads, so its marker reads run on that session, with a cache of
-  // their own that never outlives it — as PostgreSQL's do.
-  const txContributionMaterializer = admitContributionReadsThroughView(
+  // connection, or on a libSQL session of its own that holds the writer slot
+  // (no other connection can commit while it is open), its reads share the
+  // root materializer's cache: the root reads what this transaction reads.
+  // Holding the slot is proven, not requested: TypeGraph asked for
+  // `BEGIN IMMEDIATE` and the driver reports, from the engine's own state,
+  // that the transaction has begun. A remote libSQL client sends its BEGIN
+  // with the first statement and reports a stream rather than the engine,
+  // so a marker read there could run on the root before the BEGIN. Every
+  // other transaction on a libSQL session of its own (that one, a caller's
+  // adopted transaction, one opened deferred) can see other than the root
+  // reads, so its marker reads run on that session, with a cache of their
+  // own that never outlives it — as PostgreSQL's do.
+  const sharesRootMarkerReads =
     ownLibsqlSession(options.db) === undefined ||
-      options.beganWithWriterSlot === true ?
+    (options.requestedWriterSlot === true && driverState?.() === "open");
+  const txContributionMaterializer = admitContributionReadsThroughView(
+    sharesRootMarkerReads ?
       options.contributionMaterializer
     : options.contributionMaterializer.bindReadSession(
         createSessionMarkerBatchRead(
@@ -3066,34 +3075,101 @@ function sqliteNativeHandle(db: AnySqliteDatabase): NativeHandle {
         kind: "pinned",
         handle: db,
         pinned,
-        isOpen: () => isPinnedLibsqlTransactionOpen(pinned),
+        // Proof 2 asks whether the handle still denotes the transaction it
+        // was opened for: a libSQL transaction handle never hosts a later
+        // one, so only a handle known to have ended is retired. Whether a
+        // statement may still run on it is the view's question, not this one.
+        isOpen: () => libsqlSessionState(pinned, db) !== "ended",
       };
 }
 
 /**
- * Whether the pinned libSQL transaction handle `pinned` still has its
- * transaction open: a libSQL transaction handle reports `closed` once its
- * transaction has ended, committed, rolled back or ended by the engine, and
- * refuses every statement from then on.
+ * What the driver's own flag says about the transaction the SQLite handle
+ * `db` runs in: THE one reading of a driver's transaction flag, which the
+ * transaction view (after a statement fails), the marker gate (whether the
+ * writer slot is held) and the native-transaction proofs 2 and 4 consume.
+ *
+ * | Driver | Flag | Reflects the engine? |
+ * | --- | --- | --- |
+ * | better-sqlite3, bun:sqlite | `inTransaction` (the connection's autocommit state) | yes |
+ * | local libSQL transaction (`file:`) | `closed` (`!inTransaction` of the transaction's connection) | yes |
+ * | remote libSQL transaction (`http`, `ws`), or a Drizzle database over a libSQL transaction handle | `closed` (whether the stream or handle was closed) | only `closed: true`; an open stream is `"unknown"` |
+ * | sql.js, Durable Object storage, `sqlite-proxy`, a local libSQL client before 0.18 | none | no flag (`undefined`) |
+ *
+ * A read that throws (a closed database) answers `"unknown"`.
  */
-function isPinnedLibsqlTransactionOpen(pinned: object): boolean {
-  return !(pinned as Readonly<{ closed: boolean }>).closed;
+function sqliteDriverTransactionState(
+  db: AnySqliteDatabase,
+): (() => TransactionState) | undefined {
+  const session = ownLibsqlSession(db);
+  if (session !== undefined) return () => libsqlSessionState(session, db);
+  const client = sqliteHandleClient(db);
+  if (!reportsConnectionTransactionState(client)) return undefined;
+  return () => readSqliteInTransaction(client);
 }
 
 /**
- * How the driver reports whether the transaction `db` runs in is still open,
- * for the transaction view's check after a statement fails
- * (`TransactionViewOptions.isTransactionOpen`): a libSQL transaction object's
- * pinned handle, or the connection's own state
- * ({@link sqliteConnectionProbe}). `undefined` where the driver reports
- * neither (`@libsql/client` before 0.18, sql.js, Durable Object storage).
+ * What the libSQL transaction handle `session` that `db` executes on says
+ * about its transaction: `closed` is final, and an open handle is `"open"`
+ * only where `closed` is the engine's state — a local client's transaction,
+ * whose `closed` is its connection's `!inTransaction`. A remote client's
+ * `closed` reports its stream: the server can end the transaction (a
+ * `RAISE(ROLLBACK)`) while the stream stays open.
  */
-function sqliteTransactionStateProbe(
+function libsqlSessionState(
+  session: object,
   db: AnySqliteDatabase,
-): (() => boolean) | undefined {
-  const session = ownLibsqlSession(db);
-  if (session !== undefined) return () => isPinnedLibsqlTransactionOpen(session);
-  return sqliteConnectionProbe(db)?.isTransactionOpen;
+): TransactionState {
+  try {
+    if ((session as Readonly<{ closed: unknown }>).closed === true) {
+      return "ended";
+    }
+  } catch {
+    return "unknown";
+  }
+  return isLocalLibsqlClient(sqliteHandleClient(db)) ? "open" : "unknown";
+}
+
+/**
+ * Whether the transaction `db` runs in is still open, asked by its view
+ * right after a statement fails: the driver's flag where it reflects the
+ * engine ({@link sqliteDriverTransactionState}), and otherwise the engine
+ * itself, on the session the transaction runs on
+ * ({@link askSqliteEngineForTransaction}).
+ */
+function sqliteTransactionStateAfterFailure(
+  driverState: (() => TransactionState) | undefined,
+  session: SqliteExecutionAdapter,
+): TransactionState | Promise<TransactionState> {
+  const reported = driverState?.() ?? "unknown";
+  return reported === "unknown" ?
+      askSqliteEngineForTransaction(session)
+    : reported;
+}
+
+/**
+ * Asks SQLite on `session` whether a transaction is open: `BEGIN` fails
+ * with "cannot start a transaction within a transaction" inside one, and
+ * opens one outside it — which is rolled back at once, so the question
+ * leaves no transaction behind. Any other failure (a driver that refuses raw
+ * transaction control, such as Durable Object storage, or a remote client
+ * that refuses a statement on a stream whose transaction ended) answers
+ * `"unknown"`.
+ */
+async function askSqliteEngineForTransaction(
+  session: SqliteExecutionAdapter,
+): Promise<TransactionState> {
+  try {
+    await session.executeRun(sql`BEGIN`);
+  } catch (error) {
+    return isSqliteNestedTransactionError(error) ? "open" : "unknown";
+  }
+  try {
+    await session.executeRun(sql`ROLLBACK`);
+  } catch {
+    // The view refuses every later statement either way.
+  }
+  return "ended";
 }
 
 /**
@@ -3114,24 +3190,40 @@ function ownLibsqlSession(db: AnySqliteDatabase): object | undefined {
 }
 
 /**
- * Whether the driver reports a transaction open on `client` right now. A
- * read that throws (a closed database) is not a confirmation.
+ * Whether `client` reports its connection's transaction state:
+ * better-sqlite3's and bun:sqlite's boolean `inTransaction`.
  */
-function readSqliteInTransaction(client: object): boolean {
+function reportsConnectionTransactionState(client: unknown): client is object {
+  return (
+    (isBetterSqlite3Client(client) || isBunSqliteClient(client)) &&
+    typeof (client as Readonly<{ inTransaction?: unknown }>).inTransaction ===
+      "boolean"
+  );
+}
+
+/**
+ * The connection's transaction state as `client`'s `inTransaction` reports
+ * it; a read that throws (a closed database) or a non-boolean answers
+ * `"unknown"`.
+ */
+function readSqliteInTransaction(client: object): TransactionState {
   try {
-    return (client as Readonly<{ inTransaction?: unknown }>).inTransaction ===
-      true;
+    const inTransaction: unknown = (
+      client as Readonly<{ inTransaction?: unknown }>
+    ).inTransaction;
+    if (typeof inTransaction !== "boolean") return "unknown";
+    return inTransaction ? "open" : "ended";
   } catch {
-    return false;
+    return "unknown";
   }
 }
 
 /**
  * How the driver confirms that a transaction the engine opened on `db` is
- * still open (proof 4): better-sqlite3's and bun:sqlite's `inTransaction`,
- * the connection's own autocommit state, read on the client `db` executes on
- * (a transaction object's session client, or a database's `$client`).
- * `undefined` for a driver that
+ * still open (proof 4): the connection's own state
+ * ({@link sqliteDriverTransactionState}), read on the client `db` executes
+ * on (a transaction object's session client, or a database's `$client`),
+ * and only an `"open"` answer confirms. `undefined` for a driver that
  * reports none (`@libsql/client` before 0.18 hides its connection, sql.js
  * and Durable Object storage expose no transaction state): its token is never
  * honoured through the connection.
@@ -3140,17 +3232,10 @@ function sqliteConnectionProbe(
   db: AnySqliteDatabase,
 ): ConnectionTransactionProbe | undefined {
   const client = sqliteHandleClient(db);
-  if (
-    (!isBetterSqlite3Client(client) && !isBunSqliteClient(client)) ||
-    typeof (client as Readonly<{ inTransaction?: unknown }>).inTransaction !==
-      "boolean"
-  ) {
-    return undefined;
-  }
-  const driverClient = client as object;
+  if (!reportsConnectionTransactionState(client)) return undefined;
   return {
     connection: nativeTransactionConnection(db),
-    isTransactionOpen: () => readSqliteInTransaction(driverClient),
+    isTransactionOpen: () => readSqliteInTransaction(client) === "open",
   };
 }
 

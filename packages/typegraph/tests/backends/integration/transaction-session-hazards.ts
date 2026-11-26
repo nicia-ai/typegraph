@@ -2179,6 +2179,45 @@ export function registerTransactionSessionHazardTests(
         }
       });
 
+      it("refuses a sibling write submitted in the same turn as the failure that ended its transaction, and saves nothing", async () => {
+        const graphId = buildGraph().id;
+        const backend = context.getBackend();
+        const removeTrigger = await installEngineRollbackTrigger(
+          backend,
+          graphId,
+        );
+        try {
+          const statements: Record<string, Promise<Refusal>> = {};
+          const transaction = await refusalOf(
+            backend.transaction(async (tx) => {
+              await tx.insertNode(importedNode(graphId, "first"));
+              // Both submitted before either settles.
+              statements["failing"] = refusalOf(
+                tx.insertNode(importedNode(graphId, ENGINE_ROLLBACK_ID)),
+              );
+              statements["sibling"] = refusalOf(
+                tx.insertNode(importedNode(graphId, "sibling")),
+              );
+              await Promise.all(Object.values(statements));
+            }),
+          );
+          const sibling = await requireDefined(statements["sibling"]);
+          expect({
+            failed: !isFulfilled(await requireDefined(statements["failing"])),
+            sibling: typedOutcome(sibling),
+            transaction: isFulfilled(transaction) ? "fulfilled" : "rejected",
+            nodes: await countRows(backend, "nodes", graphId),
+          }).toEqual({
+            failed: true,
+            sibling: ENGINE_ROLLBACK_LATER_REFUSAL[context.driver],
+            transaction: "rejected",
+            nodes: 0,
+          });
+        } finally {
+          await removeTrigger();
+        }
+      });
+
       it("refuses vector index creation through a transaction backend, open or ended, and creates no storage", async () => {
         const handle = await context.createSerializedBackend();
         try {

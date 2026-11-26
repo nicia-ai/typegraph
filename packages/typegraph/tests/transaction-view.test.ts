@@ -32,6 +32,15 @@ import { asCompiledRowsSql } from "../src/query/sql-intent";
 import { requireDefined } from "../src/utils/presence";
 import { createGate } from "./concurrency-utils";
 
+type Status = "fulfilled" | "rejected";
+
+function statusOf(pending: Promise<unknown>): Promise<Status> {
+  return pending.then(
+    () => "fulfilled" as const,
+    () => "rejected" as const,
+  );
+}
+
 /** Whether `pending` has settled after every queued microtask has run. */
 async function hasSettled(pending: Promise<unknown>): Promise<boolean> {
   let settled = false;
@@ -48,6 +57,36 @@ async function hasSettled(pending: Promise<unknown>): Promise<boolean> {
 }
 
 describe("createTransactionView", () => {
+  it("starts a task admitted while another is in flight only once that one has settled, in admission order", async () => {
+    const view = createTransactionView();
+    const first = createGate();
+    const events: string[] = [];
+    const held = view.admit(async () => {
+      events.push("first starts");
+      await first.opened;
+      events.push("first settles");
+    });
+    const second = view.admit(() => {
+      events.push("second starts");
+      return Promise.resolve();
+    });
+    const third = view.admit(() => {
+      events.push("third starts");
+      return Promise.reject(new Error("third failed"));
+    });
+    expect(await hasSettled(second)).toBe(false);
+    first.open();
+    await held;
+    await second;
+    await expect(third).rejects.toThrow("third failed");
+    expect(events).toEqual([
+      "first starts",
+      "first settles",
+      "second starts",
+      "third starts",
+    ]);
+  });
+
   it("starts an admitted task synchronously and returns its outcome", async () => {
     const view = createTransactionView();
     let started = false;
@@ -97,13 +136,13 @@ describe("createTransactionView", () => {
   });
 });
 
-/** A view whose driver reports the transaction open until `end()`. */
+/** A view whose probe reports the transaction open until `end()`. */
 function probedView() {
   const state = { open: true, probes: 0 };
   const view = createTransactionView({
-    isTransactionOpen: () => {
+    transactionState: () => {
       state.probes += 1;
-      return state.open;
+      return state.open ? "open" : "ended";
     },
   });
   return {
@@ -174,6 +213,78 @@ describe("createTransactionView after a statement failure", () => {
     await expect(view.admit(() => Promise.resolve("row"))).resolves.toBe("row");
     await expect(view.drainAndClose()).resolves.toBeUndefined();
   });
+
+  it.each([
+    ["answers unknown", () => "unknown" as const],
+    [
+      "throws",
+      (): never => {
+        throw new Error("the probe failed");
+      },
+    ],
+  ])(
+    "refuses every later statement when the probe %s: no proof the transaction is open",
+    async (_answer, transactionState) => {
+      const view = createTransactionView({ transactionState });
+      const failure = new Error("statement failed");
+      await expect(view.admit(rejectsWith(failure))).rejects.toBe(failure);
+      await expect(view.admit(() => Promise.resolve())).rejects.toThrow(
+        TransactionRolledBackError,
+      );
+      const outcome = await view.drainAndClose();
+      expect(outcome?.cause).toBe(failure);
+    },
+  );
+
+  it.each([
+    ["a rejection", "reject"],
+    ["a synchronous throw", "throw"],
+  ] as const)(
+    "starts no sibling admitted in the same turn as %s until the probe has answered",
+    async (_failure, mode) => {
+      const answer = createGate();
+      const events: string[] = [];
+      const view = createTransactionView({
+        transactionState: async () => {
+          events.push("probe asked");
+          await answer.opened;
+          events.push("probe answered");
+          return "ended" as const;
+        },
+      });
+      const failure = new Error("trigger raised ROLLBACK");
+      function failing(): Promise<never> {
+        events.push("failing statement");
+        if (mode === "throw") throw failure;
+        return Promise.reject(failure);
+      }
+      // A synchronous throw leaves the call itself; a rejection settles later.
+      let failed: Promise<Status> = Promise.resolve("rejected");
+      let thrown: unknown;
+      try {
+        failed = statusOf(view.admit(failing));
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBe(mode === "throw" ? failure : undefined);
+      let siblingRan = false;
+      const sibling = view.admit(() => {
+        siblingRan = true;
+        return Promise.resolve();
+      });
+      // The failure itself reaches its caller once the probe has answered
+      // (a synchronous throw at once), and the sibling has not started.
+      expect(await hasSettled(sibling)).toBe(false);
+      expect(siblingRan).toBe(false);
+      answer.open();
+      expect(await failed).toBe("rejected");
+      await expect(sibling).rejects.toThrow(TransactionRolledBackError);
+      expect({ siblingRan, events }).toEqual({
+        siblingRan: false,
+        events: ["failing statement", "probe asked", "probe answered"],
+      });
+    },
+  );
 
   it("without a probe, a failure never ends the view", async () => {
     const view = createTransactionView();
@@ -264,21 +375,20 @@ function heldAdapter() {
 
 describe("createSqliteTransactionExecutionView", () => {
   it.each(STATEMENT_MEMBERS)(
-    "waits for a held %s before it closes",
+    "admits a held %s in its turn and waits for it before it closes",
     async (member) => {
       const { adapter, release, ran } = heldAdapter();
       const view = createSqliteTransactionExecutionView(adapter);
-      // Every other member is in flight too, and released first: the drain
-      // must still wait on this one alone.
-      const inFlight = STATEMENT_MEMBERS.map((each) =>
+      // Every other member is admitted first and released at once: each
+      // starts in its turn, and the drain still waits on this one alone.
+      const others = STATEMENT_MEMBERS.filter((each) => each !== member);
+      for (const other of others) release(other);
+      const inFlight = [...others, member].map((each) =>
         STATEMENT_MEMBER_CALLS[each](view.adapter),
       );
-      expect(ran).toEqual(STATEMENT_MEMBERS);
       const drained = view.drainAndClose();
-      for (const other of STATEMENT_MEMBERS) {
-        if (other !== member) release(other);
-      }
       expect(await hasSettled(drained)).toBe(false);
+      expect(ran).toEqual([...others, member]);
       release(member);
       await drained;
       await Promise.all(inFlight);
