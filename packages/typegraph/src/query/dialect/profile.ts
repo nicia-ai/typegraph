@@ -1,3 +1,4 @@
+import { dateInstantText } from "../../utils/date";
 import { type SqlDialect } from "./types";
 
 export type SqlDialectProfile = Readonly<{
@@ -40,7 +41,7 @@ export function getSqlDialectProfile(dialect: SqlDialect): SqlDialectProfile {
 
 /** Maps a JavaScript value to the representation expected by a SQL driver. */
 export function bindSqlValue(value: unknown, dialect: SqlDialect): unknown {
-  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Date) return dateInstantText(value);
   return getSqlDialectProfile(dialect).bindValue(value);
 }
 

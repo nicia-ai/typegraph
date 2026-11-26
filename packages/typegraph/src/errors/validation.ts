@@ -20,6 +20,7 @@ import {
   CANONICAL_DATE_OPERAND_EXPECTATION,
   describeDateOperand,
   findUnstorableDate,
+  withPlainDates,
 } from "../utils/date";
 import { ValidationError, type ValidationIssue } from "./index";
 
@@ -119,7 +120,9 @@ export function unstorableDateIssue(
  * Validates props with full context for error messages.
  *
  * Props the schema accepts must also be storable on every backend: a `Date`
- * anywhere in them is written as its `toISOString()` text, so one outside the
+ * anywhere in them is written as the ISO text of the instant it holds
+ * (`withPlainDates` replaces it with a plain `Date` of that instant, so a
+ * `toJSON` or `toISOString` of the caller's own cannot change it), so one outside the
  * years 0001 to 9999 is refused (`findUnstorableDate`, deciding through
  * `canonicalDateOperandText` like every date operand). PostgreSQL could not
  * cast such a stored value to `timestamptz`, so it broke every later date
@@ -150,7 +153,9 @@ export function validateProps<T>(
 
   if (result.success) {
     const unstorable = unstorableDateIssue(result.data);
-    if (unstorable === undefined) return result.data;
+    // Every `Date` is handed on as a plain `Date` of the instant it holds,
+    // so no serializer the caller's object carries reaches a write.
+    if (unstorable === undefined) return withPlainDates(result.data) as T;
     throw new ValidationError(
       `Invalid ${context.entityType} props for ${location}: ${unstorable.path}: ${unstorable.message}`,
       {

@@ -194,7 +194,10 @@ import {
   storeRuntime,
 } from "../store/runtime-port";
 import { type Store } from "../store/store";
-import { reviveStoredDateProps } from "../store/stored-date-revival";
+import {
+  reviveStoredDateProps,
+  rewrittenStoredDateIssue,
+} from "../store/stored-date-revival";
 import { type CompositionNodeRef } from "../store/types";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
@@ -204,6 +207,7 @@ import {
   nowIso,
   validateOptionalCanonicalIsoDate,
   type ValidityLowerBoundFence,
+  withPlainDates,
 } from "../utils/date";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
@@ -6139,7 +6143,14 @@ function storableImportProperties(
   | { success: true; data: Record<string, unknown> }
   | { success: false; error: string } {
   const issue = unstorableDateIssue(persisted) ?? unstorableDateIssue(parsed);
-  if (issue === undefined) return { success: true, data: persisted };
+  // As the store's own writes do (`validateProps`): a `Date` is persisted as
+  // the instant it holds, whatever serializer an in-memory document's carries.
+  if (issue === undefined) {
+    return {
+      success: true,
+      data: withPlainDates(persisted) as Record<string, unknown>,
+    };
+  }
   return { success: false, error: `${issue.path}: ${issue.message}` };
 }
 
@@ -6158,7 +6169,15 @@ export function validateImportProperties(
     // value, including non-canonical date text, is parsed (and refused) as
     // stated. A revived `Date` serializes back to the same bytes, so every
     // strategy below persists the document's text unchanged.
-    const properties = reviveStoredDateProps(schema, documentProperties);
+    const revival = reviveStoredDateProps(schema, documentProperties);
+    // A stored date under an `.overwrite()` that would rewrite it is refused,
+    // not parsed: the row would be imported holding a different date than the
+    // document states.
+    if (revival.kind === "rewritten") {
+      const issue = rewrittenStoredDateIssue(revival.path);
+      return { success: false, error: `${issue.path}: ${issue.message}` };
+    }
+    const properties = revival.props;
 
     // Get the schema's known keys
     const knownKeys = new Set(Object.keys(schema.shape));

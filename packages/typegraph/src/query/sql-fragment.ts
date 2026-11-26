@@ -1,4 +1,5 @@
 import { ConfigurationError } from "../errors";
+import { dateInstantText } from "../utils/date";
 import { typeGraphGlobalSymbol } from "../utils/global-symbol";
 import {
   bindSqlValue,
@@ -358,7 +359,7 @@ function inlineLiteral(value: unknown, dialect: SqlDialect): string {
     return getSqlDialectProfile(dialect).booleanLiteralString(value);
   }
   if (value instanceof Date) {
-    return inlineSqlStringLiteral(value.toISOString(), dialect);
+    return inlineSqlStringLiteral(dateInstantText(value), dialect);
   }
 
   throw new ConfigurationError("Cannot inline this SQL parameter value", {

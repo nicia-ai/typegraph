@@ -12,6 +12,63 @@ import {
   INVERTED_VALIDITY_WINDOW_CODE,
   ValidationError,
 } from "../errors";
+import { isPlainObject } from "./object";
+
+/**
+ * The time value a `Date` holds, read from the object itself rather than
+ * through any `getTime` it carries. A caller's `Date` can carry its own
+ * `getTime`, `toISOString` or `toJSON` (an own property, a subclass, a
+ * polyfill), so calling those on the value lets it state an instant other
+ * than the one it holds; `Date.prototype`'s own method reads the time value: `NaN` for an invalid `Date` and for an
+ * object that inherits from `Date.prototype` without holding a time value.
+ */
+export function dateTimeValue(date: Date): number {
+  try {
+    return Date.prototype.getTime.call(date);
+  } catch {
+    return Number.NaN;
+  }
+}
+
+/**
+ * The UTC ISO text of the instant a valid `Date` holds — the one encoder of a
+ * `Date` to text for every write, predicate and binding. Never the value's own
+ * `toJSON` or `toISOString`, which a caller's object can override to name a
+ * different instant: a `compareAndSet` expectation then matched a row holding
+ * the instant it named, and a create stored it. The caller has refused an
+ * invalid `Date` first (`dateTimeValue` is `NaN`); this throws `RangeError`
+ * for one, as `toISOString` does.
+ */
+export function dateInstantText(date: Date): string {
+  return Date.prototype.toISOString.call(new Date(dateTimeValue(date)));
+}
+
+/**
+ * `value` with every `Date` it holds — itself, an array element, or a
+ * plain-object value at any depth — replaced by a plain `Date` of the instant
+ * it holds ({@link dateTimeValue}), so every later serializer (`JSON.stringify`
+ * on a backend's write, a uniqueness key, a hook) reads that instant whatever
+ * the caller's object carried. Returns `value` itself when it holds no `Date`;
+ * any other object is returned untouched.
+ */
+export function withPlainDates(value: unknown): unknown {
+  if (value instanceof Date) return new Date(dateTimeValue(value));
+  if (Array.isArray(value)) {
+    const items = value as readonly unknown[];
+    const replaced = items.map((item) => withPlainDates(item));
+    return replaced.some((item, index) => item !== items[index]) ? replaced : (
+        value
+      );
+  }
+  if (!isPlainObject(value)) return value;
+  const entries = Object.entries(value).map(
+    ([key, element]) => [key, withPlainDates(element)] as const,
+  );
+  const changed = entries.some(([key, element]) => element !== value[key]);
+  // `Object.fromEntries` defines own data properties, so a `__proto__` key
+  // stays a property rather than reaching the setter.
+  return changed ? Object.fromEntries(entries) : value;
+}
 
 /**
  * ISO 8601 datetime pattern.
@@ -225,9 +282,9 @@ const YEAR_ZERO_PREFIX = "0000-";
 export function canonicalDateOperandText(operand: unknown): string | undefined {
   const text =
     operand instanceof Date ?
-      Number.isNaN(operand.getTime()) ?
+      Number.isNaN(dateTimeValue(operand)) ?
         undefined
-      : operand.toISOString()
+      : dateInstantText(operand)
     : operand;
   if (typeof text !== "string" || !isCanonicalIsoDate(text)) return undefined;
   return text.startsWith(YEAR_ZERO_PREFIX) ? undefined : text;
@@ -314,8 +371,8 @@ export const CANONICAL_DATE_OPERAND_EXPECTATION =
  */
 export function describeDateOperand(operand: unknown): string {
   if (operand instanceof Date) {
-    return Number.isNaN(operand.getTime()) ? "an invalid Date" : (
-        `the Date ${operand.toISOString()}`
+    return Number.isNaN(dateTimeValue(operand)) ? "an invalid Date" : (
+        `the Date ${dateInstantText(operand)}`
       );
   }
   return `${typeof operand} ${operandText(operand)}`;

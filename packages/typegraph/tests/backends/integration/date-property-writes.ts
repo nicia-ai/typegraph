@@ -14,12 +14,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../../../src";
+import { asNodeId, defineEdge, defineGraph, defineNode } from "../../../src";
 import {
   exportGraph,
   type GraphData,
   importGraph,
   type ImportOptions,
+  trustedImportGraph,
 } from "../../../src/interchange";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
@@ -62,6 +63,21 @@ function buildDatedGraph(id: string) {
         ],
       },
     },
+    edges: {
+      datedWriteCites: {
+        type: datedWriteCites,
+        from: [DatedWriteDocument],
+        to: [DatedWriteDocument],
+      },
+    },
+  });
+}
+
+/** The dated graph without its uniqueness constraint, which trusted import refuses. */
+function buildNonUniqueDatedGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: { DatedWriteDoc: { type: DatedWriteDocument } },
     edges: {
       datedWriteCites: {
         type: datedWriteCites,
@@ -182,9 +198,233 @@ function withUnknownProperty(document: GraphData): GraphData {
   };
 }
 
+/**
+ * A `Date` holding `instant` whose own `toJSON` and `toISOString` both answer
+ * `claimed`'s text: what a caller's object or a polyfill can do. The store
+ * writes and compares the instant a `Date` holds, never what its serializer
+ * says.
+ */
+function disguisedDate(instant: Date, claimed: Date): Date {
+  const disguised = new Date(instant);
+  const text = claimed.toISOString();
+  Object.defineProperty(disguised, "toJSON", { value: () => text });
+  Object.defineProperty(disguised, "toISOString", { value: () => text });
+  return disguised;
+}
+
+/** A `Date` subclass whose serializers answer `claimed`'s text. */
+function disguisedSubclassDate(instant: Date, claimed: Date): Date {
+  const text = claimed.toISOString();
+  class ClaimingDate extends Date {
+    override toISOString(): string {
+      return text;
+    }
+    override toJSON(): string {
+      return text;
+    }
+  }
+  return new ClaimingDate(instant.getTime());
+}
+
 export function registerDatePropertyWriteIntegrationTests(
   context: IntegrationTestContext,
 ): void {
+  describe.each([
+    ["an own toJSON and toISOString", disguisedDate],
+    ["a subclass", disguisedSubclassDate],
+  ] as const)(
+    "a Date whose serializer disagrees with its instant (%s)",
+    (_label, disguise) => {
+      // Holds PUBLISHED, says LATER.
+      const disguised = () => disguise(PUBLISHED, LATER);
+      const stored = PUBLISHED.toISOString();
+
+      it("every node and edge write stores the instant the Date holds", async () => {
+        const store = await context.createStore(sourceGraph);
+        const created = await store.nodes.DatedWriteDoc.create({
+          title: "create",
+          publishedAt: disguised(),
+          revisions: [disguised()],
+          review: { at: disguised(), by: "editor" },
+        });
+        expect([
+          created.publishedAt,
+          created.revisions,
+          created.review,
+        ]).toEqual([stored, [stored], { at: stored, by: "editor" }]);
+
+        const target = await store.nodes.DatedWriteDoc.create({
+          title: "target",
+          publishedAt: REVISED,
+        });
+        const updated = await store.nodes.DatedWriteDoc.update(target.id, {
+          reviewedAt: disguised(),
+        });
+        const upserted = await store.nodes.DatedWriteDoc.upsertById(
+          "date_disguised_upsert",
+          { title: "upsert", publishedAt: REVIEWED, reviewedAt: disguised() },
+        );
+        const [bulk] = await store.nodes.DatedWriteDoc.bulkCreate([
+          {
+            props: {
+              title: "bulk",
+              publishedAt: new Date("2023-01-01T00:00:00.000Z"),
+              reviewedAt: disguised(),
+            },
+          },
+        ]);
+        await store.nodes.DatedWriteDoc.bulkUpsertById([
+          {
+            id: "date_disguised_bulk_upsert",
+            props: {
+              title: "bulk-upsert",
+              publishedAt: LATER,
+              reviewedAt: disguised(),
+            },
+          },
+        ]);
+        const bulkUpserted = await store.nodes.DatedWriteDoc.getById(
+          asNodeId("date_disguised_bulk_upsert"),
+        );
+        expect([
+          updated.reviewedAt,
+          upserted.reviewedAt,
+          requireDefined(bulk).reviewedAt,
+          bulkUpserted?.reviewedAt,
+        ]).toEqual([stored, stored, stored, stored]);
+
+        const edge = await store.edges.datedWriteCites.create(created, target, {
+          at: disguised(),
+        });
+        const edgeUpdated = await store.edges.datedWriteCites.update(edge.id, {
+          seenAt: disguised(),
+        });
+        expect([edge.at, edgeUpdated.seenAt]).toEqual([stored, stored]);
+      });
+
+      it("a set update stores, and compareAndSet compares, the instant the Date holds", async () => {
+        const store = await context.createStore(sourceGraph);
+        const document = await store.nodes.DatedWriteDoc.create({
+          title: "a",
+          publishedAt: LATER,
+          reviewedAt: REVIEWED,
+        });
+        // The row holds LATER; the expectation holds PUBLISHED and says LATER.
+        const matched = await store.nodes.DatedWriteDoc.compareAndSet(
+          document.id,
+          { expected: { publishedAt: disguised() }, patch: { title: "wrong" } },
+        );
+        expect(matched).toBe(false);
+        await store.nodes.DatedWriteDoc.updateWhere({
+          where: (node) => node.id.eq(document.id),
+          patch: { reviewedAt: disguised() },
+        });
+        const read = await store.nodes.DatedWriteDoc.getById(document.id);
+        expect([read?.title, read?.reviewedAt]).toEqual(["a", stored]);
+      });
+
+      it("importGraph and trustedImportGraph store the instant an in-memory document's Date holds", async () => {
+        const source = await seedSource(context);
+        const exported = await exportGraph(source);
+        const document: GraphData = {
+          ...exported,
+          nodes: exported.nodes.map((node) => ({
+            ...node,
+            properties: {
+              ...node.properties,
+              reviewedAt: disguised(),
+              revisions: [disguised()],
+            },
+          })),
+          edges: exported.edges.map((edge) => ({
+            ...edge,
+            properties: { ...edge.properties, seenAt: disguised() },
+          })),
+        };
+        const expectedNodes = exported.nodes.map((node) => ({
+          ...node,
+          properties: {
+            ...node.properties,
+            reviewedAt: stored,
+            revisions: [stored],
+          },
+        }));
+        const expectedEdges = exported.edges.map((edge) => ({
+          ...edge,
+          properties: { ...edge.properties, seenAt: stored },
+        }));
+        for (const onUnknownProperty of ["error", "allow"] as const) {
+          const target = await context.createStore(
+            buildDatedGraph(`date_disguised_import_${onUnknownProperty}`),
+          );
+          const result = await importGraph(target, document, {
+            onConflict: "error",
+            onUnknownProperty,
+          });
+          expect(result.errors).toEqual([]);
+          const restored = await exportGraph(target);
+          expect([restored.nodes, restored.edges]).toEqual([
+            expectedNodes,
+            expectedEdges,
+          ]);
+        }
+      });
+
+      it("trustedImportGraph stores the instant an in-memory document's Date holds", async () => {
+        // Trusted import needs empty tables and no uniqueness constraint, so
+        // the document is built here rather than exported from a seeded store.
+        const trusted = await context.createStore(
+          buildNonUniqueDatedGraph("date_disguised_trusted_import"),
+        );
+        if (trusted.backend.trustedImport === undefined) return;
+        const header = await exportGraph(trusted);
+        const nodeProperties = { title: "a", publishedAt: REVISED };
+        const document: GraphData = {
+          ...header,
+          nodes: ["a", "b"].map((id) => ({
+            kind: "DatedWriteDoc",
+            id,
+            properties: { ...nodeProperties, revisions: [disguised()] },
+          })),
+          edges: [
+            {
+              kind: "datedWriteCites",
+              id: "cites",
+              from: { kind: "DatedWriteDoc", id: "a" },
+              to: { kind: "DatedWriteDoc", id: "b" },
+              properties: { at: disguised() },
+            },
+          ],
+        };
+        await trustedImportGraph(trusted, document);
+        const restored = await exportGraph(trusted);
+        expect([
+          restored.nodes.map((node) => node.properties["revisions"]),
+          restored.edges.map((edge) => edge.properties["at"]),
+        ]).toEqual([[[stored], [stored]], [stored]]);
+      });
+
+      it("a predicate compares the instant the Date holds", async () => {
+        const store = await context.createStore(sourceGraph);
+        await store.nodes.DatedWriteDoc.create({
+          title: "published",
+          publishedAt: PUBLISHED,
+        });
+        await store.nodes.DatedWriteDoc.create({
+          title: "later",
+          publishedAt: LATER,
+        });
+        const titles = await store
+          .query()
+          .from("DatedWriteDoc", "d")
+          .whereNode("d", (d) => d.publishedAt.eq(disguised()))
+          .select((ctx) => ctx.d.title)
+          .execute();
+        expect(titles).toEqual(["published"]);
+      });
+    },
+  );
+
   describe("a Date in a set-update patch or compareAndSet expectation", () => {
     it("updateWhere stores a patched Date as the text update() stores", async () => {
       const store = await context.createStore(sourceGraph);
@@ -426,7 +666,9 @@ export function registerDatePropertyWriteIntegrationTests(
       expect(document.at).toBe(stored);
       await expect(
         source.nodes.ShiftedDateDoc.update(document.id, { title: "a2" }),
-      ).rejects.toThrow(/expected date, received string/u);
+      ).rejects.toThrow(
+        /at: The stored date sits under an \.overwrite\(\) that rewrites it on every parse/u,
+      );
       const unchanged = await source.nodes.ShiftedDateDoc.getById(document.id);
       expect(unchanged?.at).toBe(stored);
 
@@ -439,7 +681,9 @@ export function registerDatePropertyWriteIntegrationTests(
       });
       expect(result.nodes.created).toBe(0);
       expect(result.errors.map((error) => error.error)).toEqual([
-        expect.stringMatching(/at: .*expected date, received string/u),
+        expect.stringMatching(
+          /^at: The stored date sits under an \.overwrite\(\) that rewrites it/u,
+        ),
       ]);
     });
   });

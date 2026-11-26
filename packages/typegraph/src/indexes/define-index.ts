@@ -26,6 +26,7 @@ import {
   type FieldTypeInfo,
 } from "../query/schema-introspector";
 import { EDGE_META_KEYS, NODE_META_KEYS } from "../system-fields";
+import { dateInstantText } from "../utils/date";
 import { fnv1aBase36 } from "../utils/hash";
 import { hasOwnKey, isInteropProbeKey } from "../utils/object";
 import {
@@ -626,7 +627,7 @@ function toLiteralOrThrow(
   if (value instanceof Date) {
     return {
       __type: "index_where_literal",
-      value: value.toISOString(),
+      value: dateInstantText(value),
       valueType: "date",
     };
   }
