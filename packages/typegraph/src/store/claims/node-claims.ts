@@ -36,7 +36,7 @@ import { type KindRegistry } from "../../registry/kind-registry";
 import { requireDefined } from "../../utils/presence";
 import { isPostgresFailedTransactionError } from "../../utils/sql-errors";
 import { encodeTupleKey } from "../../utils/tuple-key";
-import type { StatementBackend } from "../operation-scope";
+import type { OperationEntry, StatementBackend } from "../operation-scope";
 import {
   constraintFenceRefusal,
   markWriteTransactionAborted,
@@ -563,6 +563,12 @@ export type NodeClaimContext = Readonly<{
   graphId: string;
   registry: KindRegistry;
   lock: GraphWriteLock;
+  /**
+   * The operation the claims run in: the write frame's. A compensation that
+   * finds the transaction failed marks the managed write session of that
+   * operation's session (`markWriteTransactionAborted`).
+   */
+  operation: OperationEntry;
   claimsVerdict: ClaimsVerdictThunk;
   /** Threaded `uniqueSidecarBatch` verdict — never re-resolved here. */
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>;
@@ -801,6 +807,7 @@ async function issueClaimsBatched(
  */
 async function claimGroupThenWrite<T>(
   ctx: UniquenessContext,
+  operation: OperationEntry,
   issue: ClaimIssuer,
   gating: readonly PlacedClaim[],
   gatedWrite: () => Promise<T>,
@@ -827,7 +834,7 @@ async function claimGroupThenWrite<T>(
       // reservations, and its 25P02 must not replace the insert's diagnosis.
       if (!isPostgresFailedTransactionError(compensationError))
         throw compensationError;
-      markWriteTransactionAborted(ctx.backend, error);
+      markWriteTransactionAborted(operation, error);
     }
     throw error;
   }
@@ -888,6 +895,7 @@ async function withNodeCreateClaimsIssuedBy<T>(
 
   const result = await claimGroupThenWrite(
     claimContext,
+    ctx.operation,
     issue,
     inPlacement("pre-insert"),
     gatedInsert,
@@ -1356,6 +1364,7 @@ async function releaseClaimedUniqueKeys(
  */
 async function claimUniqueKeysThen<T>(
   ctx: UniquenessContext,
+  operation: OperationEntry,
   kind: string,
   id: string,
   plan: UniquenessUpdatePlan,
@@ -1415,7 +1424,7 @@ async function claimUniqueKeysThen<T>(
     } catch (compensationError) {
       if (!isPostgresFailedTransactionError(compensationError))
         throw compensationError;
-      markWriteTransactionAborted(ctx.backend, error);
+      markWriteTransactionAborted(operation, error);
     }
     throw error;
   }
@@ -1459,9 +1468,13 @@ async function claimUniqueKeysThen<T>(
  * is refused before the first of them — see {@link claimFenceRefusal}. The
  * subject is the plan's claims rather than the kind's constraints: an update
  * that does not move a key issues no reservation and must not be refused.
+ *
+ * `operation` is the write frame's: a compensation that finds the
+ * transaction failed marks that operation's managed write session.
  */
 export async function withNodeClaimTransition<T>(
   ctx: UniquenessContext,
+  operation: OperationEntry,
   kind: string,
   id: string,
   plan: UniquenessUpdatePlan,
@@ -1476,7 +1489,14 @@ export async function withNodeClaimTransition<T>(
   );
   if (refusal !== undefined) throw refusal;
 
-  const result = await claimUniqueKeysThen(ctx, kind, id, plan, gatedWrite);
+  const result = await claimUniqueKeysThen(
+    ctx,
+    operation,
+    kind,
+    id,
+    plan,
+    gatedWrite,
+  );
   await releaseOwnedUniqueKeys(
     ctx,
     kind,

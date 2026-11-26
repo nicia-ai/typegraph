@@ -64,3 +64,22 @@ export async function detectLibsqlTransactionMode(
   if (!isLocalLibsqlClient(client)) return "drizzle";
   return (await localExecuteSharesSession(client)) ? "sql" : "drizzle";
 }
+
+/**
+ * Whether `value` is a libSQL transaction handle: what `client.transaction()`
+ * returns, the per-transaction handle a Drizzle libSQL transaction session
+ * pins (`session.tx`) and executes every statement on. The client's own
+ * statement surface plus the commit/rollback pair and the `closed` flag only
+ * a transaction carries.
+ */
+export function isLibsqlTransaction(value: unknown): value is object {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Readonly<Record<string, unknown>>;
+  return (
+    typeof candidate["execute"] === "function" &&
+    typeof candidate["batch"] === "function" &&
+    typeof candidate["commit"] === "function" &&
+    typeof candidate["rollback"] === "function" &&
+    typeof candidate["closed"] === "boolean"
+  );
+}

@@ -54,7 +54,28 @@ import {
 } from "../../../src/query/dialect/vector/pgvector-strategy";
 import { renderPostgres } from "../../../src/query/sql-fragment";
 import { createStore, createStoreWithSchema } from "../../../src/store/store";
+import {
+  asForeignTransaction,
+  ForeignPgTransaction,
+} from "../../helpers/foreign-drizzle-handles";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
+
+/**
+ * A caller's transaction as this copy of Drizzle hands it out, and as a
+ * transaction of another loaded copy of Drizzle is seen: every site that asks
+ * whether the backend runs on a caller's transaction must classify both alike.
+ */
+const CALLER_TRANSACTION_VIEWS = [
+  {
+    name: "own copy",
+    view: (transaction: AnyPgTransaction): AnyPgTransaction => transaction,
+  },
+  {
+    name: "another loaded copy",
+    view: (transaction: AnyPgTransaction): AnyPgTransaction =>
+      asForeignTransaction(transaction, ForeignPgTransaction),
+  },
+] as const;
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
@@ -1099,109 +1120,118 @@ describe.runIf(process.env["POSTGRES_URL"])(
       }
     }, 60_000);
 
-    it("checks a caller-owned transaction's schema for lazy DDL instead of rewriting its search_path", async () => {
-      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
-      const skewed = skewedPool();
-      try {
-        await prepareDatabase(pool);
-        const connectedNames: PostgresTableNames[] = [];
-        const manager = managerOver<GraphDef>(pool, pool, connectedNames);
-        const owner = await manager.makeBackend();
-        const names = requireNames(connectedNames);
-        const searchPathOf = async (
-          transaction: AnyPgTransaction,
-        ): Promise<string> => {
-          const shown = await transaction.execute(sql`SHOW search_path`);
-          return String(
-            (shown as { rows: { search_path: string }[] }).rows[0]?.search_path,
-          );
-        };
+    it.each(CALLER_TRANSACTION_VIEWS)(
+      "checks a caller-owned transaction's schema for lazy DDL instead of rewriting its search_path ($name)",
+      async ({ view }) => {
+        const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+        const skewed = skewedPool();
+        try {
+          await prepareDatabase(pool);
+          const connectedNames: PostgresTableNames[] = [];
+          const manager = managerOver<GraphDef>(pool, pool, connectedNames);
+          const owner = await manager.makeBackend();
+          const names = requireNames(connectedNames);
+          const searchPathOf = async (
+            transaction: AnyPgTransaction,
+          ): Promise<string> => {
+            const shown = await transaction.execute(sql`SHOW search_path`);
+            return String(
+              (shown as { rows: { search_path: string }[] }).rows[0]
+                ?.search_path,
+            );
+          };
 
-        let skewedPathBefore = "";
-        let skewedPathAfter = "";
-        let refusal: unknown;
-        await drizzle(skewed).transaction(async (transaction) => {
-          skewedPathBefore = await searchPathOf(transaction);
-          const callerBackend = createPostgresBackend(transaction, {
-            tables: createPostgresTables(names),
+          let skewedPathBefore = "";
+          let skewedPathAfter = "";
+          let refusal: unknown;
+          await drizzle(skewed).transaction(async (transaction) => {
+            skewedPathBefore = await searchPathOf(transaction);
+            const callerBackend = createPostgresBackend(view(transaction), {
+              tables: createPostgresTables(names),
+            });
+            refusal = await rejectionOf(
+              createStoreWithSchema(personGraph, callerBackend),
+            );
+            skewedPathAfter = await searchPathOf(transaction);
           });
-          refusal = await rejectionOf(
-            createStoreWithSchema(personGraph, callerBackend),
+          expect(configurationCodesOf(refusal)).toContain(
+            "ALLOCATION_SCHEMA_SESSION_MISMATCH",
           );
-          skewedPathAfter = await searchPathOf(transaction);
-        });
-        expect(configurationCodesOf(refusal)).toContain(
-          "ALLOCATION_SCHEMA_SESSION_MISMATCH",
-        );
-        expect(skewedPathAfter).toBe(skewedPathBefore);
+          expect(skewedPathAfter).toBe(skewedPathBefore);
 
-        // A session already in the allocation schema runs the same DDL and
-        // keeps the search_path it brought.
-        let matchingPathBefore = "";
-        let matchingPathAfter = "";
-        await drizzle(pool).transaction(async (transaction) => {
-          matchingPathBefore = await searchPathOf(transaction);
-          const callerBackend = createPostgresBackend(transaction, {
-            tables: createPostgresTables(names),
+          // A session already in the allocation schema runs the same DDL and
+          // keeps the search_path it brought.
+          let matchingPathBefore = "";
+          let matchingPathAfter = "";
+          await drizzle(pool).transaction(async (transaction) => {
+            matchingPathBefore = await searchPathOf(transaction);
+            const callerBackend = createPostgresBackend(view(transaction), {
+              tables: createPostgresTables(names),
+            });
+            await createStoreWithSchema(personGraph, callerBackend);
+            matchingPathAfter = await searchPathOf(transaction);
           });
-          await createStoreWithSchema(personGraph, callerBackend);
-          matchingPathAfter = await searchPathOf(transaction);
-        });
-        expect(matchingPathAfter).toBe(matchingPathBefore);
-        await owner.close();
-      } finally {
-        await skewed.end();
-        await pool.end();
-      }
-    }, 60_000);
+          expect(matchingPathAfter).toBe(matchingPathBefore);
+          await owner.close();
+        } finally {
+          await skewed.end();
+          await pool.end();
+        }
+      },
+      60_000,
+    );
 
-    it("refuses lazy DDL on a caller-owned transaction whose session is not in the allocation schema, before any schema write", async () => {
-      const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
-      const skewed = skewedPool();
-      try {
-        await prepareDatabase(pool);
-        await expectSkewed(skewed);
-        const connectedNames: PostgresTableNames[] = [];
-        const manager = managerOver<typeof articleGraph>(
-          pool,
-          pool,
-          connectedNames,
-        );
-        const owner = await manager.makeBackend();
-        const names = requireNames(connectedNames);
-        // The schema is committed on the allocation and the caller's store is
-        // built with createStore, so no schema write precedes the rebuild's
-        // lazy contribution DDL: that DDL must be the statement refused.
-        await createStoreWithSchema(articleGraph, owner);
-        const before = await relationsOf(pool, names);
-
-        let refusal: unknown;
-        await drizzle(skewed).transaction(async (transaction) => {
-          const callerBackend = createPostgresBackend(transaction, {
-            tables: createPostgresTables(names),
-          });
-          const callerStore = createStore(articleGraph, callerBackend);
-          refusal = await rejectionOf(
-            callerStore.rebuildContribution("fulltext"),
+    it.each(CALLER_TRANSACTION_VIEWS)(
+      "refuses lazy DDL on a caller-owned transaction whose session is not in the allocation schema, before any schema write ($name)",
+      async ({ view }) => {
+        const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });
+        const skewed = skewedPool();
+        try {
+          await prepareDatabase(pool);
+          await expectSkewed(skewed);
+          const connectedNames: PostgresTableNames[] = [];
+          const manager = managerOver<typeof articleGraph>(
+            pool,
+            pool,
+            connectedNames,
           );
-        });
+          const owner = await manager.makeBackend();
+          const names = requireNames(connectedNames);
+          // The schema is committed on the allocation and the caller's store is
+          // built with createStore, so no schema write precedes the rebuild's
+          // lazy contribution DDL: that DDL must be the statement refused.
+          await createStoreWithSchema(articleGraph, owner);
+          const before = await relationsOf(pool, names);
 
-        expect(configurationCodesOf(refusal)).toContain(
-          "ALLOCATION_SCHEMA_SESSION_MISMATCH",
-        );
-        expect(messagesOf(refusal).join(" ")).toContain("Lazy DDL");
-        const skewedRelations = await pool.query(
-          "SELECT c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1",
-          [SKEW_SCHEMA],
-        );
-        expect(skewedRelations.rows).toEqual([]);
-        expect(await relationsOf(pool, names)).toEqual(before);
-        await owner.close();
-      } finally {
-        await skewed.end();
-        await pool.end();
-      }
-    }, 60_000);
+          let refusal: unknown;
+          await drizzle(skewed).transaction(async (transaction) => {
+            const callerBackend = createPostgresBackend(view(transaction), {
+              tables: createPostgresTables(names),
+            });
+            const callerStore = createStore(articleGraph, callerBackend);
+            refusal = await rejectionOf(
+              callerStore.rebuildContribution("fulltext"),
+            );
+          });
+
+          expect(configurationCodesOf(refusal)).toContain(
+            "ALLOCATION_SCHEMA_SESSION_MISMATCH",
+          );
+          expect(messagesOf(refusal).join(" ")).toContain("Lazy DDL");
+          const skewedRelations = await pool.query(
+            "SELECT c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1",
+            [SKEW_SCHEMA],
+          );
+          expect(skewedRelations.rows).toEqual([]);
+          expect(await relationsOf(pool, names)).toEqual(before);
+          await owner.close();
+        } finally {
+          await skewed.end();
+          await pool.end();
+        }
+      },
+      60_000,
+    );
 
     it("allocates, reopens and destroys a history-enabled durable copy through a connection that leads with another schema", async () => {
       const pool = new Pool({ connectionString: TEST_DATABASE_URL, max: 8 });

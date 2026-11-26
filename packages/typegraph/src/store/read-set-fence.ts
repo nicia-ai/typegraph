@@ -20,7 +20,7 @@ import {
   ReadSetUnverifiableError,
   UnsupportedBackendCapabilityError,
 } from "../errors";
-import type { OperationBackend } from "./operation-scope";
+import type { Operation } from "./operation-scope";
 import { lockStoreWriteFence } from "./operations/write-fence-prelude";
 import {
   refuseReadOnlyTransactionWrite,
@@ -114,7 +114,7 @@ export type ReadSetFenceContext<G extends GraphDef> = Readonly<{
  */
 export async function assertReadSetUnchangedSince<G extends GraphDef>(
   ctx: ReadSetFenceContext<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   anchor: EngineRevision,
   scopes: readonly ReadSetScope<G>[],
 ): Promise<void> {
@@ -131,7 +131,8 @@ export async function assertReadSetUnchangedSince<G extends GraphDef>(
   }
   assertReadSetFenceSupported(ctx, graphId);
 
-  await lockStoreWriteFence(txBackend, {
+  const txBackend = operation.backend;
+  await lockStoreWriteFence(operation, {
     graphId,
     schemaVersion: ctx.schemaVersion,
     graphLock: "required",

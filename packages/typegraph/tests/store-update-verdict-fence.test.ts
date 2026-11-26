@@ -706,6 +706,7 @@ describe("store update verdict fence", () => {
           {} as never,
           createClaimsVerdictThunk(backend),
           uniqueSidecarBatchVerdict(backend),
+          backend,
         ),
         {
           existing: tombstone as Parameters<

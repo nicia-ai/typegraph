@@ -1,9 +1,8 @@
 /**
  * THE RATCHET for Store-layer registries keyed by an object.
  *
- * Store state kept for a transaction (the managed write session of a
- * `store.transaction` attempt, leased schema fences, held graph write locks,
- * savepoint checkpoints, recorded-capture scopes) is kept in side tables keyed
+ * Store state kept for a transaction (savepoint checkpoints, recorded-capture
+ * scopes, a merge-apply frame's composition windows) is kept in side tables keyed
  * by the identity of a backend, target, context or native handle object. Each
  * such table decides its own scope implicitly: which bindings of one native
  * transaction share an entry follows from which object a caller happens to
@@ -102,16 +101,7 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
     keyedBy: "transaction-binding",
     reason: "One merge-apply write frame, as `openCompositionWindowVerdicts`.",
   },
-  "store/operations/write-transaction.ts#writeTransactionSessions": {
-    keyedBy: "transaction-binding",
-    reason:
-      "The managed write session of one `store.transaction` attempt, keyed by its target: state about the attempt's Store binding (its graph, revision and history configuration), not about the native transaction alone. It stays keyed by the target because graph-merge reads it (`forceWriteTransactionRevision`, `hasPendingWriteTransactionRevision`) through the transaction runtime port's `backend`, a type the public API report spells; carrying the session there is a port change.",
-  },
-  "store/operations/write-transaction.ts#leasedSchemaFences": {
-    keyedBy: "transaction-binding",
-    reason:
-      "Schema fences a reusable write session leased, keyed by the target that acquired them; a fence is about one graph on one set of physical tables. It stays keyed by target: the adopted history path seeds one lease on four objects of one binding (raw, capture overlay, witness wrapper, execution scope), and `lockSchemaVersionForStoreWrite` consults it from capture, identity and evolution code that holds no session yet.",
-  },
+
   // --- keyed by a root backend ------------------------------------------
   "store/fixed-schema-working-copy.ts#FIXED_SCHEMA_BACKENDS": {
     keyedBy: "root-backend",
@@ -134,7 +124,7 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
   "store/native-transaction-state.ts#nativeTransactionStates": {
     keyedBy: "native-handle",
     reason:
-      "The state every session of one native transaction shares, keyed by the engine's per-bind record of that transaction (a per-BEGIN driver transaction object, or the engine's per-transaction token on a connection-level handle; never the connection). It exists because each adoption binds a new transaction backend, so no binding-keyed registry can join the bindings of one transaction. It does not absorb `ACTIVE_ADOPTED_TRANSACTIONS`: that registry is consulted on the caller's raw handle before any adoption, and on a caller-opened better-sqlite3 transaction the engine records nothing to join on.",
+      "The state every session of one native transaction shares, keyed by the engine's per-bind record of that transaction (a per-transaction driver handle, a per-BEGIN driver transaction object, or the engine's per-transaction token on a connection-level handle while the driver confirms it is open; never the connection). It exists because each adoption binds a new transaction backend, so no binding-keyed registry can join the bindings of one transaction. It does not absorb `ACTIVE_ADOPTED_TRANSACTIONS`: that registry is consulted on the caller's raw handle before any adoption, and on a caller-opened better-sqlite3 transaction the engine records nothing to join on.",
   },
   // --- keyed by a transaction callback's runtime ------------------------
   "store/runtime-port.ts#transactionStoreOwners": {
@@ -161,17 +151,6 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
   "store/runtime-port.ts#scopedTransactionRuntimes": {
     keyedBy: "callback-context",
     reason: "A measure scope's runtime → its callback's runtime.",
-  },
-  // --- local to one call ----------------------------------------------
-  "store/operations/write-transaction.ts#uniqueTargets": {
-    keyedBy: "call-local",
-    reason:
-      "Deduplicates the targets one schema-fence lease covers; dropped when the call returns.",
-  },
-  "store/operations/write-transaction.ts#previousLeases": {
-    keyedBy: "call-local",
-    reason:
-      "The leases one call displaced, restored in its `finally`; dropped when the call returns.",
   },
   // --- not keyed by a backend, target, context or native handle ---------
   "graph-merge/clustering.ts#offendingSet": {
@@ -287,7 +266,7 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
  * May only decrease: lower it when a registry moves onto state the
  * transaction carries explicitly.
  */
-const TRANSACTION_BINDING_KEYED_BASELINE = 9;
+const TRANSACTION_BINDING_KEYED_BASELINE = 7;
 
 /** `"transaction" in x` probes in the Store layers. May only decrease. */
 const TRANSACTION_MEMBER_PROBE_BASELINE = 5;

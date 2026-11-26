@@ -3642,6 +3642,7 @@ type HardDeleteNodeParams = Readonly<{
     graphId: string;
     kind: string;
     id: string;
+    releaseEdgeClaims?: boolean;
 }>;
 
 // @public
@@ -3649,6 +3650,7 @@ type HardDeleteNodesBatchParams = Readonly<{
     graphId: string;
     kind: string;
     ids: readonly string[];
+    releaseEdgeClaims?: boolean;
 }>;
 
 // @public
@@ -4568,6 +4570,12 @@ type ManagedNodeCreatePlan = Readonly<{
     claims: readonly NodeInsertClaim[];
     projections: readonly NodeInsertProjection[];
 }>;
+
+// @public
+interface ManagedWriteState {
+    schemaFenceLeases: Map<string, Promise<void>> | undefined;
+    writeSession: WriteTransactionSession | undefined;
+}
 
 // @public
 type MapRowToMeta<R extends Readonly<Record<string, unknown>>, M extends Readonly<Record<string, string>>> = Readonly<{
@@ -7882,6 +7890,7 @@ type TransactionSession<Engine extends TransactionBackend = TransactionBackend> 
     [SESSION_TRANSACTION]: OperationScoped<Engine>;
 } & Readonly<{
     heldGraphWriteLocks: Map<string, Promise<GraphWriteLock>>;
+    managedWrite: ManagedWriteState;
     native: NativeTransactionState;
 }>>;
 
@@ -8624,6 +8633,23 @@ type WriteFenceDeclaration = Readonly<{
 }> | Readonly<{
     mechanism: "caller-serialized";
 }>;
+
+// @public
+type WriteTransactionFenceEvidence = "reusable" | "per-write";
+
+// @public
+interface WriteTransactionSession {
+    // (undocumented)
+    aborted?: Readonly<{
+        error: unknown;
+    }>;
+    // (undocumented)
+    fenceEvidence: WriteTransactionFenceEvidence;
+    // (undocumented)
+    lock: GraphWriteLock | undefined;
+    // (undocumented)
+    wrote: boolean;
+}
 
 // (No @packageDocumentation comment for this package)
 

@@ -33,6 +33,7 @@ import { chunk } from "../utils/array";
 import { nowIso } from "../utils/date";
 import { sha256Hex } from "../utils/hash";
 import type { SchemaIntrospection } from "./introspect";
+import { reviveStoredDateProps } from "./stored-date-revival";
 
 const DEFAULT_VALIDATION_PAGE_SIZE = 100;
 const MAX_VALIDATION_PAGE_SIZE = 1000;
@@ -501,7 +502,9 @@ function zodFailures(
 ): readonly StoreValidationFailure[] {
   const failures: StoreValidationFailure[] = [];
   for (const row of rows) {
-    const parsed = schema.safeParse(rowPropsToObject(row.props));
+    const parsed = schema.safeParse(
+      reviveStoredDateProps(schema, rowPropsToObject(row.props)),
+    );
     if (parsed.success) continue;
     for (const issue of parsed.error.issues) {
       if (issue.code === "unrecognized_keys") continue;
