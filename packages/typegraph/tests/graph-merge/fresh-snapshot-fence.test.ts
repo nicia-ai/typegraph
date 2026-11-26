@@ -52,18 +52,15 @@ async function mutateAfterFreshFence(
   backend: TransactionBackend,
   witness: { mutated: boolean },
 ): Promise<void> {
-  await lockStoreWriteFence(
-    enterOperation(openTransactionSession(backend)).backend,
-    {
-      graphId: "fresh-snapshot-fence",
-      schemaVersion: 1,
-      graphLock: "required",
-      requireFreshSnapshot: true,
-      freshSnapshotError: mergeCallbackIsolationError,
-      staleSchemaError: (cause) =>
-        new MergePlanCapabilityError("schema changed", { cause }),
-    },
-  );
+  await lockStoreWriteFence(enterOperation(openTransactionSession(backend)), {
+    graphId: "fresh-snapshot-fence",
+    schemaVersion: 1,
+    graphLock: "required",
+    requireFreshSnapshot: true,
+    freshSnapshotError: mergeCallbackIsolationError,
+    staleSchemaError: (cause) =>
+      new MergePlanCapabilityError("schema changed", { cause }),
+  });
   witness.mutated = true;
 }
 

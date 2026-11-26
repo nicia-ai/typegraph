@@ -15,10 +15,12 @@
  *
  * A savepoint is not a transaction of its own: one the engine opens resolves
  * the enclosing transaction's state on every driver that has one. A caller's
- * own savepoint resolves it only where the engine published the enclosing
- * transaction on the connection (better-sqlite3); elsewhere Drizzle's
+ * own savepoint resolves it only where the driver proves the enclosing
+ * transaction (`CALLER_SAVEPOINT_PROOF_DRIVERS`); elsewhere Drizzle's
  * savepoint object has no link to the enclosing one, and its sessions share
  * a state of their own (`src/backend/native-transaction-handle.ts`).
+ *
+ * Two transactions open at once on one pool never share a state.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -50,6 +52,29 @@ const POSTGRES_DRIVERS: ReadonlySet<IntegrationLaneDriver> = new Set([
   "node-postgres",
   "postgres-js",
 ]);
+
+/**
+ * Drivers on which a caller's own savepoint inside a TypeGraph-owned
+ * transaction carries proof of the enclosing transaction: libSQL and PGlite
+ * keep the transaction's Drizzle session, and with it the per-transaction
+ * driver handle it pins; better-sqlite3 runs the savepoint on the connection
+ * the engine published its open transaction on. node-postgres and
+ * postgres-js give the savepoint a new object with no link to the enclosing
+ * one (postgres-js a new session and client too).
+ */
+const CALLER_SAVEPOINT_PROOF_DRIVERS: ReadonlySet<IntegrationLaneDriver> =
+  new Set(["better-sqlite3", "libsql", "pglite"]);
+
+/**
+ * Drivers whose per-transaction handle reports its transaction closed once it
+ * has ended (libSQL's transaction handle, PGlite's transaction client), so a
+ * handle retained past its transaction resolves no state at all.
+ * node-postgres and postgres-js report nothing on the Drizzle transaction
+ * object, which keeps resolving the transaction it was opened for.
+ */
+const ENDED_HANDLE_SIGNAL_DRIVERS: ReadonlySet<IntegrationLaneDriver> = new Set(
+  ["libsql", "pglite"],
+);
 
 /** A native transaction handle's own Drizzle `transaction()`. */
 type CallerTransactionHandle = Readonly<{
@@ -180,6 +205,44 @@ export function registerNativeTransactionHandleProbeTests(
       expect(second).not.toBe(first);
     });
 
+    // Only the server lanes hold two transactions open at once: every
+    // in-process lane serializes them on one connection.
+    it.runIf(context.serverLaneConcurrency)(
+      "resolves a state of its own for each of two transactions open at once on one pool",
+      async () => {
+        const backend = context.getBackend();
+        const [plain] = await createAdapterStoreWithSchema(probeGraph, backend);
+        const opens: (() => void)[] = [];
+        const bothOpen = new Promise<void>((resolve) => {
+          opens.push(resolve);
+        });
+        let opened = 0;
+        const observe = (): Promise<
+          Readonly<{
+            opener: NativeTransactionState;
+            adopted: NativeTransactionState;
+            native: unknown;
+          }>
+        > =>
+          backend.transactionWithNative(async (target, native) => {
+            const opener = openTransactionSession(target).native;
+            opened += 1;
+            if (opened === 2) for (const open of opens) open();
+            await bothOpen;
+            return {
+              opener,
+              adopted: stateOf(plain.withTransaction(native)),
+              native,
+            };
+          });
+        const [first, second] = await Promise.all([observe(), observe()]);
+        expect(first.native).not.toBe(second.native);
+        expect(first.adopted).toBe(first.opener);
+        expect(second.adopted).toBe(second.opener);
+        expect(second.opener).not.toBe(first.opener);
+      },
+    );
+
     it("never resolves an ended transaction's state from a handle retained into the next one", async () => {
       const backend = context.getBackend();
       const [plain] = await createAdapterStoreWithSchema(probeGraph, backend);
@@ -200,15 +263,26 @@ export function registerNativeTransactionHandleProbeTests(
         stateOf(plain.withTransaction(first.native)),
       ];
       const perBegin = PER_BEGIN_NATIVE_DRIVERS.has(context.driver);
+      // A handle that reports its transaction ended resolves no state once it
+      // has; a per-BEGIN object that reports nothing still names the
+      // transaction it was opened for, never another.
+      const namesEnded =
+        perBegin && !ENDED_HANDLE_SIGNAL_DRIVERS.has(context.driver);
       expect(second.current).not.toBe(first.state);
-      // A per-BEGIN handle names the transaction it was opened for; on
-      // better-sqlite3 the retained handle is the database, which inside the
-      // next transaction is that transaction's handle.
-      const retainedOwner = perBegin ? first.state : second.current;
-      expect(second.retained).toBe(retainedOwner);
-      // After both ended, a per-BEGIN handle still names the first
-      // transaction. The database object, outside any transaction the engine
-      // opened, identifies none: each binding gets a state of its own.
+      // On better-sqlite3 the retained handle is the database, which inside
+      // the next transaction is that transaction's handle.
+      expect({
+        driver: context.driver,
+        retainedIsFirst: second.retained === first.state,
+        retainedIsCurrent: second.retained === second.current,
+      }).toEqual({
+        driver: context.driver,
+        retainedIsFirst: namesEnded,
+        retainedIsCurrent: !perBegin,
+      });
+      // After both ended: the database object, outside any transaction the
+      // engine opened, identifies none, and neither does a handle that
+      // reported its end: each binding gets a state of its own.
       expect({
         driver: context.driver,
         firstTransaction: afterwards.map((state) => state === first.state),
@@ -216,15 +290,15 @@ export function registerNativeTransactionHandleProbeTests(
         shared: afterwards[0] === afterwards[1],
       }).toEqual({
         driver: context.driver,
-        firstTransaction: [perBegin, perBegin],
+        firstTransaction: [namesEnded, namesEnded],
         secondTransaction: [false, false],
-        shared: perBegin,
+        shared: namesEnded,
       });
     });
   });
 
   describe("native transaction state of a savepoint", () => {
-    it("resolves a caller's own savepoint in a TypeGraph-owned transaction to the enclosing state only where the engine published that transaction on the connection", async () => {
+    it("resolves a caller's own savepoint in a TypeGraph-owned transaction to the enclosing state exactly where the driver proves the enclosing transaction", async () => {
       const backend = context.getBackend();
       const [plain] = await createAdapterStoreWithSchema(probeGraph, backend);
       const observed = await backend.transactionWithNative(
@@ -248,7 +322,7 @@ export function registerNativeTransactionHandleProbeTests(
         sharedWithinSavepoint: first === second,
       }).toEqual({
         driver: context.driver,
-        joinsEnclosing: !PER_BEGIN_NATIVE_DRIVERS.has(context.driver),
+        joinsEnclosing: CALLER_SAVEPOINT_PROOF_DRIVERS.has(context.driver),
         sharedWithinSavepoint: true,
       });
     });

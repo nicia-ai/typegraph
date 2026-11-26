@@ -218,6 +218,7 @@ import {
   unsupportedResolvedMutationSet,
 } from "../resolved-mutation-set";
 import { type EdgeRow, rowToEdge } from "../row-mappers";
+import { reviveStoredDateProps } from "../stored-date-revival";
 import {
   type CompositionNodeRef,
   type CreateEdgeInput,
@@ -1166,6 +1167,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     _overlaidSession: OverlaidSessionMint<"edge">,
     lock: GraphWriteLock,
     transactionMode: WriteTransactionMode,
+    frame: OperationEntry,
   ): Promise<EdgeCreateInternalResult> => {
     // See node create's matching receiver check: a custom transaction
     // wrapper may replace the marked outer backend with an unmarked target.
@@ -1174,9 +1176,9 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
     const fuseSchemaFenceInFirstWrite =
       schemaFenceInFirstWrite &&
       isSchemaFencedInsertEligible(targetBackend) &&
-      !hasLeasedSchemaFence(ctx, targetBackend);
+      !hasLeasedSchemaFence(ctx, frame);
     if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
-      await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+      await lockSchemaVersionForStoreWrite(ctx, frame);
     }
     const diagnoseFusedCreateNoRow = async (
       validateCardinality: boolean,
@@ -1193,7 +1195,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         if (transactionMode !== "none") {
           // Transaction-backed fallback probes need the portable schema fence;
           // the transaction already supplies atomicity.
-          await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+          await lockSchemaVersionForStoreWrite(ctx, frame);
         }
         const prepared = await validateAndPrepareEdgeCreate(
           ctx,
@@ -1213,7 +1215,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
           // A noninteractive root has no safe plain-write fallback. Probe
           // endpoints first for the typed missing-endpoint error, then fail
           // closed at the schema fence before any unfenced INSERT.
-          await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+          await lockSchemaVersionForStoreWrite(ctx, frame);
         }
         return prepared;
       }
@@ -1532,7 +1534,7 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       );
       if (fusedResult.outcome === "created") {
         if (fuseSchemaFenceInFirstWrite) {
-          memoizeLeasedSchemaFence(ctx, targetBackend);
+          memoizeLeasedSchemaFence(ctx, frame);
         }
         return createdEdgeResult(rowToEdge(fusedResult.row));
       }
@@ -1998,7 +2000,7 @@ async function runAtomicEdgeBatchProgram<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
   preparation: AtomicEdgeBatchPreparation,
-  backend: StatementBackend,
+  entry: OperationEntry,
   atomicExecutor: AtomicEdgeBatchExecutor,
   resultMode: "count",
 ): Promise<number>;
@@ -2006,7 +2008,7 @@ async function runAtomicEdgeBatchProgram<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
   preparation: AtomicEdgeBatchPreparation,
-  backend: StatementBackend,
+  entry: OperationEntry,
   atomicExecutor: AtomicEdgeBatchExecutor,
   resultMode: "rows",
 ): Promise<readonly BackendEdgeRow[]>;
@@ -2015,10 +2017,11 @@ async function runAtomicEdgeBatchProgram<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   inputs: readonly CreateEdgeInput[],
   preparation: AtomicEdgeBatchPreparation,
-  backend: StatementBackend,
+  entry: OperationEntry,
   atomicExecutor: AtomicEdgeBatchExecutor,
   resultMode: "count" | "rows",
 ): Promise<number | readonly BackendEdgeRow[]> {
+  const backend = operationEntryBackend(entry);
   const params = preparation.preparedCreates.map(
     (prepared) => prepared.insertParams,
   );
@@ -2085,7 +2088,7 @@ async function runAtomicEdgeBatchProgram<G extends GraphDef>(
       },
     );
   }
-  memoizeLeasedSchemaFence(ctx, backend);
+  memoizeLeasedSchemaFence(ctx, entry);
   return result;
 }
 
@@ -2150,7 +2153,7 @@ export async function executeEdgeCreateNoReturnBatch<G extends GraphDef>(
       ctx,
       inputs,
       preparation,
-      backend,
+      entry,
       atomicExecutor,
       "count",
     );
@@ -2323,7 +2326,7 @@ async function executeDecidedEdgeCreateBatch<G extends GraphDef>(
       ctx,
       inputs,
       preparation,
-      backend,
+      entry,
       atomicExecutor,
       "rows",
     );
@@ -2651,9 +2654,10 @@ function computeEdgeUpdate<G extends GraphDef>(
   inputProps: Partial<Record<string, unknown>>,
 ): Record<string, unknown> {
   const registration = getEdgeRegistration(ctx.graph, kind);
+  const schema = registration.type.schema;
   const validatedProps = validateEdgeProps(
-    registration.type.schema,
-    { ...existingProps, ...inputProps },
+    schema,
+    { ...reviveStoredDateProps(schema, existingProps), ...inputProps },
     { kind, operation: "update", id },
   );
   const identityRefusal = edgeMatchIdentityUpdateRefusal({
@@ -3614,7 +3618,7 @@ export async function executeEdgeUpdate<G extends GraphDef>(
         const edges = await executeAtomicEdgeResolvedUpdates(
           ctx,
           [atomicEntry],
-          backend,
+          entry,
           atomicExecutor,
         );
         return requireDefined(edges[0]);
@@ -3924,7 +3928,7 @@ export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
       "Atomic resolved edge mutation set returned a partial result.",
     );
   }
-  memoizeLeasedSchemaFence(ctx, backend);
+  memoizeLeasedSchemaFence(ctx, entry);
   const createdById = new Map(result.created.map((row) => [row.id, row]));
   const updatedById = new Map(result.updated.map((row) => [row.id, row]));
   return appliedResolvedMutationSet({
@@ -3957,7 +3961,7 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
     return executeAtomicEdgeResolvedUpdates(
       ctx,
       entries,
-      backend,
+      entry,
       atomicExecutor,
     );
   }
@@ -4017,9 +4021,10 @@ export async function executeEdgeUpsertUpdateBatch<G extends GraphDef>(
 async function executeAtomicEdgeResolvedUpdates<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   entries: readonly EdgeUpsertUpdateBatchEntry[],
-  backend: StatementBackend,
+  entry: OperationEntry,
   atomicExecutor: AtomicEdgeResolvedUpdateBatchExecutor,
 ): Promise<readonly Edge[]> {
+  const backend = operationEntryBackend(entry);
   const maxAttempts = atomicResolvedUpdateAttemptBudget(
     entries.length,
     EDGE_UPDATE_ATTEMPTS,
@@ -4072,7 +4077,7 @@ async function executeAtomicEdgeResolvedUpdates<G extends GraphDef>(
       },
     });
     if (rows.length === entries.length) {
-      memoizeLeasedSchemaFence(ctx, backend);
+      memoizeLeasedSchemaFence(ctx, entry);
       const returned = new Map(rows.map((row) => [row.id, row]));
       return entries.map((entry) =>
         rowToEdge(requireDefined(returned.get(entry.input.id))),

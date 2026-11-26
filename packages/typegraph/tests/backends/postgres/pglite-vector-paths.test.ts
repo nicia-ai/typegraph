@@ -19,10 +19,13 @@
  * One shared engine per file; `beforeEach` drops vector tables (dimension- and
  * reclaim-sensitive) and truncates base tables.
  */
+import { sql as drizzleSql } from "drizzle-orm";
+import { PgTransaction } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { defineGraph, defineNode, embedding } from "../../../src";
+import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
 import { type VectorSearchParams } from "../../../src/backend/types";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import { pgvectorStrategy } from "../../../src/query/dialect/vector/pgvector-strategy";
@@ -35,6 +38,10 @@ import {
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { createStoreWithSchema } from "../../../src/store";
 import { requireDefined } from "../../../src/utils/presence";
+import {
+  asForeignTransaction,
+  ForeignPgTransaction,
+} from "../../helpers/foreign-drizzle-handles";
 import {
   setupSharedPgliteEngine,
   type SharedPgliteEngine,
@@ -323,6 +330,41 @@ describe("Store-level vector paths under PGlite", () => {
     // immediately visible on the next read.
     expect(await readEfSearch()).toBe(baseline);
     expect(await readEfSearch()).not.toBe("256");
+  });
+
+  it("keeps hnsw.ef_search scoped to one search on a backend over a caller's transaction from another loaded copy of Drizzle", async () => {
+    const backend = engine.makeBackend();
+    const graph = documentGraph("ef_pglite_foreign");
+    await createStoreWithSchema(graph, backend);
+    const efSearchInCallerTransaction = await backend.transactionWithNative(
+      async (_target, native) => {
+        const foreign = asForeignTransaction(native, ForeignPgTransaction);
+        expect(foreign instanceof PgTransaction).toBe(false);
+        const [store] = await createStoreWithSchema(
+          graph,
+          createPostgresBackend(foreign),
+        );
+        await store.nodes.Doc.create({
+          title: "alpha",
+          embedding: [1, 0, 0, 0],
+        });
+        const hits = await store.search.vector("Doc", {
+          fieldPath: "embedding",
+          queryEmbedding: [1, 0, 0, 0],
+          limit: 1,
+          efSearch: 256,
+        });
+        expect(requireDefined(hits[0]).node.title).toBe("alpha");
+        // Read on the caller's transaction after the search: a SET LOCAL a
+        // savepoint released would still be in force here.
+        const result = await native.execute(
+          drizzleSql`SELECT current_setting('hnsw.ef_search', true) AS ef`,
+        );
+        return (result as Readonly<{ rows: readonly { ef: string | null }[] }>)
+          .rows[0]?.ef;
+      },
+    );
+    expect(efSearchInCallerTransaction).not.toBe("256");
   });
 
   it("reclaims the orphaned vector table when an embedding field is removed", async () => {

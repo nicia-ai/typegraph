@@ -455,8 +455,10 @@ sql DELETE FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_i
     ["<graph1>","Item","item-c"]
 sql DELETE FROM "typegraph_node_fulltext" WHERE "graph_id" = ? AND "node_kind" = ? AND "node_id" = ?
     ["<graph1>","Item","item-c"]
-sql DELETE FROM "typegraph_edges" WHERE ( ("typegraph_edges"."graph_id" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ?) OR ("typegraph_edges"."graph_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ?) )
+sql DELETE FROM "typegraph_edges" WHERE ( ("typegraph_edges"."graph_id" = ? AND "typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" = ?) OR ("typegraph_edges"."graph_id" = ? AND "typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" = ?) ) RETURNING "typegraph_edges"."id"
     ["<graph1>","Item","item-c","<graph1>","Item","item-c"]
+sql DELETE FROM "typegraph_edge_claims" WHERE ( "graph_id", "axis", "key" ) IN ( SELECT "typegraph_edge_claims"."graph_id", "typegraph_edge_claims"."axis", "typegraph_edge_claims"."key" FROM "typegraph_edge_claims" WHERE "typegraph_edge_claims"."graph_id" = ? AND "typegraph_edge_claims"."edge_id" IN (?) ORDER BY "typegraph_edge_claims"."axis", "typegraph_edge_claims"."key" )
+    ["<graph1>","link-dead"]
 sql DELETE FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
     ["<graph1>","Item","item-c"]
 libsql commit
@@ -479,6 +481,8 @@ sql DELETE FROM "typegraph_node_fulltext" WHERE "graph_id" = ? AND "node_kind" =
     ["<graph1>","Item","item-c"]
 sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = ? AND ( ("typegraph_edges"."from_kind" = ? AND "typegraph_edges"."from_id" IN (?)) OR ("typegraph_edges"."to_kind" = ? AND "typegraph_edges"."to_id" IN (?)) ) RETURNING "typegraph_edges"."id"
     ["<graph1>","Item","item-c","Item","item-c"]
+sql DELETE FROM "typegraph_edge_claims" WHERE ( "graph_id", "axis", "key" ) IN ( SELECT "typegraph_edge_claims"."graph_id", "typegraph_edge_claims"."axis", "typegraph_edge_claims"."key" FROM "typegraph_edge_claims" WHERE "typegraph_edge_claims"."graph_id" = ? AND "typegraph_edge_claims"."edge_id" IN (?) ORDER BY "typegraph_edge_claims"."axis", "typegraph_edge_claims"."key" )
+    ["<graph1>","link-dead"]
 sql DELETE FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" IN (?) RETURNING "typegraph_nodes"."id"
     ["<graph1>","Item","item-c"]
 libsql commit

@@ -283,6 +283,7 @@ import {
   type AnyPgTransaction,
   createPostgresExecutionAdapter,
   getPgliteClient,
+  getPinnedPgliteTransaction,
   getPinnedPostgresTransactionConnection,
   hasFunctionProperty,
   isNeonHttpClient,
@@ -1122,9 +1123,15 @@ const toSchemaVersionRow = createSchemaVersionRowMapper(
 
 /**
  * Whether `handle` is a Drizzle PostgreSQL transaction object: THE
- * classifier the adoption boundaries and the native-transaction record share.
- * Drizzle's brand check, so a transaction of another loaded copy of Drizzle
- * qualifies as it does for `instanceof`'s own copy.
+ * classifier every site in this module that asks "is this a transaction"
+ * calls — factory routing (`createPostgresBackend`,
+ * `buildPostgresEngineProfile`), the adoption boundaries, lazy and
+ * schema-write DDL session binding, recorded-anchor retention adoption, the
+ * scoped vector-search GUC group, engine savepoint recording and the
+ * native-transaction record. Drizzle's brand check, so a transaction of
+ * another loaded copy of Drizzle qualifies as it does for `instanceof`'s own
+ * copy; a site that asked `instanceof` instead would route such a handle as
+ * a root database.
  */
 function isPostgresTransactionHandle(
   handle: unknown,
@@ -1133,14 +1140,33 @@ function isPostgresTransactionHandle(
 }
 
 /**
- * A PostgreSQL handle as the native-transaction record classifies it: a
- * transaction object is one per BEGIN or savepoint; anything else is a
- * connection or pool, on which the engine publishes no transaction.
+ * A PostgreSQL handle as the native-transaction record classifies it
+ * (`native-transaction-handle.ts`):
+ *
+ * - a PGlite transaction object, or a savepoint of one: proof 2, the PGlite
+ *   transaction client its session pins;
+ * - any other transaction object: proof 3, itself — node-postgres and
+ *   postgres-js give each BEGIN and each savepoint a new object that runs only
+ *   inside it, and keep no link from a caller's savepoint to its enclosing
+ *   transaction;
+ * - anything else is a connection or pool, on which the engine publishes no
+ *   transaction: no proof.
  */
 function postgresNativeHandle(db: object): NativeHandle {
-  return isPostgresTransactionHandle(db) ?
-      { kind: "transaction", transaction: db }
-    : { kind: "connection", connection: db };
+  if (!isPostgresTransactionHandle(db)) {
+    return { kind: "connection", handle: db, connection: db };
+  }
+  const pinned = getPinnedPgliteTransaction(db);
+  return pinned === undefined ?
+      { kind: "transaction", handle: db }
+    : {
+        kind: "pinned",
+        handle: db,
+        pinned,
+        // PGlite marks its transaction client closed once the transaction
+        // has committed or rolled back, and refuses statements from then on.
+        isOpen: () => (pinned as Readonly<{ closed?: unknown }>).closed !== true,
+      };
 }
 
 /**
@@ -1156,8 +1182,7 @@ export function createPostgresBackend(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
 ): AdapterBackend<AnyPgTransaction> {
-  if (db instanceof PgTransaction) {
-    assertAdoptedDialect(db, isPostgresTransactionHandle, "postgres");
+  if (isPostgresTransactionHandle(db)) {
     return createPostgresTransactionBackend(db, options);
   }
   return markAllocationBound(
@@ -1213,7 +1238,7 @@ export function buildPostgresEngineProfile(
   db: AnyPgDatabase,
   options: PostgresBackendOptions = {},
 ): SqlEngineProfile<AnyPgTransaction> {
-  if (db instanceof PgTransaction) {
+  if (isPostgresTransactionHandle(db)) {
     throw new ConfigurationError(
       "A PostgreSQL transaction requires createPostgresTransactionBackend(tx, options).",
       { backend: "postgres", code: "TRANSACTION_REQUIRES_SCOPED_BACKEND" },
@@ -1319,7 +1344,30 @@ function buildPostgresEngineProfileInternal(
   }
   // A backend built over a transaction handle opens savepoints on that
   // transaction, not transactions of its own: whether they commit is decided
-  // by whoever opened the enclosing transaction, so it declares no evidence.
+  // by whoever opened the enclosing transaction, so it declares no evidence,
+  // and refuses a declaration of it (a root backend's forwarded capabilities)
+  // rather than mark a savepoint as if its RELEASE were the COMMIT.
+  // The override type has no `commitOutcome`; a forwarded `capabilities`
+  // object carries one anyway, so it is read as what it may be.
+  const requestedCommitOutcome: unknown = (
+    options.capabilities?.execution as
+      | Readonly<{ commitOutcome?: unknown }>
+      | undefined
+  )?.commitOutcome;
+  if (transactionScoped && requestedCommitOutcome === "commit-reply") {
+    throw new ConfigurationError(
+      `A PostgreSQL backend over a caller's transaction cannot declare execution.commitOutcome: "commit-reply": its transactions are savepoints of the caller's transaction, whose commit only the caller observes.`,
+      {
+        code: "TRANSACTION_SCOPED_COMMIT_OUTCOME",
+        capability: "execution.commitOutcome",
+        requestedCommitOutcome,
+      },
+      {
+        suggestion:
+          "Omit execution.commitOutcome when forwarding a root backend's capabilities to createPostgresBackend(tx) or createPostgresTransactionBackend(tx).",
+      },
+    );
+  }
   const { commitOutcome: baseCommitOutcome, ...baseExecution } =
     baseCapabilities.execution;
   const declaredCapabilities = sealCapabilityDeclaration(
@@ -1534,7 +1582,7 @@ function buildPostgresEngineProfileInternal(
       await db.execute(statement);
       return;
     }
-    if (db instanceof PgTransaction) {
+    if (isPostgresTransactionHandle(db)) {
       await assertCallerSessionInAllocationSchema(
         executionAdapter,
         allocationSchema,
@@ -1559,7 +1607,7 @@ function buildPostgresEngineProfileInternal(
     tx: AnyPgTransaction,
   ): Promise<void> {
     if (allocationPin === undefined || allocationSchema === undefined) return;
-    if (db instanceof PgTransaction) {
+    if (isPostgresTransactionHandle(db)) {
       await assertCallerSessionInAllocationSchema(
         createPostgresExecutionAdapter(tx, adapterOptions),
         allocationSchema,
@@ -2071,7 +2119,7 @@ function buildPostgresEngineProfileInternal(
       }
       try {
         const ddl = postgresRecordedAnchorRetentionAdoptionDDL(tableName);
-        if (db instanceof PgTransaction) {
+        if (isPostgresTransactionHandle(db)) {
           // Savepoint rollback restores both the caller's session and GUC after a timeout.
           await withConcurrentCreateRetry(() =>
             db.transaction(async (transaction: AnyPgTransaction) => {
@@ -3773,7 +3821,7 @@ function createPostgresOperationBackend(
     if (overrides.length === 0) {
       return execAll<Row>(query);
     }
-    if (db instanceof PgTransaction) {
+    if (isPostgresTransactionHandle(db)) {
       // Already inside the caller's transaction (low-level
       // backend.transaction / adoptTransaction). `executionAdapter` is
       // bound to this tx client, but SET LOCAL persists to the end of the

@@ -88,12 +88,11 @@ export async function rotateGraphAllocationOwner(
         backend.transaction(async (transaction: StoreTransactionBackend) => {
           // This unit opened the transaction: its session opens here, and
           // the unit runs as one operation of it.
-          const target = enterOperation(
-            openTransactionSession(transaction),
-          ).backend;
+          const operation = enterOperation(openTransactionSession(transaction));
+          const target = operation.backend;
           await lockSchemaVersionForStoreWrite(
             { graphId, schemaVersion },
-            target,
+            operation,
           );
           await lockRecordedGraphWrite(target, graphId);
           const previous = await readGraphAllocationOwner(

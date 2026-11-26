@@ -534,9 +534,9 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
         { revisionTracking: true },
       );
       const routing = routeOperations();
-      // The write session keys on the surface's identity, which the routing
-      // handles do not share, so its end-of-callback revision advance cannot
-      // be observed through them here: the opener it is handed is checked
+      // The write session's own statements are not the routing handles'
+      // operations, so its end-of-callback revision advance cannot be
+      // observed through them here: the opener it is handed is checked
       // instead, and `tests/write-transaction-session-opener.test.ts` shows
       // that its own statements go through that opener.
       const withWriteTransactionSession =
@@ -544,9 +544,9 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
       const openers: unknown[] = [];
       const spy = vi
         .spyOn(writeTransaction, "withWriteTransactionSession")
-        .mockImplementation((target, opener, ...rest) => {
+        .mockImplementation((session, target, opener, ...rest) => {
           openers.push(opener);
-          return withWriteTransactionSession(target, opener, ...rest);
+          return withWriteTransactionSession(session, target, opener, ...rest);
         });
       try {
         await store.transaction(async (tx) => {
