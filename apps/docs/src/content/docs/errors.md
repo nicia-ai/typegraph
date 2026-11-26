@@ -2538,11 +2538,18 @@ so. Nothing the transaction wrote was saved.
   expose the `COMMIT`'s reply);
 - `"statement-failure"`: on SQLite, a statement failed and the database ended
   the transaction with it — a trigger's `RAISE(ROLLBACK)`, or an error SQLite
-  answers by rolling back. TypeGraph asks the driver whether the transaction is
-  still open right after a statement fails (better-sqlite3, bun:sqlite, libSQL
-  0.18 and later); once it is not, every later statement of the transaction is
-  refused with this error rather than running in autocommit, and the
-  transaction rejects with it, sending no `COMMIT`.
+  answers by rolling back. Right after a statement fails, and before any later
+  statement of the transaction reaches the driver, TypeGraph asks whether the
+  transaction is still open: the driver's own flag where it reports the
+  engine's state (better-sqlite3, bun:sqlite, a local libSQL client), and
+  otherwise SQLite itself, on the transaction's session (a remote libSQL
+  client, libSQL before 0.18, sql.js). Where neither can answer (Durable
+  Object storage) the first failure ends the transaction. Unless the
+  transaction is known to be open, every later statement of it is refused with
+  this error rather than running in autocommit, and the transaction rejects
+  with it, sending no `COMMIT`. A SQLite transaction's statements reach the
+  driver one at a time, so a statement issued together with the failing one
+  (a `Promise.all`) is refused too.
 
 `cause` is the first error the database reported during the transaction (for
 example a unique violation, `23505`); an error the driver raised without the

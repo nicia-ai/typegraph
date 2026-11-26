@@ -2316,10 +2316,11 @@ statement inside a savepoint (for example a nested `tx.sql.transaction(...)`) th
 it: the transaction is then healthy and commits. SQLite keeps a transaction usable after most failed
 statements, so on SQLite the same callback commits what it wrote. Some failures end a SQLite
 transaction in the engine itself (a trigger's `RAISE(ROLLBACK)`, or an error SQLite answers by
-rolling back): on a driver that reports transaction state (better-sqlite3, bun:sqlite, libSQL 0.18
-and later) TypeGraph then refuses every later statement of the transaction with a
+rolling back): TypeGraph asks right after a statement fails whether the transaction is still open,
+and unless it is, refuses every later statement of the transaction with a
 `TransactionRolledBackError` (`details.detectedBy: "statement-failure"`), so none runs in
-autocommit, and the transaction rejects with it. A deferred constraint that fails
+autocommit, and the transaction rejects with it. On Durable Object storage, which cannot be asked,
+the first failed statement ends the transaction. A deferred constraint that fails
 at `COMMIT` rejects with the constraint's own error, as before.
 
 ```typescript
