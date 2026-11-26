@@ -22,7 +22,11 @@ import {
   edgeIdentityFromRow,
 } from "../store/operations/edge-identity";
 import { type ValidityEndMutation } from "../store/types";
-import { isInvertedValidityWindow, isPortableTimestamp } from "../utils/date";
+import {
+  dateInstantText,
+  isInvertedValidityWindow,
+  isPortableTimestamp,
+} from "../utils/date";
 import { createDataKeyedBag } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 import { branch } from "./branch";
@@ -43,6 +47,7 @@ import {
   assertStableMergePostimage,
   captureMergePlanTargetFence,
   planMergeIncrementalWithCandidateKeys,
+  revivedPlannedProps,
 } from "./merge";
 import { finalizeMergePlanArtifact } from "./plan-canonical";
 import {
@@ -379,7 +384,7 @@ function jsonMutationProps(props: unknown): Record<string, JsonValue> {
   // Reject other non-JSON values rather than allowing stringify to silently discard them.
   const seen = new WeakSet<object>();
   function convert(value: unknown): JsonValue {
-    if (value instanceof Date) return value.toISOString();
+    if (value instanceof Date) return dateInstantText(value);
     if (value !== null && typeof value === "object") {
       if (seen.has(value))
         throw new ValidationError(
@@ -438,12 +443,34 @@ async function executeMutation<G extends GraphDef>(
   store: Store<G>,
   operation: MutationOperation,
 ): Promise<void> {
-  const props = createDataKeyedBag<unknown>();
+  const stated = createDataKeyedBag<unknown>();
   for (const [key, value] of Object.entries(operation.props ?? {}))
-    props[key] = value;
-  for (const key of operation.unsetProps ?? []) props[key] = undefined;
+    stated[key] = value;
+  for (const key of operation.unsetProps ?? []) stated[key] = undefined;
+  const role = operation.op.startsWith("node.") ? "node" : "edge";
+  // A mutation document carries each `Date` as the ISO text the store writes
+  // for it (`jsonMutationProps`), so it is revived for the kind's schema as
+  // every merge write is before it reaches the store.
+  const registration =
+    role === "node" ?
+      (
+        store.graph.nodes as Readonly<
+          Record<string, { type: { schema: z.ZodType } } | undefined>
+        >
+      )[operation.kind]
+    : (
+        store.graph.edges as Readonly<
+          Record<string, { type: { schema: z.ZodType } } | undefined>
+        >
+      )[operation.kind];
+  const props = revivedPlannedProps(
+    registration?.type.schema,
+    role,
+    operation,
+    stated,
+  );
   const writer =
-    operation.op.startsWith("node.") ?
+    role === "node" ?
       nodeWriter(store, operation.kind)
     : edgeWriter(store, operation.kind);
   switch (operation.op) {
