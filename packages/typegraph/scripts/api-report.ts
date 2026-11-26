@@ -1118,7 +1118,11 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // port names none of capture's internals, and `GraphWriteLock` carries the
 // graph-lock memo of the session it was taken in, `RecordedGraphLockMemo`.
 // Each of the twelve entrypoints that renders `StoreRuntime` gains exactly
-// those two names (+2 each). Neither is exported.
+// those two names (+2 each). Neither is exported: both are reached only
+// through `TransactionSession`, itself internal debt of the port above, and
+// exporting them would publish capture's session plumbing as API. Making
+// them unreachable means taking `TransactionSession` off the port's types,
+// which is the port's own change, not this one's.
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Meta-edge removal: removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in
