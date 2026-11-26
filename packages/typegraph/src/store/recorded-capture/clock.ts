@@ -362,6 +362,21 @@ function keyedRecordedGraphFence(
 }
 
 /**
+ * Whether {@link lockRecordedGraphWrite} on `target` writes: under a `row`
+ * write fence the per-graph lock is an upsert of the graph's fence row, which
+ * a transaction opened `read_only` must not run (PostgreSQL rejects it with
+ * `25006`; SQLite would let it write). Every other plan takes no row: an
+ * advisory lock, the engine's writer slot or the caller's serialization.
+ */
+export function recordedGraphWriteLockWrites(
+  target: Pick<GraphBackend, "capabilities" | "dialect">,
+): boolean {
+  return (
+    keyedRecordedGraphFence(target, "recorded graph write")?.kind === "row"
+  );
+}
+
+/**
  * Takes the per-graph write fence: the keyed exclusion and the session's
  * isolation fact, and nothing else. Under an advisory `lock` plan the graph's
  * fence row is left alone — a holder that only captures history, advances a

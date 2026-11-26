@@ -246,7 +246,7 @@ its callback, before any statement, with `ConfigurationError`
 refuse a transaction opened with `accessMode: "read_only"` before any
 statement, with `UnsupportedBackendCapabilityError`, after which the
 transaction is still usable. `holding(tx)` answers in a read-only transaction,
-except on PostgreSQL with a `row` write fence (see the read-only item under
+except on a backend with a `row` write fence (see the read-only item under
 [Locking and transactions](#locking-and-transactions) below), and
 `assertHolds(tx, [])` returns an empty result there; `assertHolds` with facts
 to judge is refused like the verbs. A store handle whose schema version
@@ -829,12 +829,13 @@ reads in its own transaction.
   transaction decides no write, so it is not refused. In a read-only
   transaction, use `holding(tx)` rather than `assertHolds`.
 - On a backend that declares a `row` write fence, the graph write lock is an
-  upsert of a fence row. SQLite runs it in a read-only Store transaction, so
-  `holding(tx)` still answers there. PostgreSQL does not: the read-only form of
-  `holding(tx)` fails with the database's own error (`25006`, cannot execute
-  `INSERT` in a read-only transaction). On a PostgreSQL `row` fence, read the
-  believed set with `holding()` or with `holding(tx)` in a transaction that
-  can write, under a role that may write the fences table.
+  upsert of a fence row, which a read-only transaction does not run. The
+  read-only form of `holding(tx)` is refused there, on SQLite and PostgreSQL
+  alike, with `UnsupportedBackendCapabilityError` (capability
+  `write transaction access`) before any statement, and the transaction stays
+  usable. On a `row` fence, read the believed set with `holding()` or with
+  `holding(tx)` in a transaction that can write, under a role that may write
+  the fences table.
 - In a transaction that can write, `holding(tx)` and `assertHolds` on a keyed
   write fence (PostgreSQL's default) need read committed isolation, observed on
   the lock statement, as the retraction verbs do; see

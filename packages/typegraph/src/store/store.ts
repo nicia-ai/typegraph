@@ -479,6 +479,7 @@ import {
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
+  recordedGraphWriteLockWrites,
   registeredRecordedGraphLockMemo,
   registerRecordedIdentityMutationWitness,
   resetRevisionOrigin,
@@ -5825,6 +5826,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           },
           acquireReadFences: async (operation) => {
             if (readOnly) {
+              // Under a `row` write fence the graph lock is a fence-row
+              // upsert: refused before any statement on every backend, so a
+              // read-only transaction never writes (SQLite would run it,
+              // PostgreSQL rejects it).
+              if (recordedGraphWriteLockWrites(txBackend)) {
+                refuseReadOnlyTransactionWrite(
+                  operation,
+                  this.graphId,
+                  'Under a "row" write fence the graph write lock writes the graph\'s fence row. Call it without a transaction, or in a transaction opened without accessMode: "read_only".',
+                );
+              }
               await lockRecordedGraphWrite(txBackend, this.graphId);
               return;
             }

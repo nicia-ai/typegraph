@@ -3155,7 +3155,9 @@ export type TransactionRuntime = Readonly<{
    * fences, in their order, so a write that follows the read cannot take the
    * schema-version fence after the graph lock. In a transaction opened with
    * `accessMode: "read_only"`, which never writes and cannot hold the schema
-   * fence, it is the per-graph write lock alone. The transaction's own
+   * fence, it is the per-graph write lock alone; under a `row` write fence
+   * that lock is a fence-row upsert, so it is refused there, naming
+   * `operation`, before any statement (`recordedGraphWriteLockWrites`). The transaction's own
    * read-only flag decides, so no caller re-derives it — today's caller is
    * provenance's `holding(tx)`.
    *

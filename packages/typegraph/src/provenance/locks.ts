@@ -31,7 +31,9 @@
  * own evidence that the session reads at read committed (or that the engine
  * serializes writers), and refuse the transaction before the first support
  * read otherwise. A read-only `holding(tx)` decides no write, and its
- * statements share one snapshot at a snapshot isolation, so it is not refused.
+ * statements share one snapshot at a snapshot isolation, so it is not refused
+ * for its isolation; it is refused under a `row` write fence, whose graph lock
+ * is a write (`acquireReadFences`).
  */
 import type { GraphDef } from "../core/define-graph";
 import { type Operation } from "../store/operation-scope";
