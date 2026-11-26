@@ -3781,6 +3781,7 @@ async function assertImportedRequiredPartsAttached<G extends GraphDef>(
 async function purgeAsUnit(
   frame: Pick<
     ImportWriteFrame,
+    | "operation"
     | "target"
     | "allocateEdgeSavepoint"
     | "transactionMode"
@@ -3793,6 +3794,7 @@ async function purgeAsUnit(
     return PURGED;
   }
   return runRecordedTransactionSavepoint<PurgeOutcome>(
+    frame.operation,
     frame.target,
     frame.statementExecution,
     frame.allocateEdgeSavepoint(),
