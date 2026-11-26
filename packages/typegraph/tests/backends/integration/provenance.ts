@@ -2950,5 +2950,73 @@ export function registerProvenanceIntegrationTests(
         expect(await store.verifyConstraintFences()).toEqual([]);
       },
     );
+
+    // A caught failure can also land between a whole's reopen and its
+    // required part's. The whole is then live and supported, so a re-run
+    // reaches it with nothing to change; the part, held through a source of
+    // its own and reached only through that whole, must still come into the
+    // re-run's scope, or re-running the interrupted verb leaves it closed
+    // while its support stands.
+    // Revert check: in `computeAffectedFactKeys` (`src/provenance/support.ts`)
+    // carry a whole's parts only when the whole itself moves, and the re-run
+    // leaves `part-one` closed.
+    it.each(KIND_ORDERS)(
+      "($order) re-running a verb interrupted between a whole's reopen and its required part's reopens the part, though the whole is already live",
+      async ({ factKinds }) => {
+        const armed = { on: false, started: 0 };
+        const [store] = await createAdapterStoreWithSchema(
+          compositionGraph,
+          context.getBackend(),
+          {
+            history: true,
+            hooks: {
+              onOperationStart: () => {
+                if (!armed.on) return;
+                armed.started += 1;
+                // Write 0 restores `sourceOne`, write 1 reopens `whole-one`
+                // (`either` stays live through `sourceTwo`); write 2 would
+                // reopen `part-one`.
+                if (armed.started === 3) throw new Error(REJECTED_WRITE);
+              },
+            },
+          },
+        );
+        await seedTwoSourceWorld(store);
+        // `part-one` holds only through `sourceOther` (and its whole), so
+        // `sourceOne` reaches it only through `whole-one`.
+        const [ownPremise] = await store.edges.premiseOf.find({
+          from: sourceOne,
+          to: { kind: "Justification", id: "part-one-j" },
+        });
+        await store.edges.premiseOf.hardDelete(requireDefined(ownPremise).id);
+        await store.edges.premiseOf.create(
+          sourceOther,
+          { kind: "Justification", id: "part-one-j" },
+          {},
+        );
+        const provenance = capabilityFor(store, factKinds);
+        await provenance.retract(sourceOne);
+        expect(await liveFactIds(store)).not.toContain("part-one");
+
+        const caught = await store.transaction(async (tx) => {
+          armed.on = true;
+          try {
+            return await captureRejection(provenance.unRetract(sourceOne, tx));
+          } finally {
+            armed.on = false;
+          }
+        });
+        expect(String(caught)).toContain(REJECTED_WRITE);
+        const interrupted = await liveFactIds(store);
+        expect(interrupted).toContain("whole-one");
+        expect(interrupted).not.toContain("part-one");
+        expect(await store.verifyConstraintFences()).toEqual([]);
+
+        await provenance.unRetract(sourceOne);
+        expect(await liveFactIds(store)).toEqual(ALL_FACTS);
+        expect(sortedIds(await provenance.holding())).toEqual(ALL_FACTS);
+        expect(await store.verifyConstraintFences()).toEqual([]);
+      },
+    );
   });
 }

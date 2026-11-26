@@ -399,21 +399,33 @@ function computeAffectedFactKeys(
     // whole folds out of the same walk. A whole reached with neither change
     // (another of its justifications still fires and its row is in step)
     // leaves its parts alone: their existence dependency has the same
-    // verdict before and after. Only a fact whole propagates: a transition
-    // flips source properties, so a non-fact whole's liveness is the same
-    // before and after.
+    // verdict before and after. The one exception is a part that is closed
+    // although it is supported after: a caught failure between the whole's
+    // reopen and the part's leaves exactly that state (the reopen pass runs
+    // every whole before its parts), and a re-run that reaches the part only
+    // through the whole must reopen it to complete the transition. A live
+    // part without support is not carried in: no prefix of a transition
+    // leaves one (the close pass closes every part before its whole and
+    // before any flag), and closing it is the business of a transition that
+    // moves its support. Only a fact whole propagates: a transition flips
+    // source properties, so a non-fact whole's liveness is the same before
+    // and after.
     const wholeRow = roles.facts.get(current);
     if (wholeRow === undefined) continue;
-    if (
-      supportedBefore.has(current) === supportedAfter.has(current) &&
-      !currencyMovesWithSupport(wholeRow, supportedAfter.has(current))
-    ) {
-      continue;
-    }
+    const wholeMoves =
+      supportedBefore.has(current) !== supportedAfter.has(current) ||
+      currencyMovesWithSupport(wholeRow, supportedAfter.has(current));
     const requiredParts =
       compositionDependencies.partKeysByWholeKey.get(current) ?? [];
     for (const partKey of requiredParts) {
-      if (!roles.facts.has(partKey)) continue;
+      const partRow = roles.facts.get(partKey);
+      if (partRow === undefined) continue;
+      if (
+        !wholeMoves &&
+        !(supportedAfter.has(partKey) && isTombstonedNodeRow(partRow))
+      ) {
+        continue;
+      }
       affected.add(partKey);
       if (seen.has(partKey)) continue;
       seen.add(partKey);
