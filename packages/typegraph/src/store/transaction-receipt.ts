@@ -350,15 +350,15 @@ export function wrapTransactionIdentity<G extends GraphDef>(
     explainSame: (a, b) => identity.explainSame(a, b),
     transitionsOf: (ref, options) => identity.transitionsOf(ref, options),
     replay: (ref, options) => identity.replay(ref, options),
-    async assertSame(a, b) {
+    async assertSame(a, b, window) {
       recorder.assertWritable("tx.identity.assertSame()");
-      const result = await identity.assertSame(a, b);
+      const result = await identity.assertSame(a, b, window);
       recorder.recordIdentity("sameAssertions", 1);
       return result;
     },
-    async assertDifferent(a, b) {
+    async assertDifferent(a, b, window) {
       recorder.assertWritable("tx.identity.assertDifferent()");
-      const result = await identity.assertDifferent(a, b);
+      const result = await identity.assertDifferent(a, b, window);
       recorder.recordIdentity("differentAssertions", 1);
       return result;
     },
