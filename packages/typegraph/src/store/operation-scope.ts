@@ -15,9 +15,13 @@
  * - **Session.** Where a Store opens or joins a transaction it opens a
  *   {@link TransactionSession}: that transaction as this binding holds it
  *   ({@link openTransactionSession}, or {@link openBoundTransactionSession}
- *   where the binding builds a statement surface over the transaction). A
- *   transaction context carries its session to privileged internals on its
- *   runtime ({@link transactionRuntimeSession}).
+ *   where the binding builds a statement surface over the transaction).
+ *   Where it opens a transaction on a root, {@link openRootTransaction}
+ *   hands it the one session of that transaction: the session a backend
+ *   layer opened itself (recorded capture's overlay, bound over the capture
+ *   surface), or one opened over what the root handed out. A transaction
+ *   context carries its session to privileged internals on its runtime
+ *   ({@link transactionRuntimeSession}).
  * - **Operation.** Each public Store call inside the transaction enters one
  *   {@link Operation} of that session when it executes: {@link enterOperation}
  *   from a session the caller holds, {@link enterTransactionOperation} from a
@@ -42,8 +46,8 @@
  *
  * The backend brand is a phantom: a minted backend is the SAME object it was
  * minted from. That is deliberate. Store state not carried by a session is
- * keyed by the target object's identity (the savepoint-state registry,
- * recorded capture's bindings), and the layers above
+ * keyed by the target object's identity (the savepoint-state registry), and
+ * the layers above
  * discriminate a root from a transaction with `"transaction" in target`; a
  * derived object per operation would change both. An {@link Operation} is
  * therefore a separate small value that CARRIES the handle and its session,
@@ -78,6 +82,7 @@ import {
 } from "./native-transaction-state";
 import type { ManagedWriteState } from "./operations/managed-write-state";
 import type { GraphWriteLock } from "./recorded-capture/clock";
+import type { RecordedSessionState } from "./recorded-capture/session-state";
 import { TRANSACTION_RUNTIME } from "./types";
 
 // Declared only and never exported: the brand cannot be spelled outside this
@@ -192,6 +197,7 @@ type EngineEvidence<Engine extends TransactionBackend> =
 // operation from a root backend except through the functions below.
 const SESSION_TRANSACTION: unique symbol = Symbol("typegraph.session");
 const OPERATION_SESSION: unique symbol = Symbol("typegraph.operation");
+const SESSION_CONTROL: unique symbol = Symbol("typegraph.sessionControl");
 
 /**
  * One native transaction as one Store binding opened or joined it: the value
@@ -210,8 +216,12 @@ const OPERATION_SESSION: unique symbol = Symbol("typegraph.operation");
  * write locks its frames hold or are acquiring
  * ({@link GraphWriteLock}, see `write-transaction.ts`), and the managed
  * write state of the `store.transaction` attempt that opened it with the
- * schema fences it leased (`managed-write-state.ts`). It never hands out
- * its transaction; an operation entered from it does.
+ * schema fences it leased (`managed-write-state.ts`), and the recorded
+ * capture scope or engine-native mutation witness bound to it
+ * (`recorded-capture/session-state.ts`). It never hands out its
+ * transaction; an operation entered from it does, as its statement surface
+ * (`Operation.backend`) and as the undecorated holding beneath it
+ * (`Operation.control`).
  *
  * State about the native transaction alone, shared by every binding of it,
  * is on {@link TransactionSession.native}, not on the session.
@@ -228,6 +238,13 @@ export type TransactionSession<
      */
     [SESSION_TRANSACTION]: OperationScoped<Engine>;
   } & Readonly<{
+    /**
+     * The transaction as the session holds it, undecorated: what
+     * {@link Operation.control} hands out. The same object as what the
+     * session's operations hand out, unless the session was bound over a
+     * statement surface.
+     */
+    [SESSION_CONTROL]: OperationScoped<Engine>;
     /**
      * Graph write locks a still-running write frame on this session holds or
      * is still acquiring, by graph id: owned by `write-transaction.ts`.
@@ -246,6 +263,12 @@ export type TransactionSession<
      * session's own when it recorded none.
      */
     native: NativeTransactionState;
+    /**
+     * The recorded-capture scope or engine-native mutation witness bound to
+     * this session, read through `recordedSessionBinding` from the operation
+     * a reader holds: owned by `recorded-capture.ts`.
+     */
+    recorded: RecordedSessionState;
   }>
 >;
 
@@ -262,6 +285,15 @@ export type Operation<Engine extends TransactionBackend = TransactionBackend> =
     Readonly<{
       [OPERATION_SESSION]: TransactionSession<Engine>;
       backend: OperationScoped<Engine>;
+      /**
+       * The session's undecorated holding, as this operation holds it: the
+       * transaction beneath the statement surface `backend` hands out, or
+       * `backend` itself when the session was bound over none. The Store's
+       * own control statements (a savepoint, a fence that bypasses row
+       * capture, a recorded identity write) go through it, in the operation
+       * the call entered.
+       */
+      control: OperationScoped<Engine>;
     }>
   >;
 
@@ -295,9 +327,11 @@ export function openTransactionSession<
   /* eslint-disable no-restricted-syntax -- This module is the mint: a session over a transaction the Store opened or joined is built here and nowhere else. */
   return {
     [SESSION_TRANSACTION]: transaction,
+    [SESSION_CONTROL]: transaction,
     heldGraphWriteLocks: new Map<string, Promise<GraphWriteLock>>(),
     managedWrite: { writeSession: undefined, schemaFenceLeases: undefined },
     native: resolveNativeTransactionState(transaction),
+    recorded: { binding: undefined },
   } as TransactionSession<Engine>;
   /* eslint-enable no-restricted-syntax */
 }
@@ -359,6 +393,61 @@ export async function openBoundTransactionSession<
   return { session, binding: bound.binding };
 }
 
+// Module-private: only `withSessionOpener` puts an opener on a backend's
+// `transaction` member, and only `openRootTransaction` reads one back.
+const SESSION_OPENER: unique symbol = Symbol("typegraph.sessionOpener");
+
+/**
+ * A backend layer's own way to open a transaction for a Store: it opens the
+ * transaction, opens the one session over it, and hands the Store that
+ * session, bound over whatever statement surface the layer builds.
+ */
+export type SessionTransactionOpener = <T>(
+  fn: (session: TransactionSession) => Promise<T>,
+  options?: Parameters<GraphBackend["transaction"]>[1],
+) => Promise<T>;
+
+type SessionOpeningTransaction = GraphBackend["transaction"] &
+  Readonly<{ [SESSION_OPENER]?: SessionTransactionOpener }>;
+
+/**
+ * Marks `transaction`, a backend layer's `transaction` member, as one whose
+ * layer opens the session for the transaction it opens (recorded capture's
+ * overlay): {@link openRootTransaction} then hands the Store that session
+ * instead of opening a second one over the surface the member hands out.
+ * Carried by the member function itself, so a derivation that overrides
+ * `transaction` (and so opens its transaction some other way) carries none.
+ */
+export function withSessionOpener(
+  transaction: GraphBackend["transaction"],
+  opener: SessionTransactionOpener,
+): GraphBackend["transaction"] {
+  Object.defineProperty(transaction, SESSION_OPENER, { value: opener });
+  return transaction;
+}
+
+/**
+ * The mint where a Store opens a transaction on a root backend: `fn`
+ * receives the one session of the transaction `root` opens. When `root`'s
+ * `transaction` member opens a session of its own (recorded capture's
+ * overlay, {@link withSessionOpener}), that session is the one; otherwise
+ * the session opens here, over what the member hands out.
+ */
+export function openRootTransaction<T>(
+  root: Pick<GraphBackend, "transaction">,
+  fn: (session: TransactionSession) => Promise<T>,
+  options?: Parameters<GraphBackend["transaction"]>[1],
+): Promise<T> {
+  const member: SessionOpeningTransaction = root.transaction;
+  const opener = member[SESSION_OPENER];
+  if (opener !== undefined) return opener(fn, options);
+  return root.transaction(
+    (transaction: StoreTransactionBackend) =>
+      fn(openTransactionSession(transaction)),
+    options,
+  );
+}
+
 /**
  * The mint at a public Store member: the root backend as itself, or a new
  * {@link Operation} of the session.
@@ -373,6 +462,7 @@ export function enterOperation(scope: EntryScope): OperationEntry {
   return {
     [OPERATION_SESSION]: scope,
     backend: scope[SESSION_TRANSACTION],
+    control: scope[SESSION_CONTROL],
   } as Operation;
   /* eslint-enable no-restricted-syntax */
 }
@@ -497,8 +587,13 @@ export function decorateOperation<Engine extends TransactionBackend>(
     );
   }
   const session: TransactionSession = operation[OPERATION_SESSION];
+  const control: OperationBackend = operation.control;
   /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
-  return { [OPERATION_SESSION]: session, backend: decorated } as Operation;
+  return {
+    [OPERATION_SESSION]: session,
+    backend: decorated,
+    control,
+  } as Operation;
   /* eslint-enable no-restricted-syntax */
 }
 
@@ -523,6 +618,13 @@ function isOwnOperation(operation: Operation): boolean {
   return OPERATION_SESSION in operation;
 }
 
+/** The session `operation` belongs to. */
+export function operationSession<Engine extends TransactionBackend>(
+  operation: Operation<Engine>,
+): TransactionSession {
+  return operation[OPERATION_SESSION];
+}
+
 /** The session `entry` belongs to, or `undefined` for the root backend. */
 export function operationEntrySession(
   entry: OperationEntry,
@@ -533,6 +635,14 @@ export function operationEntrySession(
 /** What `entry`'s statements go through: the root, or the operation's handle. */
 export function operationEntryBackend(entry: OperationEntry): StatementBackend {
   return OPERATION_SESSION in entry ? entry.backend : entry;
+}
+
+/**
+ * What `entry`'s control statements go through: the root, or the
+ * operation's {@link Operation.control}.
+ */
+export function operationEntryControl(entry: OperationEntry): StatementBackend {
+  return OPERATION_SESSION in entry ? entry.control : entry;
 }
 
 /**

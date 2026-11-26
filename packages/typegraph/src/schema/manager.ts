@@ -1679,7 +1679,7 @@ async function prepareIdentityKindCascade<G extends GraphDef>(
     options.droppedNodeKinds,
     resolveSchemaCommitCapture(backend, undefined),
   );
-  return (operation) => cascade(operation.backend);
+  return (operation) => cascade(operation);
 }
 
 /**
@@ -1746,7 +1746,7 @@ async function prepareIdentitySchemaCommit<G extends GraphDef>(
       capture: resolveSchemaCommitCapture(backend, options.historyEnabled),
     },
   );
-  return (operation) => preflight(operation.backend);
+  return (operation) => preflight(operation);
 }
 
 /**

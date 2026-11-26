@@ -42,13 +42,12 @@ describe("recorded capture scope flush target", () => {
         await foreign.transaction(async (foreignTransaction) => {
           try {
             const scope = createRecordedTransactionScope(
+              enterOperation(openTransactionSession(foreignTransaction)),
               enterOperation(openTransactionSession(capturedTransaction))
                 .backend,
               batchPointReadVerdict(captured),
               createSqlSchema(captured.tableNames),
               false,
-              enterOperation(openTransactionSession(foreignTransaction))
-                .backend,
             );
             await scope.backend.insertNode({
               graphId: GRAPH_ID,
@@ -79,11 +78,11 @@ describe("recorded capture scope flush target", () => {
     await backend.transaction(async (transaction) => {
       const session = openTransactionSession(transaction);
       const scope = createRecordedTransactionScope(
+        enterOperation(session),
         enterOperation(session).backend,
         batchPointReadVerdict(backend),
         createSqlSchema(backend.tableNames),
         false,
-        enterOperation(session).backend,
       );
       await scope.backend.insertNode({
         graphId: GRAPH_ID,

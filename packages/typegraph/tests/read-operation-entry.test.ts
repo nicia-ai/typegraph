@@ -43,6 +43,14 @@ import { TRANSACTION_RUNTIME } from "../src/store/types";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
+/**
+ * The session each `openRootTransaction` call handed its callback: the one a
+ * root's own `transaction` member opened (the capture overlay's), or the one
+ * the mint opened over what the member handed out, inside the mint module
+ * where the `openTransactionSession` spy cannot see.
+ */
+const rootTransactionSessions = vi.hoisted((): unknown[] => []);
+
 vi.mock("../src/store/operation-scope", async (importOriginal) => {
   const actual: typeof OperationScopeModule = await importOriginal();
   return {
@@ -50,6 +58,17 @@ vi.mock("../src/store/operation-scope", async (importOriginal) => {
     enterOperation: vi.fn(actual.enterOperation),
     enterTargetOperation: vi.fn(actual.enterTargetOperation),
     openTransactionSession: vi.fn(actual.openTransactionSession),
+    openRootTransaction: vi.fn(
+      (...[root, fn, options]: Parameters<typeof actual.openRootTransaction>) =>
+        actual.openRootTransaction(
+          root,
+          (session) => {
+            rootTransactionSessions.push(session);
+            return fn(session);
+          },
+          options,
+        ),
+    ),
   };
 });
 
@@ -80,13 +99,19 @@ function targetEntries(): readonly OperationEntry[] {
   });
 }
 
-/** What each `openTransactionSession` call since the last clear returned. */
+/**
+ * What each `openTransactionSession` call since the last clear returned, then
+ * each session an `openRootTransaction` call handed its callback.
+ */
 function openedSessions(): readonly TransactionSession[] {
-  return openTransactionSessionSpy.mock.results.map((result) => {
-    if (result.type !== "return") throw new Error("mint threw");
-    const session: TransactionSession = result.value;
-    return session;
-  });
+  return [
+    ...openTransactionSessionSpy.mock.results.map((result) => {
+      if (result.type !== "return") throw new Error("mint threw");
+      const session: TransactionSession = result.value;
+      return session;
+    }),
+    ...rootTransactionSessions.map((session) => session as TransactionSession),
+  ];
 }
 
 /**
@@ -112,6 +137,7 @@ function clearMints(): void {
   enterOperationSpy.mockClear();
   enterTargetOperationSpy.mockClear();
   openTransactionSessionSpy.mockClear();
+  rootTransactionSessions.length = 0;
 }
 
 /** The session a transaction's own writes enter their operations from. */
@@ -363,7 +389,7 @@ describe("a read enters its operation at execution", () => {
 
     expect(enterOperationSpy).not.toHaveBeenCalled();
     expect(enterTargetOperationSpy).not.toHaveBeenCalled();
-    expect(openTransactionSessionSpy).not.toHaveBeenCalled();
+    expect(openedSessions()).toEqual([]);
   });
 
   describe("executeOn takes an outside target through its public signature", () => {
@@ -700,7 +726,7 @@ describe("a read enters its operation at execution", () => {
           refused: outcome instanceof Error,
           entered: enterOperationSpy.mock.calls.length,
           targets: enterTargetOperationSpy.mock.calls.length,
-          sessions: openTransactionSessionSpy.mock.calls.length,
+          sessions: openedSessions().length,
         });
       }
       expect(observed).toEqual(

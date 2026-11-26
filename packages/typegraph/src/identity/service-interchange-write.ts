@@ -295,6 +295,9 @@ export async function loadIdentityWindowHistory(
  */
 export async function importIdentityAssertionsIntoTarget(
   ctx: IdentityAssertionImportContext,
+  // The operation `target` is the handle of: its recorded binding decides
+  // how the rows are captured.
+  entry: OperationEntry,
   target: Backend,
   assertions: readonly IdentityTransferAssertion[],
   mode: "state" | "archival",
@@ -308,6 +311,7 @@ export async function importIdentityAssertionsIntoTarget(
   let created = 0;
   let skipped = 0;
   await withRecordedIdentityMutationTarget(
+    entry,
     target,
     async (rawTarget, touch, noteTransition) => {
       const operationInstant = nowIso();
@@ -646,6 +650,7 @@ export function createIdentityTransitionShapeCheck(): (
  */
 export async function importIdentityTransitionsIntoTarget(
   ctx: IdentityTransitionImportContext,
+  entry: OperationEntry,
   target: IdentityTarget,
   transitions: readonly IdentityTransitionTransfer[],
   carriedCut: IdentityTransitionCut | undefined,
@@ -657,40 +662,44 @@ export async function importIdentityTransitionsIntoTarget(
   // relation writer already goes through this seam. Neither `touch` nor
   // `noteTransition` is used: a restore inserts historical rows verbatim, it
   // does not touch live entities or note a NEW transition.
-  return withRecordedIdentityMutationTarget(target, async (rawTarget) => {
-    const restoredAt = nowIso();
-    if (transitions.length > 0) {
-      const values = transitions.map((row) =>
-        encodeIdentityTransitionRow(
-          {
-            graphId: ctx.graphId,
-            cause: row.cause,
-            classRef: row.class,
-            priorClassRef: row.priorClass,
-            assertionIds: row.assertionIds,
-            decision: row.decision,
-            validAt: row.validAt,
-          },
-          row.recordedRevision,
-          row.recordedAt,
-          row.transitionId,
-          restoredAt,
-        ),
-      );
-      await insertIdentityTransitionValues(rawTarget, ctx.schema, values);
-    }
-    if (carriedCut !== undefined && carriedCut.revision > 0) {
-      await advanceIdentityTransitionCut(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        "restored-pruned",
-        carriedCut,
-        "transition-restore",
-      );
-    }
-    return { created: transitions.length };
-  });
+  return withRecordedIdentityMutationTarget(
+    entry,
+    target,
+    async (rawTarget) => {
+      const restoredAt = nowIso();
+      if (transitions.length > 0) {
+        const values = transitions.map((row) =>
+          encodeIdentityTransitionRow(
+            {
+              graphId: ctx.graphId,
+              cause: row.cause,
+              classRef: row.class,
+              priorClassRef: row.priorClass,
+              assertionIds: row.assertionIds,
+              decision: row.decision,
+              validAt: row.validAt,
+            },
+            row.recordedRevision,
+            row.recordedAt,
+            row.transitionId,
+            restoredAt,
+          ),
+        );
+        await insertIdentityTransitionValues(rawTarget, ctx.schema, values);
+      }
+      if (carriedCut !== undefined && carriedCut.revision > 0) {
+        await advanceIdentityTransitionCut(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          "restored-pruned",
+          carriedCut,
+          "transition-restore",
+        );
+      }
+      return { created: transitions.length };
+    },
+  );
 }
 
 export async function applyIdentityChangesForContext<G extends GraphDef>(
@@ -710,7 +719,7 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
   }
   return runIdentityMutation(
     ctx,
-    async (target, touch, markWritten, noteTransition) => {
+    async (target, touch, markWritten, noteTransition, frame) => {
       // A `reconcile` cause always carries a decision.
       // Without a governing decision this is an ordinary interchange apply, and its closure repair / import carry the cause
       // that already describes them elsewhere (`retract` for the split a
@@ -740,6 +749,7 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
         });
         const summary = await importIdentityAssertionsIntoTarget(
           ctx,
+          frame,
           target,
           assertions,
           "archival",
@@ -757,7 +767,7 @@ export async function applyIdentityChangesForContext<G extends GraphDef>(
         return { created: summary.created, retracted: retracted.length };
       };
       if (decision === undefined) return applyBody();
-      return withRecordedIdentityDecision(target, decision, applyBody);
+      return withRecordedIdentityDecision(frame, target, decision, applyBody);
     },
     entry,
   );

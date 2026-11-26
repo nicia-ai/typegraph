@@ -14,6 +14,7 @@ import {
   type IdentityTableNames,
   type SchemaCommitPreflightBackend,
   type SchemaWriteTransactionBackend,
+  type TransactionBackend,
 } from "../backend/types";
 import { type GraphDef } from "../core/define-graph";
 import { ConfigurationError } from "../errors";
@@ -23,6 +24,7 @@ import { type KindRegistry } from "../registry/kind-registry";
 import {
   enterOperation,
   openTransactionSession,
+  type Operation,
   type OperationBackend,
   type OperationEntry,
   type OperationScoped,
@@ -640,23 +642,24 @@ export function resolveSchemaCommitCapture(
 }
 
 /**
- * Binds a capture session to the schema-commit `target` itself when
- * `capture` calls for one. Registered against `target` ITSELF, not a wrapped
- * overlay: `createRecordedTransactionScope` registers both the overlay it
- * returns and the raw target against the same session, and every write a
- * preflight issues reaches `target` through `withRecordedIdentityMutationTarget`'s
- * own touch/noteTransition callbacks. Routing through the overlay would break
+ * Binds a capture session to the session of the schema-commit `operation`
+ * when `capture` calls for one. The preflight keeps issuing its statements
+ * through the operation's own handle, not the capture overlay: every write it
+ * issues reaches the transaction through `withRecordedIdentityMutationTarget`'s
+ * own touch/noteTransition callbacks, which find the scope on the operation's
+ * session. Routing through the overlay would break
  * `lockIdentityEnablementNodes`, which needs `executeStatement` — a raw-SQL
  * surface the overlay refuses because it cannot observe what a raw statement
  * touched. The caller flushes the returned scope once its writes are done.
  */
-async function bindSchemaCommitCapture(
-  target: OperationBackend,
+async function bindSchemaCommitCapture<Engine extends TransactionBackend>(
+  operation: Operation<Engine>,
   schema: SqlSchema,
   graphId: string,
   capture: SchemaCommitCapture | undefined,
 ): Promise<RecordedTransactionScope | undefined> {
   if (capture === undefined) return;
+  const target: OperationBackend = operation.backend;
   if (
     capture.source === "database" &&
     !(await graphCapturesRecordedHistory(target, schema, graphId))
@@ -664,6 +667,7 @@ async function bindSchemaCommitCapture(
     return;
   }
   return createRecordedTransactionScope(
+    operation,
     target,
     capture.batchPointRead,
     schema,
@@ -702,8 +706,9 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     /** See {@link SchemaCommitCapture}; absent means the commit captures nothing. */
     capture?: SchemaCommitCapture | undefined;
   }>,
-): (target: OperationScoped<SchemaCommitPreflightBackend>) => Promise<void> {
-  return async (target: OperationScoped<SchemaCommitPreflightBackend>) => {
+): (operation: Operation<SchemaCommitPreflightBackend>) => Promise<void> {
+  return async (operation: Operation<SchemaCommitPreflightBackend>) => {
+    const target = operation.backend;
     await provisionDerivedRelationsInCommit(
       target,
       ctx.graphId,
@@ -712,7 +717,7 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     await lockRecordedGraphWrite(target, ctx.graphId);
     await lockIdentityGraph(target, ctx.graphId);
     const captureScope = await bindSchemaCommitCapture(
-      target,
+      operation,
       ctx.schema,
       ctx.graphId,
       options.capture,
@@ -735,14 +740,17 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
       // assertions for kinds this schema never registers; they would stay
       // current and invisible for exactly the reasons the drop cascade exists.
       // On a true first enablement the ledger is empty and this is one scan.
-      await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
-        purgeAssertionsWithUnregisteredKinds(
-          rawTarget,
-          ctx.schema,
-          ctx.graphId,
-          new Set(ctx.registry.nodeKinds.keys()),
-          touch,
-        ),
+      await withRecordedIdentityMutationTarget(
+        operation,
+        target,
+        (rawTarget, touch) =>
+          purgeAssertionsWithUnregisteredKinds(
+            rawTarget,
+            ctx.schema,
+            ctx.graphId,
+            new Set(ctx.registry.nodeKinds.keys()),
+            touch,
+          ),
       );
     }
     // A commit that DROPS node kinds cascades the assertion ledger exactly as
@@ -754,17 +762,23 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     const droppedNodeKinds = options.droppedNodeKinds ?? [];
     const removedAssertions: readonly IdentityAssertionStorageRow[] =
       droppedNodeKinds.length > 0 ?
-        await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
-          deleteAssertionsTouchingKinds(
-            rawTarget,
-            ctx.schema,
-            ctx.graphId,
-            droppedNodeKinds,
-            touch,
-          ),
+        await withRecordedIdentityMutationTarget(
+          operation,
+          target,
+          (rawTarget, touch) =>
+            deleteAssertionsTouchingKinds(
+              rawTarget,
+              ctx.schema,
+              ctx.graphId,
+              droppedNodeKinds,
+              touch,
+            ),
         )
       : [];
-    await rebuildIdentityClosureForContext({ ...ctx, backend: target });
+    await rebuildIdentityClosureForContext(
+      { ...ctx, backend: target },
+      operation,
+    );
     const transitions = await diffFullRebuildTransitions(
       target,
       ctx,
@@ -773,6 +787,7 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
     );
     if (transitions.length > 0) {
       await withRecordedIdentityMutationTarget(
+        operation,
         target,
         (_rawTarget, _touch, noteTransition) => {
           noteClassTransitions(ctx.graphId, noteTransition, transitions, {
@@ -845,24 +860,32 @@ export function identityKindCascadePreflight(
   ctx: Readonly<{ graphId: string; schema: SqlSchema }>,
   droppedNodeKinds: readonly string[],
   capture: SchemaCommitCapture | undefined,
-): (target: OperationBackend) => Promise<void> {
-  return async (target: OperationBackend) => {
+): <Engine extends TransactionBackend>(
+  operation: Operation<Engine>,
+) => Promise<void> {
+  return async <Engine extends TransactionBackend>(
+    operation: Operation<Engine>,
+  ) => {
+    const target: OperationBackend = operation.backend;
     await lockRecordedGraphWrite(target, ctx.graphId);
     await lockIdentityGraph(target, ctx.graphId);
     const captureScope = await bindSchemaCommitCapture(
-      target,
+      operation,
       ctx.schema,
       ctx.graphId,
       capture,
     );
-    await withRecordedIdentityMutationTarget(target, (rawTarget, touch) =>
-      deleteAssertionsTouchingKinds(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        droppedNodeKinds,
-        touch,
-      ),
+    await withRecordedIdentityMutationTarget(
+      operation,
+      target,
+      (rawTarget, touch) =>
+        deleteAssertionsTouchingKinds(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          droppedNodeKinds,
+          touch,
+        ),
     );
     await captureScope?.flush();
   };

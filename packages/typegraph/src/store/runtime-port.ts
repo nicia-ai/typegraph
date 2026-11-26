@@ -439,15 +439,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     >,
   ) => Promise<void>;
   foldImportedIdentityNodes: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry: OperationEntry,
     references: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
   /**
@@ -461,15 +453,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * assertion's window.
    */
   applyImportedNodeWindowEnd: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry: OperationEntry,
     input: Readonly<{ kind: string; id: string; validTo?: string }>,
   ) => Promise<void>;
   /**
@@ -478,27 +462,11 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * `assertImportedRequiredPartsAttached` (`src/interchange/import.ts`).
    */
   detachDeletedImportedIdentityNode: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry: OperationEntry,
     reference: Readonly<{ kind: string; id: string }>,
   ) => Promise<void>;
   importIdentityAssertionsAtTarget: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry: OperationEntry,
     assertions: readonly Readonly<{
       id: string;
       relation: "same" | "different";
@@ -539,15 +507,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * graph's restored cut (see `importIdentityTransitionsIntoTarget`).
    */
   importIdentityTransitionsAtTarget: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry: OperationEntry,
     transitions: readonly IdentityTransitionTransfer[],
     carriedCut: IdentityTransitionCut | undefined,
   ) => Promise<Readonly<{ created: number }>>;

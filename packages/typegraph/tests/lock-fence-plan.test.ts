@@ -860,13 +860,16 @@ function identityProvisioningOptions(
     enablement: false as const,
     registry,
     recomputeDerivedRelations: (entry: OperationEntry) =>
-      rebuildIdentityClosureForContext({
-        backend: operationEntryBackend(entry),
-        graphId: identityGraph.id,
-        registry,
-        schema,
-        sameIdAcrossKinds: "fold",
-      }),
+      rebuildIdentityClosureForContext(
+        {
+          backend: operationEntryBackend(entry),
+          graphId: identityGraph.id,
+          registry,
+          schema,
+          sameIdAcrossKinds: "fold",
+        },
+        entry,
+      ),
   };
 }
 

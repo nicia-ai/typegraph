@@ -20,8 +20,6 @@ import { deriveBackend } from "../../../src/backend/derive-backend";
 import type { GraphBackend } from "../../../src/backend/types";
 import { renderSql, type SqlFragment } from "../../../src/query/sql-fragment";
 import * as operationScope from "../../../src/store/operation-scope";
-import { inheritRecordedTransactionBindings } from "../../../src/store/recorded-capture";
-import { expectObservation } from "../../helpers/known-defect";
 import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
 
@@ -33,9 +31,6 @@ type RoutedCall = Readonly<{
   /** The statement text an `execute` or `executeStatement` call sent. */
   sql: string | undefined;
 }>;
-
-// eslint-disable-next-line @typescript-eslint/no-empty-function -- A recording handle lives exactly as long as its transaction.
-function recordingHandleOpen(): void {}
 
 /** The text of the statement `member` sends with `args`, if it sends one. */
 function statementText(
@@ -128,28 +123,14 @@ function routeOperationsThroughRecordingHandles(
       entry,
     ) as GraphBackend;
     const handle = recordingHandle(transaction);
-    // As a lifetime-guarded decoration does: the capture binding of the
-    // transaction follows the handle, which adds no lifetime of its own.
-    inheritRecordedTransactionBindings(
-      transaction,
-      handle,
-      recordingHandleOpen,
-    );
     // The session's undecorated holding, as the operation holds it, records
     // through this operation too: where it is a different object from the
     // handle (a history session's capture surface), its own derivation.
-    const control: unknown = Reflect.get(entry, "control");
+    const control = operationScope.operationEntryControl(entry) as GraphBackend;
     const routed: object = {
       ...entry,
       backend: handle,
-      ...(control === undefined ?
-        {}
-      : {
-          control:
-            control === transaction ? handle : (
-              recordingHandle(control as GraphBackend)
-            ),
-        }),
+      control: control === transaction ? handle : recordingHandle(control),
     };
     return routed as operationScope.OperationEntry;
   }
@@ -374,27 +355,11 @@ export function registerIdentityOperationRoutingIntegrationTests(
           }
           return routes;
         });
-        // A history Store's identity writes go through the target beneath
-        // the capture binding, the capture overlay's own operation: the
-        // capture channel. They go through no operation of the session the
-        // identity call entered.
-        expectObservation({
-          lane: { dialect: store.backend.dialect },
-          observed,
-          correct: {
-            assertSame: ["its operation"],
-            retractSameAssertion: ["its operation"],
-          },
-          defects: [
-            {
-              label: "capture channel",
-              on: {},
-              today: {
-                assertSame: ["an operation of another session"],
-                retractSameAssertion: ["an operation of another session"],
-              },
-            },
-          ],
+        // A history Store's identity writes go beneath the capture surface,
+        // through the operation the identity call entered.
+        expect(observed).toEqual({
+          assertSame: ["its operation"],
+          retractSameAssertion: ["its operation"],
         });
       } finally {
         entered.mockRestore();

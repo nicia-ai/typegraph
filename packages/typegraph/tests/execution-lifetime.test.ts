@@ -6,12 +6,16 @@ import {
 } from "../src/backend/derive-backend";
 import { TransactionClosedError } from "../src/errors";
 import { scopeBackendExecution } from "../src/store/execution-lifetime";
+import { openTransactionSession } from "../src/store/operation-scope";
 import { createTestBackend } from "./test-utils";
 
 describe("callback backend execution lifetime", () => {
   it("refuses escaped deferred reads after a successful callback", async () => {
     const sourceBackend = createTestBackend();
-    const scope = scopeBackendExecution(sourceBackend);
+    const scope = scopeBackendExecution(
+      sourceBackend,
+      openTransactionSession(sourceBackend),
+    );
     const deferredRead = () =>
       scope.backend.getNode("graph", "Person", "missing");
 
@@ -27,7 +31,10 @@ describe("callback backend execution lifetime", () => {
 
   it("refuses escaped operations after a failed callback", () => {
     const sourceBackend = createTestBackend();
-    const scope = scopeBackendExecution(sourceBackend);
+    const scope = scopeBackendExecution(
+      sourceBackend,
+      openTransactionSession(sourceBackend),
+    );
     const deferredWrite = () =>
       scope.backend.insertNode({
         graphId: "graph",

@@ -19,6 +19,7 @@ import {
   lockRecordedGraphWrite,
   RECORDED_OPTIONAL_WRITE_METHODS,
   RECORDED_REQUIRED_WRITE_METHODS,
+  recordedGraphLockMemoOf,
   runRecordedTransactionSavepoint,
 } from "../src/store/recorded-capture";
 import { createTestBackend } from "./test-utils";
@@ -35,12 +36,14 @@ function buildWrappers(): {
 } {
   const base = createTestBackend();
   const schema = createSqlSchema(base.tableNames);
+  // The root is the stand-in, held as a transaction session's handle.
+  const operation = enterOperation(openTransactionSession(base));
   return {
     base,
     autocommit: createRecordedBackend(base, schema),
     transactional: createRecordedTransactionScope(
-      // The root is the stand-in, held as a transaction session's handle.
-      enterOperation(openTransactionSession(base)).backend,
+      operation,
+      operation.backend,
       batchPointReadVerdict(base),
       schema,
     ).backend,
@@ -76,8 +79,10 @@ describe("recorded-capture write-surface parity", () => {
   it("keeps an empty direct resolved-update batch as a no-op", async () => {
     const backend = createTestBackend();
     await backend.transaction(async (target) => {
+      const captureOperation = enterOperation(openTransactionSession(target));
       const scope = createRecordedTransactionScope(
-        enterOperation(openTransactionSession(target)).backend,
+        captureOperation,
+        captureOperation.backend,
         batchPointReadVerdict(backend),
         createSqlSchema(backend.tableNames),
       );
@@ -95,12 +100,15 @@ describe("recorded-capture write-surface parity", () => {
     if (!statementExecution.supported) return;
 
     await backend.transaction(async (target) => {
+      const captureOperation = enterOperation(openTransactionSession(target));
       const scope = createRecordedTransactionScope(
-        enterOperation(openTransactionSession(target)).backend,
+        captureOperation,
+        captureOperation.backend,
         batchPointReadVerdict(backend),
         createSqlSchema(backend.tableNames),
       );
       await runRecordedTransactionSavepoint(
+        captureOperation,
         scope.backend,
         statementExecution,
         "typegraph_capture_restore_test",
@@ -133,13 +141,16 @@ describe("recorded-capture write-surface parity", () => {
     if (!statementExecution.supported) return;
 
     await backend.transaction(async (target) => {
+      const captureOperation = enterOperation(openTransactionSession(target));
       const scope = createRecordedTransactionScope(
-        enterOperation(openTransactionSession(target)).backend,
+        captureOperation,
+        captureOperation.backend,
         batchPointReadVerdict(backend),
         createSqlSchema(backend.tableNames),
       );
       await expect(
         runRecordedTransactionSavepoint(
+          captureOperation,
           scope.backend,
           statementExecution,
           "typegraph_capture_throw_test",
@@ -151,7 +162,7 @@ describe("recorded-capture write-surface parity", () => {
               props: { name: "Rolled back" },
             });
             expect(
-              forceRecordedGraphRevision(scope.backend, "capture_throw"),
+              forceRecordedGraphRevision(captureOperation, "capture_throw"),
             ).toBe(true);
             throw new Error("expected callback failure");
           },
@@ -184,13 +195,18 @@ describe("recorded-capture write-surface parity", () => {
           await executeStatement(statement);
         },
       });
+      const captureOperation = enterOperation(
+        openTransactionSession(releaseFailureTarget),
+      );
       const scope = createRecordedTransactionScope(
-        enterOperation(openTransactionSession(releaseFailureTarget)).backend,
+        captureOperation,
+        captureOperation.backend,
         batchPointReadVerdict(backend),
         createSqlSchema(backend.tableNames),
       );
       await expect(
         runRecordedTransactionSavepoint(
+          captureOperation,
           scope.backend,
           statementExecution,
           "typegraph_capture_release_test",
@@ -234,17 +250,26 @@ describe("recorded-capture write-surface parity", () => {
             return execute<T>(query);
           },
         });
+        const captureOperation = enterOperation(
+          openTransactionSession(countedTarget),
+        );
         const scope = createRecordedTransactionScope(
-          enterOperation(openTransactionSession(countedTarget)).backend,
+          captureOperation,
+          captureOperation.backend,
           batchPointReadVerdict(backend),
           createSqlSchema(backend.tableNames),
         );
         await runRecordedTransactionSavepoint(
+          captureOperation,
           scope.backend,
           statementExecution,
           "typegraph_capture_lock_test",
           async () => {
-            await lockRecordedGraphWrite(scope.backend, "capture_lock");
+            await lockRecordedGraphWrite(
+              scope.backend,
+              "capture_lock",
+              recordedGraphLockMemoOf(captureOperation),
+            );
             return {
               action: "rollback",
               value: undefined,
@@ -252,7 +277,11 @@ describe("recorded-capture write-surface parity", () => {
             };
           },
         );
-        await lockRecordedGraphWrite(scope.backend, "capture_lock");
+        await lockRecordedGraphWrite(
+          scope.backend,
+          "capture_lock",
+          recordedGraphLockMemoOf(captureOperation),
+        );
       });
       expect(lockQueryCount).toBe(2);
     } finally {

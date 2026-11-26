@@ -38,10 +38,9 @@ import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
 import { type GraphAllocationOwnerRead } from "./allocation-owner";
 import {
   enterOperation,
-  openTransactionSession,
+  openRootTransaction,
   type OperationBackend,
   type StatementBackend,
-  type StoreTransactionBackend,
 } from "./operation-scope";
 import { readRecordedAdjacency } from "./recorded-adjacency";
 import {
@@ -220,14 +219,12 @@ function createRecordedReadBackend(
       options?: TransactionOptions,
     ): Promise<T> => {
       await assertOrigin(backend);
-      const result = await backend.transaction(
-        async (transaction: StoreTransactionBackend) => {
-          // This overlay opened the transaction: its session opens here,
-          // and its origin checks and the reads it guards run as one
-          // operation of it.
-          const target = enterOperation(
-            openTransactionSession(transaction),
-          ).backend;
+      const result = await openRootTransaction(
+        backend,
+        async (session) => {
+          // This overlay opened the transaction, with its one session: its
+          // origin checks and the reads it guards run as one operation of it.
+          const target = enterOperation(session).backend;
           // The owner read resolves snapshot evidence on THIS target. A confirmed
           // snapshot covers every subsequent read until this callback ends;
           // the root check below still rejects retirement outside that snapshot.

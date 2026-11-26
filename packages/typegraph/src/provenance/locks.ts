@@ -25,7 +25,10 @@
  */
 import type { GraphDef } from "../core/define-graph";
 import { type Operation } from "../store/operation-scope";
-import { lockRecordedGraphWrite } from "../store/recorded-capture";
+import {
+  lockRecordedGraphWrite,
+  recordedGraphLockMemoOf,
+} from "../store/recorded-capture";
 import {
   transactionAcquireReadFences,
   transactionAcquireWriteFences,
@@ -76,5 +79,9 @@ export async function acquireCapabilityReadLock(
   operation: Operation,
   graphId: string,
 ): Promise<void> {
-  await lockRecordedGraphWrite(operation.backend, graphId);
+  await lockRecordedGraphWrite(
+    operation.backend,
+    graphId,
+    recordedGraphLockMemoOf(operation),
+  );
 }

@@ -95,19 +95,19 @@ import { CONSTRAINT_FENCE_DECIDES_UNDER_LOCK_ONLY } from "../claims/backing";
 import { type ConstraintFenceReason } from "../constraints";
 import {
   enterOperation,
-  openTransactionSession,
+  openRootTransaction,
   type OperationBackend,
   type OperationEntry,
   operationEntryBackend,
   operationEntrySession,
   type StatementBackend,
-  type StoreTransactionBackend,
   type TransactionSession,
 } from "../operation-scope";
 import {
   advanceRevisionClock,
   lockRecordedGraphDecision,
   lockRecordedGraphWrite,
+  recordedGraphLockMemoOf,
   recordedTransactionControlTarget,
   runRecordedTransactionSavepoint,
 } from "../recorded-capture";
@@ -305,7 +305,7 @@ export function hasPendingWriteTransactionRevision(
 
 /** Takes the engine writer slot without changing graph data. */
 export async function ensureEngineSerializedWriterSlot(
-  target: StatementBackend,
+  entry: OperationEntry,
   schema: SqlSchema,
   statementExecution: Extract<
     BundleVerdictOf<typeof STATEMENT_EXECUTION>,
@@ -313,7 +313,7 @@ export async function ensureEngineSerializedWriterSlot(
   >,
 ): Promise<void> {
   const { executeStatement } = statementExecutionMembers(
-    recordedTransactionControlTarget(target),
+    recordedTransactionControlTarget(entry),
     statementExecution,
   );
   await executeStatement(
@@ -451,7 +451,7 @@ async function ensureAdoptedConstraintWriterSlot(
   }
   try {
     await ensureEngineSerializedWriterSlot(
-      target,
+      frame,
       ctx.revisionSchema,
       statementExecution,
     );
@@ -694,6 +694,7 @@ const FRAME_WRITES_SAVEPOINT = "typegraph_frame_writes";
  */
 export async function runFrameWritesAsUnit<T>(
   ctx: Pick<WriteTransactionContext, "statementExecution">,
+  frame: OperationEntry,
   target: Readonly<Pick<OperationBackend, "executeStatement">>,
   transactionMode: WriteTransactionMode,
   writes: () => Promise<T>,
@@ -702,6 +703,7 @@ export async function runFrameWritesAsUnit<T>(
   const statementExecution = ctx.statementExecution;
   if (statementExecution?.supported !== true) return writes();
   return runRecordedTransactionSavepoint(
+    frame,
     target,
     statementExecution,
     FRAME_WRITES_SAVEPOINT,
@@ -776,9 +778,9 @@ export async function runInWriteEntryTransaction<T>(
     options?.boundary ??
     resolveWriteTransactionBoundary(operationEntryBackend(entry));
   if (boundary.mode !== "opened") return fn(entry);
-  return boundary.root.transaction(
-    (transaction: StoreTransactionBackend) =>
-      fn(enterOperation(openTransactionSession(transaction))),
+  return openRootTransaction(
+    boundary.root,
+    (session) => fn(enterOperation(session)),
     options?.transaction,
   );
 }
@@ -1251,12 +1253,22 @@ function runInWriteTransactionAttempt<T>(
                   target,
                   ctx.graphId,
                   heldEvidence,
+                  recordedGraphLockMemoOf(frame),
                 )
               : heldEvidence;
           } else if (decidesUnderLockOnly) {
-            lock = await lockRecordedGraphDecision(target, ctx.graphId);
+            lock = await lockRecordedGraphDecision(
+              target,
+              ctx.graphId,
+              undefined,
+              recordedGraphLockMemoOf(frame),
+            );
           } else {
-            lock = await lockRecordedGraphWrite(target, ctx.graphId);
+            lock = await lockRecordedGraphWrite(
+              target,
+              ctx.graphId,
+              recordedGraphLockMemoOf(frame),
+            );
           }
         } else {
           // The optional strong member owns the same canonical order as the two
@@ -1269,7 +1281,7 @@ function runInWriteTransactionAttempt<T>(
             acquireCombinedFence(fenceParams),
           );
           memoizeAcquiredRecordedGraphWriteLock(
-            target,
+            recordedGraphLockMemoOf(frame),
             ctx.graphId,
             fenceAcquisition,
           );
@@ -1279,6 +1291,7 @@ function runInWriteTransactionAttempt<T>(
             target,
             ctx.graphId,
             fenceAcquisition,
+            recordedGraphLockMemoOf(frame),
           );
         }
       } catch (error) {
@@ -1344,9 +1357,13 @@ export function acquireManagedWriteFences(
   return runInWriteTransaction(
     ctx,
     entry,
-    async (target, lock) => {
+    async (target, lock, _transactionMode, frame) => {
       if (lock.coordination !== undefined) return;
-      await lockRecordedGraphWrite(target, ctx.graphId);
+      await lockRecordedGraphWrite(
+        target,
+        ctx.graphId,
+        recordedGraphLockMemoOf(frame),
+      );
     },
     { didWrite: () => false },
   );

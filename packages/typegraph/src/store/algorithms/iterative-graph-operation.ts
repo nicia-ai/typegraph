@@ -39,6 +39,7 @@ import {
 } from "../../utils/sql-errors";
 import {
   enterOperation,
+  openRootTransaction,
   openTransactionSession,
   type OperationBackend,
   type StoreTransactionBackend,
@@ -399,14 +400,15 @@ export async function runIterativeGraphOperation<
   // before the callback started is that refusal and nothing else.
   const rounds = { started: false };
   try {
-    return await ctx.backend.transaction(
-      async (backend: StoreTransactionBackend) => {
+    return await openRootTransaction(
+      ctx.backend,
+      async (session) => {
         rounds.started = true;
         return runWorkingTableRounds(
           ctx,
           options,
           plan,
-          enterOperation(openTransactionSession(backend)).backend,
+          enterOperation(session).backend,
         );
       },
       transactionOptions,

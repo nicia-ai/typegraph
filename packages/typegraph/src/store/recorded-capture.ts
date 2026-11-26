@@ -37,6 +37,7 @@ import {
   type InternalTransactionOptions,
   type NodeRow,
   type SchemaWriteFenceParams,
+  type TransactionBackend,
 } from "../backend/types";
 import { CompilerInvariantError, ConfigurationError } from "../errors";
 import { type IdentityTarget } from "../identity/sql-target";
@@ -60,17 +61,25 @@ import {
 } from "./insert-dispatch";
 import {
   enterOperation,
+  openBoundTransactionSession,
   openTransactionSession,
   type Operation,
   type OperationBackend,
+  type OperationEntry,
+  operationEntryBackend,
+  operationEntryControl,
+  operationEntrySession,
+  operationSession,
   type StatementBackend,
   type StoreTransactionBackend,
+  type TransactionSession,
+  withSessionOpener,
 } from "./operation-scope";
 import {
   allocateRecordedCommit,
   createRecordedGraphLockMemo,
   lockRecordedGraphWrite,
-  registerRecordedGraphLockMemo,
+  type RecordedGraphLockMemo,
 } from "./recorded-capture/clock";
 import {
   entityKey,
@@ -99,7 +108,7 @@ import {
   type WriteMemberHooks,
   type WriteTouchSink,
 } from "./recorded-capture/write-touch";
-import { withSavepointState } from "./savepoint-state";
+import { registerSavepointState, withSavepointState } from "./savepoint-state";
 
 export {
   advanceRevisionClock,
@@ -113,7 +122,6 @@ export {
   readRevisionOrigin,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
-  registeredRecordedGraphLockMemo,
   resetRevisionOrigin,
 } from "./recorded-capture/clock";
 export { closeRecordedHardDeletedKind } from "./recorded-capture/flush";
@@ -641,75 +649,126 @@ function createRecordedCaptureSession(): RecordedCaptureSession {
   };
 }
 
-/**
- * What `recordedTransactionBindings` maps a transaction object to. Every
- * binding can answer `withRecordedIdentityMutationTarget`'s question ("is
- * this identity write touched, and what is the underlying raw target?");
- * `capture` carries the additional session state only a TypeGraph-owned
- * transaction has — the engine-native mutation witness registers a binding
- * with `capture` absent, since its mutation flag is checkpointed separately
- * through the shared savepoint-state registry and it takes no advisory lock.
- */
-type RecordedTransactionBinding = Readonly<{
-  target: OperationBackend;
-  assertOpen: () => void;
-  sink: WriteTouchSink;
-  capture?: Readonly<{
-    session: RecordedCaptureSession;
-    graphLocks: ReturnType<typeof createRecordedGraphLockMemo>;
-  }>;
-}>;
-
 type TransactionControlTarget = Readonly<
   Pick<OperationBackend, "executeStatement">
 >;
 
-const recordedTransactionBindings = new WeakMap<
-  object,
-  RecordedTransactionBinding
->();
+// Module-private: only this module builds a recorded binding, so no other
+// value a session's opaque slot could hold reads back as one.
+const RECORDED_SESSION_BINDING: unique symbol = Symbol(
+  "typegraph.recordedSessionBinding",
+);
 
-const recordedRevisionBindings = new WeakMap<object, RecordedCaptureSession>();
+/**
+ * What binds a session's writes to recorded capture
+ * (`TransactionSession.recorded`). Every binding can answer "is this
+ * identity write touched"; `capture` carries the state only a TypeGraph-owned
+ * capture scope has. The engine-native mutation witness binds with `capture`
+ * absent: its mutation flag is checkpointed through the savepoint-state
+ * registry and it takes no advisory lock.
+ */
+type RecordedSessionBinding = Readonly<{
+  [RECORDED_SESSION_BINDING]: true;
+  assertOpen: () => void;
+  sink: WriteTouchSink;
+  capture?: Readonly<{
+    session: RecordedCaptureSession;
+    graphLocks: RecordedGraphLockMemo;
+  }>;
+}>;
 
-/** Carries capture/control state through a lifetime-guarded backend decoration. */
-export function inheritRecordedTransactionBindings(
-  source: StoreTransactionBackend,
-  derived: StoreTransactionBackend,
+/** Whether `value`, a session's recorded slot, holds a binding of this module. */
+function isRecordedSessionBinding(
+  value: unknown,
+): value is RecordedSessionBinding {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    RECORDED_SESSION_BINDING in value
+  );
+}
+
+/**
+ * The recorded-capture binding of the session `entry` belongs to: the capture
+ * scope or engine-native mutation witness bound to it, or `undefined` for the
+ * root backend and for a session nothing bound.
+ */
+function recordedSessionBinding(
+  entry: OperationEntry,
+): RecordedSessionBinding | undefined {
+  const binding = operationEntrySession(entry)?.recorded.binding;
+  return isRecordedSessionBinding(binding) ? binding : undefined;
+}
+
+/**
+ * THE statement target of a recorded control statement — a savepoint, a fence
+ * that must bypass row capture, a recorded identity write — run by the call
+ * that entered `entry` while holding `held`: beneath a recorded binding, the
+ * operation's undecorated holding ({@link Operation.control}), whose
+ * statements the capture surface neither refuses nor records; otherwise
+ * `held` itself.
+ */
+function recordedControlStatementTarget<T extends object>(
+  entry: OperationEntry,
+  binding: RecordedSessionBinding | undefined,
+  held: T,
+): T | StatementBackend {
+  return binding === undefined ? held : operationEntryControl(entry);
+}
+
+/**
+ * Binds `session` to a capture scope or an engine-native mutation witness.
+ * A later binding replaces an earlier one, as a schema commit's preflight
+ * steps each bind their own scope in turn.
+ */
+function bindRecordedSession(
+  session: TransactionSession,
+  binding: RecordedSessionBinding,
+): void {
+  session.recorded.binding = binding;
+}
+
+/**
+ * Extends the recorded binding of `session` with the lifetime of the
+ * callback-owned surface the session hands out (`execution-lifetime.ts`): once
+ * `assertScopeOpen` throws, so does every recorded control statement and
+ * identity write the session's operations issue.
+ */
+export function guardRecordedSessionLifetime(
+  session: TransactionSession,
   assertScopeOpen: () => void,
 ): void {
-  if (!isBackendDerivedFrom(derived, source)) {
-    throw new TypeError("Capture bindings require a derived backend.");
-  }
-  const binding = recordedTransactionBindings.get(source);
-  if (binding !== undefined) {
-    recordedTransactionBindings.set(derived, {
-      ...binding,
-      assertOpen: () => {
-        assertScopeOpen();
-        binding.assertOpen();
-      },
-    });
-    if (binding.capture !== undefined) {
-      registerRecordedGraphLockMemo(derived, binding.capture.graphLocks);
-    }
-  }
-  const session = recordedRevisionBindings.get(source);
-  if (session !== undefined) recordedRevisionBindings.set(derived, session);
+  const binding = session.recorded.binding;
+  if (!isRecordedSessionBinding(binding)) return;
+  session.recorded.binding = {
+    ...binding,
+    assertOpen: () => {
+      assertScopeOpen();
+      binding.assertOpen();
+    },
+  };
 }
 
 /**
  * Runs one TypeGraph-owned savepoint without letting recorded state drift from
- * live state. A rollback restores pending capture, graph-lock memos and all
- * registered transaction state, and reports savepoint-local successes through
- * their error hooks with the rollback cause.
+ * live state. A rollback restores every piece of transaction state registered
+ * with `savepoint-state.ts` (a capture scope registers its pending capture and
+ * graph-lock memo there), and reports savepoint-local successes through their
+ * error hooks with the rollback cause.
  * Callers never receive the raw transaction target, so they cannot roll back
  * SQL while forgetting the TypeGraph sidecars that mirror it.
+ *
+ * `entry` is the operation the call entered, and `target` what it holds: the
+ * savepoint statements go through the operation's undecorated holding beneath
+ * a recorded binding ({@link Operation.control}), and through `target`
+ * otherwise.
  *
  * This is deliberately the only supported savepoint seam for recorded writes.
  * Savepoints issued directly through an adopted backend remain outside the
  * capture contract because TypeGraph cannot observe their rollback boundary.
  */
 export async function runRecordedTransactionSavepoint<T>(
+  entry: OperationEntry,
   target: TransactionControlTarget,
   statementExecution: Extract<
     BundleVerdictOf<typeof STATEMENT_EXECUTION>,
@@ -718,69 +777,57 @@ export async function runRecordedTransactionSavepoint<T>(
   savepoint: string,
   fn: () => Promise<SavepointDecision<T>>,
 ): Promise<T> {
-  const binding = recordedTransactionBindings.get(target);
+  const binding = recordedSessionBinding(entry);
   binding?.assertOpen();
-  const rawTarget = binding?.target ?? target;
+  const control = recordedControlStatementTarget(entry, binding, target);
   const { executeStatement } = statementExecutionMembers(
-    rawTarget,
+    control,
     statementExecution,
   );
-  // Capture owns its touched entities and graph-lock memo. Other transaction
-  // state (revision flags, mutation witnesses, hooks) participates
-  // through withSavepointState below, including targets without capture.
-  const captureCheckpoint = binding?.capture?.session.checkpoint();
-  const graphLockCheckpoint =
-    binding?.capture === undefined ?
-      undefined
-    : new Map(binding.capture.graphLocks);
-  const restoreCapture = (): void => {
-    if (
-      binding?.capture === undefined ||
-      captureCheckpoint === undefined ||
-      graphLockCheckpoint === undefined
-    )
-      return;
-    binding.capture.session.restore(captureCheckpoint);
-    binding.capture.graphLocks.clear();
-    for (const [graphId, lock] of graphLockCheckpoint) {
-      binding.capture.graphLocks.set(graphId, lock);
-    }
-  };
-
   return withSavepointState(target, (restoreState) =>
     runSessionSavepoint(
       {
         executeControl: (statement) =>
           executeStatement(asCompiledStatementSql(portableSql.raw(statement))),
-        enterDriverScope: resolveDriverSavepointScope(rawTarget),
-        guardSavepoint: resolveSavepointGuard(rawTarget),
+        enterDriverScope: resolveDriverSavepointScope(control),
+        guardSavepoint: resolveSavepointGuard(control),
       },
       savepoint,
       fn,
-      (cause) => {
-        restoreCapture();
-        restoreState(cause);
-      },
+      restoreState,
     ),
   );
 }
 
-/** Internal fence/control statements bypass row capture but retain its lifetime guard. */
-export function recordedTransactionControlTarget<T extends StatementBackend>(
-  backend: T,
-): T | OperationBackend {
-  const binding = recordedTransactionBindings.get(backend);
+/**
+ * Internal fence/control statements bypass row capture but retain its
+ * lifetime guard: the operation's undecorated holding beneath a recorded
+ * binding, and its handle otherwise.
+ */
+export function recordedTransactionControlTarget(
+  entry: OperationEntry,
+): StatementBackend {
+  const binding = recordedSessionBinding(entry);
   binding?.assertOpen();
-  return binding?.target ?? backend;
+  const held = operationEntryBackend(entry);
+  return recordedControlStatementTarget(entry, binding, held);
+}
+
+/** The capture session of `entry`'s session, after its liveness check. */
+function liveCaptureSession(
+  entry: OperationEntry,
+): RecordedCaptureSession | undefined {
+  const binding = recordedSessionBinding(entry);
+  binding?.assertOpen();
+  return binding?.capture?.session;
 }
 
 /** Pending capture is not yet visible in the durable revision clock. */
 export function hasPendingRecordedGraphWrites(
-  backend: OperationBackend,
+  entry: OperationEntry,
   graphId: string,
 ): boolean {
-  recordedTransactionBindings.get(backend)?.assertOpen();
-  const session = recordedRevisionBindings.get(backend);
+  const session = liveCaptureSession(entry);
   if (session === undefined) return false;
   const checkpoint = session.checkpoint();
   return (
@@ -792,31 +839,38 @@ export function hasPendingRecordedGraphWrites(
 }
 
 /**
- * Whether the capture session bound to `target` holds identity transition
- * notes for `graphId` that its flush has yet to write to the transition log.
- * Resolved through the same binding `withRecordedIdentityMutationTarget`
- * buffers those notes through, so it answers for exactly the session a
- * transaction's identity writes noted into.
+ * Whether the capture session of `entry`'s session holds identity transition
+ * notes for `graphId` that its flush has yet to write to the transition log:
+ * exactly the session a transaction's identity writes noted into.
  */
 export function hasPendingIdentityTransitionNotes(
-  target: IdentityTarget,
+  entry: OperationEntry,
   graphId: string,
 ): boolean {
-  const session = recordedTransactionBindings.get(target)?.capture?.session;
+  const session = recordedSessionBinding(entry)?.capture?.session;
   if (session === undefined) return false;
   return session.hasIdentityTransitionNotes(graphId);
 }
 
 /** Forces one revision allocation when this capture transaction flushes. */
 export function forceRecordedGraphRevision(
-  backend: OperationBackend,
+  entry: OperationEntry,
   graphId: string,
 ): boolean {
-  recordedTransactionBindings.get(backend)?.assertOpen();
-  const session = recordedRevisionBindings.get(backend);
+  const session = liveCaptureSession(entry);
   if (session === undefined) return false;
   session.forceGraphRevision(graphId);
   return true;
+}
+
+/**
+ * The single-flight graph-lock memo of the capture scope bound to `entry`'s
+ * session, so a lock taken through any operation of the session shares it.
+ */
+export function recordedGraphLockMemoOf(
+  entry: OperationEntry,
+): RecordedGraphLockMemo | undefined {
+  return recordedSessionBinding(entry)?.capture?.graphLocks;
 }
 
 function ignoreIdentityTouch(): void {
@@ -841,13 +895,19 @@ export type IdentityTransitionNoteFunction = (
 ) => void;
 
 /**
+ * Runs one identity write of the call that entered `entry`, holding `target`.
+ * Beneath a recorded binding, `fn` receives the operation's undecorated
+ * holding ({@link Operation.control}) as the handle its identity STATEMENTS
+ * run against, and the binding's touch and note callbacks; otherwise `target`
+ * itself and callbacks that record nothing.
+ *
  * Both sides are {@link IdentityTarget}, not the backend union: what this hands
- * `fn` is the handle identity STATEMENTS run against, and the recorded binding
- * it may swap in is a `TransactionBackend`, which satisfies that projection.
- * Typing it this way is what lets a write frame's row work — whose handle is
- * the read-only `WriteTarget` — reach the identity fold at all.
+ * `fn` is the handle identity statements run against, which satisfies that
+ * projection. Typing it this way is what lets a write frame's row work — whose
+ * handle is the read-only `WriteTarget` — reach the identity fold at all.
  */
 export async function withRecordedIdentityMutationTarget<T>(
+  entry: OperationEntry,
   target: IdentityTarget,
   fn: (
     rawTarget: IdentityTarget,
@@ -859,13 +919,13 @@ export async function withRecordedIdentityMutationTarget<T>(
     noteTransition: IdentityTransitionNoteFunction,
   ) => Promise<T>,
 ): Promise<T> {
-  const binding = recordedTransactionBindings.get(target);
+  const binding = recordedSessionBinding(entry);
   if (binding === undefined) {
     return fn(target, ignoreIdentityTouch, ignoreIdentityTransitionNote);
   }
   binding.assertOpen();
   return fn(
-    binding.target,
+    recordedControlStatementTarget(entry, binding, target),
     (graphId, id, afterImage) => {
       binding.sink.touchIdentity(graphId, id, afterImage);
     },
@@ -891,14 +951,15 @@ function nothingToWithdraw(): void {
  * never happened.
  *
  * The collection spans `fn` alone, which issues only the identity half's own
- * reads. A target with no capture session buffers nothing and withdraws
+ * reads. A session with no capture scope buffers nothing and withdraws
  * nothing.
  */
 export async function collectRecordedIdentityTransitionNotes(
+  entry: OperationEntry,
   target: IdentityTarget,
   fn: () => Promise<void>,
 ): Promise<IdentityTransitionNoteWithdrawal> {
-  const session = recordedTransactionBindings.get(target)?.capture?.session;
+  const session = recordedSessionBinding(entry)?.capture?.session;
   if (session === undefined) {
     await fn();
     return nothingToWithdraw;
@@ -910,47 +971,42 @@ export async function collectRecordedIdentityTransitionNotes(
  * Runs `fn` with every `noteIdentityTransition` call inside it stamped with
  * `decision` — the seam `applyIdentityChangesForContext` (reconcile) uses so a
  * governed merge apply's transitions carry the plan/review digests and branch
- * ancestry that produced them. A target with no capture session (no history)
+ * ancestry that produced them. A session with no capture scope (no history)
  * simply runs `fn` — there is no ambient decision to attach to a note that
  * will never be written.
  */
 export async function withRecordedIdentityDecision<T>(
+  entry: OperationEntry,
   target: IdentityTarget,
   decision: IdentityDecisionProvenance,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const binding = recordedTransactionBindings.get(target);
-  if (binding === undefined) return fn();
-  const session = binding.capture?.session;
+  const session = recordedSessionBinding(entry)?.capture?.session;
   if (session === undefined) return fn();
   return session.withIdentityDecision(decision, fn);
 }
 
 /**
- * Registers an engine-native mutation witness's sink against `overlay` (the
- * wrapped committing transaction {@link createMutationWitness}'s `wrap`
- * returned) and `target` (the raw session it wrapped) through the same
- * binding seam {@link createRecordedTransactionBackend} registers a
- * TypeGraph-owned capture session's sink through — so an identity assertion
- * issued via either object flips the witness's `mutated` flag the same way a
+ * Binds an engine-native mutation witness's sink to `session` (the session
+ * whose surface the witness's `wrap` overlays) through the same binding seam
+ * {@link createRecordedTransactionScope} binds a TypeGraph-owned capture
+ * session's sink through — so an identity assertion issued through any
+ * operation of the session flips the witness's `mutated` flag the same way a
  * real node or edge write does. There is no session to assert open (the
  * witness never seals) and no capture-only session/lock state to carry, so
  * this binding's `capture` stays absent.
  */
 export function registerRecordedIdentityMutationWitness(
-  overlay: OperationBackend,
-  target: OperationBackend,
+  session: TransactionSession,
   sink: WriteTouchSink,
 ): void {
-  const binding: RecordedTransactionBinding = {
-    target,
+  bindRecordedSession(session, {
+    [RECORDED_SESSION_BINDING]: true,
     assertOpen: () => {
       /* An engine-native mutation witness never seals. */
     },
     sink,
-  };
-  recordedTransactionBindings.set(overlay, binding);
-  recordedTransactionBindings.set(target, binding);
+  });
 }
 
 /**
@@ -959,21 +1015,21 @@ export function registerRecordedIdentityMutationWitness(
  * heterogeneous CTE cannot pass through per-method write overlays.
  */
 export async function withRecordedNodeMutationTarget(
-  target: OperationBackend,
+  entry: Operation,
   graphId: string,
   run: (target: OperationBackend) => Promise<readonly NodeRow[]>,
 ): Promise<readonly NodeRow[]> {
-  const binding = recordedTransactionBindings.get(target);
-  if (binding === undefined) return run(target);
+  const binding = recordedSessionBinding(entry);
+  if (binding === undefined) return run(entry.backend);
   binding.assertOpen();
   if (binding.capture !== undefined) {
     await lockRecordedGraphWrite(
-      binding.target,
+      entry.control,
       graphId,
       binding.capture.graphLocks,
     );
   }
-  const rows = await run(binding.target);
+  const rows = await run(entry.control);
   for (const row of rows) {
     binding.sink.touchNode(row.graph_id, row.kind, row.id, row);
   }
@@ -984,11 +1040,11 @@ function createRecordedTransactionBackend(
   target: OperationBackend,
   session: RecordedCaptureSession,
   schema: SqlSchema,
-): OperationBackend {
+): Readonly<{ overlay: OperationBackend; binding: RecordedSessionBinding }> {
   // One advisory-lock round trip per graph per transaction: the memo is
-  // shared with the returned overlay (see registerRecordedGraphLockMemo),
-  // so external lock paths handed this backend dedupe against the same
-  // single-flight promises — including concurrent same-transaction writers.
+  // the binding's, so a lock path taken through any operation of the bound
+  // session dedupes against the same single-flight promises — including
+  // concurrent same-transaction writers.
   const graphLocks = createRecordedGraphLockMemo();
 
   async function lockGraph(graphId: string): Promise<void> {
@@ -1040,22 +1096,15 @@ function createRecordedTransactionBackend(
     ...buildRecordedWriteMembers(target, sink, hooks),
     commands: buildRecordedCommandsPort(target, sink, hooks),
   });
-  registerRecordedGraphLockMemo(overlay, graphLocks);
-  // Bind BOTH the overlay and the raw target to this capture session. Identity
-  // mutations first resolve the overlay to its raw target (runIdentityMutation),
-  // then a nested coordinator (importIdentityAssertionsIntoTarget) re-wraps that
-  // RAW target — without a raw-target binding the second lookup would miss and
-  // silently drop every touch, losing the merge-created assertions from history.
-  const binding: RecordedTransactionBinding = {
-    target,
-    assertOpen: session.assertOpen,
-    sink,
-    capture: { session, graphLocks },
+  return {
+    overlay,
+    binding: {
+      [RECORDED_SESSION_BINDING]: true,
+      assertOpen: session.assertOpen,
+      sink,
+      capture: { session, graphLocks },
+    },
   };
-  recordedTransactionBindings.set(overlay, binding);
-  recordedTransactionBindings.set(target, binding);
-  recordedRevisionBindings.set(overlay, session);
-  return overlay;
 }
 
 /**
@@ -1074,7 +1123,24 @@ export function transactionOwnsSqliteWriteLock(
   return target.dialect === "sqlite";
 }
 
-export function createRecordedTransactionScope(
+/**
+ * Binds a recorded-time capture scope to the session `operation` belongs to:
+ * a capture session, and the capture surface over `target` whose writes
+ * touch it. From then on every operation of that session finds the scope's
+ * binding (its touch sink, its pending capture, its graph-lock memo), and the
+ * scope's pending capture and graph-lock memo roll back with every savepoint
+ * unit on `target`'s transaction until the scope flushes.
+ *
+ * `target` is what the surface decorates: the session's own holding, or
+ * `operation`'s handle. The flush's statements go through `operation`'s
+ * handle, which must be `target` or derived from it; anything else is refused
+ * here, before any statement, so a scope can never write history into a
+ * transaction other than the one whose writes it captured.
+ */
+export function createRecordedTransactionScope<
+  Engine extends TransactionBackend,
+>(
+  operation: Operation<Engine>,
   target: OperationBackend,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   schema?: SqlSchema,
@@ -1083,13 +1149,8 @@ export function createRecordedTransactionScope(
   // redundant seed-UPSERT. Defaults to false so an adopted (possibly deferred)
   // external transaction still seeds the lock — the safe choice.
   ownsWriteLock = false,
-  // What the flush's statements go through: `target` itself, or an operation
-  // handle of the transaction `target` is (the caller built the surface over
-  // its session's holding but flushes as its own operation). Anything else is
-  // refused here, before any statement, so a scope can never write history
-  // into a transaction other than the one whose writes it captured.
-  flushTarget: OperationBackend = target,
 ): RecordedTransactionScope {
+  const flushTarget: OperationBackend = operation.backend;
   if (flushTarget !== target && !isBackendDerivedFrom(flushTarget, target)) {
     throw new ConfigurationError(
       "A recorded-time capture scope's flush target is not of the transaction whose writes it captures.",
@@ -1106,9 +1167,33 @@ export function createRecordedTransactionScope(
   // store passes its resolved schema so capture targets the same recorded
   // relations recorded reads do; the fallback covers standalone capture.
   const resolvedSchema = schema ?? requireRecordedSchema(target);
+  const { overlay, binding } = createRecordedTransactionBackend(
+    target,
+    session,
+    resolvedSchema,
+  );
+  bindRecordedSession(operationSession(operation), binding);
+  const graphLocks = requireDefined(binding.capture).graphLocks;
+  // The scope's pending capture and graph-lock memo mirror the writes on this
+  // transaction, so a savepoint unit that rolls back restores them. Only
+  // until the flush seals the session: nothing is pending after it.
+  const captureCheckpoint = (): (() => void) => {
+    const captured = session.checkpoint();
+    const locks = new Map(graphLocks);
+    return () => {
+      session.restore(captured);
+      graphLocks.clear();
+      for (const [graphId, lock] of locks) graphLocks.set(graphId, lock);
+    };
+  };
+  const unregisterCheckpoint = registerSavepointState(
+    target,
+    captureCheckpoint,
+  );
   return {
-    backend: createRecordedTransactionBackend(target, session, resolvedSchema),
+    backend: overlay,
     async flush(): Promise<RecordedFlushInstants> {
+      unregisterCheckpoint();
       // By flush time the live write has committed within this transaction, so a
       // missing-table error can only be a recorded relation — surface it as the
       // typed precondition the constructor gate could not check.
@@ -1136,10 +1221,12 @@ async function runCapturedAutocommit<T>(
   return backend.transaction(async (transaction: StoreTransactionBackend) => {
     // The capture unit opened this transaction: its session opens here, and
     // the write and the flush run as one operation of it.
-    const target = enterOperation(openTransactionSession(transaction)).backend;
+    const operation = enterOperation(openTransactionSession(transaction));
+    const target = operation.backend;
     await assertRecordedCaptureTransactionIsolation(target);
     // The bundled transaction opened BEGIN IMMEDIATE, so the write lock is held.
     const scope = createRecordedTransactionScope(
+      operation,
       target,
       batchPointRead,
       schema,
@@ -1163,6 +1250,55 @@ export function createRecordedBackend(
   const capture = <T>(
     fn: (target: OperationBackend) => Promise<T>,
   ): Promise<T> => runCapturedAutocommit(backend, schema, batchPointRead, fn);
+
+  /**
+   * The capture overlay's transaction: it opens the transaction and its one
+   * session, binds the session over the capture surface, and hands `fn` that
+   * session and surface. The isolation check, the capture flush and the
+   * pre-commit hook run as one operation of the session, entered before it
+   * was bound, so they go through the transaction itself; every later
+   * operation of it hands out the capture surface. The Store the callback
+   * belongs to receives the session itself through `openRootTransaction`, and
+   * opens no second one over the surface.
+   */
+  async function runRecordedTransaction<T>(
+    fn: (session: TransactionSession, surface: OperationBackend) => Promise<T>,
+    options: InternalTransactionOptions | undefined,
+  ): Promise<T> {
+    const observer = readRecordedFlushObserver(options);
+    const firePreCommitHook = claimTransactionPreCommitHook(options);
+    const backendOptions = stripRecordedFlushOptions(options);
+    assertRequestedRecordedIsolation(backend, backendOptions);
+    return backend.transaction(async (transaction: StoreTransactionBackend) => {
+      const {
+        session,
+        binding: { operation, scope },
+      } = await openBoundTransactionSession(
+        transaction,
+        async (opened, held) => {
+          const operation = enterOperation(opened);
+          await assertRecordedCaptureTransactionIsolation(
+            operation.backend,
+            backendOptions,
+          );
+          const readOnly = backendOptions?.accessMode === "read_only";
+          const scope = createRecordedTransactionScope(
+            operation,
+            held,
+            batchPointRead,
+            schema,
+            !readOnly,
+          );
+          return { statements: scope.backend, binding: { operation, scope } };
+        },
+      );
+      const result = await fn(session, scope.backend);
+      const instants = await scope.flush();
+      observer?.(instants);
+      await firePreCommitHook?.(operation);
+      return result;
+    }, backendOptions);
+  }
 
   const projectedBackend = projectGraphBackend(backend);
   return deriveBackend(projectedBackend, {
@@ -1448,38 +1584,11 @@ export function createRecordedBackend(
         },
       }),
 
-    async transaction(fn, options) {
-      const observer = readRecordedFlushObserver(options);
-      const firePreCommitHook = claimTransactionPreCommitHook(options);
-      const backendOptions = stripRecordedFlushOptions(options);
-      assertRequestedRecordedIsolation(backend, backendOptions);
-      return backend.transaction(
-        async (transaction: StoreTransactionBackend) => {
-          // This overlay opened the transaction: its session opens here, and
-          // the isolation check, the capture flush and the pre-commit hook
-          // run as one operation of it. The Store the callback belongs to
-          // joins the transaction it is handed as a binding of its own.
-          const operation = enterOperation(openTransactionSession(transaction));
-          const target = operation.backend;
-          await assertRecordedCaptureTransactionIsolation(
-            target,
-            backendOptions,
-          );
-          const readOnly = backendOptions?.accessMode === "read_only";
-          const scope = createRecordedTransactionScope(
-            target,
-            batchPointRead,
-            schema,
-            !readOnly,
-          );
-          const result = await fn(scope.backend);
-          const instants = await scope.flush();
-          observer?.(instants);
-          await firePreCommitHook?.(operation);
-          return result;
-        },
-        backendOptions,
-      );
-    },
+    transaction: withSessionOpener(
+      (fn, options) =>
+        runRecordedTransaction((_session, surface) => fn(surface), options),
+      (fn, options) =>
+        runRecordedTransaction((session) => fn(session), options),
+    ),
   });
 }
