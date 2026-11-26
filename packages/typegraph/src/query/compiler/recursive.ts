@@ -218,9 +218,6 @@ function runRecursiveQueryPassPipeline(
   graphId: string,
   ctx: PredicateCompilerContext,
 ): RecursiveQueryPassState {
-  // Every recursive statement, whole query or chain stage, compiles here; a
-  // relevance predicate on one of its aliases cannot be applied by it.
-  refuseRelevancePredicatesInRecursiveStatement(ast, ctx.callerAlias);
   let state: RecursiveQueryPassState = {
     ast,
     ctx,
@@ -264,6 +261,11 @@ function runRecursiveQueryPassPipeline(
   state = temporalPass.state;
 
   assertRecordedQueryAstDoesNotUseCurrentIndexes(state.ast);
+  // Every recursive statement, whole query or chain stage, compiles here; a
+  // relevance predicate on one of its aliases cannot be applied by it. The
+  // recorded-time refusal above keeps precedence: it rejects the predicate
+  // for any traversal shape.
+  refuseRelevancePredicatesInRecursiveStatement(state.ast, ctx.callerAlias);
 
   const columnPruningPass = runCompilerPass(state, {
     name: "column_pruning",

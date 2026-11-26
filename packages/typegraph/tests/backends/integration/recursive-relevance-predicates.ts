@@ -61,9 +61,7 @@ function expectRecursiveRelevanceRefusal(
   });
 }
 
-async function captureRejection(
-  run: () => unknown,
-): Promise<unknown> {
+async function captureRejection(run: () => unknown): Promise<unknown> {
   try {
     await run();
   } catch (error) {
@@ -216,6 +214,26 @@ export function registerRecursiveRelevancePredicateIntegrationTests(
       );
       expect(new Set(rows.map((row) => row.reader))).toEqual(
         new Set([authorId]),
+      );
+    });
+
+    it("keeps applying $fulltext.matches() on the start alias of an optional first recursive traversal", async (ctx) => {
+      skipUnlessFulltext(ctx);
+      const { climateIds } = await seedAuthorWithArticles(store);
+      const rows = await store
+        .query()
+        .from("Article", "article")
+        .whereNode("article", (article) =>
+          article.$fulltext.matches("climate", 10),
+        )
+        .optionalTraverse("authoredBy", "e")
+        .recursive({ maxHops: 2 })
+        .to("Person", "author")
+        .select((select) => ({ article: select.article.id }))
+        .execute();
+
+      expect(rows.map((row) => row.article).toSorted()).toEqual(
+        [...climateIds].toSorted(),
       );
     });
 
