@@ -3,8 +3,10 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../../../src";
 import { UnsupportedBackendCapabilityError } from "../../../src/errors";
+import { defineGraphExtension } from "../../../src/graph-extension";
 import { defineEdgeIndex, defineNodeIndex } from "../../../src/indexes";
 import { type IndexDeclaration } from "../../../src/indexes/types";
+import { getCommittedSchemaVersion } from "../../../src/schema";
 import {
   type IntegrationLaneDriver,
   type IntegrationTestContext,
@@ -357,6 +359,51 @@ export function registerDateIndexExpressionIntegrationTests(
           status: builds ? "alreadyMaterialized" : "created",
         },
       ]);
+    });
+
+    it("refuses an eager evolve before committing the new schema version", async () => {
+      const name = `idx_date_${uniqueSuffix()}`;
+      const graph = buildGraph([
+        defineNodeIndex(Event, { name, fields: ["at"] }),
+      ]);
+      const store = await context.createStore(graph);
+      const backend = context.getBackend();
+      const before = await getCommittedSchemaVersion(backend, graph.id);
+      const builds = DATE_INDEX_LANES[context.driver];
+
+      const outcome = await materializeOutcome(async () => {
+        const evolved = await store.evolve(
+          defineGraphExtension({
+            nodes: { Note: { properties: { body: { type: "string" } } } },
+          }),
+          { eager: {} },
+        );
+        return evolved.materializeIndexes();
+      });
+      const after = await getCommittedSchemaVersion(backend, graph.id);
+
+      expect({ outcome, after }).toEqual({
+        outcome:
+          builds ?
+            {
+              results: [
+                {
+                  indexName: name,
+                  entity: "node",
+                  kind: "Event",
+                  status: "alreadyMaterialized",
+                },
+              ],
+            }
+          : dateIndexRefusal(name, {
+              entity: "node",
+              kind: "Event",
+              field: "/at",
+              position: "key",
+              positionLabel: "key",
+            }),
+        after: builds ? (before ?? 0) + 1 : before,
+      });
     });
 
     it("builds a GIN index over an array of dates wherever GIN exists", async () => {

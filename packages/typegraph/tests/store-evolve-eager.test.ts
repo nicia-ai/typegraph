@@ -17,9 +17,10 @@ import { z } from "zod";
 
 import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
-import { EagerMaterializationError } from "../src/errors";
+import { EagerMaterializationError, KindNotFoundError } from "../src/errors";
 import { defineGraphExtension } from "../src/graph-extension";
 import { defineNodeIndex } from "../src/indexes";
+import { getCommittedSchemaVersion } from "../src/schema";
 import type { Store } from "../src/store/store";
 import {
   createAdapterStoreWithSchema,
@@ -299,5 +300,23 @@ describe("Store.evolve — eager materialization", () => {
     expect((caught as EagerMaterializationError).code).toBe(
       "EAGER_MATERIALIZATION_FAILED",
     );
+  });
+
+  it("refuses an unknown eager kind before committing the schema version", async () => {
+    const backend = createTestBackend();
+    const graph = buildGraphWithIndexes();
+    const [store] = await createStoreWithSchema(graph, backend);
+    const before = await getCommittedSchemaVersion(backend, graph.id);
+
+    await expect(
+      store.evolve(
+        defineGraphExtension({
+          nodes: { Tag: { properties: { label: { type: "string" } } } },
+        }),
+        { eager: { kinds: ["Missing"] } },
+      ),
+    ).rejects.toBeInstanceOf(KindNotFoundError);
+
+    expect(await getCommittedSchemaVersion(backend, graph.id)).toBe(before);
   });
 });

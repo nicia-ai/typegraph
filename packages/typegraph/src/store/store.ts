@@ -348,6 +348,7 @@ import {
   type MaterializeIndexesResult,
   materializeSystemIndexes as materializeSystemIndexesImpl,
   type MaterializeSystemIndexesOptions,
+  preflightIndexMaterialization,
   vectorStatusKey,
 } from "./materialize-indexes";
 import {
@@ -6667,6 +6668,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
        * `EagerMaterializationError` thrown AFTER the new Store is
        * constructed and `ref.current` is updated, so the caller can
        * recover via the ref handle.
+       *
+       * What materialization refuses before its first statement — a
+       * `kinds` entry the evolved graph does not declare, or a declaration
+       * the backend's `dateIndexExpressions` capability cannot build — is
+       * refused before the schema commit instead, so no version is written.
        */
       eager?: MaterializeIndexesOptions;
     }>,
@@ -6691,6 +6697,21 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // `classifyModifications`. The merge itself canonicalEqual-checks
     // and returns the input graph unchanged for no-op re-evolves.
     const merged = mergeGraphExtension(baseline, extension);
+
+    // An eager materialization refuses some declarations before its first
+    // statement (an unknown kind, a date index the backend cannot build).
+    // Refuse them here, before the schema commit, rather than after it has
+    // changed the schema and the caller can no longer tell it did.
+    if (options?.eager !== undefined) {
+      preflightIndexMaterialization(
+        {
+          graph: merged,
+          graphId: this.graphId,
+          capabilities: this.#baseBackend.capabilities,
+        },
+        options.eager,
+      );
+    }
 
     // No-op evolve (extension already applied to the persisted state):
     // skip the schema commit. We compare against `baseline` (the
