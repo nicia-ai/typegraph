@@ -65,6 +65,7 @@ import {
   currentClassKey,
   type IdentityAssertionRequest,
   identityAssertionRequest,
+  identityAssertionRequests,
   insertAssertionRows,
   noteClassTransitions,
   replaceAffectedClosure,
@@ -1416,9 +1417,7 @@ export function createIdentityFacade<G extends GraphDef>(
     },
 
     async bulkAssertSame(pairs) {
-      const requests = pairs.map((pair) =>
-        identityAssertionRequest(ctx, "same", pair.a, pair.b, pair),
-      );
+      const requests = identityAssertionRequests(ctx, "same", pairs);
       return mutate((target, touch, _markWritten, noteTransition) => {
         if (requests.every((request) => request.window === undefined)) {
           return bulkAssertPairs(
@@ -1443,9 +1442,7 @@ export function createIdentityFacade<G extends GraphDef>(
     },
 
     async bulkAssertDifferent(pairs) {
-      const requests = pairs.map((pair) =>
-        identityAssertionRequest(ctx, "different", pair.a, pair.b, pair),
-      );
+      const requests = identityAssertionRequests(ctx, "different", pairs);
       return mutate((target, touch, _markWritten, noteTransition) => {
         if (requests.every((request) => request.window === undefined)) {
           return bulkAssertPairs(

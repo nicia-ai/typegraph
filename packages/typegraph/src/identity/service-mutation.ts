@@ -85,6 +85,7 @@ import {
 import {
   type IdentityAssertionResult,
   type IdentityNodeRefInput,
+  type IdentityPair,
   type IdentityRelation,
   type IdentityValidityWindow,
 } from "./types";
@@ -1372,6 +1373,44 @@ export function identityAssertionRequest<G extends GraphDef>(
     pair: normalizePair(first, second),
     window: hasExplicitIdentityValidityWindow(stated) ? stated : undefined,
   };
+}
+
+/**
+ * THE snapshot of one bulk assertion call: the {@link identityAssertionRequest}
+ * of every pair, in index order. It reads `pairs.length` once and each index
+ * once, and refuses a hole or an entry that is not an object (with the
+ * `TypeError` reading a pair from it always raised) along with every other
+ * statement-free refusal, so a refused call enters nothing. A hole cannot slip
+ * past it the way `map` skips one and leave the write to meet it after earlier
+ * pairs were written. Everything after it (the plain-or-windowed choice, the
+ * write, the transaction receipt's count) reads the returned requests, never
+ * the caller's array.
+ */
+export function identityAssertionRequests<G extends GraphDef>(
+  ctx: Pick<IdentityServiceContext<G>, "graphId" | "registry">,
+  relation: IdentityRelation,
+  pairs: readonly IdentityPair<G>[],
+): readonly IdentityAssertionRequest[] {
+  if (!Array.isArray(pairs)) {
+    throw new TypeError(
+      `Identity bulk ${relation} assertions take an array of pairs.`,
+    );
+  }
+  const length = pairs.length;
+  const requests: IdentityAssertionRequest[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const entry: unknown = pairs[index];
+    if (typeof entry !== "object" || entry === null) {
+      throw new TypeError(
+        `Identity bulk ${relation} assertion pair ${index} is not a pair object.`,
+      );
+    }
+    const pair = entry as IdentityPair<G>;
+    requests.push(
+      identityAssertionRequest(ctx, relation, pair.a, pair.b, pair),
+    );
+  }
+  return requests;
 }
 
 export async function assertPair<G extends GraphDef>(

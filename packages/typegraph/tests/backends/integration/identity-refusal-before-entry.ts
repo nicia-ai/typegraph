@@ -72,6 +72,17 @@ const ghost = { kind: "RbeGhost", id: "g1" } as unknown as typeof p1;
 const absent = undefined as unknown as typeof p1;
 const PAST = "2020-01-01T00:00:00.000Z";
 
+/**
+ * `pairs` followed by one hole: an index the array's length covers but that
+ * holds no element. `map` and `every` skip it; a `for...of` loop reads it as
+ * `undefined`.
+ */
+function withTrailingHole<Pair>(pairs: readonly Pair[]): Pair[] {
+  const sparse = [...pairs];
+  sparse.length += 1;
+  return sparse;
+}
+
 type RefusalCase = Readonly<{
   name: string;
   invoke: (identity: RbeIdentity) => Promise<unknown>;
@@ -146,6 +157,27 @@ const REFUSALS: readonly RefusalCase[] = [
       refusal: ValidationError,
     },
     {
+      name: `${method} hole after a valid pair`,
+      invoke: (identity: RbeIdentity) =>
+        identity[method](withTrailingHole([{ a: p1, b: p2 }])),
+      refusal: TypeError,
+    },
+    {
+      name: `${method} hole after a valid windowed pair`,
+      invoke: (identity: RbeIdentity) =>
+        identity[method](withTrailingHole([{ a: p1, b: p2, validFrom: PAST }])),
+      refusal: TypeError,
+    },
+    {
+      name: `${method} entry that is not an object`,
+      invoke: (identity: RbeIdentity) =>
+        identity[method]([
+          { a: p1, b: p2, validFrom: PAST },
+          7 as unknown as { a: typeof p1; b: typeof p1 },
+        ]),
+      refusal: TypeError,
+    },
+    {
       name: `${method} pairs that are not an array`,
       invoke: (identity: RbeIdentity) =>
         identity[method](undefined as unknown as []),
@@ -187,6 +219,26 @@ async function rejectionOf(call: () => Promise<unknown>): Promise<unknown> {
   } catch (error) {
     return error;
   }
+}
+
+/** Endpoint `id` as a reference. */
+function ref(id: string): typeof p1 {
+  return { kind: "RbePerson", id };
+}
+/** `pairs`, whose `length` reads 1 the first time and 2 after that. */
+function growingPairs(
+  pairs: readonly Readonly<{ a: typeof p1; b: typeof p1 }>[],
+): readonly Readonly<{ a: typeof p1; b: typeof p1 }>[] {
+  const reads = { count: 0 };
+  return new Proxy([...pairs], {
+    get(target, property, receiver) {
+      if (property !== "length") {
+        return Reflect.get(target, property, receiver) as unknown;
+      }
+      reads.count += 1;
+      return reads.count === 1 ? 1 : 2;
+    },
+  });
 }
 
 const COUNTED_MEMBERS = [
@@ -416,6 +468,77 @@ export function registerIdentityRefusalBeforeEntryIntegrationTests(
     // REVERT CHECK: hand the caller's window object to the write instead of
     // the validated snapshot — the second read refuses "malformed" under the
     // lock, after statements ran.
+
+    it("a sparse bulk request refused inside a transaction leaves no assertion behind when the callback catches it", async () => {
+      const graph = buildGraph(nextGraphId());
+      const store = await context.createStore(graph);
+      const createdAt = { validFrom: "2019-01-01T00:00:00.000Z" };
+      await store.nodes.RbePerson.create(
+        { name: "p1" },
+        { id: "p1", ...createdAt },
+      );
+      await store.nodes.RbePerson.create(
+        { name: "p2" },
+        { id: "p2", ...createdAt },
+      );
+      const refusals = await store.transaction(async (tx) => [
+        await rejectionOf(() =>
+          tx.identity.bulkAssertSame(
+            withTrailingHole([{ a: p1, b: p2, validFrom: PAST }]),
+          ),
+        ),
+        await rejectionOf(() =>
+          tx.identity.bulkAssertDifferent(
+            withTrailingHole([{ a: p1, b: p2, validFrom: PAST }]),
+          ),
+        ),
+      ]);
+      expect(refusals.map((refusal) => refusal instanceof TypeError)).toEqual([
+        true,
+        true,
+      ]);
+      // The callback caught both refusals and committed: neither wrote its
+      // first pair, whose open window from PAST would hold now.
+      expect(await store.identity.assertionsOf(p1)).toEqual([]);
+    });
+    // REVERT CHECK: snapshot the pairs with `pairs.map` again — the windowed
+    // path writes the first pair before it reads the hole and the callback's
+    // catch commits it: the same assertion persists, and the different one
+    // is refused as a contradiction rather than for the hole.
+
+    it("tx.identity bulk receipts count the pairs the request snapshotted, not a separate read of the input", async () => {
+      const graph = buildGraph(nextGraphId());
+      const store = await context.createStore(graph);
+      for (const id of ["p1", "p2", "p3", "p4", "p5", "p6"]) {
+        await store.nodes.RbePerson.create({ name: id }, { id });
+      }
+      const outcome = await store.transactionWithReceipt(async (tx) => [
+        await tx.identity.bulkAssertSame(
+          growingPairs([
+            { a: ref("p1"), b: ref("p2") },
+            { a: ref("p2"), b: ref("p3") },
+          ]),
+        ),
+        await tx.identity.bulkAssertDifferent(
+          growingPairs([
+            { a: ref("p4"), b: ref("p5") },
+            { a: ref("p4"), b: ref("p6") },
+          ]),
+        ),
+      ]);
+      const [same, different] = outcome.result;
+      expect({
+        sameAssertions: outcome.receipt.writes.identity.sameAssertions,
+        differentAssertions:
+          outcome.receipt.writes.identity.differentAssertions,
+      }).toEqual({
+        sameAssertions: same?.length,
+        differentAssertions: different?.length,
+      });
+    });
+    // REVERT CHECK: count `pairs.length` in the transaction receipt wrapper
+    // again — the receipt reports one write of each relation while the
+    // request wrote two.
 
     it("a read-only transaction's refusal enters no operation either", async () => {
       const graph = buildGraph(nextGraphId());
