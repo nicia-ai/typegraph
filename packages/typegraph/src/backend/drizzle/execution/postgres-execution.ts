@@ -295,6 +295,27 @@ export function isPgliteTransaction(db: AnyPgDatabase): boolean {
 }
 
 /**
+ * The per-transaction PGlite client a Drizzle PGlite transaction object runs
+ * on: the `Transaction` PGlite's `transaction()` hands Drizzle, which Drizzle
+ * pins on the transaction's session and keeps for every savepoint of it. A
+ * PGlite transaction client carries `rollback` and no `transaction` of its
+ * own, unlike the PGlite instance. `undefined` for any other handle.
+ */
+export function getPinnedPgliteTransaction(
+  db: AnyPgDatabase,
+): object | undefined {
+  if (!isPgliteTransaction(db)) return undefined;
+  const client = getPinnedPostgresTransactionConnection(db);
+  return (
+      client !== undefined &&
+        hasFunctionProperty(client, "rollback") &&
+        !hasFunctionProperty(client, "transaction")
+    ) ?
+      client
+    : undefined;
+}
+
+/**
  * Single owner of "this callable client is postgres-js". Shared with the
  * serialized-resource detection in `../postgres.ts`, which reads `options.max`
  * off the same client shape, so the fast path and the marking predicate cannot

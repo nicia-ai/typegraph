@@ -46,7 +46,7 @@ describe("graph-merge write fences", () => {
   it("acquires the schema fence before the graph lock", async () => {
     const events: string[] = [];
     await lockStoreWriteFence(
-      enterOperation(openTransactionSession(makeBackend(events))).backend,
+      enterOperation(openTransactionSession(makeBackend(events))),
       {
         graphId: "merge-fence",
         schemaVersion: 3,
@@ -63,16 +63,13 @@ describe("graph-merge write fences", () => {
     const backend = makeBackend(events, true);
 
     await expect(
-      lockStoreWriteFence(
-        enterOperation(openTransactionSession(backend)).backend,
-        {
-          graphId: "merge-fence",
-          schemaVersion: 3,
-          graphLock: "required",
-          staleSchemaError: (cause) =>
-            new BaseVersionMismatchError("schema moved", { cause }),
-        },
-      ),
+      lockStoreWriteFence(enterOperation(openTransactionSession(backend)), {
+        graphId: "merge-fence",
+        schemaVersion: 3,
+        graphLock: "required",
+        staleSchemaError: (cause) =>
+          new BaseVersionMismatchError("schema moved", { cause }),
+      }),
     ).rejects.toBeInstanceOf(BaseVersionMismatchError);
     expect(events).toEqual(["schema"]);
   });
@@ -80,7 +77,7 @@ describe("graph-merge write fences", () => {
   it("can fence schema-managed writes without taking the revision graph lock", async () => {
     const events: string[] = [];
     await lockStoreWriteFence(
-      enterOperation(openTransactionSession(makeBackend(events))).backend,
+      enterOperation(openTransactionSession(makeBackend(events))),
       {
         graphId: "merge-fence",
         schemaVersion: 3,

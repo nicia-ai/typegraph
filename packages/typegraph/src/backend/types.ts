@@ -1121,6 +1121,12 @@ export type HardDeleteNodeParams = Readonly<{
   graphId: string;
   kind: string;
   id: string;
+  /**
+   * Release the claim rows of the edges the cascade removes. The store sets
+   * it exactly when the target holds claims (its claims bundle resolves
+   * supported); absent or `false`, the cascade runs no claim statement.
+   */
+  releaseEdgeClaims?: boolean;
 }>;
 
 /**
@@ -1131,6 +1137,8 @@ export type HardDeleteNodesBatchParams = Readonly<{
   graphId: string;
   kind: string;
   ids: readonly string[];
+  /** See {@link HardDeleteNodeParams.releaseEdgeClaims}. */
+  releaseEdgeClaims?: boolean;
 }>;
 
 /**
@@ -2528,6 +2536,23 @@ export type GraphBackend = Readonly<{
     params: CompareAndSetNodeParams,
   ) => Promise<UpdateNodeSetResult>;
   deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
+  /**
+   * Permanently removes one node and what it owns: its uniqueness entries,
+   * its fulltext row and every incident edge (either endpoint, any edge kind,
+   * live or tombstoned), then the node row last.
+   *
+   * When `params.releaseEdgeClaims` is `true` it also drops the edge claim
+   * rows held by exactly the edge rows this call removed — the ids its edge
+   * DELETE reports, never a prior read or the current graph's cardinalities —
+   * before the node row goes, as `purgeEdgeClaims` drops them.
+   * The store releases the claims of the live edges its `onDelete` verdict
+   * removes before this call; the rows left for this call (tombstoned edges,
+   * and a composition edge the store leaves to its part's own delete) have no
+   * other owner. A call that removes no edge must run no claim statement.
+   *
+   * Cleans no embeddings (the store does, through the vector members). Not
+   * atomic on its own: the store runs it inside its write frame.
+   */
   hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
   /**
    * Batched {@link hardDeleteNode} for one kind, in its order: removes the
@@ -2540,11 +2565,12 @@ export type GraphBackend = Readonly<{
    * per bind-budget chunk instead of one per node. Never touches a row of
    * another kind.
    *
-   * Like `hardDeleteNode` it cleans no embeddings (the store does, through the
-   * vector members) and releases no edge claims. Not atomic on its own: the
-   * store runs it inside its write frame. Optional — the store falls back to
-   * one `hardDeleteNode` per node when it is absent, deciding so before any
-   * statement runs.
+   * Like `hardDeleteNode` it releases the claim rows of exactly the edge rows
+   * it removes when `params.releaseEdgeClaims` is `true`, before the node rows,
+   * and cleans no embeddings (the store does, through the vector members).
+   * Not atomic on its own: the store runs it inside its write frame.
+   * Optional — the store falls back to one `hardDeleteNode` per node when it
+   * is absent, deciding so before any statement runs.
    */
   hardDeleteNodesBatch?: (
     this: void,
@@ -2849,6 +2875,12 @@ export type GraphBackend = Readonly<{
    * kind removal and `clearGraph` do not grow the relation without bound. The
    * FENCE never depends on it having run — a claim whose holder is no longer
    * live (or, for `oneActive`, no longer active) is taken over in place.
+   *
+   * On an engine with row locks, lock the rows in claim-target order (code
+   * point on axis, then key — the order every claim write takes them in)
+   * before deleting them, and skip a row a concurrent writer took over while
+   * this waited: an unordered delete can deadlock against an edge create that
+   * holds one of the same rows and waits for another.
    */
   purgeEdgeClaims?: (
     this: void,

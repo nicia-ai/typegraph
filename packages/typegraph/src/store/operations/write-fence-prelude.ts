@@ -19,7 +19,7 @@ import {
   TypeGraphError,
   UnsupportedBackendCapabilityError,
 } from "../../errors";
-import type { OperationBackend } from "../operation-scope";
+import type { Operation, OperationBackend } from "../operation-scope";
 import { lockRecordedGraphWrite } from "../recorded-capture";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import {
@@ -79,13 +79,14 @@ export type StoreWriteFenceInput = Readonly<{
  * prelude throws `freshSnapshotError(isolation)`.
  */
 export async function lockStoreWriteFence(
-  txBackend: OperationBackend,
+  operation: Operation,
   input: StoreWriteFenceInput,
 ): Promise<void> {
+  const txBackend = operation.backend;
   try {
     await lockSchemaVersionForStoreWrite(
       { graphId: input.graphId, schemaVersion: input.schemaVersion },
-      txBackend,
+      operation,
     );
   } catch (error) {
     if (

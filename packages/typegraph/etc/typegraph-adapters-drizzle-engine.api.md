@@ -511,6 +511,13 @@ type CommonOperationStrategy = Readonly<{
     buildTakeOverEdgeClaim: (params: ClaimEdgeCardinalityParams, timestamp: string) => SQL;
     buildTakeOverEdgeClaimGuarded: (params: ClaimEdgeCardinalityParams, timestamp: string) => SQL;
     buildPurgeEdgeClaims: (params: PurgeEdgeClaimsParams) => SQL;
+    claimPurgeLockOrder?: Readonly<{
+        buildReadEdgeClaimTargets: (params: PurgeEdgeClaimsParams) => SQL;
+        buildLockEdgeClaimTargets: (graphId: string, targets: readonly Readonly<{
+            axis: string;
+            key: string;
+        }>[]) => SQL;
+    }>;
     buildContendedUniqueRowAudit: (graphId: string, constraintNames: readonly string[]) => SQL;
     buildContendedEdgeRowAudit: (graphId: string, ref: EdgeCardinalityAxisRef, edgeKinds: readonly string[]) => SQL;
     buildContendedCompositionEdgeRowAudit: (graphId: string, ref: EdgeCardinalityAxisRef, holders: CompositionClaimScope["holders"], reportedEdgeKinds: readonly string[]) => SQL;
@@ -9520,6 +9527,7 @@ type HardDeleteNodeParams = Readonly<{
     graphId: string;
     kind: string;
     id: string;
+    releaseEdgeClaims?: boolean;
 }>;
 
 // @public
@@ -9527,6 +9535,7 @@ type HardDeleteNodesBatchParams = Readonly<{
     graphId: string;
     kind: string;
     ids: readonly string[];
+    releaseEdgeClaims?: boolean;
 }>;
 
 // @public

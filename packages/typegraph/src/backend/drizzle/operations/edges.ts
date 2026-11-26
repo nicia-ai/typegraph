@@ -1416,7 +1416,9 @@ export function buildHardDeleteEdge(
 
 /**
  * Builds a hard DELETE query for all edges connected to a node (permanent removal).
- * Deletes edges where the node appears as either source or target.
+ * Deletes edges where the node appears as either source or target, and returns
+ * the ids of the rows it removed, which are the edges whose claims the cascade
+ * releases.
  */
 export function buildHardDeleteEdgesByNode(
   tables: Tables,
@@ -1429,6 +1431,7 @@ export function buildHardDeleteEdgesByNode(
   return sql`
     DELETE FROM ${edges}
     WHERE ${edgeAtEitherEndpoint(edges, { graphId, kind: nodeKind, id: nodeId })}
+    RETURNING ${edges.id}
   `;
 }
 

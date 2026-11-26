@@ -1804,7 +1804,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           return apply();
         }
         // The caller's own operation: the claim work runs in its session.
-        const target = portEntryBackend(operation);
+        const claimOperation = portOperationEntry(operation);
+        const target = operationEntryBackend(claimOperation);
         // The per-graph write lock, before any claim or sidecar work: the
         // rebuild below writes claim rows, and the lock is what the claim
         // discipline requires ahead of them. It is reentrant and memoized per
@@ -1815,6 +1816,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             graphId: this.graphId,
             registry: this.#registry,
             lock,
+            operation: claimOperation,
             claimsVerdict: this.#claimsVerdict,
             uniqueSidecarBatch: this.#uniqueSidecarBatch,
           },
@@ -4771,46 +4773,37 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // requested, or not engine-native: nothing to observe, so no
           // wrapping. `writeTarget` is the single object
           // every write in this attempt runs through — capture's decorator
-          // installs the same way, and the schema-fence lease / write-session
-          // maps below key on object identity, so leasing and wrapping must
-          // share the identical target or a write issued through the wrapper
-          // resolves a session/lease the raw `txBackend` registered under.
+          // installs the same way. The write session and schema-fence lease
+          // below are this session's, so every operation of it (each hands
+          // out `writeTarget`) reads them, whichever object it holds.
           const {
             session,
             binding: { txOperation, mutationWitness, writeTarget },
-          } = await openBoundTransactionSession(
-            transaction,
-            (opened, held) => {
-              const txOperation = enterOperation(opened);
-              const mutationWitness =
-                this.#engineNativeHistory && receiptRequested ?
-                  createMutationWitness()
-                : undefined;
-              const writeTarget =
-                mutationWitness === undefined ? held : (
-                  mutationWitness.wrap(held)
-                );
-              if (mutationWitness !== undefined) {
-                // Identity assertions run through a wholly separate seam
-                // (`withRecordedIdentityMutationTarget`) that `wrap`'s overlay
-                // does not cover — register the witness's sink against both
-                // object identities `writeTarget` can be reached through, the
-                // same binding capture uses for its own session-backed sink.
-                registerRecordedIdentityMutationWitness(
-                  writeTarget,
-                  held,
-                  mutationWitness.sink,
-                );
-              }
-              return {
-                statements: writeTarget,
-                binding: { txOperation, mutationWitness, writeTarget },
-              };
-            },
-            // This attempt opened the transaction: on SQLite its BEGIN
-            // IMMEDIATE already holds the writer slot.
-            true,
-          );
+          } = await openBoundTransactionSession(transaction, (opened, held) => {
+            const txOperation = enterOperation(opened);
+            const mutationWitness =
+              this.#engineNativeHistory && receiptRequested ?
+                createMutationWitness()
+              : undefined;
+            const writeTarget =
+              mutationWitness === undefined ? held : mutationWitness.wrap(held);
+            if (mutationWitness !== undefined) {
+              // Identity assertions run through a wholly separate seam
+              // (`withRecordedIdentityMutationTarget`) that `wrap`'s overlay
+              // does not cover — register the witness's sink against both
+              // object identities `writeTarget` can be reached through, the
+              // same binding capture uses for its own session-backed sink.
+              registerRecordedIdentityMutationWitness(
+                writeTarget,
+                held,
+                mutationWitness.sink,
+              );
+            }
+            return {
+              statements: writeTarget,
+              binding: { txOperation, mutationWitness, writeTarget },
+            };
+          });
           const runHooks = this.#createBufferedHookRunner(pending, writeTarget);
           const runBulkHooks = this.#createBufferedBulkHookRunner(
             pending,
@@ -4837,6 +4830,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               },
             );
           const output = await withWriteTransactionSession(
+            session,
             writeTarget,
             txOperation.backend,
             {
@@ -5218,17 +5212,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // through the same operation, into the capture surface's graph-lock memo.
     const {
       session,
-      binding: {
-        txBackend,
-        held,
-        scope,
-        mutationWitness,
-        writeTarget,
-        executionScope,
-        contextBackend,
-      },
+      binding: { txBackend, scope, mutationWitness, executionScope },
     } = await openBoundTransactionSession(transaction, async (opened, held) => {
-      const txBackend = enterOperation(opened).backend;
+      const txOperation = enterOperation(opened);
+      const txBackend = txOperation.backend;
       if (this.#captureEnabled) {
         await assertRecordedCaptureTransactionIsolation(txBackend);
         await lockSchemaVersionForStoreWrite(
@@ -5236,7 +5223,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             graphId: this.graphId,
             schemaVersion: this.#schemaMetadata.schemaVersion,
           },
-          txBackend,
+          txOperation,
         );
       }
       // A uniform `flush → RecordedFlushInstants` shape on both branches
@@ -5295,15 +5282,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const contextBackend = executionScope?.backend ?? writeTarget;
       return {
         statements: contextBackend,
-        binding: {
-          txBackend,
-          held,
-          scope,
-          mutationWitness,
-          writeTarget,
-          executionScope,
-          contextBackend,
-        },
+        binding: { txBackend, scope, mutationWitness, executionScope },
       };
     });
     const receiptRecorder = createTransactionReceiptRecorder();
@@ -5359,13 +5338,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // The schema fence above was acquired before the caller callback. That
     // makes reuse safe for this history-capture scope: a callback-created
     // savepoint is necessarily later than the lock, so rolling back to it
-    // cannot release the lock. Seed the lease on the actual derived capture
-    // target, which is what collection writes receive. A savepoint created
+    // cannot release the lock. The lease is this adoption's session's, so
+    // every operation of it reads it: the capture, witness and
+    // execution-lifetime surface collection writes receive, and the raw
+    // transaction this method's own operation holds. A savepoint created
     // before entering this method through the raw external handle is outside
     // the recorded-capture callback contract and is not covered by this
-    // lease. Seed every exact target a managed mutation can resolve to,
-    // including the raw identity target and the evolved execution-lifetime
-    // target. Adapter/native and non-history adopted paths retain their
+    // lease. Adapter/native and non-history adopted paths retain their
     // per-write fence behavior.
     return this.#captureEnabled ?
         withPreAcquiredTransactionSchemaFenceLease(
@@ -5373,7 +5352,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             graphId: this.graphId,
             schemaVersion: this.#schemaMetadata.schemaVersion,
           },
-          [held, scope.backend, writeTarget, contextBackend],
+          session,
           finish,
         )
       : finish();
@@ -5746,7 +5725,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // runtime port, the identity facade's context, the read-set fence, the
     // read fences, the immediate hook runners) hold for the life of the
     // transaction.
-    const txBackend = enterOperation(session).backend;
+    const contextOperation = enterOperation(session);
+    const txBackend = contextOperation.backend;
     const runHooks = bufferedHooks ?? this.#immediateHookRunner(txBackend);
     const runBulkHooks =
       bufferedBulkHooks ?? this.#immediateBulkHookRunner(txBackend);
@@ -5923,7 +5903,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ) =>
         assertReadSetUnchangedSince(
           this.#readSetFenceContext(readOnly),
-          txBackend,
+          contextOperation,
           anchor,
           scopes,
         ),
@@ -6435,15 +6415,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // The Store joins the caller's transaction here: the session for this
       // adoption, and the one operation the baseline check runs under. The
       // recorded transaction below receives that operation's handle.
-      const target = enterOperation(
+      const baselineOperation = enterOperation(
         openTransactionSession(adopt(externalTx)),
-      ).backend;
+      );
+      const target = baselineOperation.backend;
       await lockSchemaVersionForStoreWrite(
         {
           graphId: this.graphId,
           schemaVersion: plan.baseline.version,
         },
-        target,
+        baselineOperation,
       );
       await assertEvolutionPlanBaseline(
         plan,

@@ -42,8 +42,8 @@
  *
  * The backend brand is a phantom: a minted backend is the SAME object it was
  * minted from. That is deliberate. Store state not carried by a session is
- * keyed by the target object's identity (`writeTransactionSessions`, the
- * savepoint-state registry, schema fence leases), and the layers above
+ * keyed by the target object's identity (the savepoint-state registry,
+ * recorded capture's bindings), and the layers above
  * discriminate a root from a transaction with `"transaction" in target`; a
  * derived object per operation would change both. An {@link Operation} is
  * therefore a separate small value that CARRIES the handle and its session,
@@ -76,6 +76,7 @@ import {
   type NativeTransactionState,
   resolveNativeTransactionState,
 } from "./native-transaction-state";
+import type { ManagedWriteState } from "./operations/managed-write-state";
 import type { GraphWriteLock } from "./recorded-capture/clock";
 import { TRANSACTION_RUNTIME } from "./types";
 
@@ -207,7 +208,9 @@ const OPERATION_SESSION: unique symbol = Symbol("typegraph.operation");
  *
  * What it carries today is the write executor's per-binding state: the graph
  * write locks its frames hold or are acquiring
- * ({@link GraphWriteLock}, see `write-transaction.ts`). It never hands out
+ * ({@link GraphWriteLock}, see `write-transaction.ts`), and the managed
+ * write state of the `store.transaction` attempt that opened it with the
+ * schema fences it leased (`managed-write-state.ts`). It never hands out
  * its transaction; an operation entered from it does.
  *
  * State about the native transaction alone, shared by every binding of it,
@@ -231,17 +234,11 @@ export type TransactionSession<
      */
     heldGraphWriteLocks: Map<string, Promise<GraphWriteLock>>;
     /**
-     * Whether `store.transaction()` opened this session's transaction for
-     * it, rather than the binding joining one it did not open. On an
-     * `engine-serialized` engine the first holds the writer slot from its
-     * `BEGIN IMMEDIATE`; a joined one may have been begun DEFERRED by its
-     * caller and hold none until it writes
-     * (`ensureAdoptedWriterSlot` in `write-transaction.ts`). A fact of this
-     * binding, not of the native transaction: a `store.transaction()` that
-     * is a savepoint of an enclosing transaction ends with its session, and
-     * the enclosing transaction's later bindings must not inherit it.
+     * The managed write session and the schema-fence leases of this session,
+     * read through `managedWriteState` from the operation a reader holds:
+     * owned by `write-transaction.ts`.
      */
-    openedByStoreTransaction: boolean;
+    managedWrite: ManagedWriteState;
     /**
      * The state every session of this session's native transaction shares
      * (`native-transaction-state.ts`): the same object for every binding
@@ -284,9 +281,7 @@ export type EntryScope = GraphBackend | TransactionSession;
 
 /**
  * The mint where a Store opens or joins a transaction: a new session for
- * `transaction` as this binding holds it. `openedByStoreTransaction` is
- * `true` only where `store.transaction()` opens the transaction for this
- * session ({@link TransactionSession.openedByStoreTransaction}).
+ * `transaction` as this binding holds it.
  *
  * `Engine` names a specialised engine transaction (the schema-write
  * transaction, say) when `transaction` is the Store form of one; the
@@ -296,15 +291,12 @@ export type EntryScope = GraphBackend | TransactionSession;
  */
 export function openTransactionSession<
   Engine extends TransactionBackend = TransactionBackend,
->(
-  transaction: StoreTransactionBackend<Engine>,
-  openedByStoreTransaction = false,
-): TransactionSession<Engine> {
+>(transaction: StoreTransactionBackend<Engine>): TransactionSession<Engine> {
   /* eslint-disable no-restricted-syntax -- This module is the mint: a session over a transaction the Store opened or joined is built here and nowhere else. */
   return {
     [SESSION_TRANSACTION]: transaction,
     heldGraphWriteLocks: new Map<string, Promise<GraphWriteLock>>(),
-    openedByStoreTransaction,
+    managedWrite: { writeSession: undefined, schemaFenceLeases: undefined },
     native: resolveNativeTransactionState(transaction),
   } as TransactionSession<Engine>;
   /* eslint-enable no-restricted-syntax */
@@ -358,11 +350,10 @@ export async function openBoundTransactionSession<
   ) =>
     | TransactionSessionBinding<Binding, Engine>
     | Promise<TransactionSessionBinding<Binding, Engine>>,
-  openedByStoreTransaction = false,
 ): Promise<
   Readonly<{ session: TransactionSession<Engine>; binding: Binding }>
 > {
-  const session = openTransactionSession(transaction, openedByStoreTransaction);
+  const session = openTransactionSession(transaction);
   const bound = await bind(session, session[SESSION_TRANSACTION]);
   session[SESSION_TRANSACTION] = bound.statements;
   return { session, binding: bound.binding };

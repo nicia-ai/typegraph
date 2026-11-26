@@ -102,6 +102,7 @@ import {
   operationEntrySession,
   type StatementBackend,
   type StoreTransactionBackend,
+  type TransactionSession,
 } from "../operation-scope";
 import {
   advanceRevisionClock,
@@ -122,6 +123,12 @@ import {
   type OperationHookContext,
   type OperationOutcomeFacts,
 } from "../types";
+import {
+  type ManagedWriteState,
+  managedWriteState,
+  type WriteTransactionFenceEvidence,
+  type WriteTransactionSession,
+} from "./managed-write-state";
 
 /**
  * The slice of an operation context {@link runInWriteTransaction} needs: the
@@ -139,40 +146,19 @@ export type WriteTransactionContext = Readonly<{
 }>;
 
 /**
- * Whether a transaction session may hand the fence evidence one managed write
- * acquired to the writes after it: the per-graph write fence and the schema
- * fence alike.
- *
- * PostgreSQL releases a lock taken after a savepoint, and undoes a fence-row
- * advance made after it, when the transaction rolls back to that savepoint.
- * A callback holding a raw SQL handle can issue that rollback between two
- * managed writes, so its session is `"per-write"`: every write that needs a
- * fence takes it again. A callback with no such handle cannot, and its
- * session is `"reusable"`. The Store decides which from the one raw handle a
- * transaction context can carry, `tx.sql`.
+ * A failed PostgreSQL statement may doom the managed transaction even if
+ * caught: marks the write session of the session `operation` belongs to.
  */
-export type WriteTransactionFenceEvidence = "reusable" | "per-write";
-
-interface WriteTransactionSession {
-  fenceEvidence: WriteTransactionFenceEvidence;
-  lock: GraphWriteLock | undefined;
-  wrote: boolean;
-  aborted?: Readonly<{ error: unknown }>;
-}
-
-const writeTransactionSessions = new WeakMap<object, WriteTransactionSession>();
-
-/** A failed PostgreSQL statement may doom the managed transaction even if caught. */
 export function markWriteTransactionAborted(
-  target: StatementBackend,
+  operation: OperationEntry,
   error: unknown,
 ): void {
-  const session = writeTransactionSessions.get(target);
+  const session = managedWriteState(operation)?.writeSession;
   if (session !== undefined && session.aborted === undefined)
     session.aborted = { error };
 }
 
-/**
+/*
  * Schema fences deliberately do not normally memoize: PostgreSQL releases a
  * lock acquired after a savepoint when a caller rolls back to that savepoint.
  * The one safe exception is a TypeGraph-owned Store transaction whose session
@@ -181,37 +167,46 @@ export function markWriteTransactionAborted(
  * caller-controlled savepoint, and once that write acquires the fence,
  * subsequent managed writes can reuse it until the outer transaction ends.
  *
- * The key includes the expected version rather than only the graph id. A
- * transaction target is also the cache owner, never the root backend, so a
- * pooled connection cannot inherit a prior transaction's success.
+ * The leases are the transaction session's (`ManagedWriteState`), read
+ * through the operation a write holds, so every operation of the session
+ * shares them and no other session over the same transaction does. The key
+ * includes the expected version rather than only the graph id, and the root
+ * backend has no session, so a pooled connection cannot inherit a prior
+ * transaction's success.
  */
-const leasedSchemaFences = new WeakMap<object, Map<string, Promise<void>>>();
 
 function schemaFenceLeaseKey(graphId: string, expectedVersion: number): string {
   return `${graphId}\u0000${expectedVersion}`;
 }
 
-/** Whether this transaction has already acquired the exact schema fence. */
+/** The schema-fence leases of the session `entry` belongs to, if it holds any. */
+function schemaFenceLeases(
+  entry: OperationEntry,
+): Map<string, Promise<void>> | undefined {
+  return managedWriteState(entry)?.schemaFenceLeases;
+}
+
+/** Whether this transaction session has already acquired the exact schema fence. */
 export function hasLeasedSchemaFence(
   ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
-  target: object,
+  entry: OperationEntry,
 ): boolean {
   const expectedVersion = ctx.schemaVersion;
   return (
     expectedVersion !== undefined &&
-    leasedSchemaFences
-      .get(target)
-      ?.has(schemaFenceLeaseKey(ctx.graphId, expectedVersion)) === true
+    schemaFenceLeases(entry)?.has(
+      schemaFenceLeaseKey(ctx.graphId, expectedVersion),
+    ) === true
   );
 }
 
 /** Records a schema fence acquired inside a successful fused write statement. */
 export function memoizeLeasedSchemaFence(
   ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
-  target: object,
+  entry: OperationEntry,
 ): void {
   const expectedVersion = ctx.schemaVersion;
-  const leases = leasedSchemaFences.get(target);
+  const leases = schemaFenceLeases(entry);
   if (expectedVersion === undefined || leases === undefined) return;
   leases.set(
     schemaFenceLeaseKey(ctx.graphId, expectedVersion),
@@ -232,6 +227,7 @@ export function memoizeLeasedSchemaFence(
 async function withTransactionSchemaFenceLease<T>(
   ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
   target: OperationBackend,
+  state: ManagedWriteState,
   fn: () => Promise<T>,
 ): Promise<T> {
   const expectedVersion = ctx.schemaVersion;
@@ -240,7 +236,7 @@ async function withTransactionSchemaFenceLease<T>(
   }
 
   const leases = new Map<string, Promise<void>>();
-  leasedSchemaFences.set(target, leases);
+  state.schemaFenceLeases = leases;
   const unregister = registerSavepointState(target, () => {
     const before = new Map(leases);
     return () => {
@@ -252,7 +248,7 @@ async function withTransactionSchemaFenceLease<T>(
     return await fn();
   } finally {
     unregister();
-    leasedSchemaFences.delete(target);
+    state.schemaFenceLeases = undefined;
   }
 }
 
@@ -262,10 +258,10 @@ async function withTransactionSchemaFenceLease<T>(
  * The adopted history path acquires its fence before invoking user code, so a
  * savepoint created by that callback cannot predate the lock. That is the one
  * adopted-transaction shape where reusing the lock is savepoint-safe. The
- * lease is bound to the exact targets the callback can resolve, including
- * derived capture and execution-lifetime targets plus the raw target used by
- * identity mutations, and is removed when the callback and its capture flush
- * finish.
+ * lease is the adopted session's: every operation of that session (the
+ * capture, witness and execution-lifetime surface its operations hand out,
+ * and the raw transaction its opener's operations hold) reads it, and it is
+ * removed when the callback and its capture flush finish.
  *
  * This deliberately does not require the first-party factory mark: adopted
  * transaction backends are marked caller-owned even when their root backend
@@ -274,41 +270,37 @@ async function withTransactionSchemaFenceLease<T>(
  */
 export async function withPreAcquiredTransactionSchemaFenceLease<T>(
   ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
-  targets: readonly OperationBackend[],
+  session: TransactionSession,
   fn: () => Promise<T>,
 ): Promise<T> {
   const expectedVersion = ctx.schemaVersion;
   if (expectedVersion === undefined) return fn();
 
+  const state = session.managedWrite;
   const leases = new Map<string, Promise<void>>([
     [schemaFenceLeaseKey(ctx.graphId, expectedVersion), Promise.resolve()],
   ]);
-  const uniqueTargets = [...new Set(targets)];
-  const previousLeases = new Map<
-    OperationBackend,
-    Map<string, Promise<void>> | undefined
-  >();
-  for (const target of uniqueTargets) {
-    previousLeases.set(target, leasedSchemaFences.get(target));
-    leasedSchemaFences.set(target, leases);
-  }
+  const previous = state.schemaFenceLeases;
+  state.schemaFenceLeases = leases;
   try {
     return await fn();
   } finally {
-    for (const target of uniqueTargets) {
-      if (leasedSchemaFences.get(target) !== leases) continue;
-      const previous = previousLeases.get(target);
-      if (previous === undefined) leasedSchemaFences.delete(target);
-      else leasedSchemaFences.set(target, previous);
-    }
+    if (state.schemaFenceLeases === leases) state.schemaFenceLeases = previous;
   }
+}
+
+/** The write session of the session `operation` belongs to, if one runs. */
+function writeSessionOf(
+  operation: OperationEntry,
+): WriteTransactionSession | undefined {
+  return managedWriteState(operation)?.writeSession;
 }
 
 /** A managed revision is allocated only when its outer callback completes. */
 export function hasPendingWriteTransactionRevision(
-  target: OperationBackend,
+  operation: OperationEntry,
 ): boolean {
-  return writeTransactionSessions.get(target)?.wrote === true;
+  return writeSessionOf(operation)?.wrote === true;
 }
 
 /** Takes the engine writer slot without changing graph data. */
@@ -331,9 +323,9 @@ export async function ensureEngineSerializedWriterSlot(
 
 /** Forces the enclosing managed Store transaction to consume one revision. */
 export function forceWriteTransactionRevision(
-  target: OperationBackend,
+  operation: OperationEntry,
 ): boolean {
-  const session = writeTransactionSessions.get(target);
+  const session = writeSessionOf(operation);
   if (session === undefined) return false;
   session.wrote = true;
   return true;
@@ -470,9 +462,10 @@ function constraintWriterSlotRefusals(
  * transaction TypeGraph opens — `BEGIN IMMEDIATE` holds the slot before its
  * first statement. A frame whose own entry opened the transaction is skipped
  * by its mode, and a frame on a session `store.transaction()` opened by the
- * session's `openedByStoreTransaction`, which the frame's operation carries (never a lookup
- * keyed by the handle, which a derivation of the transaction would miss): it
- * issues exactly the statements it always has. An adopted
+ * write session that attempt installs on that session (`writeSessionOf`,
+ * read through the frame's operation, never a lookup keyed by the handle,
+ * which a derivation of the transaction would miss): it issues exactly the
+ * statements it always has. An adopted
  * transaction may have been begun DEFERRED: a reader until its first write,
  * whose snapshot another connection can overtake. A zero-row write takes the
  * slot without changing data; it must run before the schema fence, graph
@@ -496,7 +489,7 @@ async function ensureAdoptedWriterSlot(
   if (
     refusals === undefined ||
     transactionMode !== "existing" ||
-    operationEntrySession(frame)?.openedByStoreTransaction === true ||
+    writeSessionOf(frame) !== undefined ||
     resolveWriteFencePlan(target).kind !== "engine-serialized"
   ) {
     return;
@@ -522,24 +515,29 @@ async function ensureAdoptedWriterSlot(
  * `fenceEvidence` decides both whether the session remembers the per-graph
  * write fence and whether it leases the schema fence.
  *
- * `target` is what the mutations' statements go through, and what the
- * session is keyed on; `opener` is the operation of the transaction's opener
- * that this function's own statements (the recovery probe, the revision
- * advance) go through.
+ * `session` is the transaction session the attempt opened: the write session
+ * and the schema-fence leases are its own (`ManagedWriteState`), so every
+ * operation entered from it reads them. `target` is what its operations hand
+ * the mutations, which the savepoint checkpoint is registered on and whose
+ * provenance decides whether the schema fence may be leased. `opener` is the
+ * operation of the transaction's opener that this function's own statements
+ * (the recovery probe, the revision advance) go through.
  */
 export async function withWriteTransactionSession<T>(
+  transactionSession: TransactionSession,
   target: OperationBackend,
   opener: OperationBackend,
   ctx: WriteTransactionContext,
   fenceEvidence: WriteTransactionFenceEvidence,
   fn: () => Promise<T>,
 ): Promise<T> {
+  const state = transactionSession.managedWrite;
   const session: WriteTransactionSession = {
     fenceEvidence,
     lock: undefined,
     wrote: false,
   };
-  writeTransactionSessions.set(target, session);
+  state.writeSession = session;
   const unregister = registerSavepointState(target, () => {
     const { wrote, lock, aborted } = session;
     return () => {
@@ -551,7 +549,7 @@ export async function withWriteTransactionSession<T>(
   });
   try {
     const result = await (fenceEvidence === "reusable" ?
-      withTransactionSchemaFenceLease(ctx, target, fn)
+      withTransactionSchemaFenceLease(ctx, target, state, fn)
     : fn());
     if (session.aborted !== undefined) {
       // A caller with tx.sql may have rolled back a native savepoint after
@@ -570,7 +568,7 @@ export async function withWriteTransactionSession<T>(
     return result;
   } finally {
     unregister();
-    writeTransactionSessions.delete(target);
+    state.writeSession = undefined;
   }
 }
 
@@ -583,12 +581,13 @@ export async function withWriteTransactionSession<T>(
  */
 export async function lockSchemaVersionForStoreWrite(
   ctx: Pick<WriteTransactionContext, "graphId" | "schemaVersion">,
-  backend: StatementBackend,
+  entry: OperationEntry,
 ): Promise<void> {
   const expectedVersion = ctx.schemaVersion;
   if (expectedVersion === undefined) return;
 
-  const leases = leasedSchemaFences.get(backend);
+  const backend = operationEntryBackend(entry);
+  const leases = schemaFenceLeases(entry);
   const leaseKey = schemaFenceLeaseKey(ctx.graphId, expectedVersion);
   const existingLease = leases?.get(leaseKey);
   if (existingLease !== undefined) return existingLease;
@@ -1245,8 +1244,9 @@ function runInWriteTransactionAttempt<T>(
             constraintWriterSlotRefusals(ctx, fenceReason)
           )),
       );
-      const session =
-        needsGraphWriteLock ? writeTransactionSessions.get(target) : undefined;
+      // The write session of this frame's own transaction session: the
+      // `store.transaction` attempt's, when the frame runs in one.
+      const session = needsGraphWriteLock ? writeSessionOf(frame) : undefined;
       // A frame that does not acquire works under the token of whichever frame
       // did: the transaction session's, or the acquisition an enclosing or
       // sibling frame on this frame's session registered. `uncapturedGraphWriteLock` is
@@ -1280,7 +1280,7 @@ function runInWriteTransactionAttempt<T>(
           expectedSchemaVersion !== undefined &&
           acquiresLock &&
           !("transaction" in target) &&
-          !hasLeasedSchemaFence(ctx, target)
+          !hasLeasedSchemaFence(ctx, frame)
         ) ?
           {
             acquire: target.lockSchemaVersionAndGraphWrite,
@@ -1295,7 +1295,7 @@ function runInWriteTransactionAttempt<T>(
       try {
         if (combinedSchemaGraphFence?.acquire === undefined) {
           if (!options?.schemaFenceInFirstWrite) {
-            await lockSchemaVersionForStoreWrite(ctx, target);
+            await lockSchemaVersionForStoreWrite(ctx, frame);
           }
           if (!acquiresLock) {
             const heldEvidence =
