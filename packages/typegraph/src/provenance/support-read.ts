@@ -167,7 +167,7 @@ export async function loadSupportGraph(
   const asOf = nowIso();
   const roles = await readRoles(backend, graphId, config, asOf);
   const supportEdges = buildSupportEdges(config, roles);
-  const [compositionDependencies, sourceRowsByKind] = await Promise.all([
+  const [compositionDependencies, sourceRows] = await Promise.all([
     readCompositionExistenceDependencies(
       backend,
       registry,
@@ -175,18 +175,34 @@ export async function loadSupportGraph(
       roles.facts,
       batchPointRead,
     ),
-    Promise.all(
-      config.sourceKinds.map((kind) =>
-        findNodeRows(backend, graphId, kind, CURRENT_ROLE_ROW, asOf),
-      ),
-    ),
+    readCurrentSourceRows(backend, graphId, config, asOf),
   ]);
   return {
     roles,
     supportEdges,
     compositionDependencies,
-    sourceRows: sourceRowsByKind.flat(),
+    sourceRows,
   };
+}
+
+/**
+ * The current row of every source of every configured source kind at
+ * `asOf`: THE one read of which sources exist and what their retraction
+ * flags say, shared by {@link loadSupportGraph} and a transition's re-read of
+ * the availability it decided from.
+ */
+export async function readCurrentSourceRows(
+  backend: GraphReadBackend,
+  graphId: string,
+  config: NormalizedConfig,
+  asOf: string = nowIso(),
+): Promise<NodeRow[]> {
+  const sourceRowsByKind = await Promise.all(
+    config.sourceKinds.map((kind) =>
+      findNodeRows(backend, graphId, kind, CURRENT_ROLE_ROW, asOf),
+    ),
+  );
+  return sourceRowsByKind.flat();
 }
 
 /**

@@ -371,8 +371,16 @@ the same transaction is refused with `ConfigurationError`
 transaction stays usable: each transition decides its writes from one support
 read, so two that overlapped would each decide without the other's writes. To
 retract several sources at once, pass them to `retractMany(sources, tx)`.
-Other calls are not refused: a write that overlaps the verb can land between
-the transition's support read and its writes.
+The refusal needs proof that two calls run on one transaction. Two
+`withRecordedTransaction()` adoptions of a transaction you began yourself on
+a better-sqlite3 connection have none, since a connection does not say which
+transaction is open on it, so their verbs are not refused. The verb does not
+rely on the refusal to stay correct: after its writes it re-reads every
+source flag on the transaction and, if another verb changed one since its
+support read, runs once more without flipping anything, so whichever verb
+re-reads last brings every fact it reaches in line with the flags. Other
+calls are not refused: a write that overlaps the verb can land between the
+transition's support read and its writes.
 
 ## Recorded time
 

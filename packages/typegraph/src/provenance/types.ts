@@ -162,7 +162,10 @@ export type RetractionCapability<
    *   an active callback of the capability's store
    *   (`PROVENANCE_TRANSACTION_NOT_OWNED`), when another retraction verb of
    *   the same graph is still running on `tx`'s transaction
-   *   (`PROVENANCE_TRANSITION_OVERLAPPING`, before any statement), or when a
+   *   (`PROVENANCE_TRANSITION_OVERLAPPING`, before any statement; only where
+   *   the two calls' sessions are proven to share that transaction, and a
+   *   verb on an unproven one re-reads the source flags after its writes and
+   *   reconciles a change instead), or when a
    *   source's kind is not one of the configured source kinds.
    * @throws {UnsupportedBackendCapabilityError} in a `tx` opened with
    *   `accessMode: "read_only"`, before any statement; and, with capability

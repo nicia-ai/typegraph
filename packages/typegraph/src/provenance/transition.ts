@@ -44,7 +44,7 @@ import {
   sourceRetractedState,
   type SupportSnapshot,
 } from "./support";
-import { loadSupportGraph } from "./support-read";
+import { loadSupportGraph, readCurrentSourceRows } from "./support-read";
 import {
   type NodeKind,
   type ProvenanceNodeRef,
@@ -417,6 +417,14 @@ function overlappingTransitionError(
  * overlapped would each decide from a read that predates the other's writes
  * (two retractions of a fact's two sources would each keep it live on the
  * other's support). The overlapping call is refused before any statement.
+ *
+ * The refusal holds only where the sessions share their native transaction's
+ * state, which is only on proof (`session.native`): two adoptions of one
+ * caller-begun transaction on a connection-level handle (better-sqlite3)
+ * each get a state of their own and are not refused. The transition is
+ * therefore also correct without the refusal: it re-reads the availability
+ * it decided from after its writes and reconciles a change
+ * ({@link transitionInExclusiveSection}).
  */
 async function transitionInTransaction<
   G extends GraphDef,
@@ -455,6 +463,28 @@ async function transitionInTransaction<
   );
 }
 
+/**
+ * Runs the transition, then makes sure the availability it decided from is
+ * still the transaction's. A verb on another session of the same native
+ * transaction that shares no state with this one (an unproven adoption, see
+ * {@link transitionInTransaction}) can flip a source flag between this
+ * transition's support read and its writes, and this transition then decided
+ * from a stale view: retracting a fact's two sources at once would each keep
+ * the fact live on the support the other removes.
+ *
+ * The database decides it, not a lock: after its own writes the transition
+ * re-reads every source flag (`readCurrentSourceRows`) on the same
+ * transaction, which sees every write made on it so far. When the
+ * availability differs from the one it decided, it runs a reconcile pass,
+ * which is the verb re-run with nothing left to flip: a fresh support read,
+ * then the closes and reopens that bring every fact reachable from its
+ * sources in line with the current flags. Of two overlapping transitions,
+ * the later re-read follows both flag writes (each transition writes its
+ * flags before it re-reads), so at least that one reconciles, and every fact
+ * whose support depends on both is reachable from both. A reconcile pass
+ * writes no flag, so each further pass answers a flag written by another
+ * verb since the previous read, and the loop ends once they stop.
+ */
 async function transitionInExclusiveSection<
   G extends GraphDef,
   FactKind extends NodeKind<G>,
@@ -491,7 +521,99 @@ async function transitionInExclusiveSection<
     }
     return { source, row: sourceRow };
   });
+  const nextState: SourceRetractedState = retracted ? "retracted" : "available";
+  const flipping = sourceRows.filter(
+    ({ row }) => sourceRetractedState(row, config.retractedField) !== nextState,
+  );
 
+  let pass = await runTransitionPass<G, FactKind, JustificationKind>(
+    scope,
+    tx,
+    backend,
+    uniqueSources,
+    { flipping, retracted },
+  );
+  let report = pass.report;
+  for (;;) {
+    const current = availableSourceKeys(
+      await readCurrentSourceRows(backend, scope.graphId, config),
+      config.retractedField,
+    );
+    if (sameKeys(current, pass.decidedAvailability)) return report;
+    pass = await runTransitionPass<G, FactKind, JustificationKind>(
+      scope,
+      tx,
+      backend,
+      uniqueSources,
+      { flipping: [], retracted },
+    );
+    report = reconciledReport(report, pass.report);
+  }
+}
+
+/** One pass's report and the source availability it decided its writes on. */
+type TransitionPass<
+  G extends GraphDef,
+  FactKind extends NodeKind<G>,
+  JustificationKind extends NodeKind<G>,
+> = Readonly<{
+  report: RetractionReport<G, FactKind, JustificationKind>;
+  decidedAvailability: ReadonlySet<string>;
+}>;
+
+function sameKeys(
+  left: ReadonlySet<string>,
+  right: ReadonlySet<string>,
+): boolean {
+  if (left.size !== right.size) return false;
+  for (const key of left) if (!right.has(key)) return false;
+  return true;
+}
+
+/**
+ * The report of a transition that reconciled: every fact any of its passes
+ * closed, the support standing after the last pass, and the facts the first
+ * pass found believed and out of its reach (every pass reaches the same
+ * facts: the graph's structure is the same, only flags moved).
+ */
+function reconciledReport<
+  G extends GraphDef,
+  FactKind extends NodeKind<G>,
+  JustificationKind extends NodeKind<G>,
+>(
+  earlier: RetractionReport<G, FactKind, JustificationKind>,
+  reconcile: RetractionReport<G, FactKind, JustificationKind>,
+): RetractionReport<G, FactKind, JustificationKind> {
+  const died = new Map(
+    [...earlier.died, ...reconcile.died].map((fact) => [refKey(fact), fact]),
+  );
+  return {
+    died: [...died.entries()]
+      .toSorted(([left], [right]) => compareStrings(left, right))
+      .map(([, fact]) => fact),
+    survivedVia: reconcile.survivedVia,
+    unaffected: earlier.unaffected,
+  };
+}
+
+/**
+ * One decide-then-write pass of a transition: one support read, then the
+ * closes, `flipping`'s flag writes and the reopens it decides from that
+ * read. A reconcile pass flips nothing.
+ */
+async function runTransitionPass<
+  G extends GraphDef,
+  FactKind extends NodeKind<G>,
+  JustificationKind extends NodeKind<G>,
+>(
+  scope: CapabilityScope,
+  tx: TransactionContext<G>,
+  backend: Operation["backend"],
+  uniqueSources: readonly ProvenanceNodeRef[],
+  writes: Readonly<{ flipping: readonly SourceRow[]; retracted: boolean }>,
+): Promise<TransitionPass<G, FactKind, JustificationKind>> {
+  const { config } = scope;
+  const { flipping, retracted } = writes;
   // Load the provenance graph once. Its structure (justifications, facts,
   // premise/derive edges) is identical before and after the transition — only
   // source availability changes — so the pre- and post-flip snapshots share
@@ -509,19 +631,15 @@ async function transitionInExclusiveSection<
   );
   const before = computeSupportSnapshot(supportGraph, availableBefore);
 
-  // Decide the whole transition from the one read before writing anything:
-  // the sources that flip, the availability they leave, and the facts whose
-  // currency changes with it.
-  const nextState: SourceRetractedState = retracted ? "retracted" : "available";
-  const flipping = sourceRows.filter(
-    ({ row }) => sourceRetractedState(row, config.retractedField) !== nextState,
-  );
+  // Decide the whole pass from the one read before writing anything: the
+  // availability the flips leave, and the facts whose currency changes with
+  // it.
   const availableAfter = new Set(availableBefore);
   for (const { source } of flipping) {
-    if (nextState === "available") {
-      availableAfter.add(refKey(source));
-    } else {
+    if (retracted) {
       availableAfter.delete(refKey(source));
+    } else {
+      availableAfter.add(refKey(source));
     }
   }
   const after = computeSupportSnapshot(supportGraph, availableAfter);
@@ -550,10 +668,13 @@ async function transitionInExclusiveSection<
     await setSourceRetractionState(tx, config, source, retracted);
   }
   await reopenFacts(tx, dependencies, after, affected);
-  return buildReport<G, FactKind, JustificationKind>(
-    before,
-    after,
-    affected,
-    closing,
-  );
+  return {
+    report: buildReport<G, FactKind, JustificationKind>(
+      before,
+      after,
+      affected,
+      closing,
+    ),
+    decidedAvailability: availableAfter,
+  };
 }

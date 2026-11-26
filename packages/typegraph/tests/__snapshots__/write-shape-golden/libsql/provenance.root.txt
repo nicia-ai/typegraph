@@ -62,6 +62,8 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "
     ["<graph1>","Source","source-a"]
 sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"source-a\",\"retracted\":true}","<timestamp>","<graph1>","Source","source-a"]
+sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."deleted_at" IS NULL AND ("typegraph_nodes"."valid_from" IS NULL OR "typegraph_nodes"."valid_from" <= ?) AND ("typegraph_nodes"."valid_to" IS NULL OR "typegraph_nodes"."valid_to" > ?) ORDER BY "typegraph_nodes"."id" ASC
+    ["<graph1>","Source","<timestamp>","<timestamp>"]
 sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = ? LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = ?
     ["<graph1>","<graph1>"]
 sql INSERT INTO "typegraph_recorded_clock" (graph_id, revision, recorded_at) VALUES (?, ?, ?) ON CONFLICT (graph_id) DO UPDATE SET revision = excluded.revision, recorded_at = excluded.recorded_at WHERE "typegraph_recorded_clock".revision < excluded.revision
