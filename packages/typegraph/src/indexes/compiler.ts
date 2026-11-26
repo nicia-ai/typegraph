@@ -1,3 +1,4 @@
+import { ConfigurationError } from "../errors";
 import { type ValueType } from "../query/ast";
 import { getDialect } from "../query/dialect";
 import { type SqlDialect } from "../query/dialect/types";
@@ -7,6 +8,7 @@ import {
   getNodeScopeColumns,
   parseNodeIndexKeyDirection,
   validateEdgeIndexKeysPresence,
+  validateIndexFieldValueTypes,
   validateNodeIndexKeyContract,
 } from "./node-key-contract";
 import {
@@ -38,6 +40,53 @@ type CompiledIndexKeys = Readonly<{
 // ============================================================
 // Index Key Compilation
 // ============================================================
+
+/**
+ * One field of a relational index paired with its value type: a lookup
+ * field (`position: "key"`) or a covering column (`"coveringField"`).
+ */
+export type IndexFieldValueType = Readonly<{
+  pointer: JsonPointer;
+  valueType: ValueType | undefined;
+  position: "key" | "coveringField";
+}>;
+
+/**
+ * Every lookup field, then every covering field, of `index`, each paired
+ * with its own value type — the order the index key columns are built in.
+ *
+ * The one pairing of a field with the value type its extraction uses: the
+ * key compilation below, {@link compileNodeIndexFieldKeys} and
+ * {@link findDateIndexExpression} all read it, so the field the DDL casts is
+ * the field the capability gate classifies. Refuses with a
+ * `ConfigurationError` (`INDEX_FIELD_VALUE_TYPES_MISMATCH`) when an array of
+ * fields and its array of value types differ in length, rather than pairing a
+ * field with a neighbour's type.
+ */
+export function pairIndexFieldValueTypes(
+  index: RelationalIndexDeclaration,
+): readonly IndexFieldValueType[] {
+  const mismatch = validateIndexFieldValueTypes(index);
+  if (mismatch !== undefined) {
+    throw new ConfigurationError(mismatch, {
+      code: "INDEX_FIELD_VALUE_TYPES_MISMATCH",
+      indexName: index.name,
+      kind: index.kind,
+    });
+  }
+  return [
+    ...index.fields.map((pointer, position) => ({
+      pointer,
+      valueType: index.fieldValueTypes[position],
+      position: "key" as const,
+    })),
+    ...index.coveringFields.map((pointer, position) => ({
+      pointer,
+      valueType: index.coveringFieldValueTypes[position],
+      position: "coveringField" as const,
+    })),
+  ];
+}
 
 export function compileNodeIndexKeys(
   index: NodeIndexDeclaration,
@@ -83,14 +132,7 @@ export function compileNodeIndexKeys(
     keys.push(sql`(${extracted}) ${direction}`);
   }
 
-  const allPointers = [...index.fields, ...index.coveringFields];
-  const allValueTypes = [
-    ...index.fieldValueTypes,
-    ...index.coveringFieldValueTypes,
-  ];
-
-  for (const [pointerIndex, pointer] of allPointers.entries()) {
-    const valueType = allValueTypes[pointerIndex];
+  for (const { pointer, valueType } of pairIndexFieldValueTypes(index)) {
     const extracted = compileIndexKeyValue(
       adapter,
       propsColumn,
@@ -126,14 +168,7 @@ export function compileEdgeIndexKeys(
     keys.push(systemColumn(column));
   }
 
-  const allPointers = [...index.fields, ...index.coveringFields];
-  const allValueTypes = [
-    ...index.fieldValueTypes,
-    ...index.coveringFieldValueTypes,
-  ];
-
-  for (const [pointerIndex, pointer] of allPointers.entries()) {
-    const valueType = allValueTypes[pointerIndex];
+  for (const { pointer, valueType } of pairIndexFieldValueTypes(index)) {
     const extracted = compileIndexKeyValue(
       adapter,
       propsColumn,
@@ -162,12 +197,15 @@ export function compileNodeIndexFieldKeys(
 ): readonly SqlFragment[] {
   const adapter = getDialect(ctx.dialect);
   const keys: SqlFragment[] = [];
-  for (const [position, pointer] of index.fields.entries()) {
+  for (const { pointer, valueType, position } of pairIndexFieldValueTypes(
+    index,
+  )) {
+    if (position !== "key") continue;
     const extracted = compileIndexKeyValue(
       adapter,
       ctx.propsColumn,
       pointer,
-      index.fieldValueTypes[position],
+      valueType,
     );
     keys.push(sql`(${extracted})`);
   }
@@ -190,7 +228,9 @@ export type DateIndexExpression = Readonly<{
  *
  * The one classifier behind the `dateIndexExpressions` capability. It walks
  * exactly the `(pointer, valueType)` pairs the DDL compilation above hands to
- * {@link compileIndexKeyValue} and {@link compileIndexWhereOperand}, the two
+ * {@link compileIndexKeyValue} (through {@link pairIndexFieldValueTypes}, so it
+ * refuses the same mismatched declarations) and
+ * {@link compileIndexWhereOperand}, the two
  * places a `"date"` value type becomes `jsonExtractDate` — the cast PostgreSQL
  * refuses in an index. A GIN-family declaration indexes one array or string
  * field and has no partial clause (both enforced at declaration), so it never
@@ -207,15 +247,10 @@ export function findDateIndexExpression(
       }
     }
   }
-  for (const [position, pointer] of index.fields.entries()) {
-    if (index.fieldValueTypes[position] === "date") {
-      return { field: pointer, position: "key" };
-    }
-  }
-  for (const [position, pointer] of index.coveringFields.entries()) {
-    if (index.coveringFieldValueTypes[position] === "date") {
-      return { field: pointer, position: "coveringField" };
-    }
+  for (const { pointer, valueType, position } of pairIndexFieldValueTypes(
+    index,
+  )) {
+    if (valueType === "date") return { field: pointer, position };
   }
   const whereField =
     index.where === undefined ? undefined : findDateWhereOperand(index.where);

@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineNode } from "../src";
+import { defineEdge, defineGraph, defineNode } from "../src";
 import { assertDateIndexExpressionsSupported } from "../src/backend/capabilities/date-index-expressions";
 import { generateSqliteDDL } from "../src/backend/drizzle/ddl";
 import { createPostgresTables } from "../src/backend/drizzle/schema/postgres";
@@ -17,7 +17,10 @@ import {
   POSTGRES_CAPABILITIES,
   SQLITE_CAPABILITIES,
 } from "../src/backend/types";
-import { UnsupportedBackendCapabilityError } from "../src/errors";
+import {
+  ConfigurationError,
+  UnsupportedBackendCapabilityError,
+} from "../src/errors";
 import {
   defineEdgeIndex,
   defineNodeIndex,
@@ -25,10 +28,12 @@ import {
   generateIndexDDL,
   generateNodeIndexDDL,
 } from "../src/indexes";
+import { compileIndexDDL } from "../src/indexes/ddl";
 import {
   buildPostgresEdgeIndexBuilders,
   buildPostgresNodeIndexBuilders,
 } from "../src/indexes/drizzle";
+import { parseSerializedSchema, serializeSchema } from "../src/schema";
 
 const Event = defineNode("Event", {
   schema: z.object({ at: z.date(), label: z.string() }),
@@ -168,5 +173,70 @@ describe("dateIndexExpressions outside the store", () => {
       operation: "buildPostgresEdgeIndexBuilders()",
       indexName: "scheduled_at",
     });
+  });
+});
+
+// Shifts a covering field into the lookup fields while leaving each value
+// type in its own array: `fields` then has two pointers and one type,
+// `coveringFields` none and one type.
+function shiftedDeclaration() {
+  const declared = defineNodeIndex(Event, {
+    name: "event_label_at",
+    fields: ["label"],
+    coveringFields: ["at"],
+  });
+  return {
+    ...declared,
+    fields: [...declared.fields, ...declared.coveringFields],
+    coveringFields: [],
+  };
+}
+
+describe("pairing index fields with their value types", () => {
+  it("refuses a declaration whose field and value-type arrays differ in length", () => {
+    for (const dialect of ["postgres", "sqlite"] as const) {
+      expect(() => compileIndexDDL(shiftedDeclaration(), dialect)).toThrow(
+        'Index "event_label_at" has 2 fields but 1 field value types, and 0 covering fields but 1 covering field value types; each field needs exactly one value type.',
+      );
+    }
+    expect(() => {
+      assertDateIndexExpressionsSupported(
+        POSTGRES_CAPABILITIES,
+        [shiftedDeclaration()],
+        "custom()",
+      );
+    }).toThrow(ConfigurationError);
+  });
+
+  it("refuses such a declaration in a stored schema document", () => {
+    const graph = defineGraph({
+      id: "paired_value_types",
+      nodes: { Event: { type: Event } },
+      edges: {},
+      indexes: [
+        defineNodeIndex(Event, {
+          name: "event_label_at",
+          fields: ["label"],
+          coveringFields: ["at"],
+        }),
+      ],
+    });
+    const stored = serializeSchema(graph, 1);
+    const tampered = {
+      ...stored,
+      indexes: (stored.indexes ?? []).map((index) =>
+        index.entity === "vector" ?
+          index
+        : {
+            ...index,
+            fields: [...index.fields, ...index.coveringFields],
+            coveringFields: [],
+          },
+      ),
+    };
+    expect(() => parseSerializedSchema(JSON.stringify(stored))).not.toThrow();
+    expect(() => parseSerializedSchema(JSON.stringify(tampered))).toThrow(
+      /each field needs exactly one value type/,
+    );
   });
 });
