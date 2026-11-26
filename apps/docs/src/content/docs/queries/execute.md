@@ -255,6 +255,59 @@ const employeesPage = await store
   .paginate({ first: 50 });
 ```
 
+### Paging a full-text, vector or hybrid query
+
+A query with `$fulltext.matches()`, `similarTo()` or both is ordered by relevance whether or not it
+has an `orderBy()`: the full-text rank (highest first), the vector distance (smallest first) or the
+fused hybrid score (highest first), then the `orderBy()` terms, then for a hybrid query the matched
+node's id in byte order, then the row's identity (the start node's `id`, its `kind` too when the
+alias spans several kinds, and each traversal's edge `id`). That order is total, so `execute()`
+returns rows tied on relevance in it, and `paginate()`, `page()` and `stream()` read exactly the
+rows `execute()` returns, each once, in that order, forward and backward. `orderBy()` is optional
+on these queries.
+
+```typescript
+const results = store
+  .query()
+  .from("Document", "d")
+  .whereNode("d", (d) => d.$fulltext.matches("climate", 100))
+  .select((ctx) => ({ id: ctx.d.id, title: ctx.d.title }));
+
+const first = await results.paginate({ first: 20 });
+const second = await results.paginate({ first: 20, after: first.nextCursor });
+```
+
+The cursor carries the boundary row's relevance values as the database rendered them (PostgreSQL's
+text for the value, SQLite's 17 significant digits), with its `orderBy()` values and its identity,
+and the next page compares against them exactly, so rows with equal or nearly equal scores are not
+skipped or repeated at a page boundary. PostgreSQL's float text is exact at its default
+`extra_float_digits` of 1 or above; a session that lowers it gets cursors that can skip or repeat
+nearly tied rows.
+
+The cursor filters the completed match rows after the search has ranked its candidates and taken
+its top `k`, so every page ranks the same candidates `execute()` ranks and no page reaches past the
+top `k`. An approximate `similarTo(..., { approximate: true })` pages the candidates its own
+`execute()` returns, including a short result where the backend's filtered approximate search can
+under-fill (`backend.capabilities.vector.filteredApproximateSearch.guaranteesFullPage` is `false`).
+
+**Writes between pages.** Each page runs the search again. Without writes between pages the walk is
+exact. A write that changes which rows match, or how relevant they are, gives a weaker guarantee
+than keyset pagination of a query without a search. A vector distance and a PostgreSQL
+`ts_rank_cd` rank depend only on their own row, so a row that stays unchanged keeps its place as it
+would in ordinary keyset paging, except that a write can move rows into or out of the top `k`.
+SQLite's BM25 rank depends on statistics of the whole index, and a hybrid score on each row's rank
+among the candidates, so a write anywhere in the searched rows can move unchanged rows across a
+page boundary: such a row can be skipped or read twice. Restart from the first page when a walk
+must reflect one state of the data.
+
+**Refused cursors.** A search's cursor records the search it was issued for: each predicate's query
+text or embedding, `k`, minimum score, metric and approximate retrieval, and the hybrid fusion.
+`paginate()` and `page()` refuse a cursor issued for another search, for a query without a search,
+or by another backend dialect, and a search query's cursor issued by a release before relevance
+keys were part of the cursor, with a `ValidationError` whose issue `code` is
+`SEARCH_CURSOR_MISMATCH`. Start again without a cursor. A query without a search issues and accepts
+the same cursors as before.
+
 ### Recursive traversals are not paginated
 
 `paginate()`, `page()` and `stream()` refuse a query with a recursive traversal (`recursive()`,
@@ -714,7 +767,9 @@ Useful for:
 
 ## Ordering Requirements
 
-Both `paginate()` and `stream()` require an `orderBy()` clause:
+Both `paginate()` and `stream()` require an `orderBy()` clause, except on a full-text, vector or
+hybrid query, which is ordered by relevance (see
+[Paging a full-text, vector or hybrid query](#paging-a-full-text-vector-or-hybrid-query)):
 
 ```typescript
 // Required for pagination

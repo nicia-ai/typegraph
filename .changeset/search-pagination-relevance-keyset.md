@@ -1,0 +1,11 @@
+---
+"@nicia-ai/typegraph": patch
+---
+
+`paginate()`, `page()` (alone and in `store.batchOnce()`) and `stream()` on a full-text, vector or hybrid query now read every row `execute()` returns exactly once, in `execute()`'s order, forward and backward. Before, the keyset cursor held only the `orderBy()` values and the row id and ignored the relevance keys that lead the query's ORDER BY. A page boundary then repeated rows and dropped others whenever relevance and `orderBy()` disagreed. The cursor was also applied to the candidates the search ranks, so every later page took a different top `k` and could return rows `execute()` never selects.
+
+A search's cursor now carries the boundary row's relevance values as the database rendered them (PostgreSQL's text for the value, SQLite's 17 significant digits), so equal and nearly equal scores compare exactly. It is applied to the completed match rows after the search has taken its top `k`, so every page ranks the same candidates as `execute()`. An `orderBy()` is no longer required to page or stream a search, which is ordered by relevance. Rows tied on relevance and every `orderBy()` term now come in row-identity order (start node id, kind for a multi-kind alias, each traversal's edge id) in `execute()` and on every terminal, and the vector leg breaks distance ties by node id, as the full-text leg already did, so which tied match makes the top `k` no longer depends on the engine's row order.
+
+Each page runs the search again. Without writes between pages the walk is exact. Writes between pages give a weaker guarantee than keyset paging of a query without a search where a score depends on other rows (SQLite's BM25, a hybrid score): unchanged rows can then cross a page boundary.
+
+A cursor that cannot position a search is refused with a `ValidationError` whose issue code is `SEARCH_CURSOR_MISMATCH`: one issued for another search (query text, embedding, `k`, minimum score, metric, approximate retrieval or fusion), for a query without a search, or by another backend dialect, and any search query's cursor issued before this release, since those were positioned wrongly. Restart such a walk without a cursor. Cursors of queries without a search are unchanged, byte for byte.

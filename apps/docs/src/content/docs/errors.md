@@ -1897,6 +1897,13 @@ position itself, instead of returning pages that silently lose rows:
 | --- | --- |
 | `RECURSIVE_PAGINATION_UNSUPPORTED` | The query contains a recursive traversal (`recursive()`, `parts()` or `wholes()`). A recursive row has no single edge to extend the start node's keyset cursor with, so the rows of one start node that straddle a page boundary would be dropped. `details.operation` names the refused surface. Read the walk with `execute()` and an explicit `limit()` or `recursive({ maxHops })`, or page the start nodes in a query without the recursive traversal and run the walk for each page. See [Recursive traversals are not paginated](/queries/execute#recursive-traversals-are-not-paginated). |
 
+A cursor that cannot position a full-text, vector or hybrid query is refused with a
+`ValidationError` whose `details.issues[0].code` is `SEARCH_CURSOR_MISMATCH`: a cursor issued for
+another search, for a query without a search, by another backend dialect, or for a search query by
+a release before relevance keys were part of the cursor. A search's cursor passed to a query
+without a search is refused the same way. Start the walk again without a cursor. See
+[Paging a full-text, vector or hybrid query](/queries/execute#paging-a-full-text-vector-or-hybrid-query).
+
 #### Query option codes
 
 The query builder refuses an option it cannot honor with a `ConfigurationError`
