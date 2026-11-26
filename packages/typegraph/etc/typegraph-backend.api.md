@@ -1970,6 +1970,10 @@ export interface DialectAdapter {
     readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
     readonly partitionedRowsJsonArrays?: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string, partitionColumn: string) => SqlFragment;
     readonly quoteIdentifier: (this: void, name: string) => string;
+    readonly relevanceCursorKey: Readonly<{
+        select: (this: void, expression: SqlFragment) => SqlFragment;
+        bind: (this: void, text: string) => string | number | undefined;
+    }>;
     readonly rowValueComparison?: (this: void, operator: ">" | "<", left: readonly SqlFragment[], right: readonly SqlFragment[]) => SqlFragment;
     readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
     readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
