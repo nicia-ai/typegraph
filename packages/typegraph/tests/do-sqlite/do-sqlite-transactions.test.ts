@@ -649,3 +649,56 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
     });
   });
 });
+
+describe("a typed refusal inside a Durable Object transaction", () => {
+  it("does not end the transaction: a missing contribution marker refused after a successful marker read keeps earlier and later writes", async () => {
+    await inObject("missing-marker-refusal", async (_booted, storage) => {
+      const db = drizzle(storage);
+      await db.run(
+        sql.raw("DELETE FROM typegraph_contribution_materializations"),
+      );
+      // A fresh backend, so no marker verdict is cached from the boot.
+      const backend = createSqliteBackend(db, { tables: defaultTables });
+      const node = (id: string) => ({
+        graphId: DocGraph.id,
+        kind: "Doc",
+        id,
+        props: { title: id },
+      });
+      let refusal: unknown;
+      const outcome = await captureRejection(
+        backend.transaction(async (tx) => {
+          await tx.insertNode(node("before"));
+          // The marker SELECT succeeds and finds no row: a typed refusal
+          // the callback catches, not a statement failure.
+          refusal = await captureRejection(
+            requireDeleteFulltext(tx.deleteFulltext)({
+              graphId: DocGraph.id,
+              nodeKind: "SearchableDoc",
+              nodeId: "missing",
+            }),
+          );
+          await tx.insertNode(node("after"));
+        }),
+      );
+      expect({
+        refusal: refusal instanceof Error ? refusal.name : refusal,
+        outcome,
+        nodes: await backend.countNodesByKind({
+          graphId: DocGraph.id,
+          kind: "Doc",
+          excludeDeleted: false,
+        }),
+      }).toEqual({
+        refusal: "StoreNotInitializedError",
+        outcome: undefined,
+        nodes: 2,
+      });
+    });
+  });
+});
+
+function requireDeleteFulltext<T>(member: T | undefined): T {
+  if (member === undefined) throw new Error("deleteFulltext is absent");
+  return member;
+}

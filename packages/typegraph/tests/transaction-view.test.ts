@@ -15,6 +15,7 @@ import { sql } from "drizzle-orm";
 import { drizzle as drizzleSqliteProxy } from "drizzle-orm/sqlite-proxy";
 import { describe, expect, it } from "vitest";
 
+import { createConnectionStatementQueue } from "../src/backend/drizzle/execution/connection-statement-queue";
 import type {
   AnySqliteDatabase,
   SqliteExecutionAdapter,
@@ -24,7 +25,9 @@ import { createTransactionView } from "../src/backend/drizzle/execution/transact
 import { resolveNativeTransactionHandle } from "../src/backend/native-transaction-handle";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import {
+  ConfigurationError,
   TransactionClosedError,
+  TransactionOutcomeUnknownError,
   TransactionRolledBackError,
 } from "../src/errors";
 import { sql as portableSql } from "../src/query/sql-fragment";
@@ -140,7 +143,7 @@ describe("createTransactionView", () => {
 function probedView() {
   const state = { open: true, probes: 0 };
   const view = createTransactionView({
-    transactionState: () => {
+    stateAfterFailure: () => {
       state.probes += 1;
       return state.open ? "open" : "ended";
     },
@@ -224,8 +227,8 @@ describe("createTransactionView after a statement failure", () => {
     ],
   ])(
     "refuses every later statement when the probe %s: no proof the transaction is open",
-    async (_answer, transactionState) => {
-      const view = createTransactionView({ transactionState });
+    async (_answer, stateAfterFailure) => {
+      const view = createTransactionView({ stateAfterFailure });
       const failure = new Error("statement failed");
       await expect(view.admit(rejectsWith(failure))).rejects.toBe(failure);
       await expect(view.admit(() => Promise.resolve())).rejects.toThrow(
@@ -245,7 +248,7 @@ describe("createTransactionView after a statement failure", () => {
       const answer = createGate();
       const events: string[] = [];
       const view = createTransactionView({
-        transactionState: async () => {
+        stateAfterFailure: async () => {
           events.push("probe asked");
           await answer.opened;
           events.push("probe answered");
@@ -293,6 +296,155 @@ describe("createTransactionView after a statement failure", () => {
     ).rejects.toThrow("statement failed");
     await expect(view.admit(() => Promise.resolve("row"))).resolves.toBe("row");
     await expect(view.drainAndClose()).resolves.toBeUndefined();
+  });
+});
+
+/** A view whose engine reports the transaction open until `end()`. */
+function engineView() {
+  const state = { open: true, reads: 0, afterFailure: 0 };
+  const view = createTransactionView({
+    engineState: () => {
+      state.reads += 1;
+      return state.open ? "open" : "ended";
+    },
+    stateAfterFailure: () => {
+      state.afterFailure += 1;
+      return "open";
+    },
+  });
+  return {
+    view,
+    state,
+    end: () => {
+      state.open = false;
+    },
+  };
+}
+
+describe("createTransactionView with the engine's own state", () => {
+  it("reads the engine before every statement starts", async () => {
+    const { view, state } = engineView();
+    await view.admit(() => Promise.resolve());
+    await view.admit(() => Promise.resolve());
+    expect(state.reads).toBe(2);
+  });
+
+  it("refuses a statement after an end it never observed with TransactionOutcomeUnknownError, runs nothing, and makes it the outcome", async () => {
+    const { view, end } = engineView();
+    await view.admit(() => Promise.resolve());
+    // A statement the view never sees (the native handle) ends the
+    // transaction.
+    end();
+    let ran = false;
+    const later = view.admit(() => {
+      ran = true;
+      return Promise.resolve();
+    });
+    await expect(later).rejects.toThrow(TransactionOutcomeUnknownError);
+    await expect(later).rejects.toMatchObject({
+      details: { reason: "transaction-ended" },
+    });
+    expect(ran).toBe(false);
+    await expect(view.drainAndClose()).resolves.toBeInstanceOf(
+      TransactionOutcomeUnknownError,
+    );
+  });
+
+  it("finds at the boundary an end that no later statement found", async () => {
+    const { view, end } = engineView();
+    await view.admit(() => Promise.resolve());
+    end();
+    await expect(view.drainAndClose()).resolves.toBeInstanceOf(
+      TransactionOutcomeUnknownError,
+    );
+  });
+
+  it("attributes an end found right after a failure to that failure, asking the engine rather than the after-failure probe", async () => {
+    const { view, state, end } = engineView();
+    const failure = new Error("trigger raised ROLLBACK");
+    await expect(
+      view.admit(() => {
+        end();
+        return Promise.reject(failure);
+      }),
+    ).rejects.toBe(failure);
+    const later = view.admit(() => Promise.resolve());
+    await expect(later).rejects.toThrow(TransactionRolledBackError);
+    await expect(later).rejects.toMatchObject({ cause: failure });
+    expect(state.afterFailure).toBe(0);
+  });
+
+  it("refuses when the engine read throws: no proof the transaction is open", async () => {
+    const view = createTransactionView({
+      engineState: () => {
+        throw new Error("the database is closed");
+      },
+    });
+    await expect(view.admit(() => Promise.resolve())).rejects.toThrow(
+      TransactionOutcomeUnknownError,
+    );
+  });
+});
+
+describe("createTransactionView and typed refusals", () => {
+  it("never asks the after-failure probe for a TypeGraph refusal raised after a statement succeeded", async () => {
+    let asked = 0;
+    const view = createTransactionView({
+      stateAfterFailure: () => {
+        asked += 1;
+        return "unknown";
+      },
+    });
+    const refusal = new ConfigurationError("marker missing");
+    await expect(view.admit(() => Promise.reject(refusal))).rejects.toBe(
+      refusal,
+    );
+    await expect(view.admit(() => Promise.resolve("row"))).resolves.toBe("row");
+    expect(asked).toBe(0);
+    await expect(view.drainAndClose()).resolves.toBeUndefined();
+  });
+});
+
+describe("two views of one connection", () => {
+  it("start their statements in submission order across views", async () => {
+    const queue = createConnectionStatementQueue();
+    const first = createTransactionView({ queue });
+    const second = createTransactionView({ queue });
+    const release = createGate();
+    const started: string[] = [];
+    function statement(name: string, held = false): () => Promise<void> {
+      return async () => {
+        started.push(name);
+        if (held) await release.opened;
+      };
+    }
+    const a1 = first.admit(statement("A1", true));
+    const a2 = first.admit(statement("A2"));
+    const b1 = second.admit(statement("B1"));
+    expect(started).toEqual(["A1"]);
+    release.open();
+    await Promise.all([a1, a2, b1]);
+    expect(started).toEqual(["A1", "A2", "B1"]);
+  });
+
+  it("waits at one view's boundary for a statement the other view submitted before it", async () => {
+    const queue = createConnectionStatementQueue();
+    const owner = createTransactionView({ queue });
+    const adopted = createTransactionView({ queue });
+    const release = createGate();
+    let adoptedSettled = false;
+    void adopted
+      .admit(async () => {
+        await release.opened;
+      })
+      .then(() => {
+        adoptedSettled = true;
+      });
+    const closing = owner.drainAndClose();
+    expect(await hasSettled(closing)).toBe(false);
+    release.open();
+    await closing;
+    expect(adoptedSettled).toBe(true);
   });
 });
 

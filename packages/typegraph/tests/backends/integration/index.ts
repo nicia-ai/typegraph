@@ -150,6 +150,7 @@ export { registerTransactionBoundaryIntegrationTests } from "./transaction-bound
 export { registerTransactionCommitOutcomeIntegrationTests } from "./transaction-commit-outcome";
 export { registerTransactionReceiptIntegrationTests } from "./transaction-receipt";
 export { registerTransactionSessionHazardTests } from "./transaction-session-hazards";
+export { registerTransactionStatementAdmissionTests } from "./transaction-statement-admission";
 export { registerTransactionPortCallBudgetTests } from "./transaction-statement-budget";
 export { registerTraversalLimitPushdownIntegrationTests } from "./traversal-limit-pushdown";
 export { registerTraversalIntegrationTests } from "./traversals";

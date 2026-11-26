@@ -25,6 +25,10 @@
  *
  * Edge-safe: no `node:*` imports (loaded on Workers via neon-serverless).
  */
+import {
+  connectionStatementQueue,
+  createConnectionStatementQueue,
+} from "./connection-statement-queue";
 import { createTransactionView } from "./transaction-view";
 import {
   type CompiledSqlQuery,
@@ -57,50 +61,6 @@ export type SerialExecutionAdapter = SqlExecutionAdapter &
     drainAndClose: () => Promise<void>;
   }>;
 
-type StatementQueue = Readonly<{
-  /** Runs tasks one at a time, in the order they were submitted. */
-  enqueue: <T>(task: () => Promise<T>) => Promise<T>;
-  drain: () => Promise<void>;
-}>;
-
-/**
- * Swallows a statement's outcome so the queue's tail always fulfills. The
- * caller owns the result promise; the tail only tracks completion, and an
- * untouched rejection here would surface as an unhandled rejection.
- */
-function ignoreOutcome(): void {
-  // Intentionally empty: see above.
-}
-
-function createStatementQueue(): StatementQueue {
-  // Always fulfilled: a failed statement must not strand its successors, and
-  // an untouched rejection here would surface as an unhandled rejection.
-  let tail: Promise<void> = Promise.resolve();
-
-  return {
-    enqueue<T>(task: () => Promise<T>): Promise<T> {
-      // Chained synchronously, so queue order is submission order.
-      const result = tail.then(() => task());
-      tail = result.then(ignoreOutcome, ignoreOutcome);
-      return result;
-    },
-
-    async drain(): Promise<void> {
-      await tail;
-    },
-  };
-}
-
-const transactionQueues = new WeakMap<object, StatementQueue>();
-
-function queueForTransaction(owner: object): StatementQueue {
-  const existing = transactionQueues.get(owner);
-  if (existing !== undefined) return existing;
-  const queue = createStatementQueue();
-  transactionQueues.set(owner, queue);
-  return queue;
-}
-
 /**
  * Wraps `adapter` so at most one statement is in flight on its connection.
  *
@@ -115,23 +75,26 @@ export function createSerialExecutionAdapter(
   adapter: SqlExecutionAdapter,
   transactionOwner?: object,
 ): SerialExecutionAdapter {
-  const queue =
-    transactionOwner === undefined ?
-      createStatementQueue()
-    : queueForTransaction(transactionOwner);
-  const view = createTransactionView();
+  // Every view of one transaction's connection shares the connection's
+  // queue, so two views never reorder each other's statements.
+  const view = createTransactionView({
+    queue:
+      transactionOwner === undefined ?
+        createConnectionStatementQueue()
+      : connectionStatementQueue(transactionOwner),
+  });
   const { executeCompiled, prepare } = adapter;
 
   function enqueue<T>(task: () => Promise<T>): Promise<T> {
-    return view.admit(() => queue.enqueue(task));
+    return view.admit(task);
   }
 
   return {
     async drainAndClose(): Promise<void> {
-      // Close this transaction's view before draining the shared connection.
-      // A later transaction may reuse that connection with a fresh view.
+      // Closes this transaction's view, then waits for every statement
+      // submitted on the connection. A later transaction may reuse that
+      // connection with a fresh view.
       await view.drainAndClose();
-      await queue.drain();
     },
 
     compile(query: ExecutableSql): CompiledSqlQuery {
