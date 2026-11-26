@@ -731,6 +731,18 @@ Fulltext predicates must appear at top level or inside AND groups. They
 rewrite query structure (adding a CTE and ORDER BY) in a way that isn't
 compatible with disjunction or negation semantics.
 
+### Not on a Recursive Traversal
+
+`$fulltext.matches()` on an alias a recursive traversal (`recursive()`, `parts()` or `wholes()`)
+walks from or to is refused with `UnsupportedPredicateError` (`details.reason` is
+`"recursive_traversal"`) when the query is compiled, before any statement runs. The predicate selects
+a ranked top-k match set and orders the rows by relevance, and a recursive statement has no relevance
+ranking to apply either through. A one-hop traversal (`maxHops: 1`, with no `depth`, `path` or
+`stopExpansion()`) that is the query's only traversal compiles to a fixed step and applies the
+predicate, and so does a fixed traversal chained with a recursive one, on its own aliases. Otherwise,
+run the search in a separate query and constrain the walk with the matched ids (`id.in(ids)`).
+`.similarTo()` is refused the same way.
+
 ### Tokenizer Is Fixed on SQLite
 
 FTS5 tokenizer options are set at CREATE VIRTUAL TABLE time. TypeGraph

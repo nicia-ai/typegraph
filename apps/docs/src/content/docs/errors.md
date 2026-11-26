@@ -2427,6 +2427,12 @@ try {
 }
 ```
 
+It is also thrown, when the query is compiled, for a `$fulltext.matches()` or `.similarTo()`
+predicate on an alias a recursive traversal walks from or to
+(`details.reason` is `"recursive_traversal"`; `details.predicate` is `"fulltext_match"` or
+`"vector_similarity"` and `details.alias` names the alias). See
+[Recursive traversal limitations](/queries/recursive#limitations).
+
 ## Transaction Errors
 
 ### `TransactionClosedError`
@@ -2855,7 +2861,7 @@ try {
 | `SCHEMA_MISMATCH` | `SchemaMismatchError` | system | Database schema mismatch |
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |
 | `BASE_SCHEMA_MIGRATION_REQUIRED` | `BaseSchemaMigrationError` | system | Deployment-wide base storage requires privileged adoption |
-| `UNSUPPORTED_PREDICATE` | `UnsupportedPredicateError` | system | Predicate not supported. Also raised, before any SQL is sent, when a `whereNode()` or `whereEdge()` predicate reads an alias other than its own (`details.targetAlias`, `details.readAlias`); compare aliases in `where()` and correlate subqueries with `$exists()` / `$scalar()` |
+| `UNSUPPORTED_PREDICATE` | `UnsupportedPredicateError` | system | Predicate not supported. Also raised, before any SQL is sent, when a `whereNode()` or `whereEdge()` predicate reads an alias other than its own (`details.targetAlias`, `details.readAlias`); compare aliases in `where()` and correlate subqueries with `$exists()` / `$scalar()`; and for a `$fulltext.matches()` or `.similarTo()` predicate on an alias a recursive traversal walks from or to (`details.reason` is `"recursive_traversal"`) |
 | `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation, or `clearGraphPreservingContributionMaterializations` for `store.clear({ preserveContributionMaterializations: true })` on a custom backend without that member (refused before anything is deleted) |
 | `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |
 | `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |

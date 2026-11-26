@@ -729,6 +729,14 @@ For the whole-plus-parts *export* shape (rather than a query result), see
   edge properties remain selectable when fixed hops and recursion appear in the same query.
 - **Recursive edges are not materialized in the result.** Qualified paths expose edge references,
   but selected recursive edge fields are refused.
+- **Relevance predicates are refused on recursive aliases.** `$fulltext.matches()` and
+  `.similarTo()` on an alias a recursive traversal walks from or to are refused with
+  `UnsupportedPredicateError` (`details.reason` is `"recursive_traversal"`) when the query is
+  compiled, before any statement runs: they select a ranked top-k set and order rows by relevance,
+  which a recursive statement cannot apply. A one-hop traversal (`maxHops: 1`, with no `depth`,
+  `path` or `stopExpansion()`) that is the query's only traversal compiles to a fixed step and
+  applies them, as does a fixed traversal chained with a recursive one, on its own aliases.
+  Otherwise, search in a separate query and constrain the walk with the matched ids.
 
 ## Real-World Examples
 
