@@ -115,10 +115,13 @@ export const compareAndSetAbsent: unique symbol = typeGraphGlobalSymbol(
 /** Explicitly requires that a compare-and-set property is not stored. */
 export type CompareAndSetAbsent = typeof compareAndSetAbsent;
 
-/** Scalar-only exact predicates accepted by {@link NodeCollection.compareAndSet}. */
+/**
+ * Scalar-only exact predicates accepted by {@link NodeCollection.compareAndSet}.
+ * A `Date` is compared as the ISO text the store writes for it.
+ */
 export type CompareAndSetExpected<Props> = Readonly<{
   [Property in keyof Props]?:
-    | Extract<Exclude<Props[Property], undefined>, JsonScalar>
+    | Extract<Exclude<Props[Property], undefined>, JsonScalar | Date>
     | CompareAndSetAbsent;
 }>;
 

@@ -1,5 +1,6 @@
 /**
- * Stored date text, revived to the `Date` a kind's schema accepts.
+ * Stored date text and the `Date` a kind's schema accepts: the one owner of
+ * both directions.
  *
  * The store persists props as JSON, so a `z.date()` property's `Date` is
  * written as its `toISOString()` text and read back as that text. A path that
@@ -35,6 +36,15 @@
  * typing (`schemaIntrospectorFor`), which follows a pipe to its output to
  * decide where a stored value compares as a date: `z.string().pipe(z.coerce.date())`
  * is a date there, but its input is a string that a revived `Date` would fail.
+ *
+ * The same decision serves every document that carries props in their stored
+ * form: an interchange document `exportGraph` wrote, which `importGraph`
+ * revives before parsing it through the kind's schema.
+ *
+ * The opposite direction — a validated `Date` to the stored text — is
+ * {@link encodeStoredDates}, for a write that hands the backend JSON rather
+ * than letting `JSON.stringify` encode the `Date` (the set-update patch and
+ * the `compareAndSet` expectation).
  *
  * Reads are unchanged: they return the stored text.
  */
@@ -142,4 +152,36 @@ export function reviveStoredDateProps(
   props: Record<string, unknown>,
 ): Record<string, unknown> {
   return reviveStoredDates(schema, props) as Record<string, unknown>;
+}
+
+/**
+ * `value`, as validated by a kind's schema, with every `Date` it holds —
+ * itself, an array element, or a plain-object value at any depth — replaced
+ * by the text the store persists for it: `Date.prototype.toJSON`, which is
+ * exactly what `JSON.stringify` writes for a `Date` on the single-row write
+ * paths, so a set update's encoded patch stores the same bytes. The inverse
+ * of {@link reviveStoredDates} for every `Date` the store accepts (the
+ * validation boundary refuses an invalid or unstorable `Date` first).
+ *
+ * Every other value is returned untouched — a `Map`, a class instance or a
+ * non-finite number is left for the caller's JSON check to refuse — and
+ * `value` itself is returned when it holds no `Date`.
+ */
+export function encodeStoredDates(value: unknown): unknown {
+  if (value instanceof Date) return value.toJSON();
+  if (Array.isArray(value)) {
+    const items = value as readonly unknown[];
+    const encoded = items.map((item) => encodeStoredDates(item));
+    return encoded.some((item, index) => item !== items[index]) ? encoded : (
+        value
+      );
+  }
+  if (!isPlainObject(value)) return value;
+  const entries = Object.entries(value).map(
+    ([key, element]) => [key, encodeStoredDates(element)] as const,
+  );
+  const changed = entries.some(([key, element]) => element !== value[key]);
+  // `Object.fromEntries` defines own data properties, so a `__proto__` key
+  // stays a property rather than reaching the setter.
+  return changed ? Object.fromEntries(entries) : value;
 }

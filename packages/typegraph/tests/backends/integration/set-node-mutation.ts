@@ -340,7 +340,7 @@ export function registerSetNodeMutationIntegrationTests(
             patch: { title: "Updated document" },
           } as never),
         ).rejects.toThrow(
-          'compareAndSet() expected property "metadata" must be a JSON scalar or compareAndSetAbsent',
+          'compareAndSet() expected property "metadata" must be a JSON scalar, a Date, or compareAndSetAbsent',
         );
       }
     });

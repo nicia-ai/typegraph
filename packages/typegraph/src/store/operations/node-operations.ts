@@ -228,7 +228,10 @@ import {
   unsupportedResolvedMutationSet,
 } from "../resolved-mutation-set";
 import { type NodeRow, rowToEdge, rowToNode } from "../row-mappers";
-import { reviveStoredDateProps } from "../stored-date-revival";
+import {
+  encodeStoredDates,
+  reviveStoredDateProps,
+} from "../stored-date-revival";
 import {
   type BulkOperationHookContext,
   compareAndSetAbsent,
@@ -6447,9 +6450,14 @@ function normalizeCompareAndSetExpectations(
       expected[property] = { kind: "absent" };
       continue;
     }
-    if (value === undefined || (typeof value === "object" && value !== null)) {
+    // A `Date` is the one object an expectation may state: it is compared as
+    // the stored text the store writes for it, encoded after parsing below.
+    if (
+      value === undefined ||
+      (typeof value === "object" && value !== null && !(value instanceof Date))
+    ) {
       throw new ValidationError(
-        `compareAndSet() expected property "${property}" must be a JSON scalar or compareAndSetAbsent`,
+        `compareAndSet() expected property "${property}" must be a JSON scalar, a Date, or compareAndSetAbsent`,
         {
           entityType: "node",
           kind,
@@ -6458,7 +6466,7 @@ function normalizeCompareAndSetExpectations(
             {
               path: property,
               message:
-                "Expected a string, number, boolean, null, or compareAndSetAbsent",
+                "Expected a string, number, boolean, null, Date, or compareAndSetAbsent",
             },
           ],
         },
@@ -6473,7 +6481,7 @@ function normalizeCompareAndSetExpectations(
     { kind, operation: "update" },
   );
   for (const property of Object.keys(scalarExpectedInput)) {
-    const value = parsedExpected[property];
+    const value = encodeStoredDates(parsedExpected[property]);
     if (value === undefined || (typeof value === "object" && value !== null)) {
       throw new ValidationError(
         `compareAndSet() expected property "${property}" did not resolve to a JSON scalar`,
@@ -6576,8 +6584,11 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
       unsetProperties.push(property);
       continue;
     }
-    assertJsonValue(value, property, `Node "${kind}" ${operation} patch`);
-    patch[property] = value as JsonValue;
+    // The backend receives JSON, so a validated `Date` is encoded here as the
+    // text every other write stores for it; anything else non-JSON is refused.
+    const encoded = encodeStoredDates(value);
+    assertJsonValue(encoded, property, `Node "${kind}" ${operation} patch`);
+    patch[property] = encoded as JsonValue;
   }
   if (Object.keys(patch).length === 0 && unsetProperties.length === 0) {
     throw new ValidationError(

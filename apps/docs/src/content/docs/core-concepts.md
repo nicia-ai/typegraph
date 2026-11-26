@@ -131,6 +131,16 @@ property as a `Date`. The `getOrCreate…` forms parse the properties you state
 as a create first, so a property you omit that declares a `.default()` or
 `.catch()` takes that value rather than the stored one.
 
+Every write stores a `Date` you state the same way. `updateWhere()` and
+`compareAndSet()` accept a `Date` in their `patch`, at any depth of a nested
+object or array, and store the same text `create()` and `update()` store. A
+`compareAndSet()` `expected` value may be a `Date`; it matches when the stored
+text is that `Date`'s ISO text. `importGraph()` reads the stored text an export
+wrote back as a `Date` by the same rule as the updates above
+([Date properties in interchange](/interchange#date-properties)). Applying a
+[graph merge](/graph-merge) plan does not yet do this: a plan whose node or edge write holds a stored
+date is refused as invalid.
+
 ### Node Operations
 
 ```typescript

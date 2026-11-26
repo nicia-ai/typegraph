@@ -140,6 +140,20 @@ write. Any other value fails `GraphDataSchema` with a `ValidationError` before
 anything is written. A `Date` in a row's properties outside those years refuses
 that row, reported in `errors`.
 
+### Date properties
+
+An interchange document carries properties in the form the store holds them,
+so a `z.date()` property is the canonical ISO-8601 text the store wrote for its
+`Date` (`2024-01-01T00:00:00.000Z`), and that is what `exportGraph` writes.
+Import turns that text back into a `Date` before it parses the row through the
+kind's schema, so an export re-imports unchanged, including a date inside
+`.optional()`, `.nullable()`, `.default()` and similar wrappers, a nested
+`z.object()` or a `z.array()`. Only that exact text is converted, and only where
+the schema accepts nothing but a `Date` (the rule
+[Date properties](/core-concepts#date-properties) describes for updates). Any
+other string for a date property, such as `2024-01-01` or a timestamp without
+milliseconds, still fails the schema and refuses the row, reported in `errors`.
+
 ### Format Version Compatibility
 
 Exports always write `formatVersion: "3.0"`. The read side — both

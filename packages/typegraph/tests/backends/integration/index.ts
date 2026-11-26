@@ -37,6 +37,7 @@ export { registerContributionDiagnosticIntegrationTests } from "./contribution-d
 export { registerCrossBackendConsistencyTests } from "./cross-backend";
 export { registerDatabaseExpressionQueryIntegrationTests } from "./database-expression-queries";
 export { registerDatePredicateIntegrationTests } from "./date-predicates";
+export { registerDatePropertyWriteIntegrationTests } from "./date-property-writes";
 export { registerDurableEdgeMatchIdentityIntegrationTests } from "./durable-edge-match-identity";
 export { registerEdgeAcyclicityIntegrationTests } from "./edge-acyclicity";
 export { registerEdgeBulkHardDeleteIntegrationTests } from "./edge-bulk-hard-delete";

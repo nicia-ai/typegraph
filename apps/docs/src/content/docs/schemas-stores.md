@@ -1060,11 +1060,12 @@ if (!reopened) {
 }
 ```
 
-Expected values are JSON scalars (`string`, `number`, `boolean`, or `null`).
+Expected values are JSON scalars (`string`, `number`, `boolean`, or `null`) or a
+`Date`, which matches the ISO text the store wrote for it.
 Use the `compareAndSetAbsent` marker (imported from `@nicia-ai/typegraph/store`) to require that an optional
 property is not stored. `undefined` is refused rather than treated as absence,
-because it can disappear while an object is assembled or serialized; arrays and
-objects are also refused so every backend uses the same exact scalar comparison.
+because it can disappear while an object is assembled or serialized; arrays and other
+objects are refused so every backend uses the same exact scalar comparison.
 Expected predicates are re-checked directly on the target row by the outer
 `UPDATE`, so a concurrent writer cannot satisfy the guard and then change the
 row before the patch lands.
