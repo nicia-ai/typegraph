@@ -4674,6 +4674,14 @@ type MisassignedEdgeEndpointRow = Readonly<{
     toId: string;
 }>;
 
+// @public (undocumented)
+const NATIVE_TRANSACTION_STATE: unique symbol;
+
+// @public
+type NativeTransactionState = Readonly<{
+    [NATIVE_TRANSACTION_STATE]: true;
+}>;
+
 // @public
 type NeighborNodeOrderField<G extends GraphDef> = {
     [K in keyof G["nodes"] & string]: Exclude<keyof Node<G["nodes"][K]["type"]>, "id" | "kind" | "meta"> & string;
@@ -7794,6 +7802,7 @@ type TransactionSession<Engine extends TransactionBackend = TransactionBackend> 
     [SESSION_TRANSACTION]: OperationScoped<Engine>;
 } & Readonly<{
     heldGraphWriteLocks: Map<string, Promise<GraphWriteLock>>;
+    native: NativeTransactionState;
 }>>;
 
 // @public (undocumented)
