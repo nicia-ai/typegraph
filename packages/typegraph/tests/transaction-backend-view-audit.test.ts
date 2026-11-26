@@ -13,6 +13,7 @@
  * once its transaction has ended.
  */
 import Database from "better-sqlite3";
+import { getTableName } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as sqliteVec from "sqlite-vec";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -32,6 +33,14 @@ import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import type { GraphBackend, TransactionBackend } from "../src/backend/types";
 import { ConfigurationError, TransactionClosedError } from "../src/errors";
 import { sqliteVecStrategy } from "../src/query/dialect/vector/sqlite-vec-strategy";
+import { sql as portableSql } from "../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  asCompiledSelectSql,
+  asCompiledStatementSql,
+  asCompiledTemporaryStatementSql,
+} from "../src/query/sql-intent";
+import type { SerializedSchema } from "../src/schema/types";
 import { requireDefined } from "../src/utils/presence";
 import {
   setupSharedPgliteEngine,
@@ -261,32 +270,6 @@ function routeMismatches(
   return [...unrouted, ...misrouted];
 }
 
-describe("transaction backend members", () => {
-  let engine: SharedPgliteEngine;
-
-  beforeAll(async () => {
-    engine = await setupSharedPgliteEngine();
-  });
-
-  afterAll(async () => {
-    await engine.dispose();
-  });
-
-  it("routes every member a better-sqlite3 transaction backend carries", async () => {
-    const { backend } = createLocalSqliteBackend();
-    const tx = await escapedTransaction(backend);
-    expect(routeMismatches(tx, "sqlite")).toEqual([]);
-    await backend.close();
-  });
-
-  it("routes every member a PGlite transaction backend carries", async () => {
-    const backend = engine.makeBackend();
-    await backend.bootstrapTables?.();
-    const tx = await escapedTransaction(backend);
-    expect(routeMismatches(tx, "postgres")).toEqual([]);
-  });
-});
-
 /**
  * A better-sqlite3 connection whose statement executions are counted from
  * the moment {@link DriverSpy.startCounting} is called. Every statement a
@@ -297,6 +280,7 @@ type DriverSpy = Readonly<{
   backend: GraphBackend;
   startCounting: () => void;
   executed: () => readonly string[];
+  close: () => void;
 }>;
 
 const STATEMENT_METHODS = new Set(["run", "all", "get", "iterate"]);
@@ -339,6 +323,9 @@ function createSpiedSqliteBackend(path: string): DriverSpy {
       counting = true;
     },
     executed: () => executed,
+    close: () => {
+      client.close();
+    },
   };
 }
 
@@ -404,6 +391,490 @@ function outcome(pending: Promise<unknown>): Promise<string> {
   );
 }
 
+/**
+ * A transaction backend as the audit calls it: every member the SQLite
+ * transaction backend is built with, the schema-write ones included, plus the
+ * hybrid search assembled beside it.
+ */
+type AuditedTransaction = InternalOperationBackend &
+  Pick<GraphBackend, "hybridSearch">;
+
+/** One call into a member, with arguments that reach its statement path. */
+type MemberCall = (tx: AuditedTransaction) => Promise<unknown>;
+
+/** The members better-sqlite3 routes through the transaction's view. */
+type SqliteViewMember = {
+  [
+    M in Member
+  ]: (typeof TRANSACTION_BACKEND_MEMBER_ROUTES)[M]["sqlite"] extends "view" ? M
+  : never;
+}[Member];
+
+/** A cardinality-claim request for the audit graph. */
+const CLAIM = {
+  graphId: graph.id,
+  edgeKind: "auditLink",
+  edgeId: "e1",
+  fromKind: "AuditDoc",
+  fromId: "d1",
+  toKind: "AuditDoc",
+  toId: "d2",
+  direction: "source",
+  cardinality: "one",
+} as const;
+
+const NODE = {
+  graphId: graph.id,
+  kind: "AuditDoc",
+  id: "d1",
+  props: { title: "audit" },
+} as const;
+
+const EDGE = {
+  graphId: graph.id,
+  id: "e1",
+  kind: "auditLink",
+  fromKind: "AuditDoc",
+  fromId: "d1",
+  toKind: "AuditDoc",
+  toId: "d2",
+  props: {},
+} as const;
+
+const SCHEMA_FENCE = { graphId: graph.id, expectedVersion: 1 } as const;
+
+const UNIQUE = {
+  graphId: graph.id,
+  nodeKind: "AuditDoc",
+  constraintName: "audit_title",
+  key: "audit",
+  nodeId: "d1",
+  concreteKind: "AuditDoc",
+} as const;
+
+/** Candidate ids for the set-based node updates. */
+function candidateIds() {
+  return asCompiledSelectSql(
+    portableSql`SELECT id FROM ${portableSql.identifier(getTableName(tables.nodes))} WHERE graph_id = ${graph.id}`,
+  );
+}
+
+/**
+ * For every member better-sqlite3 routes through the view, one call — or,
+ * for a member that is a bag of functions, one call per function that issues
+ * a statement — with valid arguments for the audit graph. A member added to
+ * the routes as `view` does not compile here until it has a call.
+ */
+const MEMBER_CALLS = {
+  insertNode: (tx) => tx.insertNode(NODE),
+  insertNodeIfAbsent: (tx) => requireDefined(tx.insertNodeIfAbsent)(NODE),
+  insertNodeWithSchemaFence: (tx) =>
+    requireDefined(tx.insertNodeWithSchemaFence)(NODE, SCHEMA_FENCE),
+  insertNodeIfAbsentWithSchemaFence: (tx) =>
+    requireDefined(tx.insertNodeIfAbsentWithSchemaFence)(NODE, SCHEMA_FENCE),
+  commands: {
+    execute: (tx) =>
+      tx.commands.execute(
+        {
+          kind: "node.create",
+          plan: {
+            entity: "node",
+            params: NODE,
+            idGenerated: false,
+            mode: { kind: "ordinary" },
+            claims: [],
+            projections: [],
+          },
+        },
+        { session: "transaction", coordination: "none" },
+      ),
+  },
+  insertNodeNoReturn: (tx) => requireDefined(tx.insertNodeNoReturn)(NODE),
+  insertNodesBatch: (tx) => requireDefined(tx.insertNodesBatch)([NODE]),
+  insertNodesBatchReturning: (tx) =>
+    requireDefined(tx.insertNodesBatchReturning)([NODE]),
+  updateNode: (tx) => tx.updateNode(NODE),
+  updateResolvedNodesBatch: (tx) =>
+    requireDefined(tx.updateResolvedNodesBatch)({
+      entries: [{ ...NODE, expectedVersion: 1 }],
+    }),
+  compareAndSetNode: (tx) =>
+    requireDefined(tx.compareAndSetNode)({
+      operation: "compareAndSet",
+      graphId: graph.id,
+      kind: "AuditDoc",
+      patch: { title: "patched" },
+      candidateIds: candidateIds(),
+      candidateIdColumn: "id",
+      expected: { title: { kind: "value", value: "audit" } },
+    }),
+  updateNodeSet: (tx) =>
+    requireDefined(tx.updateNodeSet)({
+      operation: "updateWhere",
+      graphId: graph.id,
+      kind: "AuditDoc",
+      patch: { title: "patched" },
+      candidateIds: candidateIds(),
+      candidateIdColumn: "id",
+    }),
+  deleteNode: (tx) => tx.deleteNode(NODE),
+  hardDeleteNode: (tx) => tx.hardDeleteNode(NODE),
+  hardDeleteNodesBatch: (tx) =>
+    requireDefined(tx.hardDeleteNodesBatch)({
+      graphId: graph.id,
+      kind: "AuditDoc",
+      ids: ["d1"],
+    }),
+  lockNodes: (tx) => tx.lockNodes(graph.id, "AuditDoc", ["d1"], "delete"),
+  getNode: (tx) => tx.getNode(graph.id, "AuditDoc", "d1"),
+  getNodes: (tx) => requireDefined(tx.getNodes)(graph.id, "AuditDoc", ["d1"]),
+  findNodesByKind: (tx) =>
+    tx.findNodesByKind({ graphId: graph.id, kind: "AuditDoc" }),
+  findNodesAcrossKinds: (tx) =>
+    requireDefined(tx.findNodesAcrossKinds)({
+      graphId: graph.id,
+      kinds: ["AuditDoc"],
+      limit: 1,
+    }),
+  countNodesByKind: (tx) =>
+    tx.countNodesByKind({ graphId: graph.id, kind: "AuditDoc" }),
+  insertEdge: (tx) => tx.insertEdge(EDGE),
+  insertEdgeNoReturn: (tx) => requireDefined(tx.insertEdgeNoReturn)(EDGE),
+  insertEdgesBatch: (tx) => requireDefined(tx.insertEdgesBatch)([EDGE]),
+  insertEdgesBatchReturning: (tx) =>
+    requireDefined(tx.insertEdgesBatchReturning)([EDGE]),
+  insertEdgesDurableBatchReturning: (tx) =>
+    requireDefined(tx.insertEdgesDurableBatchReturning)([
+      { ...EDGE, matchIdentity: { name: "audit", key: "k" } },
+    ]),
+  updateEdge: (tx) => tx.updateEdge(EDGE),
+  deleteEdge: (tx) => tx.deleteEdge(EDGE),
+  deleteEdgesBatch: (tx) =>
+    requireDefined(tx.deleteEdgesBatch)({ graphId: graph.id, ids: ["e1"] }),
+  hardDeleteEdge: (tx) => tx.hardDeleteEdge(EDGE),
+  hardDeleteEdgesBatch: (tx) =>
+    requireDefined(tx.hardDeleteEdgesBatch)({ graphId: graph.id, ids: ["e1"] }),
+  getEdge: (tx) => tx.getEdge(graph.id, "e1"),
+  getEdges: (tx) => requireDefined(tx.getEdges)(graph.id, ["e1"]),
+  countEdgesAtEndpoint: (tx) =>
+    tx.countEdgesAtEndpoint({
+      graphId: graph.id,
+      edgeKind: "auditLink",
+      endpoint: "from",
+      endpointKind: "AuditDoc",
+      endpointId: "d1",
+    }),
+  edgeExistsBetween: (tx) => tx.edgeExistsBetween(EDGE_BETWEEN),
+  findEdgesConnectedTo: (tx) =>
+    tx.findEdgesConnectedTo({
+      graphId: graph.id,
+      nodeKind: "AuditDoc",
+      nodeId: "d1",
+    }),
+  findEdgesConnectedToNodes: (tx) =>
+    requireDefined(tx.findEdgesConnectedToNodes)({
+      graphId: graph.id,
+      nodeKind: "AuditDoc",
+      nodeIds: ["d1"],
+    }),
+  findEdgesByKind: (tx) =>
+    tx.findEdgesByKind({ graphId: graph.id, kind: "auditLink" }),
+  findActiveEdgesBySourceV1: (tx) =>
+    requireDefined(tx.findActiveEdgesBySourceV1)({
+      graphId: graph.id,
+      edgeKind: "auditLink",
+      fromKind: "AuditDoc",
+      fromId: "d1",
+    }),
+  findEdgesByMatchIdentity: (tx) =>
+    requireDefined(tx.findEdgesByMatchIdentity)({
+      graphId: graph.id,
+      identities: [{ kind: "auditLink", name: "audit", key: "k" }],
+    }),
+  findEdgesAcrossKinds: (tx) =>
+    requireDefined(tx.findEdgesAcrossKinds)({
+      graphId: graph.id,
+      kinds: ["auditLink"],
+      limit: 1,
+    }),
+  findEdgesByEndpointSet: (tx) =>
+    requireDefined(tx.findEdgesByEndpointSet)({
+      graphId: graph.id,
+      kind: "auditLink",
+      side: "from",
+      endpointKind: "AuditDoc",
+      endpointIds: ["d1"],
+    }),
+  findEdgesByHeterogeneousEndpointSet: (tx) =>
+    requireDefined(tx.findEdgesByHeterogeneousEndpointSet)({
+      graphId: graph.id,
+      side: "from",
+      endpoints: [{ kind: "AuditDoc", id: "d1" }],
+      edgeKinds: ["auditLink"],
+    }),
+  countEdgesByKind: (tx) =>
+    tx.countEdgesByKind({ graphId: graph.id, kind: "auditLink" }),
+  insertUnique: (tx) => tx.insertUnique(UNIQUE),
+  insertUniqueBatch: (tx) => requireDefined(tx.insertUniqueBatch)([UNIQUE]),
+  deleteUnique: (tx) => tx.deleteUnique(UNIQUE),
+  hardDeleteUniquesByNodeIds: (tx) =>
+    requireDefined(tx.hardDeleteUniquesByNodeIds)({
+      graphId: graph.id,
+      concreteKind: "AuditDoc",
+      nodeIds: ["d1"],
+    }),
+  hardDeleteUniquesByConcreteKind: (tx) =>
+    requireDefined(tx.hardDeleteUniquesByConcreteKind)({
+      graphId: graph.id,
+      concreteKind: "AuditDoc",
+    }),
+  checkUnique: (tx) => tx.checkUnique(UNIQUE),
+  checkUniqueBatch: (tx) =>
+    requireDefined(tx.checkUniqueBatch)({ ...UNIQUE, keys: ["audit"] }),
+  claimEdgeCardinality: (tx) => requireDefined(tx.claimEdgeCardinality)(CLAIM),
+  claimEdgeCardinalityGuarded: (tx) =>
+    requireDefined(tx.claimEdgeCardinalityGuarded)(CLAIM),
+  claimEdgeCardinalityBatch: (tx) =>
+    requireDefined(tx.claimEdgeCardinalityBatch)([CLAIM]),
+  purgeEdgeClaims: (tx) =>
+    requireDefined(tx.purgeEdgeClaims)({ graphId: graph.id, edgeIds: ["e1"] }),
+  readConstraintFenceViolations: (tx) =>
+    requireDefined(tx.readConstraintFenceViolations)({
+      graphId: graph.id,
+      uniqueConstraintNames: ["audit_title"],
+      disjointKindPairs: [],
+      edgeCardinalities: [],
+    }),
+  getActiveSchema: (tx) => tx.getActiveSchema(graph.id),
+  getSchemaVersion: (tx) => tx.getSchemaVersion(graph.id, 1),
+  lockSchemaVersionForWrite: (tx) =>
+    requireDefined(tx.lockSchemaVersionForWrite)(SCHEMA_FENCE),
+  commitSchemaVersion: (tx) =>
+    tx.commitSchemaVersion({
+      graphId: graph.id,
+      expected: { kind: "active", version: 1 },
+      version: 2,
+      schemaHash: "audit",
+      schemaDoc: requireDefined(activeSchemaDocument),
+    }),
+  setActiveVersion: (tx) =>
+    tx.setActiveVersion({
+      graphId: graph.id,
+      expected: { kind: "active", version: 1 },
+      version: 1,
+    }),
+  upsertEmbedding: (tx) => MARKER_GATED_CALLS.upsertEmbedding(tx),
+  upsertEmbeddingBatch: (tx) =>
+    requireDefined(tx.upsertEmbeddingBatch)({
+      ...SLOT,
+      rows: [{ nodeId: "d1", embedding: [0.1, 0.2, 0.3] }],
+    }),
+  deleteEmbedding: (tx) => MARKER_GATED_CALLS.deleteEmbedding(tx),
+  deleteEmbeddingBatch: (tx) =>
+    requireDefined(tx.deleteEmbeddingBatch)({ ...SLOT, nodeIds: ["d1"] }),
+  vectorSearch: (tx) =>
+    requireDefined(tx.vectorSearch)({
+      ...SLOT,
+      queryEmbedding: [0.1, 0.2, 0.3],
+      limit: 1,
+    }),
+  hybridSearch: (tx) =>
+    requireDefined(tx.hybridSearch)({
+      graphId: graph.id,
+      nodeKind: "AuditDoc",
+      vector: {
+        fieldPath: "vector",
+        queryEmbedding: [0.1, 0.2, 0.3],
+        metric: "cosine",
+        dimensions: 3,
+        indexType: "none",
+        k: 1,
+      },
+      fulltext: { query: "audit", k: 1 },
+      fusion: { k: 60, vectorWeight: 1, fulltextWeight: 1 },
+      limit: 1,
+    }),
+  dropVectorIndex: (tx) =>
+    requireDefined(tx.dropVectorIndex)({
+      graphId: graph.id,
+      nodeKind: "AuditDoc",
+      fieldPath: "vector",
+    }),
+  deleteSchemaVectorSlotContribution: (tx) =>
+    tx.deleteSchemaVectorSlotContribution(SLOT),
+  upsertFulltext: (tx) => MARKER_GATED_CALLS.upsertFulltext(tx),
+  deleteFulltext: (tx) =>
+    requireDefined(tx.deleteFulltext)({
+      graphId: graph.id,
+      nodeKind: "AuditDoc",
+      nodeId: "d1",
+    }),
+  upsertFulltextBatch: (tx) =>
+    requireDefined(tx.upsertFulltextBatch)({
+      graphId: graph.id,
+      nodeKind: "AuditDoc",
+      rows: [{ nodeId: "d1", content: "audit", language: "english" }],
+    }),
+  deleteFulltextBatch: (tx) =>
+    requireDefined(tx.deleteFulltextBatch)({
+      graphId: graph.id,
+      nodeKind: "AuditDoc",
+      nodeIds: ["d1"],
+    }),
+  fulltextSearch: (tx) => MARKER_GATED_CALLS.fulltextSearch(tx),
+  recordContributionMaterialization: (tx) =>
+    requireDefined(tx.recordContributionMaterialization)({
+      graphId: graph.id,
+      logicalName: "audit",
+      owner: "audit",
+      tableName: "audit",
+      signature: "audit",
+      attemptedAt: "2026-01-01T00:00:00.000Z",
+      materializedAt: undefined,
+      error: undefined,
+    }),
+  execute: (tx) => tx.execute(asCompiledRowsSql(portableSql`SELECT 1 AS one`)),
+  executeRaw: (tx) => requireDefined(tx.executeRaw)("SELECT 1 AS one", []),
+  executeStatement: (tx) =>
+    requireDefined(tx.executeStatement)(
+      asCompiledStatementSql(
+        portableSql`CREATE TEMP TABLE IF NOT EXISTS audit_statement (x)`,
+      ),
+    ),
+  executeTemporaryStatement: (tx) =>
+    requireDefined(tx.executeTemporaryStatement)(
+      asCompiledTemporaryStatementSql(
+        portableSql`CREATE TEMP TABLE IF NOT EXISTS audit_temporary (x)`,
+      ),
+    ),
+  executeSchemaDdl: (tx) =>
+    tx.executeSchemaDdl("CREATE TABLE IF NOT EXISTS audit_ddl (x)"),
+  tableExists: (tx) => tx.tableExists("audit_absent_table"),
+  catalog: {
+    tableExists: (tx) =>
+      requireDefined(tx.catalog).tableExists("audit_absent_table"),
+    tablesExist: (tx) =>
+      requireDefined(tx.catalog).tablesExist(["audit_absent_table"]),
+    indexStates: (tx) =>
+      requireDefined(tx.catalog).indexStates(["audit_absent_index"]),
+    dropInvalidIndex: (tx) =>
+      requireDefined(tx.catalog).dropInvalidIndex("audit_absent_index"),
+    columnTypes: (tx) => requireDefined(tx.catalog).columnTypes("audit_ddl"),
+  },
+  clearGraph: (tx) => tx.clearGraph(graph.id),
+  clearGraphPreservingContributionMaterializations: (tx) =>
+    requireDefined(tx.clearGraphPreservingContributionMaterializations)(
+      graph.id,
+    ),
+} as const satisfies Record<
+  SqliteViewMember,
+  MemberCall | Readonly<Record<string, MemberCall>>
+>;
+
+const EDGE_BETWEEN = {
+  graphId: graph.id,
+  edgeKind: "auditLink",
+  fromKind: "AuditDoc",
+  fromId: "d1",
+  toKind: "AuditDoc",
+  toId: "d2",
+} as const;
+
+/** The audit graph's active schema document, read once before the cases. */
+let activeSchemaDocument: SerializedSchema | undefined;
+
+/** Every call in {@link MEMBER_CALLS}, labelled `member` or `member.function`. */
+function labelledMemberCalls(): readonly (readonly [string, MemberCall])[] {
+  return Object.entries(MEMBER_CALLS).flatMap(
+    ([member, entry]): (readonly [string, MemberCall])[] =>
+      typeof entry === "function" ?
+        [[member, entry as MemberCall]]
+      : Object.entries(entry as Readonly<Record<string, MemberCall>>).map(
+          ([name, call]) => [`${member}.${name}`, call] as const,
+        ),
+  );
+}
+
+/**
+ * Calls that issue no statement on the audit backend's driver, though their
+ * member is routed `view`: sqlite-vec builds no ANN index, so dropping one is
+ * a no-op, and SQLite has no invalid-index state to drop. They are held to
+ * that (no statement while open, nothing to refuse once ended) so a change
+ * that makes either issue a statement fails here and moves it into the main
+ * audit.
+ */
+const STATEMENT_FREE_ON_SQLITE_VEC: ReadonlySet<string> = new Set([
+  "dropVectorIndex",
+  "catalog.dropInvalidIndex",
+]);
+
+/** Rolls the open transaction a case drives back, after the call settled. */
+const ROLLBACK_AFTER_CALL = new Error("roll the audit transaction back");
+
+describe("transaction backend members", () => {
+  let engine: SharedPgliteEngine;
+  let path: string;
+
+  beforeAll(async () => {
+    engine = await setupSharedPgliteEngine();
+    path = `${process.env["TMPDIR"] ?? "/tmp"}/transaction-backend-view-inventory-${process.pid}-${Date.now()}.sqlite`;
+    const { backend } = createLocalSqliteBackend({ path });
+    await createStoreWithSchema(graph, backend);
+    await backend.close();
+  });
+
+  afterAll(async () => {
+    await engine.dispose();
+  });
+
+  it("routes every member a better-sqlite3 transaction backend carries", async () => {
+    const { backend } = createLocalSqliteBackend();
+    const tx = await escapedTransaction(backend);
+    expect(routeMismatches(tx, "sqlite")).toEqual([]);
+    await backend.close();
+  });
+
+  it("issues no statement from a better-sqlite3 member routed no-statement or refused, on an open transaction", async () => {
+    const spy = createSpiedSqliteBackend(path);
+    const reached: string[] = [];
+    const refusals: Record<string, string> = {};
+    try {
+      await spy.backend.transaction(async (tx) => {
+        spy.startCounting();
+        for (const member of MEMBERS) {
+          const route = TRANSACTION_BACKEND_MEMBER_ROUTES[member].sqlite;
+          const before = spy.executed().length;
+          if (route === "refused") {
+            refusals[member] = await outcome(
+              requireDefined(
+                MARKER_GATED_CALLS[member as keyof typeof MARKER_GATED_CALLS],
+              )(tx),
+            );
+          } else if (route === "no-statement") {
+            readOrRender(tx, member);
+          } else {
+            continue;
+          }
+          if (spy.executed().length > before) reached.push(member);
+        }
+      });
+    } finally {
+      spy.close();
+    }
+    expect({ reached, refusals }).toEqual({
+      reached: [],
+      refusals: { createVectorIndex: "administration" },
+    });
+  });
+
+  it("routes every member a PGlite transaction backend carries", async () => {
+    const backend = engine.makeBackend();
+    await backend.bootstrapTables?.();
+    const tx = await escapedTransaction(backend);
+    expect(routeMismatches(tx, "postgres")).toEqual([]);
+  });
+});
+
 describe("a better-sqlite3 transaction backend once its transaction ended", () => {
   let path: string;
 
@@ -413,6 +884,8 @@ describe("a better-sqlite3 transaction backend once its transaction ended", () =
     // each case then opens a second, whose marker cache starts cold.
     const { backend } = createLocalSqliteBackend({ path });
     await createStoreWithSchema(graph, backend);
+    const active = requireDefined(await backend.getActiveSchema(graph.id));
+    activeSchemaDocument = JSON.parse(active.schema_doc) as SerializedSchema;
     await backend.close();
   });
 
@@ -434,42 +907,87 @@ describe("a better-sqlite3 transaction backend once its transaction ended", () =
       },
       executed: [],
     });
+    spy.close();
   });
 
-  it("reaches the driver from no member at all, whatever its arguments", async () => {
-    const spy = createSpiedSqliteBackend(path);
-    const tx = await escapedTransaction(spy.backend);
-    spy.startCounting();
-    const reached: string[] = [];
-    for (const member of MEMBERS) {
-      const value: unknown = (tx as unknown as Record<string, unknown>)[member];
-      const route = TRANSACTION_BACKEND_MEMBER_ROUTES[member].sqlite;
-      if (route === "no-statement" || route === "absent") continue;
-      const before = spy.executed().length;
-      const callables: readonly ((...args: unknown[]) => unknown)[] =
-        typeof value === "function" ?
-          [value as (...args: unknown[]) => unknown]
-        : Object.values(value as Record<string, unknown>).filter(
-            (entry): entry is (...args: unknown[]) => unknown =>
-              typeof entry === "function",
-          );
-      for (const callable of callables) {
-        try {
-          await callable(
-            { ...SLOT, id: "d1", kind: "AuditDoc" },
-            "AuditDoc",
-            "d1",
-          );
-        } catch {
-          // Refused, or rejected its arguments: either way the question is
-          // only whether a statement reached the driver.
-        }
+  // Each call is first shown to reach the driver on an open transaction, so
+  // its refusal after the end is the view's, not an argument check's.
+  it("reaches the driver from every view member while open, and from none once ended, refusing each with TransactionClosedError", async () => {
+    const statementsWhileOpen: Record<string, number> = {};
+    for (const [label, call] of labelledMemberCalls()) {
+      const spy = createSpiedSqliteBackend(path);
+      try {
+        await spy.backend
+          .transaction(async (tx) => {
+            spy.startCounting();
+            await call(tx as unknown as AuditedTransaction).catch(() => {
+              // A statement that reached the driver and failed still counts.
+            });
+            // Counted before the frame's own ROLLBACK.
+            statementsWhileOpen[label] = spy.executed().length;
+            throw ROLLBACK_AFTER_CALL;
+          })
+          .catch(() => {
+            // Rolled back on purpose: nothing a call wrote outlives its case.
+          });
+      } finally {
+        spy.close();
       }
-      if (spy.executed().length > before) reached.push(member);
     }
-    expect({ reached, executed: spy.executed() }).toEqual({
-      reached: [],
-      executed: [],
+
+    const spy = createSpiedSqliteBackend(path);
+    const ended = (await escapedTransaction(
+      spy.backend,
+    )) as unknown as AuditedTransaction;
+    spy.startCounting();
+    const outcomesOnceEnded: Record<string, string> = {};
+    const reachedOnceEnded: string[] = [];
+    for (const [label, call] of labelledMemberCalls()) {
+      const before = spy.executed().length;
+      outcomesOnceEnded[label] = await outcome(call(ended));
+      if (spy.executed().length > before) reachedOnceEnded.push(label);
+    }
+    spy.close();
+
+    const labels = labelledMemberCalls().map(([label]) => label);
+    function isStatementFree(label: string): boolean {
+      return STATEMENT_FREE_ON_SQLITE_VEC.has(label);
+    }
+    expect({
+      silentWhileOpen: labels.filter(
+        (label) => !isStatementFree(label) && statementsWhileOpen[label] === 0,
+      ),
+      notRefusedOnceEnded: labels
+        .filter(
+          (label) =>
+            !isStatementFree(label) && outcomesOnceEnded[label] !== "closed",
+        )
+        .map((label) => `${label}: ${outcomesOnceEnded[label]}`),
+      statementFree: [...STATEMENT_FREE_ON_SQLITE_VEC].map((label) => ({
+        label,
+        whileOpen: statementsWhileOpen[label],
+        onceEnded: outcomesOnceEnded[label],
+      })),
+      reachedOnceEnded,
+    }).toEqual({
+      silentWhileOpen: [],
+      notRefusedOnceEnded: [],
+      statementFree: [...STATEMENT_FREE_ON_SQLITE_VEC].map((label) => ({
+        label,
+        whileOpen: 0,
+        onceEnded: "fulfilled",
+      })),
+      reachedOnceEnded: [],
     });
   });
 });
+
+/**
+ * Reads a `no-statement` member; a function among them (the SQL renderer) is
+ * called the way the query compiler calls it.
+ */
+function readOrRender(tx: TransactionBackend, member: Member): void {
+  const value: unknown = (tx as unknown as Record<string, unknown>)[member];
+  if (typeof value !== "function") return;
+  Reflect.apply(value, undefined, [asCompiledRowsSql(portableSql`SELECT 1`)]);
+}
