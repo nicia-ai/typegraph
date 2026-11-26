@@ -72,24 +72,11 @@ const ghost = { kind: "RbeGhost", id: "g1" } as unknown as typeof p1;
 const absent = undefined as unknown as typeof p1;
 const PAST = "2020-01-01T00:00:00.000Z";
 
-type Facade = "store.identity" | "tx.identity";
-
 type RefusalCase = Readonly<{
   name: string;
   invoke: (identity: RbeIdentity) => Promise<unknown>;
   refusal: abstract new (...args: never[]) => Error;
-  /** The facades the case runs on; both unless stated. */
-  facades?: readonly Facade[];
 }>;
-
-/**
- * `tx.identity.assertSame` / `assertDifferent` never see a window today: the
- * transaction receipt wrapper forwards only the two references, so there is
- * no window on that facade to refuse. Those cases run on `store.identity`
- * only until the wrapper forwards it.
- */
-const WINDOW_FORWARDING_FACADES: readonly Facade[] = ["store.identity"];
-const BOTH_FACADES: readonly Facade[] = ["store.identity", "tx.identity"];
 
 /** Every public identity mutation × every refusal it has that needs no statement. */
 const REFUSALS: readonly RefusalCase[] = [
@@ -109,14 +96,12 @@ const REFUSALS: readonly RefusalCase[] = [
       invoke: (identity: RbeIdentity) =>
         identity[method](p1, p2, { validFrom: "yesterday" }),
       refusal: ValidationError,
-      facades: WINDOW_FORWARDING_FACADES,
     },
     {
       name: `${method} malformed validTo`,
       invoke: (identity: RbeIdentity) =>
         identity[method](p1, p2, { validFrom: PAST, validTo: "later" }),
       refusal: ValidationError,
-      facades: WINDOW_FORWARDING_FACADES,
     },
     {
       name: `${method} reference that is not an object`,
@@ -304,12 +289,7 @@ export function registerIdentityRefusalBeforeEntryIntegrationTests(
       await store.nodes.RbePerson.create({ name: "p2" }, { id: "p2" });
 
       const observed: unknown[] = [];
-      for (const {
-        name,
-        invoke,
-        refusal,
-        facades = BOTH_FACADES,
-      } of REFUSALS) {
+      for (const { name, invoke, refusal } of REFUSALS) {
         const root = await observe(counted, () =>
           rejectionOf(() => invoke(store.identity)),
         );
@@ -320,7 +300,6 @@ export function registerIdentityRefusalBeforeEntryIntegrationTests(
           statements: root.statements,
           operations: root.operations,
         });
-        if (!facades.includes("tx.identity")) continue;
         await store.transaction(async (tx) => {
           const scoped = await observe(counted, () =>
             rejectionOf(() => invoke(tx.identity)),
@@ -335,8 +314,8 @@ export function registerIdentityRefusalBeforeEntryIntegrationTests(
         });
       }
       expect(observed).toEqual(
-        REFUSALS.flatMap(({ name, facades = BOTH_FACADES }) =>
-          facades.map((form) => ({
+        REFUSALS.flatMap(({ name }) =>
+          ["store.identity", "tx.identity"].map((form) => ({
             form,
             name,
             refused: true,
@@ -353,6 +332,90 @@ export function registerIdentityRefusalBeforeEntryIntegrationTests(
     // schema fence and identity lock statements, and at least one operation.
     // MUTATION CHECK: drop `async` from one facade mutation — its rows report
     // a synchronous throw instead of a rejected promise.
+
+    it("tx.identity.assertSame and assertDifferent honor the window they are given", async () => {
+      const graph = buildGraph(nextGraphId());
+      const store = await context.createStore(graph);
+      const createdAt = { validFrom: "2019-01-01T00:00:00.000Z" };
+      await store.nodes.RbePerson.create(
+        { name: "p1" },
+        { id: "p1", ...createdAt },
+      );
+      await store.nodes.RbePerson.create(
+        { name: "p2" },
+        { id: "p2", ...createdAt },
+      );
+      const ended = { validFrom: PAST, validTo: "2021-01-01T00:00:00.000Z" };
+      const written = await store.transaction(async (tx) => [
+        await tx.identity.assertSame(p1, p2, ended),
+        await tx.identity.assertDifferent(p1, p2, {
+          validFrom: "2022-01-01T00:00:00.000Z",
+          validTo: "2023-01-01T00:00:00.000Z",
+        }),
+      ]);
+      expect(
+        written.map(({ assertion }) => [
+          assertion.relation,
+          assertion.validFrom,
+          assertion.validTo,
+        ]),
+      ).toEqual([
+        ["same", PAST, "2021-01-01T00:00:00.000Z"],
+        ["different", "2022-01-01T00:00:00.000Z", "2023-01-01T00:00:00.000Z"],
+      ]);
+      // Both windows have ended: neither holds now.
+      expect(await store.identity.areSame(p1, p2)).toBe(false);
+      expect(await store.identity.assertionsOf(p1)).toEqual([]);
+    });
+    // REVERT CHECK: drop the window argument in the transaction receipt
+    // wrapper again — both assertions are written as current ones.
+
+    it("a window bound read once before entry is the bound the write uses", async () => {
+      const graph = buildGraph(nextGraphId());
+      const store = await context.createStore(graph);
+      const createdAt = { validFrom: "2019-01-01T00:00:00.000Z" };
+      await store.nodes.RbePerson.create(
+        { name: "p1" },
+        { id: "p1", ...createdAt },
+      );
+      await store.nodes.RbePerson.create(
+        { name: "p2" },
+        { id: "p2", ...createdAt },
+      );
+      /** `base` plus a `validFrom` that turns malformed after its first read. */
+      function withShiftingValidFrom<Base extends object>(
+        base: Base,
+      ): Base & Readonly<{ validFrom: string }> {
+        const reads = { count: 0 };
+        return Object.defineProperty({ ...base }, "validFrom", {
+          enumerable: true,
+          get: () => {
+            reads.count += 1;
+            return reads.count === 1 ? PAST : "malformed";
+          },
+        }) as Base & Readonly<{ validFrom: string }>;
+      }
+      const single = await store.identity.assertSame(
+        p1,
+        p2,
+        withShiftingValidFrom({}),
+      );
+      expect(single.assertion.validFrom).toBe(PAST);
+      await store.nodes.RbePerson.create(
+        { name: "p3" },
+        { id: "p3", ...createdAt },
+      );
+      const [bulk] = await store.identity.bulkAssertDifferent([
+        withShiftingValidFrom({
+          a: p2,
+          b: { kind: "RbePerson" as const, id: "p3" },
+        }),
+      ]);
+      expect(bulk?.assertion.validFrom).toBe(PAST);
+    });
+    // REVERT CHECK: hand the caller's window object to the write instead of
+    // the validated snapshot — the second read refuses "malformed" under the
+    // lock, after statements ran.
 
     it("a read-only transaction's refusal enters no operation either", async () => {
       const graph = buildGraph(nextGraphId());
@@ -409,7 +472,13 @@ export function registerIdentityRefusalBeforeEntryIntegrationTests(
             held.open();
             await release.opened;
           });
-          await held.opened;
+          // The holder failing before it holds the lock ends the wait too.
+          await Promise.race([
+            held.opened,
+            holding.then(() => {
+              throw new Error("the holder committed without holding the lock");
+            }),
+          ]);
 
           // The lock is held: a valid mutation waits behind it.
           const valid = callerStore.identity.retractSameAssertion(p1, p2);

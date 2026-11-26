@@ -1348,7 +1348,9 @@ export type IdentityAssertionRequest = Readonly<{
  * a self-assertion, a malformed window bound. A facade calls it before it
  * enters its operation, so a refused assertion takes no lock and issues no
  * statement; the write consumes the request it returns and re-derives none of
- * these decisions. The window's clock-relative refusals (a future or inverted
+ * these decisions. The request carries a snapshot of the bounds it validated,
+ * never the caller's object, so a bound read again under the lock is the bound
+ * that was checked. The window's clock-relative refusals (a future or inverted
  * window) compare against the operation's own instant and stay inside it.
  */
 export function identityAssertionRequest<G extends GraphDef>(
@@ -1361,10 +1363,14 @@ export function identityAssertionRequest<G extends GraphDef>(
   const first = registeredPlainRef(ctx, firstInput);
   const second = registeredPlainRef(ctx, secondInput);
   if (refKey(first) === refKey(second)) throw selfAssertionError(relation);
-  validateIdentityValidityWindowBounds(window);
+  const bounds = validateIdentityValidityWindowBounds(window);
+  const stated: IdentityValidityWindow = {
+    ...(bounds.validFrom === undefined ? {} : { validFrom: bounds.validFrom }),
+    ...(bounds.validTo === undefined ? {} : { validTo: bounds.validTo }),
+  };
   return {
     pair: normalizePair(first, second),
-    window: hasExplicitIdentityValidityWindow(window) ? window : undefined,
+    window: hasExplicitIdentityValidityWindow(stated) ? stated : undefined,
   };
 }
 
