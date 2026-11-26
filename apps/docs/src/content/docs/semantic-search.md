@@ -714,7 +714,7 @@ const personalizedSearch = await store
 
 `.similarTo()` and `$fulltext.matches()` on an alias a recursive traversal walks from or to are
 refused with `UnsupportedPredicateError`, unless that traversal is the query's only one and is one
-hop (`maxHops: 1`, with no `depth`, `path` or `stopExpansion()`): the ranked top-k set has no
+hop (`minHops` and `maxHops` both 1, with no `depth`, `path` or `stopExpansion()`): the ranked top-k set has no
 relevance order to apply through a recursive statement. A fixed traversal chained with a recursive
 one still applies them on its own aliases. See
 [Recursive traversal limitations](/queries/recursive#limitations).

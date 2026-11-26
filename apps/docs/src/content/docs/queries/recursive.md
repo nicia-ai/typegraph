@@ -733,9 +733,10 @@ For the whole-plus-parts *export* shape (rather than a query result), see
   `.similarTo()` on an alias a recursive traversal walks from or to are refused with
   `UnsupportedPredicateError` (`details.reason` is `"recursive_traversal"`) when the query is
   compiled, before any statement runs: they select a ranked top-k set and order rows by relevance,
-  which a recursive statement cannot apply. A one-hop traversal (`maxHops: 1`, with no `depth`,
+  which a recursive statement cannot apply. A one-hop traversal (`minHops` and `maxHops` both 1, with no `depth`,
   `path` or `stopExpansion()`) that is the query's only traversal compiles to a fixed step and
-  applies them, as does a fixed traversal chained with a recursive one, on its own aliases.
+  applies them, as does a fixed traversal chained with a recursive one, on its own aliases, and
+  the start alias of an optional first recursive traversal, which a fixed source step filters.
   Otherwise, search in a separate query and constrain the walk with the matched ids.
 
 ## Real-World Examples
