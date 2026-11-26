@@ -70,6 +70,7 @@ export { registerCurrentIdentityTraversalTests } from "./identity-current-traver
 export { registerHistoricalIdentityTraversalTests } from "./identity-historical-traversal";
 export { registerIdentityImportIntegrationTests } from "./identity-import";
 export { registerIdentityOperationRoutingIntegrationTests } from "./identity-operation-routing";
+export { registerIdentityRefusalBeforeEntryIntegrationTests } from "./identity-refusal-before-entry";
 export { registerIdentityReplayIntegrationTests } from "./identity-replay";
 export { registerIdentitySeparationIntegrationTests } from "./identity-separation";
 export { registerImportCompositionMoveIntegrationTests } from "./import-composition-moves";
