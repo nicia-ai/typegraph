@@ -40,6 +40,12 @@
  * sessions a state of its own: wrongly sharing is the worse error, wrongly
  * splitting is what every binding had before this record existed.
  *
+ * One fact must fail closed instead: a read-only scope TypeGraph opened. A
+ * bind without proof on a connection whose driver reports no transaction
+ * state, during the span of an engine transaction opened on it, records that
+ * transaction as unverified ({@link resolveUnverifiedNativeTransaction}). It
+ * is never shared state; the Store's read-only predicate alone consults it.
+ *
  * A savepoint a caller opens resolves the enclosing transaction only where
  * proof 2 or 4 covers it (libSQL and PGlite keep the pinned handle;
  * better-sqlite3 inside an engine-opened transaction keeps the connection).
@@ -75,12 +81,16 @@
 import { backendDerivationChain } from "./derive-backend";
 
 /**
- * How the driver confirms, at a lookup, that the connection an engine
- * transaction was opened on still has a transaction open.
+ * The connection an engine transaction was opened on, and how the driver
+ * confirms, at a lookup, that the connection still has a transaction open.
+ * `isTransactionOpen` is `undefined` for a driver that reports no
+ * transaction state: its token is then never honoured through the
+ * connection, and only counts as an unverified engine transaction there
+ * ({@link resolveUnverifiedNativeTransaction}).
  */
 export type ConnectionTransactionProbe = Readonly<{
   connection: object;
-  isTransactionOpen: () => boolean;
+  isTransactionOpen: (() => boolean) | undefined;
 }>;
 
 /** A bound backend's native handle, as its dialect classifies its proof. */
@@ -132,6 +142,19 @@ const ENDED_TOKENS = new WeakSet<object>();
 const PUBLISHED_TOKENS = new WeakMap<object, object>();
 
 /**
+ * Connection whose driver reports no transaction state → the token of the
+ * engine transaction whose span is running on it. Never proof: it is read
+ * only by {@link resolveUnverifiedNativeTransaction}.
+ */
+const UNVERIFIED_SPANS = new WeakMap<object, object>();
+
+/**
+ * Bound backend with no proof → the unverified engine transaction whose span
+ * was running on its connection when it was bound.
+ */
+const BOUND_UNVERIFIED_TRANSACTIONS = new WeakMap<object, object>();
+
+/**
  * Whether `token` still identifies the transaction open on its connection:
  * not ended, and, where the driver can be asked, still the connection's
  * published transaction with a transaction open. Marks it ended otherwise.
@@ -139,7 +162,7 @@ const PUBLISHED_TOKENS = new WeakMap<object, object>();
 function isTokenLive(token: object): boolean {
   if (ENDED_TOKENS.has(token)) return false;
   const probe = TOKEN_PROBES.get(token);
-  if (probe === undefined) return true;
+  if (probe?.isTransactionOpen === undefined) return true;
   if (
     PUBLISHED_TOKENS.get(probe.connection) === token &&
     probe.isTransactionOpen()
@@ -208,6 +231,12 @@ export function recordNativeTransactionHandle(
   const nativeTransaction = identifyNativeTransaction(handle);
   if (nativeTransaction !== undefined) {
     BOUND_NATIVE_TRANSACTIONS.set(backend, nativeTransaction);
+    return;
+  }
+  if (handle.kind !== "connection") return;
+  const unverified = UNVERIFIED_SPANS.get(handle.connection);
+  if (unverified !== undefined && !ENDED_TOKENS.has(unverified)) {
+    BOUND_UNVERIFIED_TRANSACTIONS.set(backend, unverified);
   }
 }
 
@@ -266,18 +295,21 @@ export async function publishConnectionNativeTransaction<T>(
   run: () => Promise<T>,
 ): Promise<T> {
   const probe = TOKEN_PROBES.get(token);
+  // A driver that can confirm the transaction publishes it as proof; one
+  // that cannot only marks its span, which never proves an identity.
+  const spans =
+    probe?.isTransactionOpen === undefined ?
+      UNVERIFIED_SPANS
+    : PUBLISHED_TOKENS;
   if (probe !== undefined) {
-    PUBLISHED_TOKENS.set(probe.connection, token);
+    spans.set(probe.connection, token);
   }
   try {
     return await run();
   } finally {
     ENDED_TOKENS.add(token);
-    if (
-      probe !== undefined &&
-      PUBLISHED_TOKENS.get(probe.connection) === token
-    ) {
-      PUBLISHED_TOKENS.delete(probe.connection);
+    if (probe !== undefined && spans.get(probe.connection) === token) {
+      spans.delete(probe.connection);
     }
   }
 }
@@ -293,6 +325,33 @@ export function resolveNativeTransactionHandle(
   for (const link of backendDerivationChain(backend)) {
     const nativeTransaction = BOUND_NATIVE_TRANSACTIONS.get(link);
     if (nativeTransaction !== undefined) return liveIdentity(nativeTransaction);
+  }
+  return undefined;
+}
+
+/**
+ * The engine transaction that was running, unverified, on the connection
+ * `backend` was bound on when nothing proved which transaction `backend`
+ * runs in: a transaction the engine opened on a connection-level handle of a
+ * driver that reports no transaction state (`@libsql/client` before 0.18,
+ * sql.js, Durable Object storage), whose span had not ended. `undefined` once
+ * that span has ended, and for a backend with a record of its own.
+ *
+ * This is never proof that `backend` runs in that transaction, so its state
+ * is never shared: it is what a fact that must fail closed (a read-only scope
+ * TypeGraph opened) consults, because on such a connection every statement
+ * issued during the span runs in that transaction unless the engine ended it
+ * early.
+ */
+export function resolveUnverifiedNativeTransaction(
+  backend: object,
+): object | undefined {
+  for (const link of backendDerivationChain(backend)) {
+    if (BOUND_NATIVE_TRANSACTIONS.has(link)) return undefined;
+    const unverified = BOUND_UNVERIFIED_TRANSACTIONS.get(link);
+    if (unverified !== undefined) {
+      return ENDED_TOKENS.has(unverified) ? undefined : unverified;
+    }
   }
   return undefined;
 }

@@ -2840,27 +2840,31 @@ function readSqliteInTransaction(client: object): boolean {
 }
 
 /**
- * How the driver confirms that a transaction the engine opened on `db` is
- * still open (proof 4): better-sqlite3's and bun:sqlite's `inTransaction`,
- * the connection's own autocommit state. `undefined` for a driver that
- * reports none (`@libsql/client` before 0.18 hides its connection, sql.js
- * and Durable Object storage expose no transaction state): its token is never
- * honoured through the connection.
+ * The connection a transaction the engine opens on `db` runs on, and how the
+ * driver confirms that it is still open (proof 4): better-sqlite3's and
+ * bun:sqlite's `inTransaction`, the connection's own autocommit state.
+ * `isTransactionOpen` is `undefined` for a driver that reports none
+ * (`@libsql/client` before 0.18 hides its connection, sql.js and Durable
+ * Object storage expose no transaction state): its token is never honoured
+ * through the connection, and an adoption on that connection during the
+ * transaction's span sees it only as unverified
+ * (`resolveUnverifiedNativeTransaction`).
  */
 function sqliteConnectionProbe(
   db: AnySqliteDatabase,
-): ConnectionTransactionProbe | undefined {
+): ConnectionTransactionProbe {
+  const connection = nativeTransactionConnection(db);
   const client = (db as Readonly<{ $client?: unknown }>).$client;
   if (
     (!isBetterSqlite3Client(client) && !isBunSqliteClient(client)) ||
     typeof (client as Readonly<{ inTransaction?: unknown }>).inTransaction !==
       "boolean"
   ) {
-    return undefined;
+    return { connection, isTransactionOpen: undefined };
   }
   const driverClient = client as object;
   return {
-    connection: nativeTransactionConnection(db),
+    connection,
     isTransactionOpen: () => readSqliteInTransaction(driverClient),
   };
 }

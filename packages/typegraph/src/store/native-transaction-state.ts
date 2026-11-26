@@ -27,8 +27,15 @@
  *
  * What it holds: whether TypeGraph has a read-only scope open on the
  * transaction ({@link runInReadOnlyScope}, {@link isNativeTransactionReadOnly}).
+ * A state of its own, given to a session nothing proved, also holds the state
+ * of the unverified engine transaction that was running on its connection
+ * (`resolveUnverifiedNativeTransaction`), so a read-only scope there fails
+ * closed for it without the two sessions sharing a state.
  */
-import { resolveNativeTransactionHandle } from "../backend/native-transaction-handle";
+import {
+  resolveNativeTransactionHandle,
+  resolveUnverifiedNativeTransaction,
+} from "../backend/native-transaction-handle";
 
 // Module-private: only this module builds a state, so no other value (a
 // session, an operation, an empty literal) is assignable to one.
@@ -42,9 +49,21 @@ const READ_ONLY_SCOPES: unique symbol = Symbol(
   "typegraph.nativeTransactionReadOnlyScopes",
 );
 
+// Module-private: only `resolveNativeTransactionState` sets it and only
+// `isNativeTransactionReadOnly` reads it.
+const UNVERIFIED_TRANSACTION: unique symbol = Symbol(
+  "typegraph.nativeTransactionUnverifiedTransaction",
+);
+
 /** State every session of one native transaction shares. */
 export type NativeTransactionState = Readonly<{
   [NATIVE_TRANSACTION_STATE]: true;
+  /**
+   * For a state of its own given to a session nothing proved: the state of
+   * the unverified engine transaction that was running on its connection,
+   * whose read-only scope this session's writes are refused under too.
+   */
+  [UNVERIFIED_TRANSACTION]: NativeTransactionState | undefined;
 }> & {
   /**
    * How many read-only scopes TypeGraph has open on the transaction
@@ -53,8 +72,14 @@ export type NativeTransactionState = Readonly<{
   [READ_ONLY_SCOPES]: number;
 };
 
-function createNativeTransactionState(): NativeTransactionState {
-  return { [NATIVE_TRANSACTION_STATE]: true, [READ_ONLY_SCOPES]: 0 };
+function createNativeTransactionState(
+  unverifiedTransaction?: NativeTransactionState,
+): NativeTransactionState {
+  return {
+    [NATIVE_TRANSACTION_STATE]: true,
+    [UNVERIFIED_TRANSACTION]: unverifiedTransaction,
+    [READ_ONLY_SCOPES]: 0,
+  };
 }
 
 /** The engine's identity of a native transaction → its sessions' state. */
@@ -74,15 +99,23 @@ function stateOfNativeTransaction(
 /**
  * The state of the native transaction `transaction` runs on, created by the
  * first session that asks; a state of its own when the engine recorded no
- * native transaction for `transaction` or any backend it derives from.
+ * native transaction for `transaction` or any backend it derives from. That
+ * state of its own keeps the state of the unverified engine transaction that
+ * was running on `transaction`'s connection, if any
+ * (`resolveUnverifiedNativeTransaction`), for
+ * {@link isNativeTransactionReadOnly} alone.
  */
 export function resolveNativeTransactionState(
   transaction: object,
 ): NativeTransactionState {
   const nativeTransaction = resolveNativeTransactionHandle(transaction);
-  return nativeTransaction === undefined ?
-      createNativeTransactionState()
-    : stateOfNativeTransaction(nativeTransaction);
+  if (nativeTransaction !== undefined) {
+    return stateOfNativeTransaction(nativeTransaction);
+  }
+  const unverified = resolveUnverifiedNativeTransaction(transaction);
+  return createNativeTransactionState(
+    unverified === undefined ? undefined : stateOfNativeTransaction(unverified),
+  );
 }
 
 /**
@@ -137,9 +170,20 @@ export async function runInReadOnlyScope<T>(
  * answer follows the transaction, not the moment a context was built. A
  * native read-only transaction TypeGraph did not open has no scope here: the
  * engine decides.
+ *
+ * It fails closed where nothing proves the transaction: a session of a state
+ * of its own also reads as read-only while the unverified engine transaction
+ * that was running on its connection has a read-only scope open. On a
+ * connection whose driver reports no transaction state, every statement
+ * during that transaction's span runs in it, so a write there would
+ * otherwise commit inside a transaction TypeGraph opened read-only.
  */
 export function isNativeTransactionReadOnly(
   state: NativeTransactionState,
 ): boolean {
-  return state[READ_ONLY_SCOPES] > 0;
+  const unverified = state[UNVERIFIED_TRANSACTION];
+  return (
+    state[READ_ONLY_SCOPES] > 0 ||
+    (unverified !== undefined && unverified[READ_ONLY_SCOPES] > 0)
+  );
 }

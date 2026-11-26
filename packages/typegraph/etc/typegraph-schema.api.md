@@ -4898,6 +4898,7 @@ const NATIVE_TRANSACTION_STATE: unique symbol;
 // @public
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
+    [UNVERIFIED_TRANSACTION]: NativeTransactionState | undefined;
 }> & {
     [READ_ONLY_SCOPES]: number;
 };
@@ -8553,6 +8554,9 @@ type UniqueRow = Readonly<{
 
 // @public (undocumented)
 type UnsafeHistoryStoreBackendMember = "findEdgesByMatchIdentity" | "clearGraph" | "clearGraphPreservingContributionMaterializations" | "commitSchemaVersionWithPreflight" | "instantiateGraphTemplate" | "executeDdl" | "executeRaw" | "executeStatement" | "ensureIdentityTables" | "identityTableDdl" | "rebuildContribution" | "recordedTableDdl" | "repairContributions" | "registerGraphTemplate" | "schemaWriteTransaction" | "setActiveVersionWithPreflight" | "transaction" | "trustedImport";
+
+// @public (undocumented)
+const UNVERIFIED_TRANSACTION: unique symbol;
 
 // @public
 type UpdateEdgeParams = Readonly<{

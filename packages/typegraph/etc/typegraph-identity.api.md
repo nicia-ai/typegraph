@@ -4688,6 +4688,7 @@ const NATIVE_TRANSACTION_STATE: unique symbol;
 // @public
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
+    [UNVERIFIED_TRANSACTION]: NativeTransactionState | undefined;
 }> & {
     [READ_ONLY_SCOPES]: number;
 };
@@ -8187,6 +8188,9 @@ type UniqueRow = Readonly<{
     concrete_kind: string;
     deleted_at: string | undefined;
 }>;
+
+// @public (undocumented)
+const UNVERIFIED_TRANSACTION: unique symbol;
 
 // @public
 type UpdateEdgeParams = Readonly<{

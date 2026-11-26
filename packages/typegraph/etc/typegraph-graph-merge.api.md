@@ -6438,6 +6438,7 @@ const NATIVE_TRANSACTION_STATE: unique symbol;
 // @public
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
+    [UNVERIFIED_TRANSACTION]: NativeTransactionState | undefined;
 }> & {
     [READ_ONLY_SCOPES]: number;
 };
@@ -10293,6 +10294,9 @@ export class UnsupportedMergePlanVersionError extends InvalidMergePlanError {
     // (undocumented)
     readonly code: "GRAPH_MERGE_PLAN_VERSION_UNSUPPORTED";
 }
+
+// @public (undocumented)
+const UNVERIFIED_TRANSACTION: unique symbol;
 
 // @public
 export function unwrap<T, E>(result: Result<T, E>): T;
