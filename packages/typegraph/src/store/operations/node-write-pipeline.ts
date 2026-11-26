@@ -83,7 +83,7 @@ import {
   syncFulltext,
   syncFulltextBatchForKind,
 } from "../fulltext-sync";
-import type { StatementBackend } from "../operation-scope";
+import type { OperationEntry, StatementBackend } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
 import { reviveStoredDateProps } from "../stored-date-revival";
 import { type NodeDeletePlan } from "../types";
@@ -112,8 +112,16 @@ export function createNodeWriteContext(
   lock: GraphWriteLock,
   claimsVerdict: ClaimsVerdictThunk,
   uniqueSidecarBatch: BundleVerdictOf<typeof UNIQUE_SIDECAR_BATCH>,
+  operation: OperationEntry,
 ): NodeWriteContext {
-  return { graphId, registry, lock, claimsVerdict, uniqueSidecarBatch };
+  return {
+    graphId,
+    registry,
+    lock,
+    operation,
+    claimsVerdict,
+    uniqueSidecarBatch,
+  };
 }
 
 /** Whether a delete removes the node (`hard`) or tombstones it (`soft`). */
@@ -754,6 +762,7 @@ export async function applyNodeUpdate(
 
   const row = await withNodeClaimTransition(
     uniquenessContext(ctx, backend),
+    ctx.operation,
     kind,
     id,
     plan,
@@ -1011,6 +1020,7 @@ export async function applyNodeResurrect(
   );
   const row = await withNodeClaimTransition(
     uniquenessContext(ctx, backend),
+    ctx.operation,
     kind,
     id,
     plan,

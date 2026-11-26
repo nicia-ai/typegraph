@@ -958,6 +958,7 @@ describe("Uniqueness sidecar for a field named after a prototype member", () => 
         graphId: graph.id,
         registry: buildKindRegistry(graph),
         lock: uncapturedGraphWriteLock(),
+        operation: backend,
         claimsVerdict: createClaimsVerdictThunk(backend),
         uniqueSidecarBatch: uniqueSidecarBatchVerdict(backend),
       },
