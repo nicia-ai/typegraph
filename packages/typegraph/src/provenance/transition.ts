@@ -7,7 +7,12 @@ import {
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
-import { enterTransactionOperation } from "../store/operation-scope";
+import { runExclusiveSection } from "../store/native-transaction-state";
+import {
+  enterTransactionOperation,
+  type Operation,
+  operationEntrySession,
+} from "../store/operation-scope";
 import { cascadeDeletionOrder } from "../store/operations/composition-cascade";
 import { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 import {
@@ -20,6 +25,7 @@ import {
   type TransactionContext,
 } from "../store/types";
 import { compareStrings } from "../utils/compare";
+import { requireDefined } from "../utils/presence";
 import { type NormalizedConfig } from "./config";
 import {
   keyToRef,
@@ -378,6 +384,40 @@ export async function runTransition<
   );
 }
 
+/**
+ * The refusal of a transition started on a transaction while another
+ * transition of the same graph is still running on it: `operation` is the
+ * refused call, `runningOperation` the one still running.
+ */
+function overlappingTransitionError(
+  operation: string,
+  runningOperation: string,
+  graphId: string,
+): ConfigurationError {
+  return new ConfigurationError(
+    `${operation} was called while ${runningOperation} was still running on the same transaction.`,
+    {
+      code: "PROVENANCE_TRANSITION_OVERLAPPING",
+      operation,
+      runningOperation,
+      graphId,
+    },
+    {
+      suggestion:
+        "Await each retraction verb before starting the next on the same transaction, or pass the sources together to retractMany(sources, tx) or unRetractMany(sources, tx).",
+    },
+  );
+}
+
+/**
+ * Runs one transition on `tx` as the only transition of its graph running
+ * on that native transaction (`runExclusiveSection`). A transition decides
+ * its writes from one support read; another transition on the same
+ * transaction is not excluded by the graph lock this one holds, so two that
+ * overlapped would each decide from a read that predates the other's writes
+ * (two retractions of a fact's two sources would each keep it live on the
+ * other's support). The overlapping call is refused before any statement.
+ */
 async function transitionInTransaction<
   G extends GraphDef,
   FactKind extends NodeKind<G>,
@@ -385,6 +425,44 @@ async function transitionInTransaction<
 >(
   scope: CapabilityScope,
   tx: TransactionContext<G>,
+  uniqueSources: readonly ProvenanceNodeRef[],
+  retracted: boolean,
+  operation: string,
+): Promise<RetractionReport<G, FactKind, JustificationKind>> {
+  // The transition's own reads go through one operation of the session the
+  // context carries: the session `store.transaction` opened for the
+  // own-transaction form, the caller's for the caller-transaction form. The
+  // writes it makes through `tx` enter their own operations of that session.
+  const transitionOperation = enterTransactionOperation(tx);
+  const session = requireDefined(
+    operationEntrySession(transitionOperation),
+    "an operation entered from a transaction context belongs to its session",
+  );
+  return runExclusiveSection(
+    session.native,
+    { key: `provenance-transition\u0000${scope.graphId}`, operation },
+    (runningOperation) =>
+      overlappingTransitionError(operation, runningOperation, scope.graphId),
+    () =>
+      transitionInExclusiveSection<G, FactKind, JustificationKind>(
+        scope,
+        tx,
+        transitionOperation,
+        uniqueSources,
+        retracted,
+        operation,
+      ),
+  );
+}
+
+async function transitionInExclusiveSection<
+  G extends GraphDef,
+  FactKind extends NodeKind<G>,
+  JustificationKind extends NodeKind<G>,
+>(
+  scope: CapabilityScope,
+  tx: TransactionContext<G>,
+  transitionOperation: Operation,
   uniqueSources: readonly ProvenanceNodeRef[],
   retracted: boolean,
   operation: string,
@@ -400,11 +478,7 @@ async function transitionInTransaction<
   // reads could miss a transition committed before the lock (a PostgreSQL
   // snapshot isolation) before the first read.
   await acquireCapabilityWriteLocks(tx, operation);
-  // The transition's own reads go through one operation of the session the
-  // context carries: the session `store.transaction` opened for the
-  // own-transaction form, the caller's for the caller-transaction form. The
-  // writes it makes through `tx` enter their own operations of that session.
-  const { backend } = enterTransactionOperation(tx);
+  const { backend } = transitionOperation;
   const rows = await Promise.all(
     uniqueSources.map((source) =>
       backend.getNode(scope.graphId, source.kind, source.id),

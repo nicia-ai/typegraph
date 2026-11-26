@@ -364,8 +364,15 @@ writes are recorded; they are still the partial writes of a failed callback,
 which only the native rollback discards.
 
 Await the verb before starting other calls on the same transaction. Its locks
-exclude other transactions, not other calls on yours, so a write that overlaps
-it can land between the transition's support read and its writes.
+exclude other transactions, not other calls on yours. A retraction verb
+started while another retraction verb of the same graph is still running on
+the same transaction is refused with `ConfigurationError`
+(`PROVENANCE_TRANSITION_OVERLAPPING`) before any statement, and the
+transaction stays usable: each transition decides its writes from one support
+read, so two that overlapped would each decide without the other's writes. To
+retract several sources at once, pass them to `retractMany(sources, tx)`.
+Other calls are not refused: a write that overlaps the verb can land between
+the transition's support read and its writes.
 
 ## Recorded time
 

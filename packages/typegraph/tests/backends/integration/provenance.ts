@@ -2136,6 +2136,53 @@ export function registerProvenanceIntegrationTests(
       await expect(sourceFlag(store, dropSource.id)).resolves.toBe(false);
     });
 
+    // Load-bearing: two verbs overlapping on one transaction would each
+    // decide from a support read that predates the other's writes, so
+    // retracting both sources of `shared-fact` at once would keep it live on
+    // the support each believed the other left. The second call is refused
+    // before any statement, the transaction stays usable, and an awaited
+    // verb after it runs. Revert check: run `transitionInExclusiveSection`
+    // directly from `transitionInTransaction` (`src/provenance/transition.ts`)
+    // and both calls commit their flags with `shared-fact` still live.
+    it("refuses a verb that overlaps another verb on the same transaction, before any statement, leaving the transaction usable", async () => {
+      const [store] = await createAdapterStoreWithSchema(
+        provenanceGraph,
+        context.getBackend(),
+        { history: true },
+      );
+      const provenance = await seedCallerWorld(store);
+
+      const settled = await store.transaction(async (tx) => {
+        const outcomes = await Promise.allSettled([
+          provenance.retract(keepSource, tx),
+          provenance.retract(dropSource, tx),
+        ]);
+        // The transaction is still usable for an awaited verb.
+        const afterwards = await provenance.retract(dropSource, tx);
+        return { outcomes, afterwards };
+      });
+
+      const [first, second] = settled.outcomes;
+      expect(first.status).toBe("fulfilled");
+      expect(second.status).toBe("rejected");
+      const refusal = (second as PromiseRejectedResult).reason as unknown;
+      expect(refusal).toBeInstanceOf(ConfigurationError);
+      expect((refusal as ConfigurationError).details).toMatchObject({
+        code: "PROVENANCE_TRANSITION_OVERLAPPING",
+        operation: "provenance.retract(source, tx)",
+        runningOperation: "provenance.retract(source, tx)",
+      });
+      expect(sortedIds(settled.afterwards.died)).toEqual([
+        "drop-fact",
+        "shared-fact",
+      ]);
+      await expect(sourceFlag(store, keepSource.id)).resolves.toBe(true);
+      await expect(sourceFlag(store, dropSource.id)).resolves.toBe(true);
+      const live = sortedIds([...(await store.nodes.Fact.find())]);
+      expect(live).toEqual([]);
+      expect(await provenance.holding()).toEqual([]);
+    });
+
     // Load-bearing: handing a verb straight to an array method passes the
     // element's index where the transaction goes. Revert check: drop the
     // `isTransactionContext` refusal from the capability's transaction

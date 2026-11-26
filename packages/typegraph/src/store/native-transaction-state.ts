@@ -25,7 +25,8 @@
  * dropped once the transaction's identity and its last session are, and a
  * token's state is never handed out once its transaction has ended.
  *
- * It holds nothing yet: state moves onto it in later changes.
+ * It holds the exclusive sections running on the transaction
+ * ({@link runExclusiveSection}).
  */
 import { resolveNativeTransactionHandle } from "../backend/native-transaction-handle";
 
@@ -35,13 +36,21 @@ const NATIVE_TRANSACTION_STATE: unique symbol = Symbol(
   "typegraph.nativeTransactionState",
 );
 
-/** State every session of one native transaction shares. Empty so far. */
+/** State every session of one native transaction shares. */
 export type NativeTransactionState = Readonly<{
   [NATIVE_TRANSACTION_STATE]: true;
+  /**
+   * The operation running each exclusive section on this transaction, by
+   * section key: owned by {@link runExclusiveSection}.
+   */
+  exclusiveSections: Map<string, string>;
 }>;
 
 function createNativeTransactionState(): NativeTransactionState {
-  return { [NATIVE_TRANSACTION_STATE]: true };
+  return {
+    [NATIVE_TRANSACTION_STATE]: true,
+    exclusiveSections: new Map<string, string>(),
+  };
 }
 
 /** The engine's identity of a native transaction → its sessions' state. */
@@ -62,4 +71,32 @@ export function resolveNativeTransactionState(
   const created = createNativeTransactionState();
   nativeTransactionStates.set(nativeTransaction, created);
   return created;
+}
+
+/**
+ * THE one owner of running `fn` as the only holder of section `key` on one
+ * native transaction. Calls on one transaction share its connection and its
+ * snapshot, and a lock the transaction holds excludes other transactions, not
+ * other calls on this one: a section whose decision is read and then written
+ * (a provenance transition) must not interleave with another holder of the
+ * same section. A call that finds the section held is refused with
+ * `refuse(runningOperation)` before `fn` runs, so the refused call issues no
+ * statement and the transaction stays usable. Refusing rather than queueing
+ * keeps a call made from inside a running section (an operation hook fired
+ * immediately in an adopted context) from waiting on itself.
+ */
+export async function runExclusiveSection<T>(
+  state: NativeTransactionState,
+  section: Readonly<{ key: string; operation: string }>,
+  refuse: (runningOperation: string) => Error,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const running = state.exclusiveSections.get(section.key);
+  if (running !== undefined) throw refuse(running);
+  state.exclusiveSections.set(section.key, section.operation);
+  try {
+    return await fn();
+  } finally {
+    state.exclusiveSections.delete(section.key);
+  }
 }
