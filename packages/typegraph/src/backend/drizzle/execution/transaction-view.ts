@@ -177,11 +177,19 @@ export function createTransactionView(
         return Promise.reject(engineEndedTransaction(engineEnd.failure));
       }
       if (pending > 0) {
-        // Started from a promise callback, where a synchronous throw is a
-        // rejection like any other.
-        const result = tail.then(() =>
-          runTurn(() => new Promise<T>((resolve) => { resolve(task()); })),
-        );
+        // Started from a promise callback, where a synchronous throw becomes
+        // a rejection once observed. `runTurn` handles the task's own
+        // promise in the turn it is created: a driver that rejects at once
+        // (Durable Object storage) never leaves it unhandled.
+        const result = tail.then(() => {
+          try {
+            return runTurn(task);
+          } catch (error) {
+            return observeFailure(error).then(() => {
+              throw error;
+            });
+          }
+        });
         enqueueStep(result);
         return result;
       }

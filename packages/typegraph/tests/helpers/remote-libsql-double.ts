@@ -21,7 +21,7 @@
  */
 import Database from "better-sqlite3";
 
-export type RemoteLibsqlTraceEntry = Readonly<{
+type RemoteLibsqlTraceEntry = Readonly<{
   /** `"root"`, or `"stream <n>"` for the n-th transaction opened. */
   connection: string;
   sql: string;
