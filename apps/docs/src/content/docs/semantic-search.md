@@ -716,7 +716,8 @@ const personalizedSearch = await store
 refused with `UnsupportedPredicateError`, unless that traversal is the query's only one and is one
 hop (`minHops` and `maxHops` both 1, with no `depth`, `path` or `stopExpansion()`): the ranked top-k set has no
 relevance order to apply through a recursive statement. A fixed traversal chained with a recursive
-one still applies them on its own aliases. See
+one still applies them on its own aliases, as a top-k filter whose completed rows follow `orderBy()`
+alone rather than relevance; `.fuseWith()` is refused on any query with a recursive traversal. See
 [Recursive traversal limitations](/queries/recursive#limitations).
 
 ## Best Practices

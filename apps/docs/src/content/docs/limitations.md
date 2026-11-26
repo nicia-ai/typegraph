@@ -249,8 +249,9 @@ A `$fulltext.matches()` or `.similarTo()` predicate on an alias a recursive trav
 to is refused with `UnsupportedPredicateError` (`details.reason` is `"recursive_traversal"`) when the
 query is compiled: these predicates select a ranked top-k set and order rows by relevance, which a
 recursive statement cannot apply. A one-hop traversal (`minHops` and `maxHops` both 1, with no `depth`, `path` or
-`stopExpansion()`) that is the query's only traversal compiles to a fixed step and applies them, as
-does a fixed traversal chained with a recursive one, on its own aliases. See
+`stopExpansion()`) that is the query's only traversal compiles to a fixed step and applies them. A
+fixed traversal chained with a recursive one applies them on its own aliases as a top-k filter only:
+the completed rows follow `orderBy()` alone, not relevance, and `.fuseWith()` is refused. See
 [Recursive traversal limitations](/queries/recursive#limitations).
 
 ## Composition Cascade

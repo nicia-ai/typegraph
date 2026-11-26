@@ -456,7 +456,7 @@ store
 ```
 
 `.fuseWith()` throws at compile time if the query lacks either a
-`.similarTo()` or a `$fulltext.matches()`. Validation rejects non-finite
+`.similarTo()` or a `$fulltext.matches()`, or has a recursive traversal. Validation rejects non-finite
 or negative `k`/weights. The same shape is accepted by
 `store.search.hybrid({ fusion })` and validated by the same function on
 both paths.
@@ -739,9 +739,19 @@ walks from or to is refused with `UnsupportedPredicateError` (`details.reason` i
 a ranked top-k match set and orders the rows by relevance, and a recursive statement has no relevance
 ranking to apply either through. A one-hop traversal (`minHops` and `maxHops` both 1, with no `depth`, `path` or
 `stopExpansion()`) that is the query's only traversal compiles to a fixed step and applies the
-predicate, and so does a fixed traversal chained with a recursive one, on its own aliases. Otherwise,
-run the search in a separate query and constrain the walk with the matched ids (`id.in(ids)`).
-`.similarTo()` is refused the same way.
+predicate. A fixed traversal chained with a recursive one applies it on its own aliases as a filter
+only: it keeps the top-k matches, but the completed rows follow `orderBy()` alone, not relevance, and
+`.fuseWith()` is refused on any query with a recursive traversal. Otherwise, or to rank, run the
+search in a separate query and constrain the walk with the matched ids (`id.in(ids)`).
+`.similarTo()` behaves the same way. See [Recursive traversal limitations](/queries/recursive#limitations).
+
+### Not in `having()` or `whereEdge()`
+
+A relevance predicate is applied only as a `whereNode()` match constraint on a node alias.
+`having()` and `whereEdge()` refuse `$fulltext.matches()` or `.similarTo()` anywhere in the predicate
+they are given, including one reused from a `whereNode()` call or nested under `.not()`, with
+`UnsupportedPredicateError` when they are called (`details.reason` is `"having"` or
+`"edge_predicate"`).
 
 ### Tokenizer Is Fixed on SQLite
 

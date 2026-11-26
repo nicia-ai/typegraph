@@ -735,9 +735,16 @@ For the whole-plus-parts *export* shape (rather than a query result), see
   compiled, before any statement runs: they select a ranked top-k set and order rows by relevance,
   which a recursive statement cannot apply. A one-hop traversal (`minHops` and `maxHops` both 1, with no `depth`,
   `path` or `stopExpansion()`) that is the query's only traversal compiles to a fixed step and
-  applies them, as does a fixed traversal chained with a recursive one, on its own aliases, and
-  the start alias of an optional first recursive traversal, which a fixed source step filters.
-  Otherwise, search in a separate query and constrain the walk with the matched ids.
+  applies them with their usual relevance order.
+- **In a chain with a recursive stage, relevance predicates filter and do not order.** A fixed
+  traversal chained with a recursive one applies them on its own aliases, and so does the start
+  alias of an optional first recursive traversal, which a fixed source step filters. That step
+  keeps only the predicate's top-k candidates (and its `minScore`), but the completed rows are not
+  ordered by relevance: they follow the query's `orderBy()` terms alone, and without `orderBy()`
+  their order, and so the row `first()` or `limit()` keeps, is unspecified. `.fuseWith()` is refused
+  on any query with a recursive traversal (`UnsupportedPredicateError`, `details.option` is
+  `"fuseWith"`, `details.reason` is `"recursive_traversal"`): fusion only orders hybrid matches.
+  To rank, search in a separate query and constrain the walk with the matched ids.
 
 ## Real-World Examples
 
