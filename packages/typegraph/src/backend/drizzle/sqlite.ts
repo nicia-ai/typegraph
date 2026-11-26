@@ -198,8 +198,10 @@ import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
+  createSessionMarkerBatchRead,
   ensureAdoptedVectorSlots,
   gateFulltext,
+  type RawContributionMaterializationRow,
   SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
 } from "./contribution-materializations";
 import {
@@ -2187,12 +2189,12 @@ export function buildSqliteEngineProfile(
       nativeTransaction?: object,
     ): Readonly<{
       backend: TransactionBackend;
-      executionAdapter: SqliteExecutionAdapter;
+      route: TransactionStatementRoute;
       drainAndClose: CloseTransactionView;
     }> {
       const {
         backend: txBackend,
-        executionAdapter: txExecutionAdapter,
+        route,
         contributionReadGate,
         drainAndClose,
       } = createTransactionBackend({
@@ -2216,7 +2218,7 @@ export function buildSqliteEngineProfile(
           contributionReadGate.assertInitialized,
           contributionReadGate.refuseUnavailableFulltext,
         ),
-        executionAdapter: txExecutionAdapter,
+        route,
         drainAndClose,
       };
     }
@@ -2230,20 +2232,20 @@ export function buildSqliteEngineProfile(
       tx: AnySqliteDatabase,
       fn: (
         backend: TransactionBackend,
-        executionAdapter: SqliteExecutionAdapter,
+        route: TransactionStatementRoute,
       ) => Promise<T>,
       nativeTransaction?: object,
       recordEngineEnd?: RecordEngineEnd,
     ): Promise<T> {
-      const { backend, executionAdapter: txExecutionAdapter, drainAndClose } =
-        bindTransactionBackend(tx, isFirstParty, nativeTransaction);
+      const { backend, route, drainAndClose } = bindTransactionBackend(
+        tx,
+        isFirstParty,
+        nativeTransaction,
+      );
       return runThenCloseView(
         drainAndClose,
         () =>
-          fn(
-            markSchemaFencedInsertEligibleUnderFence(backend, fencePlan),
-            txExecutionAdapter,
-          ),
+          fn(markSchemaFencedInsertEligibleUnderFence(backend, fencePlan), route),
         recordEngineEnd,
       );
     }
@@ -2270,9 +2272,9 @@ export function buildSqliteEngineProfile(
 
     /**
      * Opens a transaction TypeGraph owns and runs `fn` on its backend, its
-     * native handle, and the execution adapter behind the backend's view.
-     * `transactionWithNative` is this minus the adapter; `trustedImport`
-     * issues its batches through the adapter, so they are admitted by the
+     * native handle, and the statement route behind the backend's view.
+     * `transactionWithNative` is this minus the route; `trustedImport`
+     * issues its batches through the route, so they are admitted by the
      * same view the backend's own statements are and refused once the
      * transaction ends.
      */
@@ -2280,7 +2282,7 @@ export function buildSqliteEngineProfile(
       fn: (
         tx: TransactionBackend,
         sql: AnySqliteDatabase,
-        executionAdapter: SqliteExecutionAdapter,
+        route: TransactionStatementRoute,
       ) => Promise<T>,
       options?: InternalTransactionOptions,
     ): Promise<T> {
@@ -2372,7 +2374,7 @@ export function buildSqliteEngineProfile(
                           fencePlan,
                         ),
                         db,
-                        bound.executionAdapter,
+                        bound.route,
                       ),
                   );
                   await runFrameStatement(sql`COMMIT`);
@@ -2390,8 +2392,7 @@ export function buildSqliteEngineProfile(
           return runDoSqliteStorageTransaction(async (nativeTransaction) =>
             runOnOwnedTransaction(
               db,
-              (txBackend, txExecutionAdapter) =>
-                fn(txBackend, db, txExecutionAdapter),
+              (txBackend, route) => fn(txBackend, db, route),
               nativeTransaction,
             ),
           );
@@ -2407,8 +2408,7 @@ export function buildSqliteEngineProfile(
                   recordSqliteEngineSavepoint(db, tx);
                   return runOnOwnedTransaction(
                     tx,
-                    (txBackend, txExecutionAdapter) =>
-                      fn(txBackend, tx, txExecutionAdapter),
+                    (txBackend, route) => fn(txBackend, tx, route),
                     undefined,
                     recordEngineEnd,
                   );
@@ -2711,7 +2711,7 @@ export function buildSqliteEngineProfile(
             fn: (session: TrustedImportSession) => Promise<T>,
             options_?: TrustedImportOptions,
           ): Promise<T> {
-            return openTransaction(async (tx, _native, txExecutionAdapter) => {
+            return openTransaction(async (tx, _native, route) => {
               if (options_?.schemaWrite !== undefined) {
                 await requireDefined(tx.lockSchemaVersionForWrite)({
                   ...options_.schemaWrite,
@@ -2723,7 +2723,11 @@ export function buildSqliteEngineProfile(
                 tableNames,
               );
               const result = await fn(
-                createSqliteTrustedImportSession(txExecutionAdapter, tableNames),
+                createSqliteTrustedImportSession(
+                  route.executionAdapter,
+                  tableNames,
+                  route.enterView,
+                ),
               );
               await restoreSecondaryIndexes(tx, indexDefinitions);
               await analyzeImportedTables(tx, tableNames);
@@ -2793,14 +2797,25 @@ type RecordEngineEnd = (outcome: unknown) => void;
  * issues COMMIT / ROLLBACK (or lets the driver issue them); an adopted
  * transaction never calls it, because its caller ends the transaction.
  */
+/**
+ * How a session that issues statements of its own on a transaction (trusted
+ * import) reaches it through the transaction's view, like the backend's own
+ * statements.
+ */
+type TransactionStatementRoute = Readonly<{
+  /** The execution adapter behind the backend's view. */
+  executionAdapter: SqliteExecutionAdapter;
+  /**
+   * Admits nothing through the view: resolves while the transaction is open
+   * and is refused like a statement once it ended. A session that may issue
+   * no statement (an empty batch) enters here first.
+   */
+  enterView: () => Promise<void>;
+}>;
+
 type BoundTransactionBackend = Readonly<{
   backend: InternalOperationBackend;
-  /**
-   * The execution adapter behind `backend`'s view. A session that issues
-   * statements of its own on this transaction (trusted import) runs them
-   * here, so the view admits them like the backend's.
-   */
-  executionAdapter: SqliteExecutionAdapter;
+  route: TransactionStatementRoute;
   /** The marker gate `backend` uses, admitted through the same view. */
   contributionReadGate: ContributionMaterializer;
   drainAndClose: CloseTransactionView;
@@ -2880,24 +2895,40 @@ function createTransactionBackend(
 ): BoundTransactionBackend {
   // A fresh view per transaction (and per retried attempt): the runner closes
   // it at the boundary, and a later transaction on the same connection gets
-  // its own.
-  // After a statement fails, the view asks the driver whether the
+  // its own. After a statement fails, the view asks the driver whether the
   // transaction is still open, so a failure that ended it in the engine
   // refuses every later statement instead of letting it autocommit.
   const isTransactionOpen = sqliteTransactionStateProbe(options.db);
-  const view = createSqliteTransactionExecutionView(
+  const sessionAdapter =
     options.executionAdapter ??
-      createSqliteExecutionAdapter(options.db, {
-        profileHints: options.profileHints,
-      }),
+    createSqliteExecutionAdapter(options.db, {
+      profileHints: options.profileHints,
+    });
+  const view = createSqliteTransactionExecutionView(
+    sessionAdapter,
     isTransactionOpen === undefined ? {} : { isTransactionOpen },
   );
   const txExecutionAdapter = view.adapter;
-  // Marker reads share the root materializer's cache (SQLite's root session
-  // reads the same committed markers as this transaction), but are admitted
-  // through this transaction's view; administration is refused.
+  // Marker reads are admitted through this transaction's view, and
+  // administration is refused. Where the transaction runs on the root's own
+  // connection, its reads share the root materializer's cache: the root
+  // reads what this transaction reads. A transaction on a libSQL session of
+  // its own can hold a snapshot older than the root's reads (a caller's
+  // deferred transaction), so its marker reads run on that session, with a
+  // cache of their own that never outlives it — as PostgreSQL's do.
   const txContributionMaterializer = admitContributionReadsThroughView(
-    options.contributionMaterializer,
+    ownLibsqlSession(options.db) === undefined ?
+      options.contributionMaterializer
+    : options.contributionMaterializer.bindReadSession(
+        createSessionMarkerBatchRead(
+          // Unwrapped: the gate's member is admitted through the view as a
+          // whole, so its marker read settles inside that admission.
+          (query) =>
+            sessionAdapter.execute<RawContributionMaterializationRow>(query),
+          requireDefined(options.tableNames.contributionMaterializations),
+          SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+        ),
+      ),
     view.admit,
   );
 
@@ -2905,7 +2936,7 @@ function createTransactionBackend(
   // contribution materializer: the per-field vector table is provisioned
   // (DDL) only by the privileged outer backend, so a tx-scoped vector op
   // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
-  // anything on rollback. The shared per-instance cache means a slot
+  // anything on rollback. Where the cache is shared (above), a slot
   // confirmed once stays a pure `Set.has` inside every later transaction.
   const txBackend = createSqliteOperationBackend({
     capabilities: downgradeAtomicBatch(options.capabilities),
@@ -2925,7 +2956,10 @@ function createTransactionBackend(
   return {
     backend:
       options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend,
-    executionAdapter: txExecutionAdapter,
+    route: {
+      executionAdapter: txExecutionAdapter,
+      enterView: () => view.admit(() => Promise.resolve()),
+    },
     contributionReadGate: txContributionMaterializer,
     drainAndClose: view.drainAndClose,
   };
@@ -3033,9 +3067,26 @@ function isPinnedLibsqlTransactionOpen(pinned: object): boolean {
 function sqliteTransactionStateProbe(
   db: AnySqliteDatabase,
 ): (() => boolean) | undefined {
-  const pinned = pinnedLibsqlTransaction(db);
-  if (pinned !== undefined) return () => isPinnedLibsqlTransactionOpen(pinned);
+  const session = ownLibsqlSession(db);
+  if (session !== undefined) return () => isPinnedLibsqlTransactionOpen(session);
   return sqliteConnectionProbe(db)?.isTransactionOpen;
+}
+
+/**
+ * The libSQL transaction handle `db` executes on when that is a driver
+ * session of its own, apart from the connection the root backend's reads use:
+ * the handle a Drizzle libSQL transaction object (or a savepoint of one)
+ * pins, or the client of a Drizzle database opened over a libSQL
+ * transaction. `undefined` for every other SQLite handle — better-sqlite3,
+ * bun:sqlite, sql.js, Durable Object storage, a libSQL client, and the
+ * manual `BEGIN` / `COMMIT` frame — each of which runs on the root's own
+ * connection, so a root read sees what its transaction sees.
+ */
+function ownLibsqlSession(db: AnySqliteDatabase): object | undefined {
+  const pinned = pinnedLibsqlTransaction(db);
+  if (pinned !== undefined) return pinned;
+  const client = sqliteHandleClient(db);
+  return isLibsqlTransaction(client) ? client : undefined;
 }
 
 /**

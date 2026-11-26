@@ -33,7 +33,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
-import { sql as portableSql } from "../../query/sql-fragment";
+import { sql as portableSql,type SqlFragment } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
@@ -141,6 +141,38 @@ export function mapContributionMaterializationRow(
     materializedAt: decode(row.materializedAt),
     lastAttemptedAt,
     lastError: row.lastError ?? undefined,
+  };
+}
+
+/**
+ * THE marker read a transaction-bound gate runs on its own session
+ * ({@link ContributionMaterializer.bindReadSession}): every marker row of
+ * `graphIds` from `markerTableName`, through `execute` — the transaction
+ * session's statement path, so the rows are the transaction snapshot's,
+ * never the root session's. `decode` is the dialect's timestamp decoder.
+ */
+export function createSessionMarkerBatchRead(
+  execute: (
+    query: SqlFragment,
+  ) => Promise<readonly RawContributionMaterializationRow[]>,
+  markerTableName: string,
+  decode: (value: unknown) => string | undefined,
+): NonNullable<ContributionMaterializerDeps["getMarkerBatch"]> {
+  const markerTable = portableSql.identifier(markerTableName);
+  return async (graphIds) => {
+    if (graphIds.length === 0) return [];
+    const rows = await execute(portableSql`
+      SELECT graph_id AS "graphId", logical_name AS "logicalName",
+        owner, table_name AS "tableName", signature,
+        materialized_at AS "materializedAt",
+        last_attempted_at AS "lastAttemptedAt",
+        last_error AS "lastError"
+      FROM ${markerTable} WHERE graph_id IN (${portableSql.join(
+        graphIds.map((graphId) => portableSql`${graphId}`),
+        portableSql`, `,
+      )})
+    `);
+    return rows.map((row) => mapContributionMaterializationRow(row, decode));
   };
 }
 
@@ -2510,12 +2542,14 @@ const TRANSACTION_MATERIALIZER_MEMBER_ROLES = {
  * administrative member is refused with
  * {@link transactionContributionAdministrationError}.
  *
- * For an engine whose root session reads the same committed markers as its
- * transactions (SQLite: one writer, no snapshot older than the root's
- * confirmation), sharing the root cache is sound and saves a marker read per
- * transaction; an engine whose transaction snapshot can predate the root's
- * confirmation binds a fresh cache with
- * {@link ContributionMaterializer.bindReadSession} instead.
+ * For a transaction that runs on the root session's own connection (SQLite's
+ * single-connection drivers and manual frame), the root reads what the
+ * transaction reads, so sharing the root cache is sound and saves a marker
+ * read per transaction. A transaction on a session of its own, whose snapshot
+ * can predate the root's confirmation (a libSQL transaction handle, every
+ * PostgreSQL transaction), passes the gate
+ * {@link ContributionMaterializer.bindReadSession} binds to that session
+ * instead.
  */
 export function admitContributionReadsThroughView(
   materializer: ContributionMaterializer,

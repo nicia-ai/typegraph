@@ -235,9 +235,9 @@ import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
+  createSessionMarkerBatchRead,
   ensureAdoptedVectorSlots,
   gateFulltext,
-  mapContributionMaterializationRow,
   POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
   type RawContributionMaterializationRow,
 } from "./contribution-materializations";
@@ -2639,9 +2639,16 @@ function buildPostgresEngineProfileInternal(
       backend: TransactionBackend;
       privilegedBackend: InternalOperationBackend;
       executeCompiled: TransactionCompiledExecution | undefined;
+      enterView: () => Promise<void>;
       drainAndClose: () => Promise<void>;
     }> {
-      const { backend, contributionReadGate, executeCompiled, drainAndClose } =
+      const {
+        backend,
+        contributionReadGate,
+        executeCompiled,
+        enterView,
+        drainAndClose,
+      } =
         createTransactionBackend({
           db: tx,
           connection,
@@ -2674,6 +2681,7 @@ function buildPostgresEngineProfileInternal(
         backend: gatedBackend,
         privilegedBackend: backend,
         executeCompiled,
+        enterView,
         drainAndClose,
       };
     }
@@ -2692,6 +2700,7 @@ function buildPostgresEngineProfileInternal(
         tx: TransactionBackend,
         sql: AnyPgTransaction,
         executeCompiled: TransactionCompiledExecution | undefined,
+        enterView: () => Promise<void>,
       ) => Promise<T>,
       options?: InternalTransactionOptions,
     ): Promise<T> {
@@ -2746,6 +2755,7 @@ function buildPostgresEngineProfileInternal(
             const {
               backend: txBackend,
               executeCompiled,
+              enterView,
               drainAndClose,
             } = bindTransactionBackend(
               tx,
@@ -2757,6 +2767,7 @@ function buildPostgresEngineProfileInternal(
                 markSchemaFencedInsertEligibleUnderFence(txBackend, fencePlan),
                 nativeHandleForCallback(tx, options),
                 executeCompiled,
+                enterView,
               );
             } finally {
               // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
@@ -3137,7 +3148,7 @@ function buildPostgresEngineProfileInternal(
             options_?: TrustedImportOptions,
           ): Promise<T> {
             return openTransaction(
-              async (tx, _native, executeCompiled) => {
+              async (tx, _native, executeCompiled, enterView) => {
                 if (options_?.schemaWrite !== undefined) {
                   await requireDefined(tx.lockSchemaVersionForWrite)({
                     ...options_.schemaWrite,
@@ -3165,7 +3176,11 @@ function buildPostgresEngineProfileInternal(
                   allocationSchema,
                 );
                 const result = await fn(
-                  createPostgresTrustedImportSession(trustedTx, tableNames),
+                  createPostgresTrustedImportSession(
+                    trustedTx,
+                    tableNames,
+                    enterView,
+                  ),
                 );
                 await restoreSecondaryIndexes(trustedTx, indexDefinitions);
                 await analyzeImportedTables(trustedTx, tableNames);
@@ -4442,6 +4457,13 @@ type BoundTransactionBackend = Readonly<{
    * of its own on this transaction (trusted import) runs them here.
    */
   executeCompiled: TransactionCompiledExecution | undefined;
+  /**
+   * Admits nothing through the transaction's view and queue: resolves while
+   * the transaction is open and is refused like a statement once it ended.
+   * A session that may issue no statement (an empty trusted-import batch)
+   * enters here first, so it is refused exactly when a statement would be.
+   */
+  enterView: () => Promise<void>;
   drainAndClose: () => Promise<void>;
 }>;
 
@@ -4533,33 +4555,15 @@ function createTransactionBackend(
   // A marker confirmed by the root backend can be invisible to an older
   // transaction snapshot. Resolve assertions on this exact pinned session;
   // the bound materializer owns a cache that cannot leak across transactions.
-  const markerTable = portableSql.identifier(
-    getTableName(options.contributionMaterializationsTable),
-  );
   const txContributionMaterializer =
-    options.contributionMaterializer.bindReadSession(async (graphIds) => {
-      if (graphIds.length === 0) return [];
-      const rows =
-        await txExecutionAdapter.execute<RawContributionMaterializationRow>(
-          portableSql`
-          SELECT graph_id AS "graphId", logical_name AS "logicalName",
-            owner, table_name AS "tableName", signature,
-            materialized_at AS "materializedAt",
-            last_attempted_at AS "lastAttemptedAt",
-            last_error AS "lastError"
-          FROM ${markerTable} WHERE graph_id IN (${portableSql.join(
-            graphIds.map((graphId) => portableSql`${graphId}`),
-            portableSql`, `,
-          )})
-        `,
-        );
-      return rows.map((row) =>
-        mapContributionMaterializationRow(
-          row,
-          POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
-        ),
-      );
-    });
+    options.contributionMaterializer.bindReadSession(
+      createSessionMarkerBatchRead(
+        (query) =>
+          txExecutionAdapter.execute<RawContributionMaterializationRow>(query),
+        getTableName(options.contributionMaterializationsTable),
+        POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+      ),
+    );
   const txOperationBackend = createPostgresOperationBackend({
     db: options.db,
     executionAdapter: txExecutionAdapter,
@@ -4613,6 +4617,7 @@ function createTransactionBackend(
         <TRow>(compiledQuery: CompiledSqlQuery) =>
           runExclusive(() => executeCompiled<TRow>(compiledQuery))
       ),
+    enterView: () => runExclusive(() => Promise.resolve()),
     drainAndClose: txExecutionAdapter.drainAndClose,
   };
 }
