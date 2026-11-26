@@ -221,6 +221,17 @@ async function rejectionOf(call: () => Promise<unknown>): Promise<unknown> {
   }
 }
 
+/**
+ * The first issue of a ValidationError — its code, or the field it names
+ * when it has none — or what was thrown instead.
+ */
+async function refusalCode(call: () => Promise<unknown>): Promise<unknown> {
+  const error = await rejectionOf(call);
+  return error instanceof ValidationError ?
+      (error.details.issues[0]?.code ?? error.details.issues[0]?.path)
+    : error;
+}
+
 /** Endpoint `id` as a reference. */
 function ref(id: string): typeof p1 {
   return { kind: "RbePerson", id };
@@ -506,6 +517,42 @@ export function registerIdentityRefusalBeforeEntryIntegrationTests(
     // catch commits it: the same assertion persists, and the different one
     // is refused as a contradiction rather than for the hole.
 
+    it("a bulk pair's statement-free refusals are reported in pair order, and within a pair a self-assertion before a malformed bound", async () => {
+      const graph = buildGraph(nextGraphId());
+      const store = await context.createStore(graph);
+      const malformed = "yesterday";
+      const codes = {
+        scalar: await refusalCode(() =>
+          store.identity.assertSame(p1, p1, { validFrom: malformed }),
+        ),
+        onePair: await refusalCode(() =>
+          store.identity.bulkAssertSame([
+            { a: p1, b: p1, validFrom: malformed },
+          ]),
+        ),
+        selfBeforeLaterBound: await refusalCode(() =>
+          store.identity.bulkAssertDifferent([
+            { a: p2, b: p2 },
+            { a: p1, b: p2, validFrom: malformed },
+          ]),
+        ),
+        boundBeforeLaterSelf: await refusalCode(() =>
+          store.identity.bulkAssertDifferent([
+            { a: p1, b: p2, validFrom: malformed },
+            { a: p2, b: p2 },
+          ]),
+        ),
+      };
+      expect(codes).toEqual({
+        scalar: "IDENTITY_SELF_ASSERTION",
+        onePair: "IDENTITY_SELF_ASSERTION",
+        selfBeforeLaterBound: "IDENTITY_SELF_ASSERTION",
+        boundBeforeLaterSelf: "validFrom",
+      });
+    });
+    // REVERT CHECK: validate the bounds before the self-assertion in the
+    // request — `scalar`, `onePair` report the malformed bound instead.
+
     it("tx.identity bulk receipts count the pairs the request snapshotted, not a separate read of the input", async () => {
       const graph = buildGraph(nextGraphId());
       const store = await context.createStore(graph);
@@ -540,7 +587,7 @@ export function registerIdentityRefusalBeforeEntryIntegrationTests(
     // again — the receipt reports one write of each relation while the
     // request wrote two.
 
-    it("a read-only transaction's refusal enters no operation either", async () => {
+    it("compatibility pin: a read-only transaction's refusal enters no operation (already true before refusals moved ahead of entry)", async () => {
       const graph = buildGraph(nextGraphId());
       const seeded = await context.createStore(graph);
       const counted = countingBackend(seeded.backend);
