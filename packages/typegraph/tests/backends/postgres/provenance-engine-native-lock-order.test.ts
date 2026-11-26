@@ -6,11 +6,12 @@
  * On that profile an ordinary node write takes its row lock without the
  * per-graph write lock (TypeGraph captures no history, so there is nothing to
  * serialize). A call that takes the graph lock in the middle of a transaction
- * — `provenance.retract(source, tx)`, `provenance.assertHolds(tx, …)`,
- * `tx.assertUnchangedSince()` — therefore takes it AFTER that row lock, the
- * reverse of the order a concurrent retraction takes them (graph lock, then
- * the source row). The holder updates source A and parks; the contender's
- * own-transaction `retract(A)` takes the graph lock and waits on A's row;
+ * — `provenance.retract(source, tx)`, `provenance.assertHolds(tx, …)`, a
+ * writable `provenance.holding(tx)`, `tx.assertUnchangedSince()` — therefore
+ * takes it AFTER that row lock, the reverse of the order a concurrent
+ * retraction takes them (graph lock, then the source row). The holder
+ * updates source A and parks; the contender's own-transaction `retract(A)`
+ * takes the graph lock and waits on A's row;
  * the holder then makes its call and waits on the graph lock. PostgreSQL
  * detects the cycle and aborts one of the two, which surfaces as the store's
  * typed, retryable `TransactionConflictError` with the driver's `40P01` as
@@ -342,6 +343,12 @@ const LOCKING_CALLS: readonly LockingCall[] = [
     name: "provenance.assertHolds(tx, …)",
     call: (store, tx) =>
       createRetractionCapability(store, config).assertHolds(tx, [sharedFact]),
+  },
+  {
+    // A writable holding(tx) takes the schema fence and the graph lock as
+    // assertHolds does, so it inverts the same way after an ordinary write.
+    name: "provenance.holding(tx) in a transaction that can write",
+    call: (store, tx) => createRetractionCapability(store, config).holding(tx),
   },
 ];
 
