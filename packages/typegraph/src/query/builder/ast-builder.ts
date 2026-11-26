@@ -56,6 +56,9 @@ export function buildQueryAst(
       recordedAsOf: state.recordedAsOf,
     }),
     ...(state.orderBy.length > 0 && { orderBy: state.orderBy }),
+    ...(state.reverseSelectionOrder === true && {
+      reverseSelectionOrder: true as const,
+    }),
     ...(state.limit !== undefined && { limit: state.limit }),
     ...(state.offset !== undefined && { offset: state.offset }),
     ...(state.groupBy !== undefined && { groupBy: state.groupBy }),

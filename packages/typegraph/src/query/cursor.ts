@@ -8,8 +8,15 @@
  */
 
 import { ConfigurationError, ValidationError } from "../errors";
-import { type FieldRef, type OrderSpec } from "./ast";
+import { shortHash } from "../utils/hash";
+import { type FieldRef, type OrderSpec, type QueryAst } from "./ast";
 import { systemColumnSelectedPath } from "./builder/order-by-field";
+import {
+  extractFulltextMatchPredicates,
+  extractVectorSimilarityPredicates,
+} from "./compiler/predicates";
+import { type RelevanceSortKey } from "./compiler/relevance-order";
+import { type SqlDialect } from "./dialect/types";
 import { resolveJsonPointer } from "./json-pointer";
 
 // ============================================================
@@ -30,6 +37,11 @@ export type CursorData = Readonly<{
   vals: readonly unknown[];
   /** Column identifiers for validation */
   cols: readonly string[];
+  /**
+   * The search a full-text, vector or hybrid query's cursor positions
+   * ({@link searchCursorFingerprint}); absent on any other query's cursor.
+   */
+  s?: string;
 }>;
 
 // ============================================================
@@ -117,11 +129,19 @@ export function decodeCursor(cursor: string): CursorData {
       });
     }
 
+    const search = raw["s"];
+    if (search !== undefined && typeof search !== "string") {
+      throw new ValidationError("Invalid cursor structure", {
+        issues: [{ path: "cursor", message: "Cursor search must be a string" }],
+      });
+    }
+
     return {
       v: raw["v"],
       d: raw["d"],
       vals: raw["vals"] as readonly unknown[],
       cols: raw["cols"] as readonly string[],
+      ...(search === undefined ? {} : { s: search }),
     };
   } catch (error) {
     if (error instanceof ValidationError) {
@@ -283,8 +303,16 @@ export function validateCursorColumns(
   cursorData: CursorData,
   orderSpecs: readonly OrderSpec[],
 ): void {
-  const expectedCols = orderSpecs.map((spec) => buildColumnId(spec));
+  validateCursorColumnIds(
+    cursorData,
+    orderSpecs.map((spec) => buildColumnId(spec)),
+  );
+}
 
+function validateCursorColumnIds(
+  cursorData: CursorData,
+  expectedCols: readonly string[],
+): void {
   if (cursorData.cols.length !== expectedCols.length) {
     throw new ValidationError(
       `Cursor has ${cursorData.cols.length} columns but query has ${expectedCols.length} ORDER BY columns`,
@@ -329,4 +357,217 @@ export function requireCursorField(field: OrderSpec["field"]): FieldRef {
       "Cursor pagination does not support database-expression ordering.",
     );
   return field;
+}
+
+// ============================================================
+// Keyset cursors over relevance-ordered (search) queries
+// ============================================================
+
+/**
+ * One key of a keyset cursor: a field the row's order reads, or one of the
+ * relevance sort keys a full-text, vector or hybrid statement orders by.
+ */
+export type KeysetKey =
+  | Readonly<{ kind: "field"; spec: OrderSpec }>
+  | Readonly<{ kind: "relevance"; key: RelevanceSortKey }>;
+
+/**
+ * What a full-text, vector or hybrid query's cursor is bound to: the search it
+ * positions ({@link searchCursorFingerprint}) and how its dialect binds the
+ * text a numeric relevance key is carried as
+ * (`DialectAdapter.relevanceCursorKey.bind`).
+ */
+export type SearchCursorBinding = Readonly<{
+  fingerprint: string;
+  bindRelevanceKey: (text: string) => string | number | undefined;
+}>;
+
+/** The code of the refusal of a cursor that does not position this query. */
+export const SEARCH_CURSOR_MISMATCH = "SEARCH_CURSOR_MISMATCH";
+
+/**
+ * Identifies the search a full-text, vector or hybrid query runs: everything
+ * that decides its candidates and their relevance values (each predicate's
+ * target, query text or embedding, mode, language, metric, k, minimum score
+ * and approximate retrieval, and the hybrid fusion), on the dialect that scores
+ * it. A cursor records it, and a cursor recorded for another search is
+ * refused: its relevance values are positions in another ranking, and another
+ * engine's native scores (BM25 against `ts_rank_cd`) rank differently. The
+ * query's other filters are not part of it, as they are not part of a
+ * non-search cursor.
+ */
+export function searchCursorFingerprint(
+  ast: QueryAst,
+  dialect: SqlDialect,
+): string {
+  const fulltext = extractFulltextMatchPredicates(ast.predicates).map(
+    (predicate) => [
+      "fulltext",
+      predicate.field.alias,
+      predicate.query,
+      predicate.mode,
+      predicate.language,
+      predicate.limit,
+      predicate.minScore,
+    ],
+  );
+  const vector = extractVectorSimilarityPredicates(ast.predicates).map(
+    (predicate) => [
+      "vector",
+      predicate.field.alias,
+      predicate.field.path,
+      predicate.field.jsonPointer,
+      predicate.queryEmbedding,
+      predicate.metric,
+      predicate.limit,
+      predicate.minScore,
+      predicate.approximate ?? false,
+    ],
+  );
+  // JSON writes an absent option as `null`, so it keeps its position.
+  const fusion =
+    fulltext.length > 0 && vector.length > 0 ?
+      [
+        ast.fusion?.method ?? "rrf",
+        ast.fusion?.k,
+        ast.fusion?.weights?.vector,
+        ast.fusion?.weights?.fulltext,
+      ]
+    : [];
+  return shortHash(JSON.stringify([dialect, fulltext, vector, fusion]));
+}
+
+/** The column identifier a cursor records for one keyset key. */
+function keysetColumnId(key: KeysetKey): string {
+  return key.kind === "field" ?
+      buildColumnId(key.spec)
+    : `@relevance.${key.key.source}`;
+}
+
+/**
+ * Builds the cursor of a keyset that leads with, or interleaves, relevance
+ * keys. `fieldValues` hold the field keys' values in keyset order and
+ * `relevanceValues` the relevance keys' values in keyset order, as the
+ * statement's cursor-key columns returned them.
+ */
+export function buildKeysetCursor(
+  input: Readonly<{
+    keys: readonly KeysetKey[];
+    fieldValues: readonly unknown[];
+    relevanceValues: readonly unknown[];
+    direction: "f" | "b";
+    search: SearchCursorBinding;
+  }>,
+): string {
+  const fieldValues = input.fieldValues.values();
+  const relevanceValues = input.relevanceValues.values();
+  const vals = input.keys.map((key) => {
+    if (key.kind === "field") return fieldValues.next().value;
+    const value: unknown = relevanceValues.next().value;
+    if (relevanceKeyBinding(key.key, value, input.search) === undefined) {
+      throw new ConfigurationError(
+        `Cursor pagination cannot position a row whose ${key.key.source} relevance key is ${String(value)}.`,
+        { operation: "paginate" },
+      );
+    }
+    return value;
+  });
+  return encodeCursor({
+    v: CURSOR_VERSION,
+    d: input.direction,
+    vals,
+    cols: input.keys.map((key) => keysetColumnId(key)),
+    s: input.search.fingerprint,
+  });
+}
+
+/**
+ * The value a cursor's comparison binds for a relevance key the cursor carries
+ * as `value`, or `undefined` when `value` is not a key this dialect renders.
+ * The hybrid node-id tiebreak is text compared as text; a numeric key is the
+ * text `DialectAdapter.relevanceCursorKey.select` rendered, bound by its
+ * `bind`.
+ */
+function relevanceKeyBinding(
+  key: RelevanceSortKey,
+  value: unknown,
+  search: SearchCursorBinding,
+): string | number | undefined {
+  if (typeof value !== "string") return undefined;
+  if (key.source === "hybrid_node_id") return value;
+  return search.bindRelevanceKey(value);
+}
+
+/**
+ * The values a validated search cursor's keyset position compares against,
+ * in keyset order: a field key's value as the cursor carries it, a relevance
+ * key's as its dialect binds it ({@link relevanceKeyBinding}).
+ */
+export function keysetPositionValues(
+  cursorData: CursorData,
+  keys: readonly KeysetKey[],
+  search: SearchCursorBinding,
+): readonly unknown[] {
+  return keys.map((key, index) => {
+    const value = cursorData.vals[index];
+    if (key.kind === "field") return value;
+    const bound = relevanceKeyBinding(key.key, value, search);
+    if (bound === undefined)
+      refuseSearchCursor(
+        `This cursor's ${key.key.source} relevance key is not a value this backend issued.`,
+      );
+    return bound;
+  });
+}
+
+function refuseSearchCursor(message: string): never {
+  throw new ValidationError(
+    message,
+    {
+      issues: [{ path: "cursor", code: SEARCH_CURSOR_MISMATCH, message }],
+    },
+    {
+      suggestion:
+        "Start again without a cursor: a search query's cursor positions only the search it was issued for, and cursors issued for search queries before relevance-ordered keysets are not accepted.",
+    },
+  );
+}
+
+/**
+ * Validates that `cursorData` positions this query's keyset. For a full-text,
+ * vector or hybrid query (`search` given), the cursor must have been issued
+ * for the same search, carry every relevance key the keyset leads with, and
+ * hold each relevance value in the type this dialect carries it in. A cursor
+ * that does not is refused with a `ValidationError` whose issue code is
+ * {@link SEARCH_CURSOR_MISMATCH}: a cursor issued before this check existed, by
+ * another search, by a query that is not a search, or by another dialect. A
+ * query that is not a search refuses a search's cursor the same way. Field
+ * columns are then checked as for any cursor ({@link validateCursorColumns}).
+ *
+ * @throws ValidationError if the cursor does not position this keyset
+ */
+export function validateKeysetCursor(
+  cursorData: CursorData,
+  keys: readonly KeysetKey[],
+  search: SearchCursorBinding | undefined,
+): void {
+  if (search === undefined) {
+    if (cursorData.s !== undefined)
+      refuseSearchCursor(
+        "This cursor was issued for a full-text, vector or hybrid query and cannot position a query without one.",
+      );
+  } else if (cursorData.s === undefined) {
+    refuseSearchCursor(
+      "This cursor does not position a full-text, vector or hybrid query: it was issued for a query without a search, or before search cursors carried their relevance keys.",
+    );
+  } else if (cursorData.s !== search.fingerprint) {
+    refuseSearchCursor(
+      "This cursor was issued for a different search (query text, embedding, k, minimum score, metric or fusion).",
+    );
+  }
+  validateCursorColumnIds(
+    cursorData,
+    keys.map((key) => keysetColumnId(key)),
+  );
+  if (search !== undefined) keysetPositionValues(cursorData, keys, search);
 }

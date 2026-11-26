@@ -8,6 +8,7 @@ import {
   DEFAULT_PAGINATION_LIMIT,
   DEFAULT_STREAM_BATCH_SIZE,
 } from "../../constants";
+import { CompilerInvariantError } from "../../errors";
 import { requireDefined } from "../../utils/presence";
 import {
   type FieldRef,
@@ -15,6 +16,7 @@ import {
   type NodePredicate,
   type OrderSpec,
   type PredicateExpression,
+  type RelevanceComparisonPredicate,
   type TupleComparisonPredicate,
 } from "../ast";
 import { isNullableSystemOrderField } from "../builder/order-by-field";
@@ -26,14 +28,16 @@ import type {
   SelectContext,
   StreamOptions,
 } from "../builder/types";
+import { type RelevanceSortKey } from "../compiler/relevance-order";
 import { requireCursorField } from "../cursor";
 import {
   buildCursorFromRow,
   type CursorData,
   decodeCursor,
+  type KeysetKey,
   validateCursorColumns,
 } from "../cursor";
-import { resolveNullOrdering } from "../order";
+import { resolveNullOrdering, reverseOrder } from "../order";
 
 /**
  * Parses pagination options into internal format.
@@ -79,11 +83,7 @@ export function adjustOrderByForDirection(
   if (direction === "forward") {
     return orderBy;
   }
-  return orderBy.map((spec) => ({
-    ...spec,
-    direction: spec.direction === "asc" ? ("desc" as const) : ("asc" as const),
-    nulls: resolveNullOrdering(spec) === "first" ? "last" : "first",
-  }));
+  return orderBy.map((spec) => reverseOrder(spec));
 }
 
 /**
@@ -96,64 +96,134 @@ export function buildCursorPredicate(
   direction: "forward" | "backward",
   targetAlias: string,
 ): NodePredicate {
-  const values = cursorData.vals;
-
   const tupleComparison = buildTupleComparisonPredicate(
-    values,
+    cursorData.vals,
     orderBy,
     direction,
   );
   if (tupleComparison !== undefined) {
     return { targetAlias, expression: tupleComparison };
   }
-
-  // Build OR of progressively longer AND conditions
-  const orConditions: PredicateExpression[] = [];
-
-  for (let index = 0; index < orderBy.length; index++) {
-    const andConditions: PredicateExpression[] = [];
-
-    // All preceding columns must be equal
-    for (let index_ = 0; index_ < index; index_++) {
-      const spec = requireDefined(orderBy[index_]);
-      const value = values[index_];
-      andConditions.push(
-        buildEqualityPredicate(requireCursorField(spec.field), value),
-      );
-    }
-
-    // Current column uses comparison
-    const currentSpec = requireDefined(orderBy[index]);
-    const comparison = buildPositionPredicate(
-      requireCursorField(currentSpec.field),
-      currentSpec,
-      values[index],
-      direction === "forward" ? "after" : "before",
-    );
-    if (comparison === undefined) continue;
-    andConditions.push(comparison);
-
-    // Combine with AND
-    if (andConditions.length === 1) {
-      orConditions.push(requireDefined(andConditions[0]));
-    } else {
-      orConditions.push({ __type: "and", predicates: andConditions });
-    }
-  }
-
-  // Combine with OR
-  const expression: PredicateExpression =
-    orConditions.length === 0 ?
-      buildImpossiblePredicate(
-        requireCursorField(requireDefined(orderBy[0]).field),
-      )
-    : orConditions.length === 1 ? requireDefined(orConditions[0])
-    : { __type: "or", predicates: orConditions };
-
   return {
     targetAlias,
-    expression,
+    expression: buildKeysetPosition(
+      cursorData.vals,
+      orderBy.map((spec) => ({ kind: "field", spec }) as const),
+      direction,
+    ),
   };
+}
+
+/**
+ * "Strictly after (or before) the cursor" over `keys` in order: the OR of
+ * progressively longer ANDs, each holding the keys before one key equal to
+ * the cursor's values and that key past its value. The one owner of the
+ * lexicographic keyset position, for field and relevance keys alike.
+ */
+function buildKeysetPosition(
+  values: readonly unknown[],
+  keys: readonly KeysetKey[],
+  direction: "forward" | "backward",
+): PredicateExpression {
+  const position = direction === "forward" ? "after" : "before";
+  const orConditions: PredicateExpression[] = [];
+
+  for (const [index, currentKey] of keys.entries()) {
+    const comparison = buildKeyPositionPredicate(
+      currentKey,
+      values[index],
+      position,
+    );
+    if (comparison === undefined) continue;
+    // All preceding keys must be equal
+    const andConditions = [
+      ...keys
+        .slice(0, index)
+        .map((key, keyIndex) =>
+          buildKeyEqualityPredicate(key, values[keyIndex]),
+        ),
+      comparison,
+    ];
+    orConditions.push(
+      andConditions.length === 1 ?
+        requireDefined(andConditions[0])
+      : { __type: "and", predicates: andConditions },
+    );
+  }
+
+  if (orConditions.length === 0) {
+    // Only a NULL field key can leave nothing past the cursor; a relevance
+    // key always has a value to compare.
+    const firstField = keys.find((key) => key.kind === "field");
+    return buildImpossiblePredicate(
+      requireCursorField(requireDefined(firstField).spec.field),
+    );
+  }
+  return orConditions.length === 1 ?
+      requireDefined(orConditions[0])
+    : { __type: "or", predicates: orConditions };
+}
+
+function buildKeyEqualityPredicate(
+  key: KeysetKey,
+  value: unknown,
+): PredicateExpression {
+  if (key.kind === "field")
+    return buildEqualityPredicate(requireCursorField(key.spec.field), value);
+  return buildRelevanceComparison(key.key, "eq", value);
+}
+
+function buildKeyPositionPredicate(
+  key: KeysetKey,
+  value: unknown,
+  position: "after" | "before",
+): PredicateExpression | undefined {
+  if (key.kind === "field")
+    return buildPositionPredicate(
+      requireCursorField(key.spec.field),
+      key.spec,
+      value,
+      position,
+    );
+  const isAscending = key.key.direction === "asc";
+  return buildRelevanceComparison(
+    key.key,
+    isAscending === (position === "after") ? "gt" : "lt",
+    value,
+  );
+}
+
+function buildRelevanceComparison(
+  key: RelevanceSortKey,
+  op: RelevanceComparisonPredicate["op"],
+  value: unknown,
+): RelevanceComparisonPredicate {
+  if (typeof value !== "string" && typeof value !== "number")
+    throw new CompilerInvariantError(
+      `A cursor reached the keyset without a value for the ${key.source} relevance key`,
+      { phase: "relevance-cursor-key" },
+    );
+  return { __type: "relevance_comparison", source: key.source, op, value };
+}
+
+/**
+ * Applies a cursor to a full-text, vector or hybrid query: the keyset
+ * position over `keys` (`describeSelectionOrder`, relevance keys included) is
+ * ANDed into the completed-match predicate, after the relevance relations are
+ * computed. It never filters a node alias: the start alias's rows are the
+ * candidates the search ranks and limits to its top k, so a position pushed
+ * into them would rank a different candidate set on every page.
+ */
+export function applyRelevanceCursorFilter(
+  resultPredicate: PredicateExpression | undefined,
+  values: readonly unknown[],
+  keys: readonly KeysetKey[],
+  direction: "forward" | "backward",
+): PredicateExpression {
+  const position = buildKeysetPosition(values, keys, direction);
+  return resultPredicate === undefined ? position : (
+      { __type: "and", predicates: [resultPredicate, position] }
+    );
 }
 
 /** The parts of a query a cursor is applied to. */

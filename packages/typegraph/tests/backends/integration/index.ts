@@ -130,6 +130,7 @@ export { registerReservedAliasPrefixIntegrationTests } from "./reserved-alias-pr
 export { registerSavepointRecoveryIntegrationTests } from "./savepoint-recovery";
 export { registerSchemaCheckedReadIntegrationTests } from "./schema-checked-read";
 export { registerSchemaOperationRoutingIntegrationTests } from "./schema-operation-routing";
+export { registerSearchPaginationIntegrationTests } from "./search-pagination";
 export { registerSelectiveRetryIntegrationTests } from "./selective-retry";
 export { registerSetNodeMutationIntegrationTests } from "./set-node-mutation";
 export { registerSetOperationIntegrationTests } from "./set-operations";

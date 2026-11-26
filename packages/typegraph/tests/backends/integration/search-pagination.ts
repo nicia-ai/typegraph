@@ -1,0 +1,747 @@
+/**
+ * Cursor pagination of full-text, vector and hybrid queries: `paginate()`,
+ * `page()` (alone and in `store.batchOnce()`) and `stream()` visit every row
+ * `execute()` selects exactly once, in `execute()`'s order, forward and
+ * backward, with and without the caller's `orderBy()`.
+ *
+ * A search orders by relevance first, so the keyset leads with the relevance
+ * keys, compares them exactly as the database returned them, and positions
+ * the completed match rather than the candidates the search ranks.
+ */
+import fc from "fast-check";
+import { describe, expect, it } from "vitest";
+
+import { ValidationError } from "../../../src";
+import type { PaginatedResult } from "../../../src/query/builder/types";
+import {
+  SEARCH_CURSOR_MISMATCH,
+  searchCursorFingerprint,
+} from "../../../src/query/cursor";
+import { propertyRuns } from "../../property/run-budget";
+import type { IntegrationStore } from "./fixtures";
+import type { IntegrationTestContext } from "./test-context";
+
+type SearchKind = "fulltext" | "vector" | "hybrid";
+const SEARCH_KINDS: readonly SearchKind[] = ["fulltext", "vector", "hybrid"];
+
+const QUERY_VECTOR = [1, 0, 0, 0];
+
+/** A unit vector at `angle` radians from {@link QUERY_VECTOR}. */
+function embeddingAt(angle: number): number[] {
+  return [Math.cos(angle), Math.sin(angle), 0, 0];
+}
+
+/**
+ * Five articles, most relevant first on every leg: the text repeats "climate"
+ * less often and grows longer, the embedding turns further from
+ * {@link QUERY_VECTOR}. `category` runs the other way, so an `orderBy()` on it
+ * disagrees with relevance everywhere.
+ */
+const RANKED_ARTICLES = [
+  ["r1", "climate climate climate climate climate", "e", 0],
+  ["r2", "climate climate climate climate report", "d", 0.3],
+  ["r3", "climate climate climate and a longer report text", "c", 0.6],
+  [
+    "r4",
+    "climate climate and an even longer report text about stuff",
+    "b",
+    0.9,
+  ],
+  [
+    "r5",
+    "climate and a very long digression about shipping lanes harvest yields budgets",
+    "a",
+    1.2,
+  ],
+] as const;
+
+async function seedRanked(store: IntegrationStore): Promise<void> {
+  for (const [id, title, category, angle] of RANKED_ARTICLES) {
+    await store.nodes.Article.create(
+      {
+        title,
+        body: "notes",
+        category,
+        published: true,
+        embedding: embeddingAt(angle),
+      },
+      { id },
+    );
+  }
+}
+
+function capabilitiesOf(kind: SearchKind): readonly ("fulltext" | "vector")[] {
+  switch (kind) {
+    case "fulltext": {
+      return ["fulltext"];
+    }
+    case "vector": {
+      return ["vector"];
+    }
+    case "hybrid": {
+      return ["fulltext", "vector"];
+    }
+  }
+}
+
+function storeWith(
+  context: IntegrationTestContext,
+  ctx: { skip: () => void },
+  kind: SearchKind,
+): IntegrationStore {
+  const store = context.getStore();
+  for (const capability of capabilitiesOf(kind)) {
+    if (store.backend.capabilities[capability]?.supported !== true) ctx.skip();
+  }
+  return store;
+}
+
+type SearchOptions = Readonly<{
+  kind: SearchKind;
+  k?: number;
+  text?: string;
+  approximate?: boolean;
+  category?: string;
+}>;
+
+function searchArticles(store: IntegrationStore, options: SearchOptions) {
+  const k = options.k ?? 10;
+  const text = options.text ?? "climate";
+  const vectorOptions =
+    options.approximate === true ? { approximate: true } : {};
+  const query = store
+    .query()
+    .from("Article", "a")
+    .whereNode("a", (a) => {
+      switch (options.kind) {
+        case "fulltext": {
+          return a.$fulltext.matches(text, k);
+        }
+        case "vector": {
+          return a.embedding.similarTo(QUERY_VECTOR, k, vectorOptions);
+        }
+        case "hybrid": {
+          return a.$fulltext
+            .matches(text, k)
+            .and(a.embedding.similarTo(QUERY_VECTOR, k, vectorOptions));
+        }
+      }
+    });
+  const { category } = options;
+  return category === undefined ? query : (
+      query.whereNode("a", (a) => a.category.eq(category))
+    );
+}
+
+type Ordering = "relevance" | "category asc" | "category desc";
+const ORDERINGS: readonly Ordering[] = [
+  "relevance",
+  "category asc",
+  "category desc",
+];
+
+function orderedSearch(
+  store: IntegrationStore,
+  options: SearchOptions,
+  ordering: Ordering,
+) {
+  const query = searchArticles(store, options);
+  const ordered =
+    ordering === "relevance" ? query
+    : ordering === "category asc" ? query.orderBy("a", "category", "asc")
+    : query.orderBy("a", "category", "desc");
+  return ordered.select((ctx) => ({ id: ctx.a.id }));
+}
+
+type SearchQuery = ReturnType<typeof orderedSearch>;
+type Row = Readonly<{ id: string }>;
+type Terminal = "paginate" | "page" | "batchOnce" | "stream";
+const TERMINALS: readonly Terminal[] = [
+  "paginate",
+  "page",
+  "batchOnce",
+  "stream",
+];
+
+type PageOptions = Readonly<{
+  first?: number;
+  last?: number;
+  after?: string;
+  before?: string;
+}>;
+
+async function readPage(
+  store: IntegrationStore,
+  query: () => SearchQuery,
+  terminal: Exclude<Terminal, "stream">,
+  options: PageOptions,
+): Promise<PaginatedResult<Row>> {
+  switch (terminal) {
+    case "paginate": {
+      return query().paginate(options);
+    }
+    case "page": {
+      return query().page(options).execute();
+    }
+    case "batchOnce": {
+      const [page] = await store.batchOnce(
+        () => [query().page(options)] as const,
+      );
+      return page;
+    }
+  }
+}
+
+/** The guard on every walk: a broken cursor must fail, not loop. */
+const MAX_PAGES = 50;
+
+/**
+ * Walks `query` to its end through `terminal`, `pageSize` rows a page,
+ * forward (`first`/`after`) or backward (`last`/`before`, the pages then
+ * reassembled in reading order), and returns the ids in the order read.
+ */
+async function walk(
+  store: IntegrationStore,
+  query: () => SearchQuery,
+  terminal: Terminal,
+  direction: "forward" | "backward",
+  pageSize: number,
+): Promise<readonly string[]> {
+  if (terminal === "stream") {
+    const streamed: string[] = [];
+    for await (const row of query().stream({ batchSize: pageSize })) {
+      streamed.push(row.id);
+      if (streamed.length > MAX_PAGES * pageSize) break;
+    }
+    return streamed;
+  }
+  const pages: (readonly string[])[] = [];
+  let cursor: string | undefined;
+  for (let guard = 0; guard < MAX_PAGES; guard += 1) {
+    const options: PageOptions =
+      direction === "forward" ?
+        { first: pageSize, ...(cursor === undefined ? {} : { after: cursor }) }
+      : { last: pageSize, ...(cursor === undefined ? {} : { before: cursor }) };
+    const page = await readPage(store, query, terminal, options);
+    pages.push(page.data.map((row) => row.id));
+    const more = direction === "forward" ? page.hasNextPage : page.hasPrevPage;
+    cursor = direction === "forward" ? page.nextCursor : page.prevCursor;
+    if (!more || cursor === undefined) break;
+  }
+  return direction === "forward" ? pages.flat() : pages.toReversed().flat();
+}
+
+async function executedIds(query: SearchQuery): Promise<readonly string[]> {
+  const rows = await query.execute();
+  return rows.map((row) => row.id);
+}
+
+/** The JSON a cursor encodes. */
+function decodeCursorJson(cursor: string): Record<string, unknown> {
+  const base64 = cursor.replaceAll("-", "+").replaceAll("_", "/");
+  return JSON.parse(
+    atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "=")),
+  ) as Record<string, unknown>;
+}
+
+/** Encodes cursor JSON as the library does. */
+function encodeCursorJson(json: unknown): string {
+  return btoa(JSON.stringify(json))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
+async function expectSearchCursorRefusal(
+  read: () => Promise<unknown>,
+): Promise<void> {
+  const error = await Promise.resolve()
+    .then(read)
+    .then(
+      () => "resolved without a refusal",
+      (error_: unknown) => error_,
+    );
+  expect(error).toBeInstanceOf(ValidationError);
+  expect((error as ValidationError).details.issues).toEqual([
+    expect.objectContaining({ path: "cursor", code: SEARCH_CURSOR_MISMATCH }),
+  ]);
+}
+
+export function registerSearchPaginationIntegrationTests(
+  context: IntegrationTestContext,
+): void {
+  describe("Cursor pagination of a full-text, vector or hybrid query", () => {
+    for (const kind of SEARCH_KINDS) {
+      for (const ordering of ORDERINGS) {
+        it(`${kind}, ordered by ${ordering}: every terminal and direction reads execute()'s rows once, in order`, async (ctx) => {
+          const store = storeWith(context, ctx, kind);
+          await seedRanked(store);
+          const query = () => orderedSearch(store, { kind }, ordering);
+          const executed = await executedIds(query());
+          expect(executed).toHaveLength(RANKED_ARTICLES.length);
+
+          const walks: Record<string, readonly string[]> = {};
+          for (const terminal of TERMINALS) {
+            for (const direction of ["forward", "backward"] as const) {
+              if (terminal === "stream" && direction === "backward") continue;
+              walks[`${terminal} ${direction}`] = await walk(
+                store,
+                query,
+                terminal,
+                direction,
+                2,
+              );
+            }
+          }
+          expect(walks).toEqual(
+            Object.fromEntries(
+              Object.keys(walks).map((name) => [name, executed]),
+            ),
+          );
+        });
+      }
+    }
+
+    for (const kind of SEARCH_KINDS) {
+      it(`${kind}: rows tied on every relevance key come in row-identity order on execute() and every page`, async (ctx) => {
+        const store = storeWith(context, ctx, kind);
+        // Identical text and embedding: every relevance key ties. The ids are
+        // created out of order so insertion order cannot pass for id order.
+        for (const id of ["t3", "t1", "t5", "t2", "t4"]) {
+          await store.nodes.Article.create(
+            {
+              title: "climate report",
+              body: "notes",
+              category: "same",
+              published: true,
+              embedding: embeddingAt(0.4),
+            },
+            { id },
+          );
+        }
+        const query = () => orderedSearch(store, { kind }, "relevance");
+        const executed = await executedIds(query());
+        expect(executed).toEqual(["t1", "t2", "t3", "t4", "t5"]);
+        for (const pageSize of [1, 2, 3]) {
+          expect({
+            pageSize,
+            forward: await walk(store, query, "paginate", "forward", pageSize),
+            backward: await walk(
+              store,
+              query,
+              "paginate",
+              "backward",
+              pageSize,
+            ),
+            batched: await walk(store, query, "batchOnce", "forward", pageSize),
+          }).toEqual({
+            pageSize,
+            forward: executed,
+            backward: executed,
+            batched: executed,
+          });
+        }
+      });
+    }
+
+    for (const kind of SEARCH_KINDS) {
+      it(`${kind}: a page boundary between near-tied scores compares the key exactly as the database returned it`, async (ctx) => {
+        const store = storeWith(context, ctx, kind);
+        // Angles a few float32 steps apart give distances that differ only
+        // in their last digits, and pairs of each give exact ties. A key that
+        // lost any bits on its way through the cursor (a decimal shortened
+        // to 15 digits, a float parsed and printed again) moves the boundary:
+        // the boundary row comes back, or its tied neighbour is skipped.
+        const angles = [0.7, 0.7, 0.7000001, 0.7000002, 0.7000002, 0.7];
+        for (const [index, angle] of angles.entries()) {
+          await store.nodes.Article.create(
+            {
+              title: index % 2 === 0 ? "climate report" : "climate summary",
+              body: "notes",
+              category: "near",
+              published: true,
+              embedding: embeddingAt(angle),
+            },
+            { id: `n${index}` },
+          );
+        }
+        const query = () => orderedSearch(store, { kind }, "relevance");
+        const executed = await executedIds(query());
+        expect(executed).toHaveLength(angles.length);
+        expect({
+          forward: await walk(store, query, "paginate", "forward", 1),
+          backward: await walk(store, query, "paginate", "backward", 1),
+          page: await walk(store, query, "page", "forward", 1),
+          batched: await walk(store, query, "batchOnce", "backward", 1),
+          stream: await walk(store, query, "stream", "forward", 1),
+        }).toEqual({
+          forward: executed,
+          backward: executed,
+          page: executed,
+          batched: executed,
+          stream: executed,
+        });
+      });
+    }
+
+    for (const kind of SEARCH_KINDS) {
+      it(`${kind}: pages read the candidates execute() selects within k and never page past them`, async (ctx) => {
+        const store = storeWith(context, ctx, kind);
+        await seedRanked(store);
+        // k = 3 keeps the three most relevant of five matches. A page whose
+        // cursor filtered the candidates before the top k was taken would
+        // rank the remaining two in and return them.
+        const query = () =>
+          orderedSearch(store, { kind, k: 3 }, "category asc");
+        const executed = await executedIds(query());
+        expect(executed.toSorted()).toEqual(["r1", "r2", "r3"]);
+        expect({
+          forward: await walk(store, query, "paginate", "forward", 1),
+          backward: await walk(store, query, "paginate", "backward", 2),
+          batched: await walk(store, query, "batchOnce", "forward", 2),
+          stream: await walk(store, query, "stream", "forward", 2),
+        }).toEqual({
+          forward: executed,
+          backward: executed,
+          batched: executed,
+          stream: executed,
+        });
+      });
+    }
+
+    for (const kind of SEARCH_KINDS) {
+      it(`${kind}: a query selecting whole nodes pages them the same way`, async (ctx) => {
+        const store = storeWith(context, ctx, kind);
+        await seedRanked(store);
+        // Selecting the node defeats the selective-field read, so the page
+        // runs through the full-row statement and its cursor path.
+        const query = () =>
+          searchArticles(store, { kind })
+            .orderBy("a", "category", "asc")
+            .select((row) => row.a);
+        const nodes = await query().execute();
+        const executed = nodes.map((node) => node.id);
+        const read = async (direction: "forward" | "backward") => {
+          const pages: (readonly string[])[] = [];
+          let cursor: string | undefined;
+          for (let guard = 0; guard < MAX_PAGES; guard += 1) {
+            const page = await query().paginate(
+              direction === "forward" ?
+                { first: 2, ...(cursor === undefined ? {} : { after: cursor }) }
+              : {
+                  last: 2,
+                  ...(cursor === undefined ? {} : { before: cursor }),
+                },
+            );
+            pages.push(page.data.map((node) => node.id));
+            const more =
+              direction === "forward" ? page.hasNextPage : page.hasPrevPage;
+            cursor =
+              direction === "forward" ? page.nextCursor : page.prevCursor;
+            if (!more || cursor === undefined) break;
+          }
+          return direction === "forward" ?
+              pages.flat()
+            : pages.toReversed().flat();
+        };
+        expect({
+          forward: await read("forward"),
+          backward: await read("backward"),
+        }).toEqual({ forward: executed, backward: executed });
+      });
+    }
+
+    it("an approximate vector search pages exactly the candidates its execute() returns, under-filled or not", async (ctx) => {
+      const store = storeWith(context, ctx, "vector");
+      await seedRanked(store);
+      for (let index = 0; index < 12; index += 1) {
+        await store.nodes.Article.create({
+          title: "filler",
+          body: "notes",
+          category: "filler",
+          published: true,
+          embedding: embeddingAt(0.05 * index),
+        });
+      }
+      // The category filter leaves 5 of 17 rows. An engine whose filtered
+      // approximate search does not guarantee a full page
+      // (`filteredApproximateSearch.guaranteesFullPage`) may return fewer
+      // than k; pagination reads whatever execute() selects, never more.
+      const query = () =>
+        searchArticles(store, {
+          kind: "vector",
+          k: 4,
+          approximate: true,
+          category: "c",
+        })
+          .orderBy("a", "category", "asc")
+          .select((row) => ({ id: row.a.id }));
+      const executed = await executedIds(query());
+      expect(executed.length).toBeLessThanOrEqual(4);
+      const guaranteesFullPage =
+        store.backend.capabilities.vector?.filteredApproximateSearch
+          .guaranteesFullPage === true;
+      // A full-page engine returns the one row the filter leaves.
+      expect(executed).toEqual(guaranteesFullPage ? ["r3"] : executed);
+      expect({
+        forward: await walk(store, query, "paginate", "forward", 1),
+        backward: await walk(store, query, "paginate", "backward", 1),
+      }).toEqual({ forward: executed, backward: executed });
+
+      const wide = () =>
+        searchArticles(store, { kind: "vector", k: 4, approximate: true })
+          .orderBy("a", "category", "desc")
+          .select((row) => ({ id: row.a.id }));
+      const wideExecuted = await executedIds(wide());
+      expect(wideExecuted.length).toBeLessThanOrEqual(4);
+      expect({
+        forward: await walk(store, wide, "paginate", "forward", 3),
+        backward: await walk(store, wide, "paginate", "backward", 3),
+      }).toEqual({ forward: wideExecuted, backward: wideExecuted });
+    });
+
+    it("a fulltext search on a traversal's start alias pages each match row once", async (ctx) => {
+      const store = storeWith(context, ctx, "fulltext");
+      await seedRanked(store);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      for (const [id] of RANKED_ARTICLES) {
+        await store.edges.authoredBy.create(
+          { kind: "Article", id },
+          { kind: "Person", id: alice.id },
+          {},
+        );
+        await store.edges.authoredBy.create(
+          { kind: "Article", id },
+          { kind: "Person", id: bob.id },
+          {},
+        );
+      }
+      const query = () =>
+        store
+          .query()
+          .from("Article", "a")
+          .whereNode("a", (a) => a.$fulltext.matches("climate", 10))
+          .traverse("authoredBy", "w")
+          .to("Person", "p")
+          .orderBy("p", "name", "desc")
+          .select((row) => ({ id: `${row.a.id}:${row.p.name}` }));
+      const rows = await query().execute();
+      const executed = rows.map((row) => row.id);
+      expect(executed).toHaveLength(RANKED_ARTICLES.length * 2);
+      const pages: string[] = [];
+      let cursor: string | undefined;
+      for (let guard = 0; guard < MAX_PAGES; guard += 1) {
+        const page = await query().paginate({
+          first: 3,
+          ...(cursor === undefined ? {} : { after: cursor }),
+        });
+        pages.push(...page.data.map((row) => row.id));
+        if (!page.hasNextPage || page.nextCursor === undefined) break;
+        cursor = page.nextCursor;
+      }
+      expect(pages).toEqual(executed);
+    });
+
+    it("refuses a cursor that does not position the search, with SEARCH_CURSOR_MISMATCH", async (ctx) => {
+      const store = storeWith(context, ctx, "fulltext");
+      await seedRanked(store);
+      const query = () =>
+        orderedSearch(store, { kind: "fulltext" }, "category asc");
+      const first = await query().paginate({ first: 2 });
+      const cursor = requireCursor(first.nextCursor);
+
+      // A cursor this library issued for the same query before search
+      // cursors carried their relevance keys: the caller's key and the
+      // id, nothing else.
+      const legacy = encodeCursorJson({
+        v: 1,
+        d: "f",
+        vals: ["d", "r2"],
+        cols: ["a.category", "a.id"],
+      });
+      await expectSearchCursorRefusal(() =>
+        query().paginate({ after: legacy }),
+      );
+      await expectSearchCursorRefusal(() =>
+        query().page({ after: legacy }).execute(),
+      );
+
+      // Another search's cursor, and a search's cursor on a query without one.
+      await expectSearchCursorRefusal(() =>
+        orderedSearch(
+          store,
+          { kind: "fulltext", text: "report" },
+          "category asc",
+        ).paginate({ after: cursor }),
+      );
+      await expectSearchCursorRefusal(() =>
+        orderedSearch(
+          store,
+          { kind: "fulltext", k: 4 },
+          "category asc",
+        ).paginate({ after: cursor }),
+      );
+      await expectSearchCursorRefusal(() =>
+        store
+          .query()
+          .from("Article", "a")
+          .orderBy("a", "category", "asc")
+          .select((row) => ({ id: row.a.id }))
+          .paginate({ after: cursor }),
+      );
+
+      // A relevance key that is not a value this backend issued: the key is
+      // carried as the text the database rendered, never as a number.
+      const json = decodeCursorJson(cursor);
+      const vals = json["vals"] as unknown[];
+      expect(typeof vals[0]).toBe("string");
+      for (const forged of [0.5, "not a score", ""]) {
+        const tampered = encodeCursorJson({
+          ...json,
+          vals: [forged, ...vals.slice(1)],
+        });
+        await expectSearchCursorRefusal(() =>
+          query().paginate({ after: tampered }),
+        );
+      }
+
+      // The same search scored by another dialect's engine.
+      const foreign = encodeCursorJson({
+        ...json,
+        s: searchCursorFingerprint(
+          query().toAst(),
+          store.backend.dialect === "postgres" ? "sqlite" : "postgres",
+        ),
+      });
+      await expectSearchCursorRefusal(() =>
+        query().paginate({ after: foreign }),
+      );
+
+      // The cursor itself keeps working.
+      const second = await query().paginate({ first: 10, after: cursor });
+      expect([...first.data, ...second.data].map((row) => row.id)).toEqual(
+        await executedIds(query()),
+      );
+    });
+
+    it("keeps a query without a search on the cursor it always issued, byte for byte", async () => {
+      const store = context.getStore();
+      for (const [id, , category] of RANKED_ARTICLES) {
+        await store.nodes.Article.create(
+          { title: "plain", body: "notes", category, published: true },
+          { id },
+        );
+      }
+      const query = () =>
+        store
+          .query()
+          .from("Article", "a")
+          .orderBy("a", "category", "asc")
+          .select((row) => ({ id: row.a.id }));
+      const first = await query().paginate({ first: 2 });
+      // Issued by the release before relevance-ordered cursors:
+      // {"v":1,"d":"f","vals":["b","r4"],"cols":["a.category","a.id"]}.
+      const golden =
+        "eyJ2IjoxLCJkIjoiZiIsInZhbHMiOlsiYiIsInI0Il0sImNvbHMiOlsiYS5jYXRlZ29yeSIsImEuaWQiXX0";
+      expect(first.data.map((row) => row.id)).toEqual(["r5", "r4"]);
+      expect(first.nextCursor).toBe(golden);
+      const second = await query().paginate({ first: 2, after: golden });
+      expect(second.data.map((row) => row.id)).toEqual(["r3", "r2"]);
+      const [batched] = await store.batchOnce(
+        () => [query().page({ first: 2 })] as const,
+      );
+      expect(batched.nextCursor).toBe(golden);
+    });
+
+    it("concatenated pages equal execute() for random corpora with duplicate scores", async (ctx) => {
+      const store = context.getStore();
+      const capabilities = store.backend.capabilities;
+      const kinds = SEARCH_KINDS.filter((kind) =>
+        capabilitiesOf(kind).every(
+          (capability) => capabilities[capability]?.supported === true,
+        ),
+      );
+      if (kinds.length === 0) ctx.skip();
+      let run = 0;
+      await fc.assert(
+        fc.asyncProperty(
+          fc.record({
+            // Few distinct texts and angles: scores repeat on every leg.
+            articles: fc.array(
+              fc.record({
+                title: fc.constantFrom(
+                  "climate",
+                  "climate climate",
+                  "climate report",
+                  "solar climate notes",
+                ),
+                angle: fc.constantFrom(0, 0.2, 0.2, 0.5),
+                body: fc.constantFrom("alpha", "beta"),
+              }),
+              { minLength: 1, maxLength: 9 },
+            ),
+            kind: fc.constantFrom(...kinds),
+            k: fc.integer({ min: 1, max: 10 }),
+            ordering: fc.constantFrom<"relevance" | "body asc" | "body desc">(
+              "relevance",
+              "body asc",
+              "body desc",
+            ),
+            terminal: fc.constantFrom<Terminal>(
+              "paginate",
+              "page",
+              "batchOnce",
+              "stream",
+            ),
+            direction: fc.constantFrom<"forward" | "backward">(
+              "forward",
+              "backward",
+            ),
+            pageSize: fc.integer({ min: 1, max: 4 }),
+          }),
+          async (plan) => {
+            run += 1;
+            // Each run's rows carry their own category, which the query
+            // filters on, so runs never see each other's rows.
+            const category = `run${run}`;
+            for (const article of plan.articles) {
+              await store.nodes.Article.create({
+                title: article.title,
+                body: article.body,
+                category,
+                published: true,
+                embedding: embeddingAt(article.angle),
+              });
+            }
+            const query = () => {
+              const search = searchArticles(store, {
+                kind: plan.kind,
+                k: plan.k,
+                category,
+              });
+              const ordered =
+                plan.ordering === "relevance" ? search
+                : plan.ordering === "body asc" ?
+                  search.orderBy("a", "body", "asc")
+                : search.orderBy("a", "body", "desc");
+              return ordered.select((row) => ({ id: row.a.id }));
+            };
+            const executed = await executedIds(query());
+            const direction =
+              plan.terminal === "stream" ? "forward" : plan.direction;
+            expect(
+              await walk(store, query, plan.terminal, direction, plan.pageSize),
+            ).toEqual(executed);
+          },
+        ),
+        { numRuns: propertyRuns({ ci: 25, local: 15 }) },
+      );
+    });
+  });
+}
+
+function requireCursor(cursor: string | undefined): string {
+  if (cursor === undefined) throw new Error("expected a cursor");
+  return cursor;
+}
