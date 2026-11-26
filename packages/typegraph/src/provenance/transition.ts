@@ -96,7 +96,7 @@ function selectAffectedFactRows<T extends NodeRow>(
   isTargetRow: (row: NodeRow) => row is T,
 ): ReadonlyMap<string, T> {
   const rows = new Map<string, T>();
-  for (const [key, row] of snapshot.facts) {
+  for (const [key, row] of snapshot.currencyRows) {
     if (!affected.has(key)) continue;
     if (!isTargetKey(key)) continue;
     if (!isTargetRow(row)) continue;
@@ -106,8 +106,10 @@ function selectAffectedFactRows<T extends NodeRow>(
 }
 
 /**
- * THE set of facts this transition closes: affected by it, unsupported in the
- * post-transition snapshot, and still a live row.
+ * THE set of facts this transition closes: affected by it, not standing in the
+ * post-transition snapshot (unsupported, or a required part outside its window
+ * whose whole falls), and still a live row — live by the composition liveness
+ * rule ({@link isLiveNodeRow}), whatever the row's validity window.
  *
  * Computed ONCE per transition and handed to both consumers — the close pass
  * that tombstones these rows and the report that names them in `died` — rather
@@ -123,7 +125,7 @@ function closingFactRows(
   return selectAffectedFactRows(
     snapshot,
     affected,
-    (key) => !snapshot.supportedFactKeys.has(key),
+    (key) => !snapshot.standingKeys.has(key),
     isLiveNodeRow,
   );
 }
@@ -136,8 +138,10 @@ function closingFactRows(
  * so a later reopen restores the same neighbourhood. No part is cascaded
  * either: the REQUIRED parts of a closed whole are closed by this same
  * transition instead, because the support computation makes a required part
- * support-dependent on its whole, so they arrive here as facts of their own,
- * and an optional part is left alone.
+ * support-dependent on its whole, so they arrive here as facts of their own —
+ * a required part outside its validity window as a row that stands while its
+ * whole does (`partsOutsideWindow`, `./support.ts`) — and an optional part
+ * is left alone.
  */
 const FACT_CURRENCY_CLOSE_POLICY: NodeDeletePolicy = {
   enforceDeleteBehavior: false,
@@ -210,7 +214,7 @@ function withoutPartsOfClosedWholes<T extends NodeRow>(
     if (!dependencies.requiredPartFactKeys.has(partKey)) return true;
     const wholeKey = dependencies.wholeKeyByPartKey.get(partKey);
     if (wholeKey === undefined || visited.has(wholeKey)) return true;
-    const whole = snapshot.facts.get(wholeKey);
+    const whole = snapshot.currencyRows.get(wholeKey);
     if (whole === undefined || isLiveNodeRow(whole)) return true;
     visited.add(wholeKey);
     return reopening.has(wholeKey) && wholeOpens(wholeKey, visited);
@@ -248,7 +252,7 @@ async function reopenFacts<G extends GraphDef>(
     selectAffectedFactRows(
       snapshot,
       affected,
-      (key) => snapshot.supportedFactKeys.has(key),
+      (key) => snapshot.standingKeys.has(key),
       isTombstonedNodeRow,
     ),
   );
@@ -634,19 +638,17 @@ async function runTransitionPass<
   // Decide the whole pass from the one read before writing anything: the
   // availability the flips leave, and the facts whose currency changes with
   // it.
-  const availableAfter = new Set(availableBefore);
-  for (const { source } of flipping) {
-    if (retracted) {
-      availableAfter.delete(refKey(source));
-    } else {
-      availableAfter.add(refKey(source));
-    }
-  }
-  const after = computeSupportSnapshot(supportGraph, availableAfter);
-  const affected = after.affectedFactKeys(
-    uniqueSources,
-    before.supportedFactKeys,
+  // The flips stand in for the stored flags of the same validity-filtered
+  // rows the before availability read, so a flipped source outside its
+  // window stays available to nothing.
+  const nextState: SourceRetractedState = retracted ? "retracted" : "available";
+  const availableAfter = availableSourceKeys(
+    supportGraph.sourceRows,
+    config.retractedField,
+    new Map(flipping.map(({ source }) => [refKey(source), nextState])),
   );
+  const after = computeSupportSnapshot(supportGraph, availableAfter);
+  const affected = after.affectedFactKeys(uniqueSources, before.standingKeys);
   const closing = closingFactRows(after, affected);
 
   // Write in the one order whose every prefix leaves no fact live without

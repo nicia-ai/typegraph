@@ -11,12 +11,36 @@ import { isPremiseKind, type NormalizedConfig } from "./config";
 import { edgeFromKey, edgeToKey, refKey, rowKey } from "./keys";
 import { type ProvenanceNodeRef } from "./types";
 
+/**
+ * The role rows of a support read. `facts` are the fact rows inside their
+ * validity window at the read instant: the only rows that can be believed,
+ * be a premise, or have a justification fire for them.
+ *
+ * `partsOutsideWindow` are the rows of a fact kind that is a REQUIRED
+ * composition part, tombstones included, whose own window does not contain
+ * the read instant. None is ever believed or a premise. Composition does not
+ * ask about valid time, though: the `compositionExistence` audit counts such
+ * a part live while its row is ({@link isLiveNodeRow}, the composition
+ * liveness rule), so it exists exactly while the whole it hangs from stands,
+ * and a transition closes and reopens it with that whole. Keeping it out of
+ * `facts` leaves every belief verdict validity-filtered; keeping it in the
+ * read keeps a closing whole from orphaning it.
+ */
 export type ProvenanceRows = Readonly<{
   justifications: ReadonlyMap<string, NodeRow>;
   facts: ReadonlyMap<string, NodeRow>;
+  partsOutsideWindow: ReadonlyMap<string, NodeRow>;
   premiseEdges: readonly EdgeRow[];
   deriveEdges: readonly EdgeRow[];
 }>;
+
+/**
+ * The row of `key` whose currency a transition may move: an in-window fact
+ * or a required part outside its window ({@link ProvenanceRows}).
+ */
+function currencyRow(roles: ProvenanceRows, key: string): NodeRow | undefined {
+  return roles.facts.get(key) ?? roles.partsOutsideWindow.get(key);
+}
 
 type SupportEdges = Readonly<{
   premisesByJustification: ReadonlyMap<string, readonly string[]>;
@@ -102,13 +126,26 @@ function compositionDepth(
 }
 
 export type SupportSnapshot = Readonly<{
+  /** The in-window fact rows: what a belief verdict ranges over. */
   facts: ReadonlyMap<string, NodeRow>;
   supportedFactKeys: ReadonlySet<string>;
   believedFactKeys: ReadonlySet<string>;
   firingJustificationKeysByFact: ReadonlyMap<string, readonly string[]>;
+  /**
+   * Every row a transition brings in line with this snapshot: `facts` and
+   * the required parts outside their window ({@link ProvenanceRows}).
+   */
+  currencyRows: ReadonlyMap<string, NodeRow>;
+  /**
+   * The keys of `currencyRows` whose currency this snapshot keeps: every
+   * supported fact, and every required part outside its window whose whole
+   * stands. A transition closes a live row outside this set and reopens a
+   * tombstoned row inside it; a belief verdict reads `supportedFactKeys`.
+   */
+  standingKeys: ReadonlySet<string>;
   affectedFactKeys: (
     sources: readonly ProvenanceNodeRef[],
-    supportedBefore: ReadonlySet<string>,
+    standingBefore: ReadonlySet<string>,
   ) => ReadonlySet<string>;
 }>;
 
@@ -161,15 +198,30 @@ export function sourceRetractedState(
   return value ? "retracted" : "available";
 }
 
+/**
+ * THE answer to "which sources are available at this instant": the keys of
+ * `sourceRows` whose retracted state is `"available"`, where `sourceRows` are
+ * the current rows of a support read (`readCurrentSourceRows`, validity
+ * filtered at the read instant) and `pending` states a flag a transition is
+ * about to write in place of the stored one.
+ *
+ * Availability comes from the rows alone. A source outside its validity
+ * window, or tombstoned, has no current row, so it is available to nothing
+ * whatever its flag says or a transition writes to it: a restoration flips
+ * its flag and reopens nothing on it. The support read, a transition's
+ * decided availability, its re-read after the writes and `holding()` all ask
+ * here, so none of them can count a source the support snapshot excludes.
+ */
 export function availableSourceKeys(
   sourceRows: readonly NodeRow[],
   retractedField: string,
+  pending: ReadonlyMap<string, SourceRetractedState> = new Map(),
 ): Set<string> {
   const available = new Set<string>();
   for (const row of sourceRows) {
-    if (sourceRetractedState(row, retractedField) === "available") {
-      available.add(rowKey(row));
-    }
+    const key = rowKey(row);
+    const state = pending.get(key) ?? sourceRetractedState(row, retractedField);
+    if (state === "available") available.add(key);
   }
   return available;
 }
@@ -238,6 +290,9 @@ export function computeSupportSnapshot(
 ): SupportSnapshot {
   const { roles, supportEdges, compositionDependencies } = graph;
   const supported = new Set<string>();
+  // `supported` plus every required part outside its window whose whole
+  // stands: what keeps its currency. Only `supported` feeds premises.
+  const standing = new Set<string>();
   const inSet = new Set<string>(available);
   const firingJustifications = new Set<string>();
   const firingJustificationKeysByFact = new Map<string, string[]>();
@@ -276,14 +331,35 @@ export function computeSupportSnapshot(
         !compositionExistenceSupported(
           compositionDependencies,
           roles,
-          supported,
+          standing,
           factKey,
         )
       ) {
         continue;
       }
       supported.add(factKey);
+      standing.add(factKey);
       inSet.add(factKey);
+      changed = true;
+    }
+    // A required part outside its window has no belief to support: it
+    // stands exactly while its whole does. It joins `standing` alone, never
+    // `supported` or the premise set, and in the same fixpoint, because the
+    // whole it waits on, or an in-window part below it, can settle in any
+    // round.
+    for (const partKey of roles.partsOutsideWindow.keys()) {
+      if (standing.has(partKey)) continue;
+      if (
+        !compositionExistenceSupported(
+          compositionDependencies,
+          roles,
+          standing,
+          partKey,
+        )
+      ) {
+        continue;
+      }
+      standing.add(partKey);
       changed = true;
     }
   }
@@ -299,17 +375,19 @@ export function computeSupportSnapshot(
     supportedFactKeys: supported,
     believedFactKeys: believed,
     firingJustificationKeysByFact,
+    currencyRows: new Map([...roles.facts, ...roles.partsOutsideWindow]),
+    standingKeys: standing,
     affectedFactKeys(
       targets: readonly ProvenanceNodeRef[],
-      supportedBefore: ReadonlySet<string>,
+      standingBefore: ReadonlySet<string>,
     ): ReadonlySet<string> {
       return computeAffectedFactKeys(
         targets,
         roles,
         supportEdges,
         compositionDependencies,
-        supportedBefore,
-        supported,
+        standingBefore,
+        standing,
       );
     },
   };
@@ -330,20 +408,23 @@ function allPremisesSupported(
  * given that a required composition part cannot exist without its whole?
  *
  * A fact that is not a required part always may. A required part may only
- * while the whole it currently hangs from is itself supported (a whole that is
- * a fact carries its own belief status) or live (any other whole). A required
- * part with no current whole may not: nothing holds it up.
+ * while the whole it currently hangs from stands: a whole that is a fact
+ * carries its own belief status, a whole that is a required part outside its
+ * window stands while its own whole does, and any other whole while it is
+ * live. A required part with no current whole may not: nothing holds it up.
  */
 function compositionExistenceSupported(
   dependencies: CompositionExistenceDependencies,
   roles: ProvenanceRows,
-  supported: ReadonlySet<string>,
+  standing: ReadonlySet<string>,
   factKey: string,
 ): boolean {
   if (!dependencies.requiredPartFactKeys.has(factKey)) return true;
   const wholeKey = dependencies.wholeKeyByPartKey.get(factKey);
   if (wholeKey === undefined) return false;
-  if (roles.facts.has(wholeKey)) return supported.has(wholeKey);
+  if (currencyRow(roles, wholeKey) !== undefined) {
+    return standing.has(wholeKey);
+  }
   return dependencies.liveWholeKeys.has(wholeKey);
 }
 
@@ -363,8 +444,8 @@ function computeAffectedFactKeys(
   roles: ProvenanceRows,
   supportEdges: SupportEdges,
   compositionDependencies: CompositionExistenceDependencies,
-  supportedBefore: ReadonlySet<string>,
-  supportedAfter: ReadonlySet<string>,
+  standingBefore: ReadonlySet<string>,
+  standingAfter: ReadonlySet<string>,
 ): ReadonlySet<string> {
   const affected = new Set<string>();
   // Seed the BFS with every source at once: the union of facts reachable from
@@ -410,21 +491,21 @@ function computeAffectedFactKeys(
     // it is the business of a transition that moves its support. Only a fact
     // whole propagates: a transition flips source properties, so a non-fact
     // whole's liveness is the same before and after.
-    const wholeRow = roles.facts.get(current);
+    const wholeRow = currencyRow(roles, current);
     if (wholeRow === undefined) continue;
     const wholeMoves =
-      supportedBefore.has(current) !== supportedAfter.has(current) ||
-      currencyMovesWithSupport(wholeRow, supportedAfter.has(current));
+      standingBefore.has(current) !== standingAfter.has(current) ||
+      currencyMovesWithSupport(wholeRow, standingAfter.has(current));
     const carriedParts =
       wholeMoves ?
         (compositionDependencies.partKeysByWholeKey.get(current) ?? []).filter(
-          (partKey) => roles.facts.has(partKey),
+          (partKey) => currencyRow(roles, partKey) !== undefined,
         )
       : interruptedReopenPartKeys(
           current,
           roles,
           compositionDependencies,
-          supportedAfter,
+          standingAfter,
         );
     for (const partKey of carriedParts) {
       affected.add(partKey);
@@ -450,7 +531,7 @@ function interruptedReopenPartKeys(
   wholeKey: string,
   roles: ProvenanceRows,
   compositionDependencies: CompositionExistenceDependencies,
-  supportedAfter: ReadonlySet<string>,
+  standingAfter: ReadonlySet<string>,
 ): readonly string[] {
   const reopen: string[] = [];
   const visited = new Set<string>([wholeKey]);
@@ -462,9 +543,9 @@ function interruptedReopenPartKeys(
     for (const partKey of parts) {
       if (visited.has(partKey)) continue;
       visited.add(partKey);
-      const partRow = roles.facts.get(partKey);
+      const partRow = currencyRow(roles, partKey);
       if (partRow === undefined) continue;
-      if (supportedAfter.has(partKey) && isTombstonedNodeRow(partRow)) {
+      if (standingAfter.has(partKey) && isTombstonedNodeRow(partRow)) {
         reopen.push(partKey);
       } else {
         pending.push(partKey);

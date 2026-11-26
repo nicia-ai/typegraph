@@ -202,6 +202,53 @@ const nestedCompositionGraph = defineGraph({
   ],
 });
 
+const Annex = defineNode("Annex", {
+  schema: z.object({ label: z.string() }),
+});
+
+const annexOf = defineEdge("annexOf");
+
+// Report → Section → Paragraph, each part required, and an Annex an optional
+// part of a Report: for parts whose own validity windows have ended or not
+// begun while their attachments stay current.
+const windowedCompositionGraph = defineGraph({
+  id: "provenance_windowed_composition_integration",
+  nodes: {
+    Source: { type: Source },
+    Report: { type: Report },
+    Section: { type: Section },
+    Paragraph: { type: Paragraph },
+    Annex: { type: Annex },
+    Justification: { type: Justification },
+  },
+  edges: {
+    premiseOf: { type: premiseOf, from: [Source], to: [Justification] },
+    derives: {
+      type: derives,
+      from: [Justification],
+      to: [Report, Section, Paragraph, Annex],
+    },
+    sectionOf: {
+      type: sectionOf,
+      from: [Section],
+      to: [Report],
+      cardinality: "one",
+    },
+    paragraphOf: {
+      type: paragraphOf,
+      from: [Paragraph],
+      to: [Section],
+      cardinality: "one",
+    },
+    annexOf: { type: annexOf, from: [Annex], to: [Report], cardinality: "one" },
+  },
+  ontology: [
+    partOf(Section, Report, { via: sectionOf, existence: "required" }),
+    partOf(Paragraph, Section, { via: paragraphOf, existence: "required" }),
+    partOf(Annex, Report, { via: annexOf, existence: "optional" }),
+  ],
+});
+
 // An unrelated kind: evolving the provenance graph with it leaves every role
 // the capability maps in place, so the evolved graph still validates.
 const noteExtension = defineGraphExtension({
@@ -388,6 +435,11 @@ function functionMemberNames(target: object): readonly string[] {
     }
   }
   return [...names];
+}
+
+/** The default of {@link recordingTransactionTarget}: no call is held. */
+function holdNoCall(): Promise<void> | undefined {
+  return undefined;
 }
 
 /**
@@ -3213,5 +3265,255 @@ export function registerProvenanceIntegrationTests(
         expect(await store.verifyConstraintFences()).toEqual([]);
       },
     );
+  });
+
+  describe("provenance retraction: validity windows", () => {
+    type WindowedStore = HistoryStore<typeof windowedCompositionGraph>;
+    type WindowedKind = "Report" | "Section" | "Paragraph" | "Annex";
+
+    const ENDED = {
+      validFrom: "2000-01-01T00:00:00.000Z",
+      validTo: "2001-01-01T00:00:00.000Z",
+    } as const;
+    const NOT_BEGUN = { validFrom: "2999-01-01T00:00:00.000Z" } as const;
+    const REJECTED_WRITE = "rejected verb write";
+
+    function windowedCapability(store: WindowedStore) {
+      return createRetractionCapability(store, {
+        ...config,
+        fact: { kinds: ["Report", "Section", "Paragraph", "Annex"] },
+      });
+    }
+
+    async function deriveFrom(
+      store: WindowedStore,
+      source: Readonly<{ kind: "Source"; id: string }>,
+      fact: Readonly<{ kind: WindowedKind; id: string }>,
+    ): Promise<void> {
+      const justificationId = `${fact.id}-j`;
+      const justification = await store.nodes.Justification.create(
+        { label: justificationId },
+        { id: justificationId },
+      );
+      await store.edges.premiseOf.create(source, justification, {});
+      await store.edges.derives.create(justification, fact, {});
+    }
+
+    const WINDOWED_KINDS = ["Report", "Section", "Paragraph", "Annex"] as const;
+
+    /** The fact rows of the store built on the lane's backend. */
+    async function factRows(excludeDeleted: boolean) {
+      const rows = await Promise.all(
+        WINDOWED_KINDS.map((kind) =>
+          context.getBackend().findNodesByKind({
+            graphId: windowedCompositionGraph.id,
+            kind,
+            excludeDeleted,
+          }),
+        ),
+      );
+      return rows.flat();
+    }
+
+    /** Every live fact row whatever its window: the composition audit's population. */
+    async function liveIds(): Promise<string[]> {
+      return sortedIds(await factRows(true));
+    }
+
+    /** Every fact row's id and stored validity window, tombstones included. */
+    async function windows(): Promise<string[]> {
+      const rows = await factRows(false);
+      return rows
+        .map(
+          (row) => `${row.id} ${row.valid_from ?? "-"} ${row.valid_to ?? "-"}`,
+        )
+        .toSorted((left, right) => left.localeCompare(right));
+    }
+
+    // Load-bearing: a source outside its validity window supports nothing,
+    // so restoring it reopens nothing, and a caught failure partway through
+    // the restoration has nothing to leave behind. Revert check: in
+    // `runTransitionPass` (`src/provenance/transition.ts`) add every flipped
+    // source to the availability after, as the point lookup accepts it, and
+    // the restoration flips the flag and reopens one of the two facts before
+    // the armed third write rejects; the caller commits that fact live with
+    // no support.
+    it("restoring a source whose window has ended reopens nothing, so a failure armed at a later write never fires and no fact is left live without support", async () => {
+      const armed = { on: false, started: 0 };
+      const [store] = await createAdapterStoreWithSchema(
+        windowedCompositionGraph,
+        context.getBackend(),
+        {
+          history: true,
+          hooks: {
+            onOperationStart: () => {
+              if (!armed.on) return;
+              armed.started += 1;
+              if (armed.started === 3) throw new Error(REJECTED_WRITE);
+            },
+          },
+        },
+      );
+      const lapsed = ref("Source", "lapsed");
+      await store.nodes.Source.create(
+        { label: lapsed.id, retracted: false },
+        { id: lapsed.id, validFrom: ENDED.validFrom },
+      );
+      for (const id of ["lapsed-one", "lapsed-two"]) {
+        await store.nodes.Report.create({ label: id }, { id });
+        await deriveFrom(store, lapsed, ref("Report", id));
+      }
+      const provenance = windowedCapability(store);
+      await provenance.retract(lapsed);
+      expect(await liveIds()).toEqual([]);
+      await store.nodes.Source.update(
+        asNodeId<typeof Source>(lapsed.id),
+        {},
+        { validTo: ENDED.validTo },
+      );
+
+      const outcome = await store.transaction(async (tx) => {
+        armed.on = true;
+        try {
+          return await provenance.unRetract(lapsed, tx);
+        } catch (error) {
+          return error;
+        } finally {
+          armed.on = false;
+        }
+      });
+
+      expect(outcome).toEqual({ died: [], survivedVia: [], unaffected: [] });
+      // The flag write alone.
+      expect(armed.started).toBe(1);
+      expect(await liveIds()).toEqual([]);
+      expect(await provenance.holding()).toEqual([]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
+
+    /**
+     * Under `report`, held by `source` as every fact here is: required
+     * sections whose own windows are current, ended and not yet begun; a
+     * required paragraph under each, again with current, ended and not-begun
+     * windows; and an optional annex with an ended window and one with a
+     * current window. Every attachment is current.
+     */
+    async function seedWindowedTree(store: WindowedStore): Promise<void> {
+      const source = ref("Source", "source");
+      await store.nodes.Source.create(
+        { label: source.id, retracted: false },
+        { id: source.id },
+      );
+      await store.nodes.Report.create({ label: "report" }, { id: "report" });
+      await deriveFrom(store, source, ref("Report", "report"));
+      const sections = [
+        ["section-current", {}],
+        ["section-ended", ENDED],
+        ["section-not-begun", NOT_BEGUN],
+      ] as const;
+      for (const [id, window] of sections) {
+        await store.nodes.Section.create(
+          { label: id },
+          { id, ...window, partOf: { whole: ref("Report", "report") } },
+        );
+        await deriveFrom(store, source, ref("Section", id));
+      }
+      const paragraphs = [
+        ["paragraph-current", "section-ended", {}],
+        ["paragraph-ended", "section-current", ENDED],
+        ["paragraph-not-begun", "section-not-begun", NOT_BEGUN],
+      ] as const;
+      for (const [id, whole, window] of paragraphs) {
+        await store.nodes.Paragraph.create(
+          { label: id },
+          { id, ...window, partOf: { whole: ref("Section", whole) } },
+        );
+        await deriveFrom(store, source, ref("Paragraph", id));
+      }
+      for (const [id, window] of [
+        ["annex-current", {}],
+        ["annex-ended", ENDED],
+      ] as const) {
+        await store.nodes.Annex.create(
+          { label: id },
+          { id, ...window, partOf: { whole: ref("Report", "report") } },
+        );
+        await deriveFrom(store, source, ref("Annex", id));
+      }
+    }
+
+    const EVERY_FACT = [
+      "annex-current",
+      "annex-ended",
+      "paragraph-current",
+      "paragraph-ended",
+      "paragraph-not-begun",
+      "report",
+      "section-current",
+      "section-ended",
+      "section-not-begun",
+    ];
+    // Believed: in its window, supported, and every whole up its chain
+    // standing. `paragraph-current` hangs from the ended section, which
+    // stands while the report does.
+    const BELIEVED = [
+      "annex-current",
+      "paragraph-current",
+      "report",
+      "section-current",
+    ];
+
+    // Load-bearing: the composition audit counts every non-tombstoned part
+    // live whatever its window, so a transition closing a whole closes every
+    // such required part below it, at any depth, and reopens them with it;
+    // an optional part outside its window is left alone. Revert checks: build
+    // the transition's rows from the validity-filtered support read alone
+    // (`readRoles`, `src/provenance/support-read.ts`) and the retraction
+    // leaves `section-ended`, `section-not-begun`, `paragraph-ended` and
+    // `paragraph-not-begun` out of `died` and live under closed wholes (the
+    // `compositionExistence` violation of a known defect); drop the
+    // stored window from `applyNodeResurrect`
+    // (`src/store/operations/node-write-pipeline.ts`) and every reopened row's
+    // window starts at the reopen, so the four come back believed.
+    it("closes every required part outside its window with its whole, at any depth, reopens them with it, and leaves an optional one alone", async () => {
+      const [store] = await createAdapterStoreWithSchema(
+        windowedCompositionGraph,
+        context.getBackend(),
+        { history: true },
+      );
+      await seedWindowedTree(store);
+      const provenance = windowedCapability(store);
+      const source = ref("Source", "source");
+      expect(await store.verifyConstraintFences()).toEqual([]);
+      expect(sortedIds(await provenance.holding())).toEqual(BELIEVED);
+      await expect(
+        store.transaction((tx) =>
+          provenance.assertHolds(tx, [ref("Paragraph", "paragraph-current")]),
+        ),
+      ).resolves.toHaveLength(1);
+      const windowsBefore = await windows();
+
+      const retracted = await provenance.retract(source);
+
+      expect(sortedIds(retracted.died)).toEqual(
+        EVERY_FACT.filter((id) => id !== "annex-ended"),
+      );
+      expect(await liveIds()).toEqual(["annex-ended"]);
+      expect(await provenance.holding()).toEqual([]);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+
+      const restored = await provenance.unRetract(source);
+
+      expect(restored.died).toEqual([]);
+      expect(
+        sortedIds(restored.survivedVia.map((survived) => survived.fact)),
+      ).toEqual(BELIEVED);
+      expect(await liveIds()).toEqual(EVERY_FACT);
+      // A reopen restores each row's own window, so what was outside it stays
+      // outside it and is still not believed.
+      expect(await windows()).toEqual(windowsBefore);
+      expect(sortedIds(await provenance.holding())).toEqual(BELIEVED);
+      expect(await store.verifyConstraintFences()).toEqual([]);
+    });
   });
 }

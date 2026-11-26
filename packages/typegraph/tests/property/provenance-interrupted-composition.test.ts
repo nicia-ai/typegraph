@@ -3,12 +3,18 @@
  * writes and caught so the caller commits the prefix, then re-run once, ends
  * exactly where the same verb run once without interruption ends — over
  * random composition trees of required parts, each part held through
- * sources of its own.
+ * sources of its own and each node's own validity window current, ended or
+ * not yet begun. Every run leaves no `compositionExistence` violation, keeps
+ * every row's stored window, and a restoration reopens every node.
  *
- * Revert check: in `computeAffectedFactKeys` (`src/provenance/support.ts`)
+ * Revert checks: in `computeAffectedFactKeys` (`src/provenance/support.ts`)
  * stop descending through a part whose whole does not move, and a tree of
  * depth three whose middle level is reopened before the failure leaves its
- * deepest part closed after the re-run.
+ * deepest part closed after the re-run. Read the transition's rows from the
+ * validity-filtered support read alone (`readRoles`,
+ * `src/provenance/support-read.ts`), and a required part outside its window
+ * stays live under its retracted whole, which `verifyConstraintFences()`
+ * reports.
  */
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
@@ -21,6 +27,7 @@ import {
   defineNode,
   partOf,
 } from "../../src";
+import type { GraphBackend } from "../../src/backend/types";
 import { createRetractionCapability } from "../../src/provenance";
 import type { HistoryStore } from "../../src/store-entry";
 import { requireDefined } from "../../src/utils/presence";
@@ -103,11 +110,23 @@ type LevelKind = (typeof LEVEL_KINDS)[number];
 
 type TreeStore = HistoryStore<typeof graph>;
 
+const WINDOWS = {
+  current: {},
+  ended: {
+    validFrom: "2000-01-01T00:00:00.000Z",
+    validTo: "2001-01-01T00:00:00.000Z",
+  },
+  notBegun: { validFrom: "2999-01-01T00:00:00.000Z" },
+} as const;
+type WindowName = keyof typeof WINDOWS;
+
 type TreeNode = Readonly<{
   level: number;
   /** Index into the nodes of the level above; unused at level 0. */
   parentIndex: number;
   sourceIndexes: readonly number[];
+  /** The node's own validity window; every attachment is current. */
+  window: WindowName;
 }>;
 
 type Scenario = Readonly<{
@@ -137,6 +156,7 @@ const scenarioArb: fc.Arbitrary<Scenario> = fc
             fc.integer({ min: 0, max: sourceCount - 1 }),
             { minLength: 1, maxLength: sourceCount },
           ),
+          window: fc.constantFrom<WindowName>("current", "ended", "notBegun"),
         }),
         { minLength: 1, maxLength: 9 },
       ),
@@ -151,6 +171,7 @@ type PlacedNode = Readonly<{
   kind: LevelKind;
   parentId: string | undefined;
   sourceIndexes: readonly number[];
+  window: WindowName;
 }>;
 
 /**
@@ -172,6 +193,7 @@ function placeTree(nodes: readonly TreeNode[]): readonly PlacedNode[] {
       kind: requireDefined(LEVEL_KINDS[level]),
       parentId: parent?.id,
       sourceIndexes: node.sourceIndexes,
+      window: node.window,
     });
   }
   return byLevel.flat();
@@ -188,14 +210,16 @@ async function seed(
   const placed = placeTree(scenario.nodes);
   for (const node of placed) {
     const properties = { label: node.id };
+    const window = WINDOWS[node.window];
     switch (node.kind) {
       case "Report": {
-        await store.nodes.Report.create(properties, { id: node.id });
+        await store.nodes.Report.create(properties, { id: node.id, ...window });
         break;
       }
       case "Section": {
         await store.nodes.Section.create(properties, {
           id: node.id,
+          ...window,
           partOf: {
             whole: { kind: "Report", id: requireDefined(node.parentId) },
           },
@@ -205,6 +229,7 @@ async function seed(
       case "Paragraph": {
         await store.nodes.Paragraph.create(properties, {
           id: node.id,
+          ...window,
           partOf: {
             whole: { kind: "Section", id: requireDefined(node.parentId) },
           },
@@ -214,6 +239,7 @@ async function seed(
       case "Clause": {
         await store.nodes.Clause.create(properties, {
           id: node.id,
+          ...window,
           partOf: {
             whole: { kind: "Paragraph", id: requireDefined(node.parentId) },
           },
@@ -244,7 +270,37 @@ async function seed(
 
 const REJECTED_WRITE = "rejected verb write";
 
-type Outcome = Readonly<{ live: string[]; held: string[]; writes: number }>;
+type Outcome = Readonly<{
+  live: string[];
+  held: string[];
+  writes: number;
+  placed: readonly PlacedNode[];
+}>;
+
+/** Every fact row, tombstones included, whatever its window. */
+async function factRows(backend: GraphBackend) {
+  const rows = await Promise.all(
+    LEVEL_KINDS.map((kind) =>
+      backend.findNodesByKind({
+        graphId: graph.id,
+        kind,
+        excludeDeleted: false,
+      }),
+    ),
+  );
+  return rows.flat();
+}
+
+/** Each row's id and stored window, as `seed` wrote it. */
+function windowOf(
+  row: Readonly<{
+    id: string;
+    valid_from: string | undefined;
+    valid_to: string | undefined;
+  }>,
+): string {
+  return `${row.id} ${row.valid_from ?? "-"} ${row.valid_to ?? "-"}`;
+}
 
 /**
  * Seeds the tree, retracts the source first when the verb restores it, then
@@ -257,7 +313,8 @@ async function runScenario(
   failAtWrite: number | undefined,
 ): Promise<Outcome> {
   const armed = { on: false, failing: false, started: 0 };
-  const [store] = await createStoreWithSchema(graph, createTestBackend(), {
+  const backend = createTestBackend();
+  const [store] = await createStoreWithSchema(graph, backend, {
     history: true,
     hooks: {
       onOperationStart: () => {
@@ -269,7 +326,9 @@ async function runScenario(
       },
     },
   });
-  await seed(store, scenario);
+  const placed = await seed(store, scenario);
+  const seededRows = await factRows(backend);
+  const seededWindows = seededRows.map((row) => windowOf(row));
   const provenance = createRetractionCapability(store, {
     source: { kind: "Source" },
     justification: { kind: "Justification" },
@@ -312,17 +371,17 @@ async function runScenario(
   const writes = armed.started;
   expect(await store.verifyConstraintFences()).toEqual([]);
 
-  const live = [
-    ...(await store.nodes.Report.find()),
-    ...(await store.nodes.Section.find()),
-    ...(await store.nodes.Paragraph.find()),
-    ...(await store.nodes.Clause.find()),
-  ]
-    .map((node) => node.id)
+  const rows = await factRows(backend);
+  // A close and a reopen restore each row's own window.
+  expect(rows.map((row) => windowOf(row))).toEqual(seededWindows);
+  // Live by the composition audit's rule: not tombstoned, whatever the window.
+  const live = rows
+    .filter((row) => row.deleted_at === undefined)
+    .map((row) => row.id)
     .toSorted();
   const holding = await provenance.holding();
   const held = holding.map((node) => node.id).toSorted();
-  return { live, held, writes };
+  return { live, held, writes, placed };
 }
 
 describe("provenance retraction: an interrupted verb over a composition tree", () => {
@@ -339,6 +398,12 @@ describe("provenance retraction: an interrupted verb over a composition tree", (
             live: expected.live,
             held: expected.held,
           });
+          // Every node has a source and a restoration leaves every source
+          // available, so it reopens everything the retraction closed.
+          const everyNode = expected.placed.map((node) => node.id).toSorted();
+          expect(
+            scenario.verb === "unRetract" ? expected.live : everyNode,
+          ).toEqual(everyNode);
         }),
         {
           numRuns: propertyRuns({ ci: 80, local: 150 }),
@@ -350,13 +415,59 @@ describe("provenance retraction: an interrupted verb over a composition tree", (
               {
                 sourceCount: 2,
                 nodes: [
-                  { level: 0, parentIndex: 0, sourceIndexes: [0] },
-                  { level: 1, parentIndex: 0, sourceIndexes: [1] },
-                  { level: 2, parentIndex: 0, sourceIndexes: [1] },
+                  {
+                    level: 0,
+                    parentIndex: 0,
+                    sourceIndexes: [0],
+                    window: "current",
+                  },
+                  {
+                    level: 1,
+                    parentIndex: 0,
+                    sourceIndexes: [1],
+                    window: "current",
+                  },
+                  {
+                    level: 2,
+                    parentIndex: 0,
+                    sourceIndexes: [1],
+                    window: "current",
+                  },
                 ],
                 sourceIndex: 0,
                 verb: "unRetract",
                 failurePoint: 3,
+              },
+            ],
+            // Report → Section → Paragraph on one source, the Section's own
+            // window ended and the Paragraph's not begun: retracting the
+            // source closes all three.
+            [
+              {
+                sourceCount: 1,
+                nodes: [
+                  {
+                    level: 0,
+                    parentIndex: 0,
+                    sourceIndexes: [0],
+                    window: "current",
+                  },
+                  {
+                    level: 1,
+                    parentIndex: 0,
+                    sourceIndexes: [0],
+                    window: "ended",
+                  },
+                  {
+                    level: 2,
+                    parentIndex: 0,
+                    sourceIndexes: [0],
+                    window: "notBegun",
+                  },
+                ],
+                sourceIndex: 0,
+                verb: "retract",
+                failurePoint: 0,
               },
             ],
           ],

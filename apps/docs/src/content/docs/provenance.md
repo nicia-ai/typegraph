@@ -169,6 +169,23 @@ No edge is deleted by any of this, so `store.verifyConstraintFences()`'s
 `compositionExistence` family reports nothing after a close: a closed required
 part is tombstoned, not an orphan.
 
+A required part whose own validity window has ended, or has not begun, is never
+believed and supports nothing, but composition does not ask about valid time:
+the `compositionExistence` audit counts the part live while its row is not
+tombstoned. Such a part therefore exists exactly while the whole it hangs from
+stands. A transition that closes the whole closes the part with it, at any
+depth, names it in `died`, and reopens it when it reopens the whole. It never
+appears in `survivedVia`, `unaffected` or `holding()`. An optional part
+outside its window is left alone, like any optional part.
+
+A reopen restores the row as it was closed, validity window included, so a
+fact or part whose window had ended or not begun is still outside it after
+the reopen.
+
+A source outside its validity window supports nothing, whatever its flag says.
+`retract` and `unRetract` still write its flag, but restoring it reopens
+nothing.
+
 A whole that is not a fact is held to the same liveness the write path holds an
 attachment's whole to: present and not tombstoned. A closed validity window does
 not make it dead, because the write path would still accept it as a whole. A
