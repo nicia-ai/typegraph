@@ -154,6 +154,10 @@ function postgresElementCast(elementType: ValueType | undefined): SqlFragment {
 /**
  * PostgreSQL dialect adapter implementation.
  */
+/** The text PostgreSQL renders a `real`, `double precision` or `numeric` as. */
+const POSTGRES_NUMERIC_TEXT =
+  /^(?:-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|-?Infinity|NaN)$/;
+
 export const postgresDialect: BuiltinDialectAdapter = {
   dateValue(value) {
     return sql`CAST(${value} AS ${sql.raw(SCALAR_SQL_TYPES.date)})`;
@@ -188,6 +192,13 @@ export const postgresDialect: BuiltinDialectAdapter = {
 
   binaryText(expression) {
     return sql`${expression} COLLATE "C"`;
+  },
+
+  relevanceCursorKey: {
+    select: (expression) => sql`CAST(${expression} AS TEXT)`,
+    // The text a float, real or numeric renders as: anything else would be a
+    // database error, not a refused cursor.
+    bind: (text) => (POSTGRES_NUMERIC_TEXT.test(text) ? text : undefined),
   },
 
   keyText(expression) {

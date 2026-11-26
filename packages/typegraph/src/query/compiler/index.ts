@@ -107,11 +107,13 @@ import {
   buildStandardHybridCandidateCte,
   buildStandardOrderBy,
   buildStandardProjection,
+  buildStandardRelevanceCursorKeyColumns,
   buildStandardRelevanceOrderBy,
   buildStandardResultWhere,
   buildStandardSelectionOrderColumn,
   buildStandardStartCte,
   buildStandardTraversalCte,
+  compileRelevanceComparison,
   compileStandardProjectedOutputValue,
   describeProjectedField,
   LATE_MAT_TOPK_CTE_ALIAS,
@@ -557,6 +559,15 @@ function compileQueryInExpressionContext(
     return asCompiledSelectSql(compiled);
   }
 
+  if (
+    (ast.reverseSelectionOrder === true || shape === "cursor-keyed") &&
+    selectionOrderColumn(ast) === undefined
+  )
+    throw new CompilerInvariantError(
+      "A reversed selection order or a relevance cursor key was requested for a statement without a relevance order",
+      { phase: "relevance-cursor-key" },
+    );
+
   // Check for variable-length traversals
   if (standardAst === undefined) {
     const recursive =
@@ -597,9 +608,12 @@ function standardStatementAst(ast: QueryAst): QueryAst | undefined {
  * The shape of a compiled statement: its rows alone (`rows`), or, for a
  * statement another statement wraps and reads in the order it selects its
  * rows, those rows plus the selection-order column when it has one
- * ({@link selectionOrderColumn}).
+ * ({@link selectionOrderColumn}). `cursor-keyed` is `selection-ordered` plus,
+ * for a relevance-ordered statement, the value of each relevance sort key as
+ * a keyset cursor carries it (`relevanceCursorKeyColumn`): the shape cursor
+ * pagination reads a page of a full-text, vector or hybrid query in.
  */
-export type StatementShape = "rows" | "selection-ordered";
+export type StatementShape = "rows" | "selection-ordered" | "cursor-keyed";
 
 /**
  * The column a statement compiled for `ast` in the `selection-ordered` shape
@@ -1668,7 +1682,6 @@ function selectStandardOrderBy(
       ast,
       dialect,
       fusion,
-      keys: relevanceKeys,
     });
   }
   return buildStandardOrderBy({
@@ -1848,14 +1861,14 @@ function compileStandardQueryWithCteStrategy(
     ...(vectorPredicate === undefined ? {} : { vectorPredicate }),
     ...(fulltextPredicate === undefined ? {} : { fulltextPredicate }),
   });
+  const relevanceSortValueInput = { aggregated, dialect, fusion };
+  const selectionOrdered =
+    shape !== "rows" && selectionOrderColumn(ast) !== undefined;
   const selectionOrder =
-    shape === "selection-ordered" && selectionOrderColumn(ast) !== undefined ?
+    selectionOrdered ?
       buildStandardSelectionOrderColumn({
-        aggregated,
+        ...relevanceSortValueInput,
         ast,
-        dialect,
-        fusion,
-        keys: relevanceKeys,
         names,
         compileOutputValue: (outputName) =>
           compileStandardProjectedOutputValue({
@@ -1868,7 +1881,25 @@ function compileStandardQueryWithCteStrategy(
           }),
       })
     : undefined;
-  const where = buildStandardResultWhere({ ast, ctx });
+  const relevanceCursorKeys =
+    selectionOrdered && shape === "cursor-keyed" ?
+      buildStandardRelevanceCursorKeyColumns({
+        ...relevanceSortValueInput,
+        ast,
+        names,
+      })
+    : [];
+  const where = buildStandardResultWhere({
+    ast,
+    ctx:
+      relevanceKeys.length === 0 ?
+        ctx
+      : {
+          ...ctx,
+          compileRelevanceComparison: (predicate) =>
+            compileRelevanceComparison(predicate, relevanceSortValueInput),
+        },
+  });
   const groupBy = buildStandardGroupBy({ ast, dialect });
   const having = buildStandardHaving({ ast, ctx });
 
@@ -1896,9 +1927,13 @@ function compileStandardQueryWithCteStrategy(
     ...(orderBy === undefined ? {} : { orderBy }),
     ...(limitOffset === undefined ? {} : { limitOffset }),
     logicalPlan,
-    projection:
-      selectionOrder === undefined ? projection : (
-        sql`${projection}, ${selectionOrder}`
-      ),
+    projection: sql.join(
+      [
+        projection,
+        ...(selectionOrder === undefined ? [] : [selectionOrder]),
+        ...relevanceCursorKeys,
+      ],
+      sql`, `,
+    ),
   });
 }

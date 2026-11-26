@@ -34,3 +34,21 @@ export function resolveNullOrdering(
 ): "first" | "last" {
   return order.nulls ?? (order.direction === "asc" ? "last" : "first");
 }
+
+/**
+ * The ordering term that sorts in exactly the opposite order: direction and
+ * null placement both flipped. A backward cursor page reads its rows in this
+ * order.
+ */
+export function reverseOrder<
+  Order extends Readonly<{
+    direction: SortDirection;
+    nulls?: "first" | "last" | undefined;
+  }>,
+>(order: Order): Order & Readonly<{ nulls: "first" | "last" }> {
+  return {
+    ...order,
+    direction: order.direction === "asc" ? "desc" : "asc",
+    nulls: resolveNullOrdering(order) === "first" ? "last" : "first",
+  };
+}

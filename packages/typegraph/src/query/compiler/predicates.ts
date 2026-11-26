@@ -26,6 +26,7 @@ import {
   type ParameterRef,
   type PredicateExpression,
   type QueryAst,
+  type RelevanceComparisonPredicate,
   type ValueType,
   type VectorSimilarityPredicate,
 } from "../ast";
@@ -487,6 +488,15 @@ function compileParameterizedStringPattern(
  */
 export type PredicateCompilerContext = Readonly<{
   dialect: DialectAdapter;
+  /**
+   * Compiles a keyset cursor's `relevance_comparison`. Supplied only where
+   * the comparison means something: the completed-match filter of a
+   * full-text, vector or hybrid statement (`buildStandardResultWhere`). A
+   * `relevance_comparison` compiled anywhere else is refused.
+   */
+  compileRelevanceComparison?: (
+    predicate: RelevanceComparisonPredicate,
+  ) => SqlFragment;
   schema: SqlSchema;
   compileQuery: (ast: QueryAst, graphId: string) => SqlFragment;
   compileExpressionSubquery?: (ast: QueryAst) => SqlFragment;
@@ -809,6 +819,15 @@ export function compilePredicateExpression(
       // ORDER BY, and LIMIT. Compile to 1=1 so they compose safely with
       // surrounding AND branches.
       return STRUCTURAL_PREDICATE_NOOP;
+    }
+
+    case "relevance_comparison": {
+      if (ctx.compileRelevanceComparison === undefined)
+        throw new CompilerInvariantError(
+          "A relevance cursor comparison reached a predicate outside the completed-match filter of a relevance-ordered statement",
+          { phase: "relevance-cursor-key" },
+        );
+      return ctx.compileRelevanceComparison(expr);
     }
   }
 }
@@ -1358,7 +1377,8 @@ function extractStructuralPredicates<T extends PredicateExpression>(
       case "exists":
       case "in_subquery":
       case "vector_similarity":
-      case "fulltext_match": {
+      case "fulltext_match":
+      case "relevance_comparison": {
         return;
       }
       case "database_expression_predicate": {

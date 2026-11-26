@@ -199,6 +199,30 @@ export interface DialectAdapter {
   readonly binaryText: (this: void, expression: SqlFragment) => SqlFragment;
 
   /**
+   * How a keyset cursor carries a numeric relevance sort key (a full-text
+   * rank, a vector distance, a fused hybrid score) so that comparing it back
+   * against the key is exact. `select` renders the key as text, the text the
+   * cursor stores: text survives every driver and the JSON a
+   * `store.batchOnce()` envelope carries rows in, where a number would be
+   * printed again. `bind` turns that text into the value the cursor's
+   * comparison binds, or `undefined` for text this dialect never renders,
+   * which the cursor then refuses.
+   *
+   * PostgreSQL's float output is the shortest text that reads back as the same
+   * value (at the default `extra_float_digits` of 1 or above) and `numeric`
+   * text is exact, so the text is bound as it is: an untyped parameter
+   * compared with the key takes the key's own type. SQLite renders the REAL
+   * with 17 significant digits, which identify every double, and binds the
+   * double that text denotes: before SQLite 3.43, which libSQL builds on,
+   * neither `CAST(x AS TEXT)` nor a REAL's JSON text is exact, and neither is
+   * `CAST(text AS REAL)`.
+   */
+  readonly relevanceCursorKey: Readonly<{
+    select: (this: void, expression: SqlFragment) => SqlFragment;
+    bind: (this: void, text: string) => string | number | undefined;
+  }>;
+
+  /**
    * Builds the dialect's planner-statistics refresh for a temporary table.
    * Returns undefined when the engine plans temporary tables well enough
    * without an explicit refresh.

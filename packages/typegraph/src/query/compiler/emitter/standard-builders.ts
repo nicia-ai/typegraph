@@ -11,6 +11,8 @@ import {
   type FulltextMatchPredicate,
   type HybridFusionOptions,
   type QueryAst,
+  type RelevanceComparisonPredicate,
+  type RelevanceSortSource,
   type SelectiveField,
   type VectorSimilarityPredicate,
 } from "../../ast";
@@ -21,7 +23,11 @@ import {
   vectorScoreExpression,
 } from "../../dialect/vector-strategy";
 import { type DatabaseExpression } from "../../expressions";
-import { compileOrderTerm, resolveNullOrdering } from "../../order";
+import {
+  compileOrderTerm,
+  resolveNullOrdering,
+  reverseOrder,
+} from "../../order";
 import { sql, type SqlFragment } from "../../sql-fragment";
 import { validateAggregateOperand } from "../aggregate-validation";
 import {
@@ -61,9 +67,12 @@ import {
   type PredicateCompilerContext,
 } from "../predicates";
 import {
+  describeRelevanceOrder,
+  describeSelectionOrder,
+  relevanceCursorKeyColumn,
   type RelevanceSortKey,
-  type RelevanceSortSource,
   SELECTION_ORDER_COLUMN,
+  type SelectionOrderKey,
 } from "../relevance-order";
 import {
   EMBEDDINGS_CTE_ALIAS,
@@ -1002,32 +1011,69 @@ export function buildStandardOrderBy(
 function compileStandardOrderTerms(
   input: BuildStandardOrderByInput,
 ): readonly SqlFragment[] {
-  const { ast, collapsedTraversalCteAlias, compileOutputValue, dialect } =
-    input;
+  const { ast } = input;
   const fieldOrderBy = ast.orderBy ?? [];
   const aggregateOrderBy = ast.aggregateOrderBy ?? [];
   if (fieldOrderBy.length === 0 && aggregateOrderBy.length === 0) {
     return [];
   }
 
-  // Only built when there's a FieldRef-based order spec to resolve against
-  // a CTE — the aggregate-alias loop below references the SELECT-list
-  // output alias directly and never needs it, which matters because the
-  // common case for `.aggregate().orderBy(...)` has `fieldOrderBy` empty.
-  const aliasToCte =
-    fieldOrderBy.length > 0 ? buildAliasToCteMap(ast) : undefined;
-  const parts: SqlFragment[] = [];
-  for (const orderSpec of fieldOrderBy) {
+  const compileTerm = createStandardOrderTermCompiler(input);
+  return [
+    ...fieldOrderBy.map((orderSpec) =>
+      compileTerm({ kind: "field", spec: orderSpec }),
+    ),
+    ...aggregateOrderBy.map((orderSpec) =>
+      compileTerm({ kind: "output", spec: orderSpec }),
+    ),
+  ];
+}
+
+/**
+ * Compiles one ordering term of `input.ast` that reads a field or names an
+ * output, with the term's own direction and null placement.
+ */
+function createStandardOrderTermCompiler(
+  input: BuildStandardOrderByInput,
+): (
+  key: Exclude<SelectionOrderKey, Readonly<{ kind: "relevance" }>>,
+) => SqlFragment {
+  const { ast, collapsedTraversalCteAlias, compileOutputValue, dialect } =
+    input;
+  // Built on first use: only a FieldRef-based order spec resolves against a
+  // CTE. An aggregate-alias term references the SELECT-list output alias
+  // directly and never needs it, and the common case for
+  // `.aggregate().orderBy(...)` has no field term at all.
+  let aliasToCte: ReadonlyMap<string, string> | undefined;
+  return (key) => {
+    if (key.kind === "output") {
+      // Aggregate ordering references the projected SELECT-list output alias
+      // directly rather than recompiling a FieldRef/AggregateExpr — every
+      // `.aggregate()` field (grouped or aggregated) is always projected with
+      // an alias, and both SQLite and PostgreSQL allow ORDER BY to reference
+      // it, so this needs no per-CTE or per-dialect resolution.
+      const column =
+        compileOutputValue === undefined ?
+          quoteIdentifier(key.spec.outputName)
+        : compileOutputValue(key.spec.outputName);
+      return compileOrderTerm(
+        column,
+        key.spec.direction,
+        resolveNullOrdering(key.spec),
+      );
+    }
+    const orderSpec = key.spec;
     const valueType = orderSpec.field.valueType;
     if (valueType === "array" || valueType === "object") {
       throw new UnsupportedPredicateError(
         "Ordering by JSON arrays or objects is not supported",
       );
     }
+    aliasToCte ??= buildAliasToCteMap(ast);
     const cteAlias =
       collapsedTraversalCteAlias ??
       (orderSpec.field.__type === "field_ref" ?
-        (aliasToCte?.get(orderSpec.field.alias) ??
+        (aliasToCte.get(orderSpec.field.alias) ??
         aliasCteName(orderSpec.field.alias))
       : undefined) ??
       "";
@@ -1037,26 +1083,12 @@ function compileStandardOrderTerms(
       dialect,
       cteAlias,
     );
-    const nulls = resolveNullOrdering(orderSpec);
-    parts.push(compileOrderTerm(field, orderSpec.direction, nulls));
-  }
-
-  // Aggregate ordering references the projected SELECT-list output alias
-  // directly rather than recompiling a FieldRef/AggregateExpr — every
-  // `.aggregate()` field (grouped or aggregated) is always projected with
-  // an alias, and both SQLite and PostgreSQL allow ORDER BY to reference
-  // it, so this needs no per-CTE or per-dialect resolution.
-  //
-  for (const orderSpec of aggregateOrderBy) {
-    const column =
-      compileOutputValue === undefined ?
-        quoteIdentifier(orderSpec.outputName)
-      : compileOutputValue(orderSpec.outputName);
-    const nulls = resolveNullOrdering(orderSpec);
-    parts.push(compileOrderTerm(column, orderSpec.direction, nulls));
-  }
-
-  return parts;
+    return compileOrderTerm(
+      field,
+      orderSpec.direction,
+      resolveNullOrdering(orderSpec),
+    );
+  };
 }
 
 // ============================================================
@@ -1593,6 +1625,10 @@ export function buildStandardEmbeddingsCte(
   // assign vector ordinals to every candidate, letting documents far
   // outside the requested top-k contribute to the RRF fused score and
   // reorder final results.
+  // Both break distance ties by node id, as the fulltext CTE breaks rank
+  // ties: which tied match makes the k cut, and the hybrid ordinal each
+  // tied match gets, are then the same in every statement, so every cursor
+  // page of a search ranks the candidates its `execute()` ranks.
   declareFixedCteWithColumns(
     names,
     EMBEDDINGS_CTE_ALIAS,
@@ -1606,10 +1642,10 @@ export function buildStandardEmbeddingsCte(
         ${readDerivedTableColumn("node_kind")},
         ${readDerivedTableColumn("distance")},
         ${readDerivedTableColumn("score")},
-        ROW_NUMBER() OVER (ORDER BY ${readDerivedTableColumn("distance")} ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY ${readDerivedTableColumn("distance")} ASC, ${readDerivedTableColumn("node_id")} ASC) AS ord
       FROM (
         ${unionBody}
-        ORDER BY ${readDerivedTableColumn("distance")} ASC
+        ORDER BY ${readDerivedTableColumn("distance")} ASC, ${readDerivedTableColumn("node_id")} ASC
         LIMIT ${vectorPredicate.limit}
       ) AS vec_inner
     )
@@ -1849,38 +1885,48 @@ function compileRelevanceSortValue(
 
 type BuildStandardRelevanceOrderByInput = RelevanceSortValueInput &
   Readonly<{
+    /** A statement with a relevance order (`describeRelevanceOrder`). */
     ast: QueryAst;
-    /** `describeRelevanceOrder(ast)`; never empty. */
-    keys: readonly RelevanceSortKey[];
   }>;
 
 /**
- * The order a full-text, vector or hybrid statement selects its rows in: the
- * leading relevance keys (rank DESC, distance ASC, or the fused RRF score
- * DESC), then the caller's `orderBy()` terms as tiebreakers, then the
- * trailing relevance keys (the hybrid node_id tiebreak), so pagination stays
- * stable across ties. The one owner of that order: the statement's ORDER BY
- * and its selection-order column (the rank a wrapping statement orders by)
- * both read it, and differ only in how a term naming an output is spelled.
+ * The terms of the order a full-text, vector or hybrid statement selects its
+ * rows in, as `describeSelectionOrder` describes it, reversed when the
+ * statement carries `reverseSelectionOrder`. The one owner of that order in
+ * SQL: the statement's ORDER BY and its selection-order column (the rank a
+ * wrapping statement orders by) both read it, and differ only in how a term
+ * naming an output is spelled.
  */
 function compileStandardRelevanceOrderTerms(
   input: BuildStandardRelevanceOrderByInput &
     Pick<BuildStandardOrderByInput, "compileOutputValue">,
 ): readonly SqlFragment[] {
-  const { ast, compileOutputValue, dialect, keys } = input;
-  const terms = (placement: RelevanceSortKey["placement"]) =>
-    keys
-      .filter((key) => key.placement === placement)
-      .map(
-        (key) =>
-          sql`${compileRelevanceSortValue(key, input)} ${sql.raw(key.direction === "desc" ? "DESC" : "ASC")}`,
-      );
-  const userOrders = compileStandardOrderTerms({
+  const { ast, compileOutputValue, dialect } = input;
+  const reversed = ast.reverseSelectionOrder === true;
+  const compileTerm = createStandardOrderTermCompiler({
     ast,
     dialect,
     ...(compileOutputValue === undefined ? {} : { compileOutputValue }),
   });
-  return [...terms("leading"), ...userOrders, ...terms("trailing")];
+  return describeSelectionOrder(ast).map((key) => {
+    switch (key.kind) {
+      case "relevance": {
+        const direction =
+          reversed ? reverseOrder(key.key).direction : key.key.direction;
+        return sql`${compileRelevanceSortValue(key.key, input)} ${sql.raw(direction === "desc" ? "DESC" : "ASC")}`;
+      }
+      case "field": {
+        return compileTerm(
+          reversed ? { kind: "field", spec: reverseOrder(key.spec) } : key,
+        );
+      }
+      case "output": {
+        return compileTerm(
+          reversed ? { kind: "output", spec: reverseOrder(key.spec) } : key,
+        );
+      }
+    }
+  });
 }
 
 /**
@@ -1920,6 +1966,71 @@ export function buildStandardSelectionOrderColumn(
     "the rank of the order the statement selects its rows in",
   );
   return sql`RANK() OVER (ORDER BY ${sql.join(compileStandardRelevanceOrderTerms(input), sql`, `)}) AS ${quoteIdentifier(outputName)}`;
+}
+
+/**
+ * The value a keyset cursor carries for one relevance sort key of a match
+ * row: a numeric key (rank, distance, fused score) rendered by
+ * `DialectAdapter.relevanceCursorKey`, which keeps it exact across the round
+ * trip; the hybrid node-id tiebreak as the text it compares as.
+ */
+function compileRelevanceCursorKeyValue(
+  source: RelevanceSortSource,
+  input: RelevanceSortValueInput,
+): SqlFragment {
+  const value = compileRelevancePerMatchValue(source, input);
+  return source === "hybrid_node_id" ? value : (
+      input.dialect.relevanceCursorKey.select(value)
+    );
+}
+
+/**
+ * The relevance cursor-key columns of a full-text, vector or hybrid statement
+ * compiled in the `cursor-keyed` shape: for each relevance sort key, in
+ * `describeRelevanceOrder` order, the row's value as a keyset cursor carries
+ * it ({@link compileRelevanceCursorKeyValue}), named
+ * `relevanceCursorKeyColumn(index)`. A cursor positions match rows, never
+ * groups, so a statement whose rows are groups is refused.
+ */
+export function buildStandardRelevanceCursorKeyColumns(
+  input: RelevanceSortValueInput &
+    Readonly<{ ast: QueryAst; names: SqlStatementNames }>,
+): readonly SqlFragment[] {
+  if (input.aggregated)
+    throw new CompilerInvariantError(
+      "A relevance cursor key was requested for a statement whose rows are groups",
+      { phase: "relevance-cursor-key" },
+    );
+  return describeRelevanceOrder(input.ast).map((key, index) => {
+    const outputName = declareResultColumn(
+      input.names,
+      relevanceCursorKeyColumn(index),
+      `the cursor key of the ${key.source} relevance sort key`,
+    );
+    return sql`${compileRelevanceCursorKeyValue(key.source, input)} AS ${quoteIdentifier(outputName)}`;
+  });
+}
+
+/**
+ * Compiles a keyset cursor's comparison of a match row's relevance sort key
+ * with the value the cursor carries. The value is bound as the cursor carries
+ * it, which is what {@link compileRelevanceCursorKeyValue} rendered, so it
+ * compares exactly against the same per-match value the ORDER BY sorts by.
+ */
+export function compileRelevanceComparison(
+  predicate: RelevanceComparisonPredicate,
+  input: RelevanceSortValueInput,
+): SqlFragment {
+  if (input.aggregated)
+    throw new CompilerInvariantError(
+      "A relevance cursor comparison was compiled for a statement whose rows are groups",
+      { phase: "relevance-cursor-key" },
+    );
+  const operator =
+    predicate.op === "eq" ? "="
+    : predicate.op === "gt" ? ">"
+    : "<";
+  return sql`${compileRelevancePerMatchValue(predicate.source, input)} ${sql.raw(operator)} ${predicate.value}`;
 }
 
 /**

@@ -50,6 +50,7 @@ function assertSupportedStopPredicate(
     case "in_subquery":
     case "vector_similarity":
     case "fulltext_match":
+    case "relevance_comparison":
     case "database_expression_predicate": {
       throw new ConfigurationError(
         "stopExpansion() supports ordinary target-node predicates only.",

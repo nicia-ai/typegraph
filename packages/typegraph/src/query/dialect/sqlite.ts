@@ -178,6 +178,14 @@ export const sqliteDialect: BuiltinDialectAdapter = {
     return expression;
   },
 
+  relevanceCursorKey: {
+    select: (expression) => sql`printf('%!.17g', ${expression})`,
+    bind: (text) => {
+      const value = Number(text);
+      return text.trim() !== "" && Number.isFinite(value) ? value : undefined;
+    },
+  },
+
   keyText(expression) {
     return sql`${expression} COLLATE BINARY`;
   },

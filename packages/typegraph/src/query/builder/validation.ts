@@ -212,7 +212,8 @@ function validateStructuralPredicatePlacement(
     case "exists":
     case "in_subquery":
     case "vector_similarity":
-    case "fulltext_match": {
+    case "fulltext_match":
+    case "relevance_comparison": {
       return;
     }
   }
