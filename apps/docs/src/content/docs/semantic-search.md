@@ -890,9 +890,10 @@ leaks to the next query on a pooled connection. Inside a transaction (a
 `store.transaction()`, an adopted transaction, or a backend over a caller's
 transaction) the search reads each parameter it overrides and restores it
 after the `SELECT`, so the rest of that transaction keeps its own value. The
-read tolerates a parameter the connection has not defined yet — pgvector
-defines its parameters only when its library first loads in a connection —
-and restores such a parameter to its default. Omitting it preserves
+read tolerates a parameter that the connection has not defined yet, or that
+holds no value, and restores such a parameter to its default. pgvector defines
+its parameters only when its library first loads in a connection, and a
+rolled-back `SET LOCAL` from before that leaves one without a value. Omitting it preserves
 today's behavior exactly — no transaction is opened. It applies to the
 **Postgres HNSW** path only:
 

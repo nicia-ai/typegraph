@@ -592,4 +592,51 @@ describe("Postgres search parameters — a session that has not loaded pgvector"
       await cold.end();
     }
   });
+
+  it("resets a placeholder a rolled-back SET LOCAL left empty", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    await seed(pool, "ef_empty_placeholder");
+    const cold = new Pool({ connectionString: TEST_DATABASE_URL, max: 1 });
+    try {
+      // Before pgvector loads, a rolled-back SET LOCAL leaves a placeholder
+      // with no value, which reads as the empty string.
+      const client = await cold.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SET LOCAL hnsw.ef_search = 60");
+        await client.query("ROLLBACK");
+        const placeholder = await client.query<{ v: string }>(
+          "SELECT current_setting('hnsw.ef_search', true) AS v",
+        );
+        expect(placeholder.rows[0]?.v).toBe("");
+      } finally {
+        client.release();
+      }
+
+      const backend = createPostgresBackend(drizzle(cold));
+      await backend.transaction(async (tx) => {
+        const hits = await requireDefined(tx.vectorSearch)({
+          graphId: "ef_empty_placeholder",
+          nodeKind: "Doc",
+          fieldPath: "embedding",
+          queryEmbedding: [1, 0, 0, 0],
+          metric: "cosine",
+          dimensions: 4,
+          indexType: "hnsw",
+          limit: 1,
+          efSearch: 256,
+        });
+        expect(hits).toHaveLength(1);
+        const rows = await tx.execute<Record<string, unknown>>(
+          asCompiledRowsSql(sql`
+            SELECT current_setting('hnsw.ef_search') AS ef_search,
+                   (SELECT boot_val FROM pg_settings WHERE name = 'hnsw.ef_search') AS ef_search_default
+          `),
+        );
+        expect(rows[0]?.["ef_search"]).toBe(rows[0]?.["ef_search_default"]);
+      });
+    } finally {
+      await cold.end();
+    }
+  });
 });

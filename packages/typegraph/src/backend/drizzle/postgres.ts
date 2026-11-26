@@ -3795,12 +3795,23 @@ function createPostgresOperationBackend(
         // raises 42704 and aborts the caller's transaction. With it an
         // undefined parameter reads as NULL, and the `set_config` below plants
         // a placeholder that the library adopts when the SELECT loads it.
+        //
+        // A placeholder can also read as the empty string: a `SET LOCAL` that
+        // rolled back before the library loaded leaves one with no value.
+        // The parameters overridden here, an ANN frontier size and
+        // iterative-scan modes, never read as empty once defined, so an empty
+        // value is that unset placeholder. Restoring it would assign "" to the parameter the
+        // SELECT has just defined, which it rejects with 22023, so it is
+        // treated as undefined and reset to the default instead.
         const [setting] = await connection.execute<{ v: unknown }>(
           sql`SELECT current_setting(${override.name}, true) AS v`,
         );
         snapshots.push({
           name: override.name,
-          previous: typeof setting?.v === "string" ? setting.v : undefined,
+          previous:
+            typeof setting?.v === "string" && setting.v !== "" ?
+              setting.v
+            : undefined,
         });
         await connection.execute(
           sql`SELECT set_config(${override.name}, ${override.value}, true)`,
