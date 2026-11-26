@@ -12,7 +12,7 @@ import {
 } from "../../backend/command-contract";
 import { type GraphCommandIsolation } from "../../backend/types";
 import { TypeGraphError } from "../../errors";
-import type { OperationBackend } from "../operation-scope";
+import type { Operation } from "../operation-scope";
 import { lockRecordedGraphWrite } from "../recorded-capture";
 import { lockSchemaVersionForStoreWrite } from "./write-transaction";
 
@@ -61,13 +61,14 @@ export type StoreWriteFenceInput = Readonly<{
  * prelude throws `freshSnapshotError(isolation)`.
  */
 export async function lockStoreWriteFence(
-  txBackend: OperationBackend,
+  operation: Operation,
   input: StoreWriteFenceInput,
 ): Promise<void> {
+  const txBackend = operation.backend;
   try {
     await lockSchemaVersionForStoreWrite(
       { graphId: input.graphId, schemaVersion: input.schemaVersion },
-      txBackend,
+      operation,
     );
   } catch (error) {
     if (

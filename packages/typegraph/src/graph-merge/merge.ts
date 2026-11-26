@@ -2983,8 +2983,7 @@ export async function commitPlan<G extends GraphDef>(
           // The commit is one operation of the session of the transaction
           // it opened; the collection writes it drives enter their own.
           const operation = enterTransactionOperation(tx);
-          const txBackend = operation.backend;
-          await lockMergeCommitFence(txBackend, target, expectedBaseVersion);
+          await lockMergeCommitFence(operation, target, expectedBaseVersion);
           // TOCTOU guard: the plan was resolved from reads taken OUTSIDE this
           // transaction, so the target may have been written between the base@V
           // precondition and this commit. Revision-anchored stores check their
@@ -3086,7 +3085,7 @@ function mergeCommitTransactionOptions<G extends GraphDef>(
  * before any read of the commit.
  */
 async function lockMergeCommitFence<G extends GraphDef>(
-  txBackend: OperationBackend,
+  operation: Operation,
   target: Store<G>,
   expectedBaseVersion: BaseVersion | undefined,
 ): Promise<void> {
@@ -3097,7 +3096,7 @@ async function lockMergeCommitFence<G extends GraphDef>(
       historyEnabled: storeCaptureEnabled(target),
       revisionTrackingEnabled: target.revisionTrackingEnabled,
     });
-  await lockStoreWriteFence(txBackend, {
+  await lockStoreWriteFence(operation, {
     graphId: target.graphId,
     schemaVersion: target.introspect().schemaVersion,
     graphLock: graphLockRequired ? "required" : "not-required",
@@ -5824,11 +5823,12 @@ async function preflightWireMergeWrites<G extends GraphDef>(
 
 async function assertMergePlanFenceInsideTransaction<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   artifact: MergePlanArtifactV3,
   requireFreshSnapshot: boolean,
 ): Promise<void> {
-  await lockStoreWriteFence(txBackend, {
+  const txBackend = operation.backend;
+  await lockStoreWriteFence(operation, {
     graphId: target.graphId,
     schemaVersion:
       artifact.target.schema.managed ?
@@ -6007,7 +6007,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
   );
   if (
     !forceRecordedGraphRevision(txBackend, target.graphId) &&
-    !forceWriteTransactionRevision(txBackend)
+    !forceWriteTransactionRevision(operation)
   ) {
     await advanceRevisionClock(
       txBackend,
@@ -6123,11 +6123,10 @@ async function applyValidatedMergePlanInTransaction<G extends GraphDef>(
   requireFreshSnapshot: boolean,
   decision: IdentityDecisionProvenance | undefined,
 ): Promise<MergedCounts> {
-  const txBackend = operation.backend;
   const { beforeApply, afterApply } = options;
   await assertMergePlanFenceInsideTransaction(
     target,
-    txBackend,
+    operation,
     artifact,
     requireFreshSnapshot,
   );
@@ -6329,7 +6328,7 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
     // apply: its fences, savepoint and direct statements.
     const operation = enterTransactionOperation(tx);
     const txBackend = operation.backend;
-    await assertMergeTransactionPristine(effectiveTarget, txBackend);
+    await assertMergeTransactionPristine(effectiveTarget, operation);
     const decision = mergeIdentityDecisionFromArtifact(artifact, options);
     const merged = await withAdoptedMergeApplySavepoint(
       effectiveTarget,
@@ -7555,7 +7554,7 @@ async function commitIncrementalPlan<G extends GraphDef>(
           const operation = enterTransactionOperation(tx);
           const txBackend = operation.backend;
           // The fork point carries no target base version to anchor on.
-          await lockMergeCommitFence(txBackend, target, undefined);
+          await lockMergeCommitFence(operation, target, undefined);
           // Fork-point TOCTOU guard: the ancestor the whole plan was diffed
           // against is re-read here, so a write to it in the plan→commit window
           // refuses the merge instead of committing diffs against a fork point

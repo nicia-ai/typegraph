@@ -440,6 +440,7 @@ describe("behavioral rows (B8)", () => {
           graphId: uniqueRefusalGraph.id,
           registry,
           lock: uncapturedGraphWriteLock(),
+          operation: backend,
           claimsVerdict: createClaimsVerdictThunk(backend),
           uniqueSidecarBatch: uniqueSidecarBatchVerdict(backend),
         },
