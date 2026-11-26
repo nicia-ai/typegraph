@@ -43,7 +43,6 @@ import {
   runRetriedUnit,
 } from "../backend/capabilities/retried-unit";
 import {
-  type BackendCapabilities,
   type CreateVectorIndexParams,
   type GraphBackend,
   type IndexMaterializationRow,
@@ -217,23 +216,31 @@ type MaterializeIndexesContext = Readonly<{
 /**
  * The declarations a `materializeIndexes(options)` call on `graph` acts on,
  * after refusing everything such a call refuses before its first statement:
- * an unknown kind in `options.kinds`, and a declaration the backend's
- * `dateIndexExpressions` capability cannot build. Pure — no I/O.
+ * a backend without the materialization primitives (`executeDdl` and the
+ * status-row primitives), an unknown kind in `options.kinds`, a declaration
+ * the backend's `dateIndexExpressions` capability cannot build, and — when
+ * there is anything to build — a backend without catalog probes. Pure — no
+ * I/O.
  *
  * `materializeIndexes` selects its candidates through this, and
  * `store.evolve({ eager })` runs it against the evolved graph before the
- * schema commit, so an eager evolution whose materialization would be
- * refused is refused before it changes the schema.
+ * schema commit and then materializes exactly that graph, so an eager
+ * evolution whose materialization would be refused is refused before it
+ * changes the schema.
  */
 export function preflightIndexMaterialization(
   target: Readonly<{
     graph: GraphDef;
     graphId: string;
-    capabilities: BackendCapabilities;
+    backend: GraphBackend;
   }>,
   options: MaterializeIndexesOptions = {},
 ): readonly IndexDeclaration[] {
-  const { graph, graphId } = target;
+  const { graph, graphId, backend } = target;
+  assertBackendSupportsIndexMaterialization(
+    backend,
+    "store.materializeIndexes()",
+  );
   const declared = graph.indexes ?? [];
   const kindFilter =
     options.kinds === undefined ? undefined : new Set(options.kinds);
@@ -261,10 +268,12 @@ export function preflightIndexMaterialization(
   // Refused before any I/O, so no status table, status row or sibling index
   // is created for a call that cannot honor every candidate it was given.
   assertDateIndexExpressionsSupported(
-    target.capabilities,
+    backend.capabilities,
     candidates,
     "store.materializeIndexes()",
   );
+  if (candidates.length > 0)
+    requireCatalog(backend, "store.materializeIndexes()");
   return candidates;
 }
 
@@ -274,13 +283,8 @@ export async function materializeIndexes(
 ): Promise<MaterializeIndexesResult> {
   const { graph, graphId, backend, schemaVersion } = context;
 
-  assertBackendSupportsIndexMaterialization(
-    backend,
-    "store.materializeIndexes()",
-  );
-
   const candidates = preflightIndexMaterialization(
-    { graph, graphId, capabilities: backend.capabilities },
+    { graph, graphId, backend },
     options,
   );
 

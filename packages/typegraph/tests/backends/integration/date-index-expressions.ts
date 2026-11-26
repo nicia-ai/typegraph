@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../../../src";
+import { createStore, defineEdge, defineGraph, defineNode } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { UnsupportedBackendCapabilityError } from "../../../src/errors";
 import { defineGraphExtension } from "../../../src/graph-extension";
 import { defineEdgeIndex, defineNodeIndex } from "../../../src/indexes";
 import { type IndexDeclaration } from "../../../src/indexes/types";
 import { getCommittedSchemaVersion } from "../../../src/schema";
+import { createAdapterStoreWithSchema } from "../../../src/store/store";
+import { type StoreRef } from "../../../src/store/types";
+import { requireDefined } from "../../../src/utils/presence";
+import { prefixedTableNames } from "../../helpers/traced-connection";
 import {
   type IntegrationLaneDriver,
   type IntegrationTestContext,
@@ -361,6 +366,44 @@ export function registerDateIndexExpressionIntegrationTests(
       ]);
     });
 
+    it("a refused call issues no DDL and no status-table statement", async () => {
+      const connection = await context.openTracedConnection([
+        prefixedTableNames(`dix_${uniqueSuffix()}`),
+      ]);
+      try {
+        const [store] = await createAdapterStoreWithSchema(
+          buildGraph([
+            defineNodeIndex(Tag, {
+              name: `idx_tag_${uniqueSuffix()}`,
+              fields: ["name"],
+            }),
+            defineNodeIndex(Event, {
+              name: `idx_date_${uniqueSuffix()}`,
+              fields: ["at"],
+            }),
+          ]),
+          requireDefined(connection.backends[0]),
+        );
+        connection.reset();
+
+        const outcome = await materializeOutcome(() =>
+          store.materializeIndexes(),
+        );
+        const statements = connection.statements().map(({ text }) => text);
+        const builds = DATE_INDEX_LANES[context.driver];
+
+        expect({
+          refused: "refused" in outcome,
+          ddl: statements.some((text) => /\bcreate\b/i.test(text)),
+          statusTable: statements.some((text) =>
+            text.includes("index_materializations"),
+          ),
+        }).toEqual({ refused: !builds, ddl: builds, statusTable: builds });
+      } finally {
+        await connection.close();
+      }
+    });
+
     it("refuses an eager evolve before committing the new schema version", async () => {
       const name = `idx_date_${uniqueSuffix()}`;
       const graph = buildGraph([
@@ -403,6 +446,62 @@ export function registerDateIndexExpressionIntegrationTests(
               positionLabel: "key",
             }),
         after: builds ? (before ?? 0) + 1 : before,
+      });
+    });
+
+    it("an eager evolve materializes the schema it committed, not a later writer's", async () => {
+      const graph = buildGraph([]);
+      const laterWriter = await context.createStore(graph);
+      const backend = context.getBackend();
+      const before = (await getCommittedSchemaVersion(backend, graph.id)) ?? 0;
+      let laterWriterCommitted = false;
+      // After this store's schema commit returns, and before its eager
+      // materialization starts, a second writer commits a date-typed index.
+      const interleaved = deriveBackend(backend, {
+        commitSchemaVersion: async (params) => {
+          const row = await backend.commitSchemaVersion(params);
+          if (!laterWriterCommitted) {
+            laterWriterCommitted = true;
+            await laterWriter.evolve(
+              defineGraphExtension({
+                indexes: [
+                  {
+                    entity: "node",
+                    kind: "Event",
+                    name: `idx_date_${uniqueSuffix()}`,
+                    fields: ["at"],
+                  },
+                ],
+              }),
+            );
+          }
+          return row;
+        },
+      });
+      const store = createStore(graph, interleaved);
+      const ref: StoreRef<typeof store> = { current: store };
+
+      const evolved = await store.evolve(
+        defineGraphExtension({
+          nodes: { Note: { properties: { body: { type: "string" } } } },
+          indexes: [{ entity: "node", kind: "Note", fields: ["body"] }],
+        }),
+        { eager: {}, ref },
+      );
+
+      const noteIndex = await evolved.materializeIndexes({ kinds: ["Note"] });
+      expect({
+        laterWriterCommitted,
+        refUpdated: ref.current === evolved,
+        committed: await getCommittedSchemaVersion(backend, graph.id),
+        evolvedVersion: evolved.introspect().schemaVersion,
+        noteIndex: noteIndex.results.map((entry) => entry.status),
+      }).toEqual({
+        laterWriterCommitted: true,
+        refUpdated: true,
+        committed: before + 2,
+        evolvedVersion: before + 1,
+        noteIndex: ["alreadyMaterialized"],
       });
     });
 

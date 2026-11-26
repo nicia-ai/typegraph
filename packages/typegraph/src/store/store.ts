@@ -6670,9 +6670,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
        * recover via the ref handle.
        *
        * What materialization refuses before its first statement — a
-       * `kinds` entry the evolved graph does not declare, or a declaration
-       * the backend's `dateIndexExpressions` capability cannot build — is
-       * refused before the schema commit instead, so no version is written.
+       * backend without the materialization primitives, a `kinds` entry
+       * the evolved graph does not declare, or a declaration the backend's
+       * `dateIndexExpressions` capability cannot build — is refused before
+       * the schema commit instead, so no version is written. Eager
+       * materialization then builds the indexes of the schema this call
+       * committed (or, for a no-op evolve, the schema it caught up to), not
+       * a schema another writer committed afterwards.
        */
       eager?: MaterializeIndexesOptions;
     }>,
@@ -6698,17 +6702,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // and returns the input graph unchanged for no-op re-evolves.
     const merged = mergeGraphExtension(baseline, extension);
 
-    // An eager materialization refuses some declarations before its first
-    // statement (an unknown kind, a date index the backend cannot build).
-    // Refuse them here, before the schema commit, rather than after it has
-    // changed the schema and the caller can no longer tell it did.
+    // An eager materialization refuses some calls before its first
+    // statement (missing primitives, an unknown kind, a date index the
+    // backend cannot build). Refuse them here, before the schema commit,
+    // rather than after it has changed the schema and the caller can no
+    // longer tell it did. `#runEagerOrThrow` then materializes this same
+    // `merged` graph, so the verdict cannot be invalidated by a schema
+    // another writer commits in between.
     if (options?.eager !== undefined) {
       preflightIndexMaterialization(
-        {
-          graph: merged,
-          graphId: this.graphId,
-          capabilities: this.#baseBackend.capabilities,
-        },
+        { graph: merged, graphId: this.graphId, backend: this.#baseBackend },
         options.eager,
       );
     }
@@ -6733,7 +6736,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       if (baseline === this.#graph) {
         syncStoreReplacementRef(options?.ref, this);
         if (options?.eager !== undefined) {
-          await this.#runEagerOrThrow(this, options.eager);
+          await this.#runEagerOrThrow(
+            { graph: merged, schemaVersion: activeRow.version },
+            options.eager,
+          );
         }
         return this;
       }
@@ -6743,7 +6749,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         await schemaMetadataFromRow(activeRow),
       );
       if (options?.eager !== undefined) {
-        await this.#runEagerOrThrow(caughtUp, options.eager);
+        await this.#runEagerOrThrow(
+          { graph: merged, schemaVersion: activeRow.version },
+          options.eager,
+        );
       }
       return caughtUp;
     }
@@ -6882,16 +6891,34 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       await schemaMetadataFromRow(committed),
     );
     if (options?.eager !== undefined) {
-      await this.#runEagerOrThrow(evolved, options.eager);
+      await this.#runEagerOrThrow(
+        { graph: merged, schemaVersion: committed.version },
+        options.eager,
+      );
     }
     return evolved;
   }
 
+  /**
+   * `evolve`'s eager materialization of exactly the graph it preflighted
+   * and the schema version that graph was committed (or caught up) at.
+   * Unlike the public `materializeIndexes()`, it does not reload the active
+   * schema: a later writer's version may carry declarations the preflight
+   * never saw.
+   */
   async #runEagerOrThrow(
-    store: StoreImplementation<G, TNativeTransaction>,
+    preflighted: Readonly<{ graph: G; schemaVersion: number }>,
     eager: MaterializeIndexesOptions,
   ): Promise<void> {
-    const result = await store.materializeIndexes(eager);
+    const result = await materializeIndexesImpl(
+      {
+        graph: preflighted.graph,
+        graphId: this.graphId,
+        backend: this.#baseBackend,
+        schemaVersion: preflighted.schemaVersion,
+      },
+      eager,
+    );
     if (result.results.some((entry) => entry.status === "failed")) {
       throw new EagerMaterializationError(result, this.graphId);
     }
