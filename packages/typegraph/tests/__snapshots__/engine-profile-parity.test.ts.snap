@@ -2407,7 +2407,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC, node_id ASC) AS ord
       FROM (
         
         SELECT node_id, $5 AS node_kind, (1.0 - score) AS distance, score
@@ -2419,11 +2419,11 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       LIMIT $10
     ) AS tg_ann_src
       
-        ORDER BY distance ASC
+        ORDER BY distance ASC, node_id ASC
         LIMIT $11
       ) AS vec_inner
     )
-   SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC",
+   SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC, cte_d.d_id ASC NULLS LAST",
   },
   {
     "params": [],
@@ -4891,7 +4891,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC, node_id ASC) AS ord
       FROM (
         
         SELECT node_id, ? AS node_kind, (1.0 - score) AS distance, score
@@ -4902,11 +4902,11 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
         ORDER BY distance ASC
       ) AS tg_ann_src
       
-        ORDER BY distance ASC
+        ORDER BY distance ASC, node_id ASC
         LIMIT ?
       ) AS vec_inner
     )
-   SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC",
+   SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC, cte_d.d_id ASC NULLS LAST",
   },
 ]
 `;
