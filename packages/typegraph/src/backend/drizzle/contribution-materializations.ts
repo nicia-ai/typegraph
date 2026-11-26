@@ -161,17 +161,19 @@ export function createSessionMarkerBatchRead(
   const markerTable = portableSql.identifier(markerTableName);
   return async (graphIds) => {
     if (graphIds.length === 0) return [];
+    // The statement text, indentation included, is the one the compiled-SQL
+    // goldens pin.
     const rows = await execute(portableSql`
-      SELECT graph_id AS "graphId", logical_name AS "logicalName",
-        owner, table_name AS "tableName", signature,
-        materialized_at AS "materializedAt",
-        last_attempted_at AS "lastAttemptedAt",
-        last_error AS "lastError"
-      FROM ${markerTable} WHERE graph_id IN (${portableSql.join(
+          SELECT graph_id AS "graphId", logical_name AS "logicalName",
+            owner, table_name AS "tableName", signature,
+            materialized_at AS "materializedAt",
+            last_attempted_at AS "lastAttemptedAt",
+            last_error AS "lastError"
+          FROM ${markerTable} WHERE graph_id IN (${portableSql.join(
         graphIds.map((graphId) => portableSql`${graphId}`),
         portableSql`, `,
       )})
-    `);
+        `);
     return rows.map((row) => mapContributionMaterializationRow(row, decode));
   };
 }
