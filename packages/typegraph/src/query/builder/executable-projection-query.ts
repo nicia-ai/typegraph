@@ -20,6 +20,7 @@ import { buildCompileOptions } from "./compile-options";
 import { assertExpressionScope, getExpressionScope } from "./expression-scope";
 import type { ExpressionProjectionEntries } from "./expression-subqueries";
 import { getQueryBuilderInternalContext } from "./internal-context";
+import { oneStatementBatchSelectionOrder } from "./one-statement-batch";
 import {
   bindQueryParameters,
   collectParameterMetadata,
@@ -262,7 +263,14 @@ export class ExecutableProjectionQuery<
       );
     const ast = this.toAst();
     this.#assertBound(ast);
-    const { ast: envelope, orderBy } = buildProjectionEnvelope(ast);
+    const selectionOrder = oneStatementBatchSelectionOrder(ast);
+    const {
+      ast: envelope,
+      orderBy,
+    }: ReturnType<typeof buildProjectionEnvelope> =
+      selectionOrder === undefined ?
+        buildProjectionEnvelope(ast)
+      : { ast, orderBy: selectionOrder.map((order) => ({ ...order })) };
     return {
       // batchOnce() embeds the statement as a CTE and reads its columns by name.
       query: compileNameCheckedQuery(
@@ -270,6 +278,7 @@ export class ExecutableProjectionQuery<
         this.#config.graphId,
         buildCompileOptions(this.#config),
         "wrapped",
+        "selection-ordered",
       ),
       provenance: {
         graphId: this.#config.graphId,
@@ -621,7 +630,15 @@ function decodeScalarExpressionValue(
 }
 
 /** Carries sort values through SQL envelopes without exposing them in decoded results. */
-function buildProjectionEnvelope(ast: QueryAst) {
+function buildProjectionEnvelope(ast: QueryAst): Readonly<{
+  ast: QueryAst;
+  // Spelled as `compileOneStatementBatchItem()` has always declared it.
+  orderBy: {
+    column: string;
+    direction: SortDirection;
+    nulls: "first" | "last";
+  }[];
+}> {
   const ordering = ast.orderBy ?? [];
   const orderBy = ordering.map((order, index) => ({
     column: `__tg_order_${index}`,

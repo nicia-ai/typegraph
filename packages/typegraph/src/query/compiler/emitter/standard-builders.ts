@@ -1,4 +1,7 @@
-import { UnsupportedPredicateError } from "../../../errors";
+import {
+  CompilerInvariantError,
+  UnsupportedPredicateError,
+} from "../../../errors";
 import { requireDefined } from "../../../utils/presence";
 import {
   type AggregateExpr,
@@ -60,6 +63,7 @@ import {
 import {
   type RelevanceSortKey,
   type RelevanceSortSource,
+  SELECTION_ORDER_COLUMN,
 } from "../relevance-order";
 import {
   EMBEDDINGS_CTE_ALIAS,
@@ -972,6 +976,13 @@ type BuildStandardOrderByInput = Readonly<{
   ast: QueryAst;
   collapsedTraversalCteAlias?: string;
   dialect: DialectAdapter;
+  /**
+   * How a term naming an `aggregate()` / `project()` output is spelled: by
+   * its output name (the default, for the statement's own ORDER BY) or, when
+   * given, by the value this returns for the output (a window's ORDER BY,
+   * where neither engine resolves output names).
+   */
+  compileOutputValue?: (outputName: string) => SqlFragment;
 }>;
 
 export function buildStandardOrderBy(
@@ -991,7 +1002,8 @@ export function buildStandardOrderBy(
 function compileStandardOrderTerms(
   input: BuildStandardOrderByInput,
 ): readonly SqlFragment[] {
-  const { ast, collapsedTraversalCteAlias, dialect } = input;
+  const { ast, collapsedTraversalCteAlias, compileOutputValue, dialect } =
+    input;
   const fieldOrderBy = ast.orderBy ?? [];
   const aggregateOrderBy = ast.aggregateOrderBy ?? [];
   if (fieldOrderBy.length === 0 && aggregateOrderBy.length === 0) {
@@ -1036,7 +1048,10 @@ function compileStandardOrderTerms(
   // it, so this needs no per-CTE or per-dialect resolution.
   //
   for (const orderSpec of aggregateOrderBy) {
-    const column = quoteIdentifier(orderSpec.outputName);
+    const column =
+      compileOutputValue === undefined ?
+        quoteIdentifier(orderSpec.outputName)
+      : compileOutputValue(orderSpec.outputName);
     const nulls = resolveNullOrdering(orderSpec);
     parts.push(compileOrderTerm(column, orderSpec.direction, nulls));
   }
@@ -1840,15 +1855,19 @@ type BuildStandardRelevanceOrderByInput = RelevanceSortValueInput &
   }>;
 
 /**
- * ORDER BY clause of a full-text, vector or hybrid statement: the leading
- * relevance keys (rank DESC, distance ASC, or the fused RRF score DESC), then
- * the caller's `orderBy()` terms as tiebreakers, then the trailing relevance
- * keys (the hybrid node_id tiebreak), so pagination stays stable across ties.
+ * The order a full-text, vector or hybrid statement selects its rows in: the
+ * leading relevance keys (rank DESC, distance ASC, or the fused RRF score
+ * DESC), then the caller's `orderBy()` terms as tiebreakers, then the
+ * trailing relevance keys (the hybrid node_id tiebreak), so pagination stays
+ * stable across ties. The one owner of that order: the statement's ORDER BY
+ * and its selection-order column (the rank a wrapping statement orders by)
+ * both read it, and differ only in how a term naming an output is spelled.
  */
-export function buildStandardRelevanceOrderBy(
-  input: BuildStandardRelevanceOrderByInput,
-): SqlFragment {
-  const { ast, dialect, keys } = input;
+function compileStandardRelevanceOrderTerms(
+  input: BuildStandardRelevanceOrderByInput &
+    Pick<BuildStandardOrderByInput, "compileOutputValue">,
+): readonly SqlFragment[] {
+  const { ast, compileOutputValue, dialect, keys } = input;
   const terms = (placement: RelevanceSortKey["placement"]) =>
     keys
       .filter((key) => key.placement === placement)
@@ -1856,8 +1875,75 @@ export function buildStandardRelevanceOrderBy(
         (key) =>
           sql`${compileRelevanceSortValue(key, input)} ${sql.raw(key.direction === "desc" ? "DESC" : "ASC")}`,
       );
-  const userOrders = compileStandardOrderTerms({ ast, dialect });
-  return sql`ORDER BY ${sql.join([...terms("leading"), ...userOrders, ...terms("trailing")], sql`, `)}`;
+  const userOrders = compileStandardOrderTerms({
+    ast,
+    dialect,
+    ...(compileOutputValue === undefined ? {} : { compileOutputValue }),
+  });
+  return [...terms("leading"), ...userOrders, ...terms("trailing")];
+}
+
+/**
+ * ORDER BY clause of a full-text, vector or hybrid statement, in the order
+ * {@link compileStandardRelevanceOrderTerms} owns.
+ */
+export function buildStandardRelevanceOrderBy(
+  input: BuildStandardRelevanceOrderByInput,
+): SqlFragment {
+  return sql`ORDER BY ${sql.join(compileStandardRelevanceOrderTerms(input), sql`, `)}`;
+}
+
+/**
+ * The selection-order column of a full-text, vector or hybrid statement that
+ * another statement wraps: each row's `RANK()` under exactly the terms of the
+ * statement's own ORDER BY ({@link compileStandardRelevanceOrderTerms}), so a
+ * wrapper that orders by this column selects the rows in the order the
+ * statement does. Tied rows share a rank, so terms a wrapper appends after it
+ * break ties as they would appended to the statement's ORDER BY.
+ *
+ * It is a select-list term of its own, never a projected field, so it joins
+ * no GROUP BY; in a statement whose rows are groups, its relevance keys are
+ * the same best-member aggregates the ORDER BY reads. A term naming an output
+ * is spelled as that output's value: a window's ORDER BY cannot name a result
+ * column on either engine.
+ */
+export function buildStandardSelectionOrderColumn(
+  input: BuildStandardRelevanceOrderByInput &
+    Readonly<{
+      compileOutputValue: (outputName: string) => SqlFragment;
+      names: SqlStatementNames;
+    }>,
+): SqlFragment {
+  const outputName = declareResultColumn(
+    input.names,
+    SELECTION_ORDER_COLUMN,
+    "the rank of the order the statement selects its rows in",
+  );
+  return sql`RANK() OVER (ORDER BY ${sql.join(compileStandardRelevanceOrderTerms(input), sql`, `)}) AS ${quoteIdentifier(outputName)}`;
+}
+
+/**
+ * The value the projected output `outputName` of `ast` reads, compiled as the
+ * projection compiles it.
+ */
+export function compileStandardProjectedOutputValue(
+  input: Readonly<{
+    ast: QueryAst;
+    collapsedTraversalCteAlias?: string;
+    ctx: PredicateCompilerContext;
+    outputName: string;
+  }>,
+): SqlFragment {
+  const { ast, collapsedTraversalCteAlias, ctx, outputName } = input;
+  const field = ast.projection.fields.find(
+    (projected) => projected.outputName === outputName,
+  );
+  if (field === undefined)
+    throw new CompilerInvariantError(
+      `An ordering term names the output "${outputName}", which the statement does not project`,
+      { phase: "selection-order" },
+    );
+  return compileProjectedSource(field, ast, ctx, collapsedTraversalCteAlias);
 }
 
 type BuildLimitOffsetClauseInput = Readonly<{

@@ -228,6 +228,7 @@ import {
   unsupportedResolvedMutationSet,
 } from "../resolved-mutation-set";
 import { type NodeRow, rowToEdge, rowToNode } from "../row-mappers";
+import { reviveStoredDateProps } from "../stored-date-revival";
 import {
   type BulkOperationHookContext,
   compareAndSetAbsent,
@@ -1828,9 +1829,10 @@ function computeNodeUpdate<G extends GraphDef>(
   inputProps: Partial<Record<string, unknown>>,
 ) {
   const registration = getNodeRegistration(ctx.graph, kind);
+  const schema = registration.type.schema;
   const validatedProps = validateNodeProps(
-    registration.type.schema,
-    { ...existingProps, ...inputProps },
+    schema,
+    { ...reviveStoredDateProps(schema, existingProps), ...inputProps },
     { kind, operation: "update", id },
   );
   return { registration, validatedProps };

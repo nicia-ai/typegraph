@@ -2,115 +2,195 @@
  * The one owner of "which native transaction does this transaction backend
  * run on".
  *
- * Every adoption of a native transaction binds a NEW engine transaction
- * backend (`bindTransactionBackend` in both dialects), so one native
- * transaction has as many derivation roots as it has bindings, and no backend
- * object identifies the transaction. The engine therefore records, once per
- * bind, the native transaction the bound backend runs on
- * ({@link recordNativeTransactionHandle}); the Store resolves it along the
- * derivation chain ({@link resolveNativeTransactionHandle}), so a derived
- * backend inherits the record of the backend it was derived from.
+ * THE RULE: state is shared only on proof, and proof is bound to the
+ * resource. Two bindings resolve one native transaction only when the engine
+ * can show they run on the same one:
  *
- * What is recorded is an object that identifies ONE native transaction, never
- * a connection:
+ * 1. **Engine savepoint** — a savepoint the engine opened itself on a handle
+ *    it could identify is the enclosing transaction
+ *    ({@link recordEngineSavepoint}).
+ * 2. **Pinned transaction handle** — a driver that runs each transaction on a
+ *    per-transaction handle of its own (libSQL's `client.transaction()`
+ *    handle, PGlite's transaction client), kept by every Drizzle transaction
+ *    object and caller savepoint of that transaction, is identified by that
+ *    handle, never by the client it was opened from, and only while the
+ *    handle reports its transaction open (a trigger's `RAISE(ROLLBACK)` ends
+ *    a libSQL transaction mid-callback; both report a finished one closed).
+ * 3. **Transaction object** — a Drizzle transaction object that is one per
+ *    BEGIN or savepoint and executes only inside it (PostgreSQL's
+ *    node-postgres and postgres-js) is identified by itself. Neither driver
+ *    reports the transaction's end on the object, so a handle retained after
+ *    its transaction resolves that ended transaction, never another.
+ * 4. **Verified connection token** — a handle that is only a connection
+ *    (better-sqlite3's database, or a Drizzle transaction object over it,
+ *    which runs on whatever transaction the connection has; Durable Object
+ *    storage) identifies no transaction. A transaction the engine opens on
+ *    such a connection gets a token of its own
+ *    ({@link createNativeTransactionToken}); the token is honoured only while
+ *    the driver confirms, at the moment of the lookup, that the connection
+ *    still has a transaction open AND no later engine transaction has been
+ *    published on it. A token that fails either check has ended and is never
+ *    honoured again. A driver that cannot report its transaction state
+ *    (`@libsql/client` before 0.18, sql.js, Durable Object storage) never has
+ *    its token honoured through the connection; only the opener's own bind
+ *    records it ({@link recordOpenedNativeTransaction}), and only until its
+ *    span ends.
  *
- * - A driver transaction object (Drizzle's `PgTransaction`,
- *   `SQLiteTransaction`) is a new object per BEGIN, so it is recorded as
- *   itself.
- * - A handle that is the connection itself (better-sqlite3 and Durable Object
- *   storage hand every TypeGraph-owned transaction the long-lived database
- *   object) identifies the connection, not the transaction. A transaction the
- *   engine opens on such a connection is identified by a token of its own
- *   ({@link createNativeTransactionToken}): the opener records it on its own
- *   bind, and publishes it on the connection
- *   ({@link publishConnectionNativeTransaction}) from the moment its BEGIN
- *   has succeeded until its COMMIT or ROLLBACK has finished, so a bind on
- *   that connection in between records it. A BEGIN that fails never
- *   publishes. Bound outside such a span (a caller adopting the database
- *   object around a BEGIN of its own), nothing is recorded: the engine cannot
- *   tell one of those transactions from the next.
- * - A transaction the engine has published on a connection is the one every
- *   handle on that connection runs in, a transaction object included: a
- *   connection runs one transaction at a time, so a Drizzle transaction
- *   object bound on it during the span is that transaction or a savepoint
- *   inside it.
+ * Without proof a binding records nothing and the Store gives each of its
+ * sessions a state of its own: wrongly sharing is the worse error, wrongly
+ * splitting is what every binding had before this record existed.
  *
- * A savepoint is never recorded as a transaction of its own when the engine
- * can tell which transaction it is in. Where a nested handle comes from, and
- * what a bind on it records:
+ * A savepoint a caller opens resolves the enclosing transaction only where
+ * proof 2 or 4 covers it (libSQL and PGlite keep the pinned handle;
+ * better-sqlite3 inside an engine-opened transaction keeps the connection).
+ * node-postgres and postgres-js hand a caller savepoint a new transaction
+ * object with no link to the enclosing one, so its sessions share a state of
+ * their own.
  *
- * - The engine opens a savepoint on a transaction handle (the
- *   `transaction()` of a PostgreSQL backend built over a transaction by
- *   `createPostgresTransactionBackend`, or of a SQLite backend in
- *   `transactionMode: "drizzle"` over a transaction object): the enclosing
- *   transaction ({@link recordEngineSavepoint}).
- * - A caller's own nested `transaction()` on a connection where the engine
- *   has published a transaction (better-sqlite3 inside a TypeGraph-owned
- *   transaction): the published transaction, as above.
- * - A caller's own nested `transaction()` on a Drizzle transaction object
- *   (PostgreSQL, libsql, or a caller-opened better-sqlite3 transaction):
- *   Drizzle gives the savepoint a new object and keeps no link to the
- *   enclosing one, and the engine never saw it opened, so the savepoint
- *   object is recorded as itself. Its sessions share one state, distinct
- *   from the enclosing transaction's.
+ * Residuals, where the driver exposes no signal that would close them:
  *
- * The dialect decides which kind a handle is, and names the connection it
- * runs on, with the one transaction-object classifier its adoption
- * boundaries use and the same connection identity its serialized-resource
- * audit uses.
+ * - better-sqlite3 reports THAT a transaction is open, not WHICH. If the
+ *   engine's transaction ends implicitly (a trigger's `RAISE(ROLLBACK)`) and
+ *   the caller opens another before any lookup or engine publish observes the
+ *   end, a lookup inside that one still honours the ended token.
+ * - node-postgres keeps the pooled client on a Drizzle transaction object
+ *   after its transaction ends and the client returns to the pool. A caller
+ *   who keeps using that object past its callback runs statements on
+ *   whatever the client does next, a later transaction included, while the
+ *   object still resolves the transaction it was opened for.
  *
- * A backend nothing recorded (a hand-written backend, or one bound by another
- * copy of this package) resolves to `undefined`, and the Store keeps its
- * state per binding, as it did before the record existed.
+ * The dialect decides which proof a handle offers (`sqliteNativeHandle`,
+ * `postgresNativeHandle`), with the one transaction-object classifier its
+ * adoption boundaries use.
  */
 import { backendDerivationChain } from "./derive-backend";
 
 /**
- * A bound backend's native handle, as its dialect classifies it: a driver
- * transaction object (one per BEGIN or savepoint), or the connection itself.
- * `connection` names the connection either runs on, where the dialect can.
+ * How the driver confirms, at a lookup, that the connection an engine
+ * transaction was opened on still has a transaction open.
  */
+export type ConnectionTransactionProbe = Readonly<{
+  connection: object;
+  isTransactionOpen: () => boolean;
+}>;
+
+/** A bound backend's native handle, as its dialect classifies its proof. */
 export type NativeHandle =
   | Readonly<{
+      /** Proof 3: `handle` is one per BEGIN or savepoint. */
       kind: "transaction";
-      transaction: object;
-      connection?: object | undefined;
+      handle: object;
     }>
-  | Readonly<{ kind: "connection"; connection: object }>;
+  | Readonly<{
+      /**
+       * Proof 2: `handle` runs on the per-transaction driver handle
+       * `pinned`, whose transaction is open while `isOpen()` says so.
+       */
+      kind: "pinned";
+      handle: object;
+      pinned: object;
+      isOpen: () => boolean;
+    }>
+  | Readonly<{
+      /** Proof 4 or none: `handle` runs on whatever `connection` has open. */
+      kind: "connection";
+      handle: object;
+      connection: object;
+    }>;
 
-/** Bound transaction backend → the native transaction it runs on. */
+/** Bound transaction backend → the native transaction (or token) it runs on. */
 const BOUND_NATIVE_TRANSACTIONS = new WeakMap<object, object>();
 
 /** Savepoint handle the engine opened → the native transaction it is in. */
 const ENGINE_SAVEPOINTS = new WeakMap<object, object>();
 
 /**
- * Connection → the tokens of the transactions the engine has begun on it and
- * not yet ended, innermost last. An entry lives only for the span of
- * {@link publishConnectionNativeTransaction}.
+ * Every engine token → the probe that verifies it, or `undefined` when the
+ * driver has none. Membership is what makes an identity a token.
  */
-const OPEN_CONNECTION_TRANSACTIONS = new WeakMap<object, readonly object[]>();
+const TOKEN_PROBES = new WeakMap<
+  object,
+  ConnectionTransactionProbe | undefined
+>();
+
+/** Pinned driver handle → whether its transaction is still open. */
+const PINNED_PROBES = new WeakMap<object, () => boolean>();
+
+/** Identities (tokens, pinned handles) whose transaction is known to have ended. */
+const ENDED_TOKENS = new WeakSet<object>();
+
+/** Connection → the token of the engine transaction last published on it. */
+const PUBLISHED_TOKENS = new WeakMap<object, object>();
 
 /**
- * The native transaction `handle` runs in: the transaction the engine has
- * published on its connection; else, for a transaction object, the
- * transaction the engine opened it as a savepoint in, or the object itself;
- * else none.
+ * Whether `token` still identifies the transaction open on its connection:
+ * not ended, and, where the driver can be asked, still the connection's
+ * published transaction with a transaction open. Marks it ended otherwise.
  */
+function isTokenLive(token: object): boolean {
+  if (ENDED_TOKENS.has(token)) return false;
+  const probe = TOKEN_PROBES.get(token);
+  if (probe === undefined) return true;
+  if (
+    PUBLISHED_TOKENS.get(probe.connection) === token &&
+    probe.isTransactionOpen()
+  ) {
+    return true;
+  }
+  ENDED_TOKENS.add(token);
+  if (PUBLISHED_TOKENS.get(probe.connection) === token) {
+    PUBLISHED_TOKENS.delete(probe.connection);
+  }
+  return false;
+}
+
+/**
+ * The identity `identity` stands for now: a token or a pinned handle only
+ * while its transaction is open, and never again once it was seen ended.
+ */
+function liveIdentity(identity: object): object | undefined {
+  if (TOKEN_PROBES.has(identity)) {
+    return isTokenLive(identity) ? identity : undefined;
+  }
+  if (ENDED_TOKENS.has(identity)) return undefined;
+  const isOpen = PINNED_PROBES.get(identity);
+  if (isOpen !== undefined && !isOpen()) {
+    ENDED_TOKENS.add(identity);
+    return undefined;
+  }
+  return identity;
+}
+
+/** The native transaction `handle` runs in, by the proof its kind offers. */
 function identifyNativeTransaction(handle: NativeHandle): object | undefined {
-  const published =
-    handle.connection === undefined ?
-      undefined
-    : OPEN_CONNECTION_TRANSACTIONS.get(handle.connection)?.at(-1);
-  if (published !== undefined) return published;
-  if (handle.kind === "connection") return undefined;
-  return ENGINE_SAVEPOINTS.get(handle.transaction) ?? handle.transaction;
+  // Proof 1: a savepoint the engine opened.
+  const enclosing = ENGINE_SAVEPOINTS.get(handle.handle);
+  if (enclosing !== undefined) return liveIdentity(enclosing);
+  switch (handle.kind) {
+    case "pinned": {
+      // Proof 2: the driver's per-transaction handle, whatever connection
+      // or client the transaction object also names, while it is open.
+      PINNED_PROBES.set(handle.pinned, handle.isOpen);
+      return liveIdentity(handle.pinned);
+    }
+    case "transaction": {
+      // Proof 3: the per-BEGIN transaction object itself.
+      return handle.handle;
+    }
+    case "connection": {
+      // Proof 4: the token the engine published on the connection, only
+      // while the driver confirms it is still the open transaction.
+      const published = PUBLISHED_TOKENS.get(handle.connection);
+      return published !== undefined && isTokenLive(published) ?
+          published
+        : undefined;
+    }
+  }
 }
 
 /**
  * Records, once per bind, the native transaction `backend` runs on (see
- * {@link identifyNativeTransaction}). Records nothing for a connection with
- * no published transaction.
+ * {@link identifyNativeTransaction}). Records nothing without proof.
  */
 export function recordNativeTransactionHandle(
   backend: object,
@@ -120,6 +200,17 @@ export function recordNativeTransactionHandle(
   if (nativeTransaction !== undefined) {
     BOUND_NATIVE_TRANSACTIONS.set(backend, nativeTransaction);
   }
+}
+
+/**
+ * Records that `backend` is the opener's own bind of the engine transaction
+ * `token` identifies. Resolves only while the token is live.
+ */
+export function recordOpenedNativeTransaction(
+  backend: object,
+  token: object,
+): void {
+  BOUND_NATIVE_TRANSACTIONS.set(backend, token);
 }
 
 /**
@@ -140,55 +231,59 @@ export function recordEngineSavepoint(
 
 /**
  * A new identity for one transaction the engine is about to open on a
- * connection-level handle. Carries nothing but its identity.
+ * connection-level handle. `probe` is how the driver confirms the transaction
+ * is still open; `undefined` when it cannot, and the token is then never
+ * honoured through the connection.
  */
-export function createNativeTransactionToken(): object {
-  return Object.freeze({});
+export function createNativeTransactionToken(
+  probe: ConnectionTransactionProbe | undefined,
+): object {
+  const token = Object.freeze({});
+  TOKEN_PROBES.set(token, probe);
+  return token;
 }
 
 /**
- * Runs `run` with `token` published on `connection`: every backend bound on
- * the connection during the span records it. Call it once the transaction
- * `token` identifies has begun, around the work that runs inside it AND the
- * COMMIT or ROLLBACK that ends it; the token is withdrawn when `run` settles,
- * so a backend bound on the connection afterwards does not inherit the
- * transaction that ended.
+ * Runs `run` with `token` published on its connection. Call it once the
+ * transaction `token` identifies has begun, around the work that runs inside
+ * it AND the COMMIT or ROLLBACK that ends it.
+ *
+ * The connection's BEGIN succeeding proves that any transaction published on
+ * it before has ended (a SQLite connection runs one transaction at a time),
+ * so publishing ends it. When `run` settles the token has ended too.
  */
 export async function publishConnectionNativeTransaction<T>(
-  connection: object,
   token: object,
   run: () => Promise<T>,
 ): Promise<T> {
-  OPEN_CONNECTION_TRANSACTIONS.set(connection, [
-    ...(OPEN_CONNECTION_TRANSACTIONS.get(connection) ?? []),
-    token,
-  ]);
+  const probe = TOKEN_PROBES.get(token);
+  if (probe !== undefined) {
+    PUBLISHED_TOKENS.set(probe.connection, token);
+  }
   try {
     return await run();
   } finally {
-    // Removes this span's own token wherever it sits, so a span that ends
-    // out of order never reinstates a token whose transaction already ended.
-    const remaining = (
-      OPEN_CONNECTION_TRANSACTIONS.get(connection) ?? []
-    ).filter((candidate) => candidate !== token);
-    if (remaining.length === 0) {
-      OPEN_CONNECTION_TRANSACTIONS.delete(connection);
-    } else {
-      OPEN_CONNECTION_TRANSACTIONS.set(connection, remaining);
+    ENDED_TOKENS.add(token);
+    if (
+      probe !== undefined &&
+      PUBLISHED_TOKENS.get(probe.connection) === token
+    ) {
+      PUBLISHED_TOKENS.delete(probe.connection);
     }
   }
 }
 
 /**
  * The native transaction `backend` runs on: the record of the nearest link of
- * its derivation chain that has one, or `undefined` when no link does.
+ * its derivation chain that has one, or `undefined` when no link does or the
+ * nearest record is a token that is no longer live.
  */
 export function resolveNativeTransactionHandle(
   backend: object,
 ): object | undefined {
   for (const link of backendDerivationChain(backend)) {
     const nativeTransaction = BOUND_NATIVE_TRANSACTIONS.get(link);
-    if (nativeTransaction !== undefined) return nativeTransaction;
+    if (nativeTransaction !== undefined) return liveIdentity(nativeTransaction);
   }
   return undefined;
 }

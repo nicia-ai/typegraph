@@ -379,7 +379,7 @@ sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_sche
     ["<graph1>"]
 sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" = $2 AND "typegraph_edges"."kind" = $3 RETURNING "typegraph_edges"."id"
     ["<graph1>","link-live","link"]
-sql DELETE FROM "typegraph_edge_claims" WHERE "typegraph_edge_claims"."graph_id" = $1 AND "typegraph_edge_claims"."edge_id" IN ($2)
+sql DELETE FROM "typegraph_edge_claims" WHERE ( "graph_id", "axis", "key" ) IN ( SELECT "typegraph_edge_claims"."graph_id", "typegraph_edge_claims"."axis", "typegraph_edge_claims"."key" FROM "typegraph_edge_claims" WHERE "typegraph_edge_claims"."graph_id" = $1 AND "typegraph_edge_claims"."edge_id" IN ($2) ORDER BY "typegraph_edge_claims"."axis" COLLATE "C", "typegraph_edge_claims"."key" COLLATE "C" FOR UPDATE )
     ["<graph1>","link-live"]
 sql COMMIT
 hook end delete edge:link link-live unknown
@@ -394,7 +394,7 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
 sql SAVEPOINT typegraph_frame_writes
 sql DELETE FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND "typegraph_edges"."id" IN ($2, $3) AND "typegraph_edges"."kind" = $4 RETURNING "typegraph_edges"."id"
     ["<graph1>","link-live","link-dead","link"]
-sql DELETE FROM "typegraph_edge_claims" WHERE "typegraph_edge_claims"."graph_id" = $1 AND "typegraph_edge_claims"."edge_id" IN ($2, $3)
+sql DELETE FROM "typegraph_edge_claims" WHERE ( "graph_id", "axis", "key" ) IN ( SELECT "typegraph_edge_claims"."graph_id", "typegraph_edge_claims"."axis", "typegraph_edge_claims"."key" FROM "typegraph_edge_claims" WHERE "typegraph_edge_claims"."graph_id" = $1 AND "typegraph_edge_claims"."edge_id" IN ($2, $3) ORDER BY "typegraph_edge_claims"."axis" COLLATE "C", "typegraph_edge_claims"."key" COLLATE "C" FOR UPDATE )
     ["<graph1>","link-live","link-dead"]
 sql RELEASE SAVEPOINT typegraph_frame_writes
 sql COMMIT

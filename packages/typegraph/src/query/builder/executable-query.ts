@@ -71,7 +71,10 @@ import { type CompiledSelectSql } from "../sql-intent";
 import { buildRowQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import { getQueryBuilderInternalContext } from "./internal-context";
-import { oneStatementBatchOrderColumn } from "./one-statement-batch";
+import {
+  oneStatementBatchOrderColumn,
+  oneStatementBatchSelectionOrder,
+} from "./one-statement-batch";
 import {
   assertCompatibleSetOperationProvenance,
   type OneStatementReadProvenance,
@@ -1062,6 +1065,7 @@ export class ExecutableQuery<
         this.#config.graphId,
         this.#compileOptions(),
         "wrapped",
+        "selection-ordered",
       ),
       provenance: {
         graphId: this.#config.graphId,
@@ -1076,7 +1080,8 @@ export class ExecutableQuery<
             !ast.projection.fields.some((field) => field.outputName === name),
         ),
       ],
-      orderBy: batchOrderBy,
+      // The hidden order columns still carry a paginated read's cursor values.
+      orderBy: oneStatementBatchSelectionOrder(ast) ?? batchOrderBy,
       mapRows: (rows) =>
         mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
           transformPathColumns(rows, this.#state, this.#dialect()),

@@ -3769,9 +3769,59 @@ async function assertImportedRequiredPartsAttached<G extends GraphDef>(
 }
 
 /**
+ * Runs one required part's purge as a unit, resolving what it threw, if
+ * anything. The purge is several statements (uniqueness entries, fulltext,
+ * incident edges and their claims, the node row, embeddings), so a failure
+ * part-way has already removed some of what the part owns: behind a
+ * savepoint it is rolled back whole and becomes the row's own error. Where no
+ * savepoint can undo it (no transaction, or a backend without raw statement
+ * execution) the failure is not a row outcome and propagates, failing the
+ * import rather than committing a partial purge.
+ */
+async function purgeAsUnit(
+  frame: Pick<
+    ImportWriteFrame,
+    | "target"
+    | "allocateEdgeSavepoint"
+    | "transactionMode"
+    | "statementExecution"
+  >,
+  purge: () => Promise<void>,
+): Promise<PurgeOutcome> {
+  if (frame.transactionMode === "none" || !frame.statementExecution.supported) {
+    await purge();
+    return PURGED;
+  }
+  return runRecordedTransactionSavepoint<PurgeOutcome>(
+    frame.target,
+    frame.statementExecution,
+    frame.allocateEdgeSavepoint(),
+    async () => {
+      try {
+        await purge();
+        return { action: "release", value: PURGED };
+      } catch (error: unknown) {
+        return {
+          action: "rollback",
+          value: { purged: false, error },
+          cause: error,
+        };
+      }
+    },
+  );
+}
+
+/** What {@link purgeAsUnit} did: purged, or rolled back with what it threw. */
+type PurgeOutcome =
+  Readonly<{ purged: true }> | Readonly<{ purged: false; error: unknown }>;
+
+const PURGED: PurgeOutcome = { purged: true };
+
+/**
  * Removes one refused required part and settles the import's result for it.
- * Returns whether the row was removed; a failed purge is reported as that
- * row's own error and leaves the counts alone.
+ * Returns whether the row was removed; a failed purge is rolled back whole
+ * ({@link purgeAsUnit}), reported as that row's own error, and leaves the
+ * counts alone.
  *
  * Once the row is gone its identity detach is owed, not optional: a failure
  * there is not this row's outcome but a graph whose closure still names a
@@ -3798,8 +3848,8 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
     nodeKind: part.kind,
     nodeId: part.id,
   });
-  try {
-    await frame.session.purgeNode(
+  const purge = await purgeAsUnit(frame, () =>
+    frame.session.purgeNode(
       {
         kind: part.kind,
         id: part.id,
@@ -3807,16 +3857,17 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
         onDelete: registration.onDelete,
       },
       { enforceDeleteBehavior: false },
-    );
-  } catch (error: unknown) {
+    ),
+  );
+  if (!purge.purged) {
     errors.push({
       entityType: "node",
       kind: part.kind,
       id: part.id,
       error:
-        error instanceof Error ?
-          error.message
-        : `Failed to purge unattached required-existence part: ${String(error)}`,
+        purge.error instanceof Error ?
+          purge.error.message
+        : `Failed to purge unattached required-existence part: ${String(purge.error)}`,
     });
     return false;
   }
