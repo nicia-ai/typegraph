@@ -32,6 +32,7 @@ import { compileInverseTraversalDuplicateGuard } from "./inverse-traversal-guard
 import { compileLimitOffsetClauses } from "./limit-offset";
 import {
   createTemporalFilterPass,
+  refuseRelevancePredicatesInRecursiveStatement,
   runCompilerPass,
   runRecursiveTraversalSelectionPass,
   type TemporalFilterPass,
@@ -217,6 +218,9 @@ function runRecursiveQueryPassPipeline(
   graphId: string,
   ctx: PredicateCompilerContext,
 ): RecursiveQueryPassState {
+  // Every recursive statement, whole query or chain stage, compiles here; a
+  // relevance predicate on one of its aliases cannot be applied by it.
+  refuseRelevancePredicatesInRecursiveStatement(ast, ctx.callerAlias);
   let state: RecursiveQueryPassState = {
     ast,
     ctx,

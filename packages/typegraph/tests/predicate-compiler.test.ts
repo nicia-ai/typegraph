@@ -5,7 +5,10 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { UnsupportedPredicateError } from "../src/errors";
+import {
+  CompilerInvariantError,
+  UnsupportedPredicateError,
+} from "../src/errors";
 import {
   type ArrayPredicate,
   type BetweenPredicate,
@@ -1505,20 +1508,63 @@ describe("subquery predicates", () => {
 // Vector Similarity Predicates
 // ============================================================
 
-describe("vector similarity predicates", () => {
+describe("relevance predicates (vector similarity, fulltext match)", () => {
   const ctx = createContext();
+  const vector: PredicateExpression = {
+    __type: "vector_similarity",
+    field: field("p", ["props", "embedding"], { valueType: "embedding" }),
+    queryEmbedding: [0.1, 0.2, 0.3],
+    metric: "cosine",
+    limit: 10,
+  };
+  const fulltext: PredicateExpression = {
+    __type: "fulltext_match",
+    field: field("p", ["$fulltext"]),
+    query: "climate",
+    mode: "websearch",
+    limit: 10,
+  };
 
-  it("returns no-op condition for vector similarity", () => {
-    const expr: PredicateExpression = {
-      __type: "vector_similarity",
-      field: field("p", ["props", "embedding"], { valueType: "embedding" }),
-      queryEmbedding: [0.1, 0.2, 0.3],
-      metric: "cosine",
-      limit: 10,
-    };
-    const result = compilePredicateExpression(expr, ctx);
-    // Vector similarity is handled by query structure, not predicate
-    expect(toSqlString(result)).toBe("1=1");
+  it.each([
+    ["vector_similarity", vector],
+    ["fulltext_match", fulltext],
+  ] as const)(
+    "refuses a %s predicate no relevance join applies instead of compiling it to 1=1",
+    (predicate, expr) => {
+      const compile = () => compilePredicateExpression(expr, ctx);
+      expect(compile).toThrow(CompilerInvariantError);
+      expect(compile).toThrow(
+        `A ${predicate} predicate on alias "p" reached a statement that does not apply it`,
+      );
+      // Nested under AND it is refused the same way.
+      expect(() =>
+        compilePredicateExpression({ __type: "and", predicates: [expr] }, ctx),
+      ).toThrow(CompilerInvariantError);
+    },
+  );
+
+  it.each([
+    ["vector_similarity", vector],
+    ["fulltext_match", fulltext],
+  ] as const)(
+    "compiles a %s predicate the statement applies to a neutral term at its WHERE position",
+    (_predicate, expr) => {
+      const result = compilePredicateExpression(expr, {
+        ...ctx,
+        appliedRelevancePredicates: new Set([expr]),
+      });
+      expect(toSqlString(result)).toBe("1=1");
+    },
+  );
+
+  it("refuses a relevance predicate the statement does not apply even when it applies an equal one", () => {
+    const equalCopy: PredicateExpression = { ...fulltext };
+    expect(() =>
+      compilePredicateExpression(equalCopy, {
+        ...ctx,
+        appliedRelevancePredicates: new Set([fulltext]),
+      }),
+    ).toThrow(CompilerInvariantError);
   });
 });
 

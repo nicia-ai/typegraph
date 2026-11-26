@@ -1714,13 +1714,14 @@ function assertWindowFunctionsSupported(
 function compileStandardQueryWithCteStrategy(
   ast: QueryAst,
   graphId: string,
-  ctx: PredicateCompilerContext,
+  callerContext: PredicateCompilerContext,
   names: SqlStatementNames,
   shape: StatementShape,
 ): SqlFragment {
-  const { dialect } = ctx;
+  const { dialect } = callerContext;
   const {
     collapsedTraversalCteAlias,
+    ctx,
     effectiveLimit,
     fulltextPredicate,
     fusion,
@@ -1731,7 +1732,7 @@ function compileStandardQueryWithCteStrategy(
     temporalFilterPass,
     traversalCteLimit,
     vectorPredicate,
-  } = runStandardQueryPassPipeline(ast, graphId, ctx);
+  } = runStandardQueryPassPipeline(ast, graphId, callerContext);
 
   if (temporalFilterPass === undefined) {
     throw new CompilerInvariantError(
