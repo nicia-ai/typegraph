@@ -2836,7 +2836,7 @@ export async function executeNodeReplacementBatch<G extends GraphDef>(
       },
     );
   }
-  memoizeLeasedSchemaFence(ctx, backend);
+  memoizeLeasedSchemaFence(ctx, entry);
   return appliedResolvedMutationSet(
     restoreAtomicNodeBatchRows(ctx.graphId, preparedCreates, returnedRows).map(
       (row) => rowToNode(row),
@@ -5518,6 +5518,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     _overlaidSession: OverlaidSessionMint<"mixed">,
     lock: GraphWriteLock,
     transactionMode: WriteTransactionMode,
+    frame: OperationEntry,
   ): Promise<Node | undefined> => {
     // The outer backend's mark chooses the optimistic plan, but a custom
     // transaction wrapper can replace its callback target. Re-check the
@@ -5537,9 +5538,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       compositionWork === undefined &&
       schemaFenceInFirstWrite &&
       isSchemaFencedInsertEligible(targetBackend) &&
-      !hasLeasedSchemaFence(ctx, targetBackend);
+      !hasLeasedSchemaFence(ctx, frame);
     if (schemaFenceInFirstWrite && !fuseSchemaFenceInFirstWrite) {
-      await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+      await lockSchemaVersionForStoreWrite(ctx, frame);
     }
     const draft = draftNodeCreate(ctx, input, id, options);
     const claimPlan = planNodeCreateClaims(
@@ -5654,7 +5655,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           await session.createNodeIfAbsentWithSchemaFence(work, schemaFence)
         : await session.createNodeWithSchemaFence(work, schemaFence);
       if (inserted !== undefined) {
-        memoizeLeasedSchemaFence(ctx, targetBackend);
+        memoizeLeasedSchemaFence(ctx, frame);
         return shouldReturnRow ? rowToNode(inserted) : undefined;
       }
 
@@ -5675,7 +5676,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       }
       if (!prepared.insertIfAbsent) {
         if (transactionMode !== "none") {
-          await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+          await lockSchemaVersionForStoreWrite(ctx, frame);
         }
         throw new DatabaseOperationError(
           `Fresh node insert returned no row: ${prepared.kind} ${prepared.id}`,
@@ -5690,7 +5691,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       // fused statement already carried its own fence) has no ordinary
       // lock to take here.
       if (transactionMode !== "none") {
-        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+        await lockSchemaVersionForStoreWrite(ctx, frame);
       }
     }
 
@@ -5752,7 +5753,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       // same plain limitation an ineligible write kind or a derived backend
       // reaches through this same call.
       if (fuseSchemaFenceInFirstWrite && transactionMode === "none") {
-        await lockSchemaVersionForStoreWrite(ctx, targetBackend);
+        await lockSchemaVersionForStoreWrite(ctx, frame);
       }
       const resurrected = await resurrectPreparedNode(
         ctx,
@@ -5921,7 +5922,7 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
           },
         );
       }
-      memoizeLeasedSchemaFence(ctx, backend);
+      memoizeLeasedSchemaFence(ctx, entry);
       return;
     }
   }
@@ -6076,7 +6077,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
           },
         );
       }
-      memoizeLeasedSchemaFence(ctx, backend);
+      memoizeLeasedSchemaFence(ctx, entry);
       return restoreAtomicNodeBatchRows(
         ctx.graphId,
         preparedCreates,
@@ -6337,7 +6338,7 @@ export async function executeNodeUpdate<G extends GraphDef>(
         const nodes = await executeAtomicNodeResolvedUpdates(
           ctx,
           [atomicEntry],
-          backend,
+          entry,
           atomicExecutor,
         );
         return requireDefined(nodes[0]);
@@ -6922,7 +6923,7 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
       "Atomic resolved node mutation set returned a partial result.",
     );
   }
-  memoizeLeasedSchemaFence(ctx, backend);
+  memoizeLeasedSchemaFence(ctx, entry);
   const created = restoreAtomicNodeBatchRows(
     ctx.graphId,
     preparedCreates,
@@ -6957,7 +6958,7 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
     return executeAtomicNodeResolvedUpdates(
       ctx,
       entries,
-      backend,
+      entry,
       atomicExecutor,
     );
   }
@@ -7079,9 +7080,10 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
 async function executeAtomicNodeResolvedUpdates<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   entries: readonly NodeUpsertUpdateBatchEntry[],
-  backend: StatementBackend,
+  entry: OperationEntry,
   atomicExecutor: AtomicNodeResolvedUpdateBatchExecutor,
 ): Promise<readonly Node[]> {
+  const backend = operationEntryBackend(entry);
   const maxAttempts = atomicResolvedUpdateAttemptBudget(
     entries.length,
     NODE_UPDATE_ATTEMPTS,
@@ -7140,7 +7142,7 @@ async function executeAtomicNodeResolvedUpdates<G extends GraphDef>(
       },
     });
     if (rows.length === entries.length) {
-      memoizeLeasedSchemaFence(ctx, backend);
+      memoizeLeasedSchemaFence(ctx, entry);
       const returned = new Map(rows.map((row) => [row.id, row]));
       return entries.map((entry) =>
         rowToNode(requireDefined(returned.get(entry.input.id))),

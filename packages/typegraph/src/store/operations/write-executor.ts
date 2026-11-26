@@ -203,7 +203,7 @@ function planFrame<K extends RowWorkKind, T>(
     // spelling applied to a decorated target — the decoration is the ONLY
     // difference between them, and the frame's own session pays for no proxy.
     const mintSessionOver = (sessionTarget: StatementBackend): WriteSession =>
-      createWriteSession(ctx, sessionTarget, lock);
+      createWriteSession(ctx, sessionTarget, lock, frame);
     const mintOverlaidSession: OverlaidSessionMint<K> = (reads) =>
       mintSessionOver(deriveBackend(target, reads)) as WriteSessionFor<K>;
     // The two handles are the SAME object: the session closes over the raw
