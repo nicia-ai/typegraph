@@ -2311,10 +2311,15 @@ TypeGraph reads the reply the driver already received. A `TransactionRolledBackE
 nothing the callback wrote was saved. `cause` is the first error the database reported in the
 transaction; when no failure ever reached the client, there is none (`details.causeObserved` is
 `false`). `details.detectedBy` says how TypeGraph learned of the rollback: `"commit-reply"`,
-`"refused-statement"` or `"driver"`. To carry on after an expected failure, run the failing
+`"refused-statement"`, `"driver"` or, on SQLite, `"statement-failure"`. To carry on after an expected failure, run the failing
 statement inside a savepoint (for example a nested `tx.sql.transaction(...)`) that rolls back past
-it: the transaction is then healthy and commits. SQLite keeps a transaction usable after a failed
-statement, so on SQLite the same callback commits what it wrote. A deferred constraint that fails
+it: the transaction is then healthy and commits. SQLite keeps a transaction usable after most failed
+statements, so on SQLite the same callback commits what it wrote. Some failures end a SQLite
+transaction in the engine itself (a trigger's `RAISE(ROLLBACK)`, or an error SQLite answers by
+rolling back): on a driver that reports transaction state (better-sqlite3, bun:sqlite, libSQL 0.18
+and later) TypeGraph then refuses every later statement of the transaction with a
+`TransactionRolledBackError` (`details.detectedBy: "statement-failure"`), so none runs in
+autocommit, and the transaction rejects with it. A deferred constraint that fails
 at `COMMIT` rejects with the constraint's own error, as before.
 
 ```typescript

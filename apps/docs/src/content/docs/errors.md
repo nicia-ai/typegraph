@@ -2513,8 +2513,10 @@ statement before the next write.
 
 ### `TransactionRolledBackError`
 
-Thrown when a PostgreSQL transaction that TypeGraph opened was rolled back by
-the database even though its callback returned normally. On PostgreSQL, a
+Thrown when a transaction that TypeGraph opened was rolled back by the
+database even though its callback returned normally, and, on SQLite, by every
+statement the callback issues after the database ended it (see
+`"statement-failure"` below). On PostgreSQL, a
 statement that fails inside a transaction aborts the whole transaction, even
 when the callback catches the error, and even when the client never saw the
 failure (a statement a node-postgres `query_timeout` gave up on, which then
@@ -2533,7 +2535,14 @@ so. Nothing the transaction wrote was saved.
   aborted (`25P02`);
 - `"driver"`: the driver refused to commit because a statement of the
   transaction failed, and rolled back instead (postgres-js, which does not
-  expose the `COMMIT`'s reply).
+  expose the `COMMIT`'s reply);
+- `"statement-failure"`: on SQLite, a statement failed and the database ended
+  the transaction with it — a trigger's `RAISE(ROLLBACK)`, or an error SQLite
+  answers by rolling back. TypeGraph asks the driver whether the transaction is
+  still open right after a statement fails (better-sqlite3, bun:sqlite, libSQL
+  0.18 and later); once it is not, every later statement of the transaction is
+  refused with this error rather than running in autocommit, and the
+  transaction rejects with it, sending no `COMMIT`.
 
 `cause` is the first error the database reported during the transaction (for
 example a unique violation, `23505`); an error the driver raised without the
@@ -2874,7 +2883,7 @@ try {
 | `READ_SET_CHANGED` | `ReadSetChangedError` | system | A scope declared to `tx.assertUnchangedSince()` changed after the anchor. `details.changes` lists each changed scope and its keys |
 | `READ_SET_UNVERIFIABLE` | `ReadSetUnverifiableError` | system | The lineage source could not prove the span since the anchor, so "unchanged" cannot be established |
 | `TRANSACTION_CONFLICT` | `TransactionConflictError` | system | A transaction was aborted by a serialization failure or deadlock on every attempt available to it. `details.attempts` is the number tried; `cause` is the last driver error |
-| `TRANSACTION_ROLLED_BACK` | `TransactionRolledBackError` | system | A PostgreSQL transaction TypeGraph opened, whose callback never read `tx.sql`, was rolled back although its callback returned, typically after a failed statement the callback caught. Nothing it wrote was saved; `cause` is the first error the database reported, and `details.conflict` says whether any of them was a serialization failure or deadlock |
+| `TRANSACTION_ROLLED_BACK` | `TransactionRolledBackError` | system | A PostgreSQL transaction TypeGraph opened, whose callback never read `tx.sql`, was rolled back although its callback returned, typically after a failed statement the callback caught, or a SQLite transaction a failed statement ended (`details.detectedBy: "statement-failure"`), which also refuses every later statement of that transaction. Nothing it wrote was saved; `cause` is the first error the database reported, and `details.conflict` says whether any of them was a serialization failure or deadlock |
 | `TRANSACTION_OUTCOME_UNKNOWN` | `TransactionOutcomeUnknownError` | system | A PostgreSQL transaction whose callback read `tx.sql` did not commit: it was ended by a statement TypeGraph did not issue (`details.reason` `"transaction-ended"`), or it was aborted or hit a conflict (`"native-handle-released"`, `cause` is the failure). TypeGraph cannot tell what was saved. Never retried automatically, even on a conflict |
 
 `recordedReadOwner()` on an external source without an owner raises `ConfigurationError`
