@@ -3000,6 +3000,7 @@ export type HardDeleteNodeParams = Readonly<{
     graphId: string;
     kind: string;
     id: string;
+    releaseEdgeClaims?: boolean;
 }>;
 
 // @public
@@ -3007,6 +3008,7 @@ export type HardDeleteNodesBatchParams = Readonly<{
     graphId: string;
     kind: string;
     ids: readonly string[];
+    releaseEdgeClaims?: boolean;
 }>;
 
 // @public

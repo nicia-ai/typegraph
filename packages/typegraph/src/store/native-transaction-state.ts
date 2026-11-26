@@ -11,19 +11,19 @@
  * Which native transaction a session runs on is the engine's record
  * (`src/backend/native-transaction-handle.ts`), resolved along the
  * derivation chain of the transaction the session holds; nothing is looked up
- * from async context. A transaction whose backend recorded nothing (a
- * hand-written backend, one bound by another copy of this package, or a
- * caller-opened transaction on a connection-level handle such as
- * better-sqlite3's database object) gives every session a state of its own:
- * the evidence that two bindings share a transaction is not there, so they
- * are not joined.
+ * from async context. State is shared only on the proof that record states:
+ * a transaction whose backend recorded none (a hand-written backend, one bound
+ * by another copy of this package, a caller-opened transaction on a
+ * connection-level handle such as better-sqlite3's database object or a
+ * transaction object over it), or whose engine token has ended, gives every
+ * session a state of its own.
  *
  * Lifetime: the registry is keyed by the engine's identity of the native
- * transaction, which is never a connection (a per-BEGIN driver transaction
- * object, or the engine's per-transaction token on a connection-level
- * handle), and holds it weakly. A state is therefore dropped once the
- * transaction's identity and its last session are, and a later transaction
- * on the same connection never resolves an earlier one's state.
+ * transaction, which is never a connection (a per-transaction driver handle,
+ * a per-BEGIN driver transaction object, or the engine's per-transaction token
+ * on a connection-level handle), and holds it weakly. A state is therefore
+ * dropped once the transaction's identity and its last session are, and a
+ * token's state is never handed out once its transaction has ended.
  *
  * It holds nothing yet: state moves onto it in later changes.
  */

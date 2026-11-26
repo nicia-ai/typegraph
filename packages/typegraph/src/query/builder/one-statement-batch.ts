@@ -1,6 +1,8 @@
 import { backendDerivationRoot } from "../../backend/derive-backend";
 import { ConfigurationError } from "../../errors";
 import type { StatementBackend } from "../../store/operation-scope";
+import type { QueryAst } from "../ast";
+import { selectionOrderColumn } from "../compiler";
 import { getDialect } from "../dialect";
 import { compileOrderTerm } from "../order";
 import {
@@ -30,6 +32,29 @@ const MAX_ONE_STATEMENT_BATCH_READS = PORTABLE_COMPOUND_SELECT_TERMS_LIMIT;
 
 export function oneStatementBatchOrderColumn(index: number): string {
   return `${ORDER_KEY_PREFIX}${index}`;
+}
+
+/** One term of the order `batchOnce()` numbers an item's rows in. */
+type OneStatementBatchOrder = ReturnType<
+  NonNullable<
+    OneStatementBatchableQuery<unknown>["compileOneStatementBatchItem"]
+  >
+>["orderBy"][number];
+
+/**
+ * The order `batchOnce()` numbers the rows of a query's item in when the
+ * query carries a selection-order column (`selectionOrderColumn`: a
+ * relevance-ordered search, compiled in the `selection-ordered` shape): that
+ * column alone, which ranks the rows under the query's own ORDER BY.
+ * `undefined` for any other query, whose item orders by its own terms.
+ */
+export function oneStatementBatchSelectionOrder(
+  ast: QueryAst,
+): readonly OneStatementBatchOrder[] | undefined {
+  const column = selectionOrderColumn(ast);
+  return column === undefined ? undefined : (
+      [{ column, direction: "asc", nulls: "last" }]
+    );
 }
 
 function buildOrdinalOrder(

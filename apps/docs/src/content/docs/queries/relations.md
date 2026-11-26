@@ -90,6 +90,15 @@ position; the defaults are NULLS LAST for ascending and NULLS FIRST for descendi
 select an arbitrary edge or path to represent an entity. `count()` counts the current relation,
 including distinctness and its range; `exists()` checks whether it has a row. Neither runs `map()`.
 
+A relation built from a full-text, vector or hybrid query keeps the query's relevance order: its
+rows come in the order `execute()` returns them, and the query's limit and offset select the same
+rows. Rows tied under every ordering term can come in either order, as in `execute()`. An
+`orderBy()` added to such a relation breaks the ties the query's own ordering leaves; a hybrid
+query leaves none, since its node-id tiebreak orders tied scores. `distinct()`, and a `groupBy()`
+that runs without `aggregate()` or `project()`, order each distinct row or group by its most
+relevant occurrence, and `page()` and `stream()` apply that order before the projected columns. A
+completed `aggregate()` or `project()` is ordered only by the `orderBy()` applied to it.
+
 <a id="ordered-scalar-collections"></a>
 
 ## Ordered collections

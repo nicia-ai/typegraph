@@ -40,7 +40,7 @@ import {
   fillTemplateParams,
 } from "./read-instant-template";
 import {
-  createExecutableRelation,
+  createQueryRelation,
   type ExecutableRelationQuery,
   executeRelationOn,
 } from "./relation";
@@ -287,7 +287,6 @@ export class ExecutableAggregateQuery<
     AggregateResult<R, Aliases>
   > {
     const ast = this.toAst();
-    const { aggregateOrderBy, limit, offset, ...unorderedUnboundedAst } = ast;
     const internalContext = getQueryBuilderInternalContext(this.#config);
     const columns = Object.entries(this.#fields).map(
       ([outputName, expression]) => ({
@@ -308,39 +307,37 @@ export class ExecutableAggregateQuery<
       }),
     );
 
-    let relation = createExecutableRelation<
+    return createQueryRelation<
       AggregateRelationFields<R, Aliases>,
       AggregateResult<R, Aliases>
     >({
-      ast: {
-        kind: "source",
-        query: unorderedUnboundedAst,
-        graphId: this.#config.graphId,
-        options: this.#compileOptions(),
+      query: ast,
+      definition: {
+        columns,
+        fields: {} as AggregateRelationFields<R, Aliases>,
+        config: this.#config,
+        provenance: {
+          graphId: this.#config.graphId,
+          executionTarget:
+            this.#config.backend === undefined ?
+              undefined
+            : backendDerivationRoot(this.#config.backend),
+          recordedAsOf: ast.recordedAsOf,
+          checked: internalContext.expectedSchemaVersion !== undefined,
+          temporalCoordinate: JSON.stringify(ast.temporalMode),
+        },
+        decodeRow: (row) => this.#mapRow(row),
       },
-      columns,
-      fields: {} as AggregateRelationFields<R, Aliases>,
-      config: this.#config,
-      provenance: {
-        graphId: this.#config.graphId,
-        executionTarget:
-          this.#config.backend === undefined ?
-            undefined
-          : backendDerivationRoot(this.#config.backend),
-        recordedAsOf: ast.recordedAsOf,
-        checked: internalContext.expectedSchemaVersion !== undefined,
-        temporalCoordinate: JSON.stringify(ast.temporalMode),
-      },
-      decodeRow: (row) => this.#mapRow(row),
+      // The aggregate's output ordering reads its projected columns.
+      liftOrdering: ({ aggregateOrderBy, ...unordered }, scope) => ({
+        source: unordered,
+        orderBy: (aggregateOrderBy ?? []).map((order) => ({
+          expression: scope.columns[order.outputName as keyof R],
+          direction: order.direction,
+          nulls: order.direction === "asc" ? "last" : "first",
+        })),
+      }),
     });
-    for (const order of aggregateOrderBy ?? [])
-      relation = relation.orderBy(
-        (columns) => columns[order.outputName as keyof R],
-        order.direction,
-      );
-    if (limit !== undefined) relation = relation.limit(limit);
-    if (offset !== undefined) relation = relation.offset(offset);
-    return relation;
   }
 
   /**

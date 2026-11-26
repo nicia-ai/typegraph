@@ -93,6 +93,7 @@ export { registerMultiRootSubgraphBatchIntegrationTests } from "./multi-root-sub
 export { registerMutationPlanningIntegrationTests } from "./mutation-planning";
 export { registerNativeTransactionHandleProbeTests } from "./native-transaction-handle-probes";
 export { registerNodeBulkHardDeleteIntegrationTests } from "./node-bulk-hard-delete";
+export { registerNodeHardDeleteClaimReleaseIntegrationTests } from "./node-hard-delete-claim-release";
 export { registerOntologyEquivalenceIntegrationTests } from "./ontology-equivalence";
 export { registerOntologyTighteningIntegrationTests } from "./ontology-tightening";
 export { registerOntologyTypedSubsumptionIntegrationTests } from "./ontology-typed-subsumption";
@@ -140,6 +141,7 @@ export { registerSqlIdentifierIdentityIntegrationTests } from "./sql-identifier-
 export { registerStoreAnalysisIntegrationTests } from "./store-analysis";
 export { registerStoreOperationIntegrationTests } from "./store-operation";
 export { registerStoreViewIntegrationTests } from "./store-view";
+export { registerStoredDateRevalidationIntegrationTests } from "./stored-date-revalidation";
 export { registerSubgraphIntegrationTests } from "./subgraph";
 export { registerSubgraphSharedIdIntegrationTests } from "./subgraph-shared-ids";
 export { registerTemporalIntegrationTests } from "./temporal";

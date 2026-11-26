@@ -14,10 +14,12 @@ import { requireDefined } from "../../utils/presence";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import { isPortableCountDistinctValueType } from "../aggregate-value-types";
 import type { QueryAst, SortDirection } from "../ast";
+import { selectionOrderColumn } from "../compiler";
 import {
   assertCompatibleRelationColumns,
   assertRelationSourceSqlNames,
   compileRelation,
+  readsSelectionOrder,
   type RelationAst,
   type RelationColumn,
   type RelationOrder,
@@ -816,13 +818,16 @@ export class ExecutableRelationQuery<
     const outputNames = new Set(
       this.#definition.columns.map((column) => column.outputName),
     );
+    // The selection order a relation over a search query inherits stays:
+    // distinct rows sort by their best occurrence (`compileRelation`).
     if (
       this.#state.orderBy.some(
         (order) =>
-          order.expression.node.kind !== "field" ||
-          order.expression.node.field.alias !== "relation" ||
-          order.expression.node.field.path.length !== 1 ||
-          !outputNames.has(order.expression.node.field.path[0] ?? ""),
+          !readsSelectionOrder(order.expression) &&
+          (order.expression.node.kind !== "field" ||
+            order.expression.node.field.alias !== "relation" ||
+            order.expression.node.field.path.length !== 1 ||
+            !outputNames.has(order.expression.node.field.path[0] ?? "")),
       )
     )
       throw new ConfigurationError(
@@ -1143,15 +1148,19 @@ export class ExecutableRelationQuery<
       this.#definition.columns,
       "Relation paging and streaming",
     );
-    const orderedNames = this.#state.orderBy.map((order) =>
-      (
-        order.expression.node.kind === "field" &&
-        order.expression.node.field.alias === "relation" &&
-        order.expression.node.field.path.length === 1
-      ) ?
-        order.expression.node.field.path[0]
-      : undefined,
-    );
+    // An inherited selection order leads the projected columns; with them it
+    // still orders every distinct row deterministically.
+    const orderedNames = this.#state.orderBy
+      .filter((order) => !readsSelectionOrder(order.expression))
+      .map((order) =>
+        (
+          order.expression.node.kind === "field" &&
+          order.expression.node.field.alias === "relation" &&
+          order.expression.node.field.path.length === 1
+        ) ?
+          order.expression.node.field.path[0]
+        : undefined,
+      );
     const expected = this.#definition.columns.map(
       (column) => column.outputName,
     );
@@ -1403,6 +1412,80 @@ export function createExecutableRelation<
   return new ExecutableRelationQuery(definition);
 }
 
+/**
+ * How a relation over a query carries the query's own ordering when the
+ * query has no selection-order column: the source query to read (stripped of
+ * the terms the relation re-applies) and the relation's ordering terms.
+ */
+type LiftedQueryOrdering = Readonly<{
+  source: QueryAst;
+  orderBy: readonly RelationOrder[];
+}>;
+
+/** The ordering term reading a source query's selection-order column. */
+function selectionOrder(column: string, scopeIdentity: symbol): RelationOrder {
+  return {
+    expression: createFieldExpression(
+      outputField(column, "number"),
+      scopeIdentity,
+      false,
+    ),
+    direction: "asc",
+    nulls: "last",
+  };
+}
+
+/**
+ * A relation over the query `query`: the one owner of the order such a
+ * relation selects the query's rows in. A query with a selection-order column
+ * (`selectionOrderColumn`: a relevance-ordered search) keeps every ordering
+ * term in the source statement, which ranks its rows under exactly its own
+ * ORDER BY, and the relation orders by that rank alone. Any other query lifts
+ * its ordering terms to the relation as `liftOrdering` says. Either way the
+ * query's limit and offset move to the relation, after its ordering.
+ */
+export function createQueryRelation<Fields extends RelationProjection, Result>(
+  input: Readonly<{
+    query: QueryAst;
+    definition: Omit<RelationDefinition<Fields, Result>, "ast">;
+    liftOrdering: (
+      unbounded: QueryAst,
+      scope: Readonly<{
+        identity: symbol;
+        columns: RelationColumnContext<Fields>;
+      }>,
+    ) => LiftedQueryOrdering;
+  }>,
+): ExecutableRelationQuery<Fields, Result> {
+  const { limit, offset, ...unbounded } = input.query;
+  const scopeIdentity = relationScope();
+  const column = selectionOrderColumn(input.query);
+  const { source, orderBy } =
+    column === undefined ?
+      input.liftOrdering(unbounded, {
+        identity: scopeIdentity,
+        columns: buildContext<Fields>(input.definition.columns, scopeIdentity),
+      })
+    : { source: unbounded, orderBy: [selectionOrder(column, scopeIdentity)] };
+  const { config } = input.definition;
+  const definition: RelationDefinition<Fields, Result> = {
+    ...input.definition,
+    ast: {
+      kind: "source",
+      query: source,
+      graphId: config.graphId,
+      options: buildCompileOptions(config),
+    },
+  };
+  const state: RelationState = {
+    distinct: false,
+    ...(limit === undefined ? {} : { limit }),
+    ...(offset === undefined ? {} : { offset }),
+    orderBy,
+  };
+  return new ExecutableRelationQuery(definition, state, scopeIdentity);
+}
+
 export function createProjectionRelation<
   Fields extends RelationProjection,
   Result,
@@ -1421,10 +1504,43 @@ export function createProjectionRelation<
     ...input.ast.traversals.map((traversal) => traversal.nodeAlias),
   ]);
   const columns = relationColumns(input.fields, { nodeAliases });
-  const ordering = input.ast.orderBy ?? [];
+  return createQueryRelation({
+    query: input.ast,
+    definition: {
+      columns,
+      fields: input.fields,
+      config: input.config,
+      provenance: {
+        graphId: input.config.graphId,
+        executionTarget:
+          input.config.backend === undefined ?
+            undefined
+          : backendDerivationRoot(input.config.backend),
+        recordedAsOf: input.ast.recordedAsOf,
+        checked: input.checked,
+        temporalCoordinate: JSON.stringify(input.ast.temporalMode),
+      },
+      decodeRow: input.decodeRow,
+      ...(input.mapped === undefined ? {} : { mapped: input.mapped }),
+    },
+    liftOrdering: (unbounded, scope) =>
+      liftProjectionOrdering(unbounded, scope.identity),
+  });
+}
+
+/**
+ * A projection's `orderBy()` terms, lifted to the relation over it: each
+ * reads the projected column carrying the same field, or a hidden source
+ * column the source query adds for it.
+ */
+function liftProjectionOrdering(
+  unbounded: QueryAst,
+  scopeIdentity: symbol,
+): LiftedQueryOrdering {
+  const ordering = unbounded.orderBy ?? [];
   const orderOutputNames = ordering.map(
     (order) =>
-      input.ast.projection.fields.find(
+      unbounded.projection.fields.find(
         (projected) =>
           projected.source === order.field ||
           (projected.source.__type === "database_expression" &&
@@ -1439,59 +1555,27 @@ export function createProjectionRelation<
               order.field.node.field.jsonPointer),
       )?.outputName,
   );
-  const {
-    limit: sourceLimit,
-    offset: sourceOffset,
-    orderBy: _sourceOrderBy,
-    ...unboundedSourceAst
-  } = input.ast;
-  const sourceAst: QueryAst = {
-    ...unboundedSourceAst,
-    projection: {
-      ...input.ast.projection,
-      fields: [
-        ...input.ast.projection.fields,
-        ...ordering.flatMap((order, index) =>
-          orderOutputNames[index] === undefined ?
-            [
-              {
-                outputName: relationSourceOrderColumnName(index),
-                source: order.field,
-              },
-            ]
-          : [],
-        ),
-      ],
+  const { orderBy: _sourceOrderBy, ...unordered } = unbounded;
+  return {
+    source: {
+      ...unordered,
+      projection: {
+        ...unbounded.projection,
+        fields: [
+          ...unbounded.projection.fields,
+          ...ordering.flatMap((order, index) =>
+            orderOutputNames[index] === undefined ?
+              [
+                {
+                  outputName: relationSourceOrderColumnName(index),
+                  source: order.field,
+                },
+              ]
+            : [],
+          ),
+        ],
+      },
     },
-  };
-  const definition: RelationDefinition<Fields, Result> = {
-    ast: {
-      kind: "source",
-      query: sourceAst,
-      graphId: input.config.graphId,
-      options: buildCompileOptions(input.config),
-    },
-    columns,
-    fields: input.fields,
-    config: input.config,
-    provenance: {
-      graphId: input.config.graphId,
-      executionTarget:
-        input.config.backend === undefined ?
-          undefined
-        : backendDerivationRoot(input.config.backend),
-      recordedAsOf: input.ast.recordedAsOf,
-      checked: input.checked,
-      temporalCoordinate: JSON.stringify(input.ast.temporalMode),
-    },
-    decodeRow: input.decodeRow,
-    ...(input.mapped === undefined ? {} : { mapped: input.mapped }),
-  };
-  const scopeIdentity = relationScope();
-  const state: RelationState = {
-    distinct: false,
-    ...(sourceLimit === undefined ? {} : { limit: sourceLimit }),
-    ...(sourceOffset === undefined ? {} : { offset: sourceOffset }),
     orderBy: ordering.map((order, index) => ({
       expression: createFieldExpression(
         outputField(
@@ -1505,5 +1589,4 @@ export function createProjectionRelation<
       nulls: resolveNullOrdering(order),
     })),
   };
-  return new ExecutableRelationQuery(definition, state, scopeIdentity);
 }
