@@ -16,9 +16,27 @@ import { delay } from "../../../src/utils/delay";
 import { requireDefined } from "../../../src/utils/presence";
 import { isPostgresLockTimeout } from "../../../src/utils/sql-errors";
 import { raceTimeout } from "../../concurrency-utils";
+import {
+  asForeignTransaction,
+  ForeignPgTransaction,
+} from "../../helpers/foreign-drizzle-handles";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
 const databaseUrl = await provisionPostgresTestDatabase(import.meta.url);
+/**
+ * A caller's transaction as this copy of Drizzle hands it out, and as a
+ * transaction of another loaded copy of Drizzle is seen: adoption must open
+ * its savepoint in either.
+ */
+const CALLER_TRANSACTION_VIEWS = [
+  { name: "own copy", view: <T extends object>(handle: T): T => handle },
+  {
+    name: "another loaded copy",
+    view: <T extends object>(handle: T): T =>
+      asForeignTransaction(handle, ForeignPgTransaction),
+  },
+] as const;
+
 // Harness observations need scheduler slack; adoption's database budget stays 1s.
 const OBSERVER_TIMEOUT_MS = 5000;
 
@@ -190,31 +208,34 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
       await requireDefined(backend.assertBaseSchemaCurrent)();
     });
 
-    it("preserves caller settings after queued adoption inside a savepoint", async () => {
-      await dropRetention();
-      const release = await holdWriter();
-      const adopting = drizzle(pool, { logger })
-        .transaction(async (transaction) => {
-          await transaction.execute("SET LOCAL lock_timeout = '2500ms'");
-          const attached = createPostgresBackend(transaction, {
-            vector: false,
-            fulltext: false,
-          });
-          await requireDefined(attached.adoptBaseSchema)();
-          const setting = await transaction.execute<{ value: string }>(
-            "SELECT current_setting('lock_timeout') AS value",
-          );
-          return setting.rows;
-        })
-        .catch((error: unknown) => error);
-      try {
-        await waitForQueuedLock();
-      } finally {
-        await release();
-      }
-      expect(await adopting).toEqual([{ value: "2500ms" }]);
-      expect(adoptionAttempts()).toBe(1);
-    });
+    it.each(CALLER_TRANSACTION_VIEWS)(
+      "preserves caller settings after queued adoption inside a savepoint ($name)",
+      async ({ view }) => {
+        await dropRetention();
+        const release = await holdWriter();
+        const adopting = drizzle(pool, { logger })
+          .transaction(async (transaction) => {
+            await transaction.execute("SET LOCAL lock_timeout = '2500ms'");
+            const attached = createPostgresBackend(view(transaction), {
+              vector: false,
+              fulltext: false,
+            });
+            await requireDefined(attached.adoptBaseSchema)();
+            const setting = await transaction.execute<{ value: string }>(
+              "SELECT current_setting('lock_timeout') AS value",
+            );
+            return setting.rows;
+          })
+          .catch((error: unknown) => error);
+        try {
+          await waitForQueuedLock();
+        } finally {
+          await release();
+        }
+        expect(await adopting).toEqual([{ value: "2500ms" }]);
+        expect(adoptionAttempts()).toBe(1);
+      },
+    );
 
     it("bounds persistent contention with a table-specific error and permits resumption", async () => {
       await dropRetention();
@@ -258,35 +279,38 @@ describe.skipIf(!process.env["POSTGRES_URL"])(
       await requireDefined(backend.assertBaseSchemaCurrent)();
     });
 
-    it("honors a stricter caller timeout and rolls back the failed savepoint", async () => {
-      await dropRetention();
-      const release = await holdWriter();
-      try {
-        await drizzle(pool, { logger }).transaction(async (transaction) => {
-          await transaction.execute("SET LOCAL lock_timeout = '50ms'");
-          const attached = createPostgresBackend(transaction, {
-            vector: false,
-            fulltext: false,
+    it.each(CALLER_TRANSACTION_VIEWS)(
+      "honors a stricter caller timeout and rolls back the failed savepoint ($name)",
+      async ({ view }) => {
+        await dropRetention();
+        const release = await holdWriter();
+        try {
+          await drizzle(pool, { logger }).transaction(async (transaction) => {
+            await transaction.execute("SET LOCAL lock_timeout = '50ms'");
+            const attached = createPostgresBackend(view(transaction), {
+              vector: false,
+              fulltext: false,
+            });
+            await expect(
+              requireDefined(attached.adoptBaseSchema)(),
+            ).rejects.toMatchObject({
+              code: "BASE_SCHEMA_ADOPTION_TIMEOUT",
+              details: {
+                tableName: "typegraph_recorded_clock",
+                waitBudgetMs: 50,
+              },
+            });
+            const setting = await transaction.execute<{ value: string }>(
+              "SELECT current_setting('lock_timeout') AS value",
+            );
+            expect(setting.rows).toEqual([{ value: "50ms" }]);
           });
-          await expect(
-            requireDefined(attached.adoptBaseSchema)(),
-          ).rejects.toMatchObject({
-            code: "BASE_SCHEMA_ADOPTION_TIMEOUT",
-            details: {
-              tableName: "typegraph_recorded_clock",
-              waitBudgetMs: 50,
-            },
-          });
-          const setting = await transaction.execute<{ value: string }>(
-            "SELECT current_setting('lock_timeout') AS value",
-          );
-          expect(setting.rows).toEqual([{ value: "50ms" }]);
-        });
-      } finally {
-        await release();
-      }
-      await requireDefined(backend.adoptBaseSchema)();
-    });
+        } finally {
+          await release();
+        }
+        await requireDefined(backend.adoptBaseSchema)();
+      },
+    );
 
     it("converges two cold adopters waiting behind an existing writer", async () => {
       await dropRetention();

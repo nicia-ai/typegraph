@@ -50,6 +50,7 @@ import type { CompiledSelectSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { assertsStoredLowerBound } from "../../utils/date";
+import { claimSupport } from "../claims/backing";
 import { purgeEdgeClaims } from "../claims/edge-claims";
 import {
   alreadyAppliedRowWrite,
@@ -85,6 +86,7 @@ import {
 } from "../fulltext-sync";
 import type { OperationEntry, StatementBackend } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
+import { reviveStoredDateProps } from "../stored-date-revival";
 import { type NodeDeletePlan } from "../types";
 import { hardDeleteEdgeRows, softDeleteEdgeRows } from "./edge-write-pipeline";
 
@@ -527,7 +529,7 @@ export async function applyNodeHardDeleteBatch(
     await deleteEdgesById(ctx, backend, "hard", work.removedEdgeIds);
   }
   const removedNodeIds = await hardDeleteNodeRows(
-    ctx.graphId,
+    ctx,
     backend,
     work.kind,
     work.ids,
@@ -547,20 +549,40 @@ export async function applyNodeHardDeleteBatch(
  * reports nothing (exactly as single `hardDelete` cleans embeddings by id).
  */
 async function hardDeleteNodeRows(
-  graphId: string,
+  ctx: Pick<NodeWriteContext, "graphId" | "claimsVerdict">,
   backend: Backend,
   kind: string,
   ids: readonly string[],
 ): Promise<readonly string[]> {
+  const graphId = ctx.graphId;
+  const releaseEdgeClaims = cascadeReleasesEdgeClaims(ctx, backend);
   const hardDeleteNodesBatch = backend.hardDeleteNodesBatch;
   if (hardDeleteNodesBatch !== undefined) {
-    const removed = await hardDeleteNodesBatch({ graphId, kind, ids });
+    const removed = await hardDeleteNodesBatch({
+      graphId,
+      kind,
+      ids,
+      releaseEdgeClaims,
+    });
     return removed.removedNodeIds;
   }
   for (const id of ids) {
-    await backend.hardDeleteNode({ graphId, kind, id });
+    await backend.hardDeleteNode({ graphId, kind, id, releaseEdgeClaims });
   }
   return ids;
+}
+
+/**
+ * Whether a node hard delete's backend cascade releases the claims of the
+ * edges it removes: exactly when the target holds claims. A target whose
+ * claims bundle resolves unsupported wrote none, and its database may lack the
+ * claim relation the release would name.
+ */
+function cascadeReleasesEdgeClaims(
+  ctx: Pick<NodeWriteContext, "claimsVerdict">,
+  backend: Backend,
+): boolean {
+  return claimSupport(backend, ctx.claimsVerdict()).supported;
 }
 
 /** One inserted row, as the post-insert sync fans read it. */
@@ -977,6 +999,7 @@ export async function applyNodeHardDelete(
     graphId: ctx.graphId,
     kind: args.kind,
     id: args.id,
+    releaseEdgeClaims: cascadeReleasesEdgeClaims(ctx, backend),
   });
   await deleteNodeEmbeddings(
     nodeSyncContext(ctx, args.kind, args.id, backend),
@@ -1190,11 +1213,15 @@ export async function applyNodeSetUpdate(
 
   const sidecarItems = result.rows.map((row) => {
     const props = rowPropsToObject(row.props);
-    const validatedProps = validateNodeProps(schema, props, {
-      kind,
-      operation: "update",
-      id: row.id,
-    });
+    const validatedProps = validateNodeProps(
+      schema,
+      reviveStoredDateProps(schema, props),
+      {
+        kind,
+        operation: "update",
+        id: row.id,
+      },
+    );
     if (!canonicalEqual(validatedProps, props)) {
       throw new ValidationError(
         `Set update would persist a non-canonical ${kind} row`,

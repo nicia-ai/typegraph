@@ -14,6 +14,7 @@ import {
 import { compileNameCheckedQuery, type CompileQueryOptions } from "./index";
 import { compileLimitOffsetClauses } from "./limit-offset";
 import { validateRelationAggregation } from "./relation-aggregate-validation";
+import { SELECTION_ORDER_COLUMN } from "./relevance-order";
 import { setOperationKeyword } from "./set-operations";
 import {
   refuseReservedOutputKeys,
@@ -234,10 +235,50 @@ function compileExpression(
   );
 }
 
+/**
+ * Whether `expression` reads the selection-order column of the query a
+ * relation reads from (`SELECTION_ORDER_COLUMN`, see `selectionOrderColumn`):
+ * the ordering term a relation over a relevance-ordered query inherits.
+ */
+export function readsSelectionOrder(expression: DatabaseExpression): boolean {
+  const { node } = expression;
+  return (
+    node.kind === "field" &&
+    node.field.alias === "relation" &&
+    node.field.path.length === 1 &&
+    node.field.path[0] === SELECTION_ORDER_COLUMN
+  );
+}
+
+/**
+ * Compiles an expression of a derived relation's projection or ordering.
+ * When `selectionGroups` holds (a grouped or distinct relation ordered by its source's
+ * selection order, see {@link compileDerived}), the selection-order column
+ * reads each distinct row's best occurrence, `MIN` of its rank.
+ */
+function compileDerivedExpression(
+  expression: DatabaseExpression,
+  dialect: DatabaseExpressionCompilerContext["dialect"],
+  allowAggregates: boolean,
+  orderedAggregates: boolean,
+  selectionGroups: boolean,
+): SqlFragment {
+  const compiled = compileExpression(
+    expression,
+    dialect,
+    allowAggregates,
+    orderedAggregates,
+  );
+  return selectionGroups && readsSelectionOrder(expression) ?
+      sql`MIN(${compiled})`
+    : compiled;
+}
+
 function compileOrder(
   orderBy: readonly RelationOrder[],
   dialect: DatabaseExpressionCompilerContext["dialect"],
   orderedAggregates: boolean,
+  selectionGroups = false,
 ): SqlFragment {
   if (orderBy.length === 0) return sql.empty();
   if (orderBy.some((order) => order.expression.elementValueType !== undefined))
@@ -247,7 +288,13 @@ function compileOrder(
   return sql` ORDER BY ${sql.join(
     orderBy.map((order) =>
       compileOrderTerm(
-        compileExpression(order.expression, dialect, false, orderedAggregates),
+        compileDerivedExpression(
+          order.expression,
+          dialect,
+          false,
+          orderedAggregates,
+          selectionGroups,
+        ),
         order.direction,
         order.nulls,
       ),
@@ -261,15 +308,30 @@ function compileDerived(
   dialect: DatabaseExpressionCompilerContext["dialect"],
   orderedAggregates: boolean,
 ): CompiledSelectSql {
+  // A relation whose rows are groups (`distinct()` or `groupBy()`) and that
+  // is ordered by its source's selection order sorts each group by its best
+  // occurrence, as a search statement sorts a group by its best member: it
+  // reads the smallest rank of each group. A distinct relation groups by
+  // every other projected value, which is what DISTINCT compares (its other
+  // ordering terms read projected columns, and a grouped relation's projected
+  // values are determined by its grouping, so grouping by them instead
+  // selects the same distinct rows).
+  const selectionGroups =
+    (relation.distinct || (relation.groupBy?.length ?? 0) > 0) &&
+    relation.orderBy.some((order) => readsSelectionOrder(order.expression));
   validateRelationAggregation(
-    relation.projection.map(({ expression }) => expression),
+    relation.projection
+      .map(({ expression }) => expression)
+      .filter(
+        (expression) => !(selectionGroups && readsSelectionOrder(expression)),
+      ),
     relation.groupBy,
   );
   const source = compileRelationPart(relation.source, dialect, "wrapped");
   const projection = sql.join(
     relation.projection.map(
       ({ column, expression }) =>
-        sql`${compileExpression(expression, dialect, true, orderedAggregates)} AS ${sql.identifier(column.outputName)}`,
+        sql`${compileDerivedExpression(expression, dialect, true, orderedAggregates, selectionGroups)} AS ${sql.identifier(column.outputName)}`,
     ),
     sql`, `,
   );
@@ -277,17 +339,24 @@ function compileDerived(
     relation.predicate === undefined ?
       sql.empty()
     : sql` WHERE ${compileExpression(relation.predicate, dialect, false, orderedAggregates)}`;
+  const groupExpressions =
+    selectionGroups && relation.distinct ?
+      relation.projection
+        .map(({ expression }) => expression)
+        .filter((expression) => !readsSelectionOrder(expression))
+    : (relation.groupBy ?? []);
   const groupBy =
-    relation.groupBy === undefined || relation.groupBy.length === 0 ?
+    groupExpressions.length === 0 ?
       sql.empty()
     : sql` GROUP BY ${sql.join(
-        relation.groupBy.map((expression) =>
+        groupExpressions.map((expression) =>
           compileExpression(expression, dialect, false, orderedAggregates),
         ),
         sql`, `,
       )}`;
+  const distinct = relation.distinct && !selectionGroups;
   return asCompiledSelectSql(
-    sql`SELECT ${relation.distinct ? sql.raw("DISTINCT ") : sql.empty()}${projection} FROM (${source}) AS ${sql.identifier(SOURCE_ALIAS)}${predicate}${groupBy}${compileOrder(relation.orderBy, dialect, orderedAggregates)} ${sql.join(compileLimitOffsetClauses(relation.limit, relation.offset, dialect), sql` `)}`,
+    sql`SELECT ${distinct ? sql.raw("DISTINCT ") : sql.empty()}${projection} FROM (${source}) AS ${sql.identifier(SOURCE_ALIAS)}${predicate}${groupBy}${compileOrder(relation.orderBy, dialect, orderedAggregates, selectionGroups)} ${sql.join(compileLimitOffsetClauses(relation.limit, relation.offset, dialect), sql` `)}`,
   );
 }
 
@@ -323,7 +392,10 @@ function compileTopPerPartition(
  * Compiles a query a relation reads from, refusing it when its generated SQL
  * names collide under `usage` (see `sql-name-registry.ts`): the caller's
  * use when the query is the whole relation, and `"wrapped"` when a derived,
- * top-per-partition or set relation refers to its columns by name.
+ * top-per-partition or set relation refers to its columns by name. A relation
+ * reads its source in the order the source selects its rows in, so the
+ * source compiles in the `selection-ordered` shape: a relevance-ordered query
+ * carries that order as its selection-order column (`selectionOrderColumn`).
  */
 function compileRelationSource(
   source: RelationSource,
@@ -334,6 +406,7 @@ function compileRelationSource(
     source.graphId,
     source.options,
     usage,
+    "selection-ordered",
   );
 }
 

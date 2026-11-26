@@ -1020,20 +1020,119 @@ export function buildTakeOverEdgeClaimGuarded(
  * A hard delete or a `clearGraph` removes the edges a claim's liveness
  * predicate reads, so the claim would already be takeable; this only stops the
  * relation from growing without bound.
+ *
+ * The rows are locked in claim-target order (code point on axis, then key —
+ * the order `compareClaimTargets` gives every claim write) before they are
+ * deleted, by `rowLockClause` on the ordered sub-select. A plain
+ * `DELETE ... WHERE edge_id IN (...)` locks rows in whatever order it scans
+ * them, so against an edge create that holds one of the same claim rows and
+ * waits for another it could take the second first: each session then waits
+ * for the other and PostgreSQL aborts one with `40P01`. A row a concurrent
+ * writer took over while this statement waited no longer names a listed edge
+ * when it is re-checked, so it is skipped rather than purged. SQLite admits one
+ * writer at a time and passes an empty clause.
+ *
+ * The order holds within this statement. A purge whose edge ids span several
+ * statements locks its rows first, across all of them, with
+ * {@link buildLockEdgeClaimTargets}.
  */
 export function buildPurgeEdgeClaims(
   tables: Tables,
   params: PurgeEdgeClaimsParams,
+  dialect: SqlDialect,
+  rowLockClause: SQL,
 ): SQL {
   const { edgeClaims } = tables;
+  const claimsName = getTableName(edgeClaims);
   return sql`
     DELETE FROM ${edgeClaims}
-    WHERE ${edgeClaims.graphId} = ${params.graphId}
-      AND ${edgeClaims.edgeId} IN (${sql.join(
+    WHERE (
+      ${quotedColumn(edgeClaims.graphId)},
+      ${quotedColumn(edgeClaims.axis)},
+      ${quotedColumn(edgeClaims.key)}
+    ) IN (
+      SELECT
+        ${qualifiedColumn(claimsName, edgeClaims.graphId)},
+        ${qualifiedColumn(claimsName, edgeClaims.axis)},
+        ${qualifiedColumn(claimsName, edgeClaims.key)}
+      FROM ${edgeClaims}
+      WHERE ${qualifiedColumn(claimsName, edgeClaims.graphId)} = ${params.graphId}
+        AND ${qualifiedColumn(claimsName, edgeClaims.edgeId)} IN (${sql.join(
+          params.edgeIds.map((edgeId) => sql`${edgeId}`),
+          sql`, `,
+        )})
+      ORDER BY ${claimTargetOrder(tables, dialect)}
+      ${rowLockClause}
+    )
+  `;
+}
+
+/**
+ * The claim targets (axis, key) the named edges hold, unlocked: the first
+ * half of a purge that spans several statements, which has to lock every row
+ * it will delete in one global claim-target order before deleting any (see
+ * {@link buildLockEdgeClaimTargets}).
+ */
+export function buildReadEdgeClaimTargets(
+  tables: Tables,
+  params: PurgeEdgeClaimsParams,
+): SQL {
+  const { edgeClaims } = tables;
+  const claimsName = getTableName(edgeClaims);
+  return sql`
+    SELECT
+      ${qualifiedColumn(claimsName, edgeClaims.axis)} AS axis,
+      ${qualifiedColumn(claimsName, edgeClaims.key)} AS key
+    FROM ${edgeClaims}
+    WHERE ${qualifiedColumn(claimsName, edgeClaims.graphId)} = ${params.graphId}
+      AND ${qualifiedColumn(claimsName, edgeClaims.edgeId)} IN (${sql.join(
         params.edgeIds.map((edgeId) => sql`${edgeId}`),
         sql`, `,
       )})
   `;
+}
+
+/**
+ * Locks one run of claim rows, named by target, in claim-target order. A purge
+ * whose edge ids span several statements calls it for consecutive runs of the
+ * globally sorted targets {@link buildReadEdgeClaimTargets} returned, so every
+ * row it will delete is locked in one order across statements, not only
+ * within each; the deletes that follow find the rows already held.
+ */
+export function buildLockEdgeClaimTargets(
+  tables: Tables,
+  graphId: string,
+  targets: readonly Readonly<{ axis: string; key: string }>[],
+  dialect: SqlDialect,
+  rowLockClause: SQL,
+): SQL {
+  const { edgeClaims } = tables;
+  const claimsName = getTableName(edgeClaims);
+  return sql`
+    SELECT 1
+    FROM ${edgeClaims}
+    WHERE ${qualifiedColumn(claimsName, edgeClaims.graphId)} = ${graphId}
+      AND (
+        ${qualifiedColumn(claimsName, edgeClaims.axis)},
+        ${qualifiedColumn(claimsName, edgeClaims.key)}
+      ) IN (${sql.join(
+        targets.map((target) => sql`(${target.axis}, ${target.key})`),
+        sql`, `,
+      )})
+    ORDER BY ${claimTargetOrder(tables, dialect)}
+    ${rowLockClause}
+  `;
+}
+
+/** Claim-target order over the claim relation: code point on axis, then key. */
+function claimTargetOrder(tables: Tables, dialect: SqlDialect): SQL {
+  const relation = getTableName(tables.edgeClaims).replaceAll('"', '""');
+  const orderKey = (column: string): SQL =>
+    codePointOrderKey(
+      fragmentSql.raw(`"${relation}"."${column.replaceAll('"', '""')}"`),
+      dialect,
+    );
+  return sql`${orderKey(tables.edgeClaims.axis.name)}, ${orderKey(tables.edgeClaims.key.name)}`;
 }
 
 // Re-exported from their new owner. Resolved only by
