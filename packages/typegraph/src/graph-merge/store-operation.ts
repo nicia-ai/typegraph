@@ -515,9 +515,10 @@ export async function operateStore<G extends GraphDef>(
       // One operation of the session of the transaction this call opened,
       // for its fences and evidence reads; the callback's writes enter their
       // own.
-      const backend: OperationBackend = enterTransactionOperation(tx).backend;
+      const operation = enterTransactionOperation(tx);
+      const backend: OperationBackend = operation.backend;
       requireOperationStatementMembers(backend);
-      await lockStoreWriteFence(backend, {
+      await lockStoreWriteFence(operation, {
         graphId: store.graphId,
         schemaVersion: activeSchema?.version,
         graphLock: "required",

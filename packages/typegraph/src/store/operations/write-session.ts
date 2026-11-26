@@ -533,6 +533,7 @@ export function createWriteSession(
   ctx: WriteSessionContext,
   target: StatementBackend,
   lock: GraphWriteLock,
+  frame: OperationEntry,
 ): WriteSession {
   const writeContext = createNodeWriteContext(
     ctx.graphId,
@@ -540,6 +541,7 @@ export function createWriteSession(
     lock,
     ctx.claimsVerdict,
     ctx.uniqueSidecarBatch,
+    frame,
   );
   const dispatch = nodeInsertDispatch(target);
   const edgeContext = createEdgeWriteContext(

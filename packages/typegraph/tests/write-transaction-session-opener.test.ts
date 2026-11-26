@@ -2,7 +2,7 @@
  * A Store transaction's write session issues its own statements (the
  * end-of-callback revision advance) through the operation of the
  * transaction's opener it is handed, not through the statement surface its
- * mutations go through and it is keyed on.
+ * mutations go through (the handle of the operation it is handed).
  */
 import { describe, expect, it } from "vitest";
 
@@ -10,6 +10,7 @@ import { deriveBackend } from "../src/backend/derive-backend";
 import type { TransactionBackend } from "../src/backend/types";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import {
+  decorateOperation,
   enterOperation,
   openTransactionSession,
   type OperationBackend,
@@ -49,11 +50,17 @@ describe("write transaction session opener", () => {
     const backend = createTestBackend();
     const counts: Record<string, number> = { surface: 0, opener: 0 };
     await backend.transaction(async (transaction) => {
-      const held = enterOperation(openTransactionSession(transaction)).backend;
-      const surface = counting(held, counts, "surface");
+      const openedSession = openTransactionSession(transaction);
+      const operation = enterOperation(openedSession);
+      const held = operation.backend;
+      const surface = decorateOperation(
+        operation,
+        counting(held, counts, "surface"),
+      );
       const opener = counting(held, counts, "opener");
       await withWriteTransactionSession(
-        surface,
+        openedSession,
+        surface.backend,
         opener,
         {
           graphId: "write_session_opener",

@@ -596,21 +596,13 @@ describe("engine-native recorded time: transaction receipts", () => {
   /**
    * `#buildTransactionContext` runs every write in a receipted engine-native
    * transaction through the mutation witness's wrapped session
-   * (`writeTarget`), so `withTransactionSchemaFenceLease` and
-   * `withWriteTransactionSession` must key their lease/session maps on that
-   * SAME wrapped object — they key on object identity, and a write issued
-   * through the wrapper resolves nothing under a lease the raw `txBackend`
-   * registered under. Two constrained creates in one `transactionWithReceipt`
-   * call must therefore take exactly ONE `lockSchemaVersionForWrite`
-   * acquisition — the second create's `hasLeasedSchemaFence` check must see
-   * the first create's lease, matching a plain `store.transaction()` with no
-   * receipt requested at all (asserted immediately below as the positive
-   * control). MUTATION-PROOF: passing the raw `txBackend` (instead of
-   * `writeTarget`) to `withTransactionSchemaFenceLease` and
-   * `withWriteTransactionSession` in store.ts's `run()` closure makes the
-   * receipted count assertion fail — two acquisitions instead of one, since
-   * the lease registered under the raw target is invisible to a write issued
-   * through the wrapped one.
+   * (`writeTarget`). The schema-fence lease is the transaction session's, so
+   * a write issued through the wrapper reads the lease the session holds. Two
+   * constrained creates in one `transactionWithReceipt` call must therefore
+   * take exactly ONE `lockSchemaVersionForWrite` acquisition — the second
+   * create's `hasLeasedSchemaFence` check must see the first create's lease,
+   * matching a plain `store.transaction()` with no receipt requested at all
+   * (asserted immediately below as the positive control).
    */
   it("leases the schema fence once across two constrained creates in a receipted engine-native transaction", async () => {
     // Positive control: a plain `store.transaction()` (no receipt, so the
