@@ -1,0 +1,11 @@
+---
+"@nicia-ai/typegraph": patch
+---
+
+A uniqueness claim is now released with the key it was taken with. With a unique constraint over a date property (`z.date()`, `z.coerce.date()`, a pipe ending in a date, optional or nullable), a write keyed its claim from the validated `Date`, but a release keyed the row it read back, where the same value is ISO text, so the two keys differed. Every update that changed the date left the old value reserved, and a soft delete left the deleted row's value reserved wherever it released per key (a delete inside a transaction on every backend, every delete on better-sqlite3). A later create of that value was refused with a `UniquenessError` naming a node that no longer held it, and `findByConstraint()` / `getOrCreateByConstraint()` returned that node instead of reporting the value free. On PostgreSQL the same happened for a unique constraint over an object property whose declared key order is not the order `jsonb` stores. Keys are now derived through one owner that reads a date field's stored text as the `Date` it was written from, and an object in its schema's declared key order, so the write, the release, the update diff, the lookups, import and graph-merge blocking all derive the same bytes.
+
+### Upgrade notes
+
+- No migration is needed: the bytes a create writes are unchanged, so claims already stored keep matching their rows.
+- Claims leaked before this release stay reserved until removed. A `UniquenessError` (or a `findByConstraint()` result) naming a holder whose current value differs, or a holder that is deleted, identifies one. To free it, update a live holder back onto the leaked value and then off it again, or `hardDelete()` a deleted holder (a hard delete removes every claim the node owns). `verifyConstraintFences()` and `validateStore()` do not report leaked claims.
+- Still not covered, because the stored row cannot distinguish the original form: a `Date` held by a property whose schema output is not only a date (a union such as `z.union([z.date(), z.string()])`, `z.unknown()`, a `.transform()` returning a `Date`), and on PostgreSQL the key order of a `z.record()` or of a loose object's undeclared keys. Avoid unique constraints over such properties.

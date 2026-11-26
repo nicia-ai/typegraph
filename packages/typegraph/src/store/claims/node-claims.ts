@@ -25,7 +25,11 @@ import {
   type UniqueConstraintBackend,
   type UniqueRow,
 } from "../../backend/types";
-import { uniqueConstraintKey } from "../../constraints";
+import {
+  uniqueConstraintKey,
+  type UniqueKeyForms,
+  uniqueKeyFormsFor,
+} from "../../constraints";
 import { type UniqueConstraint } from "../../core/types";
 import {
   type ConfigurationError,
@@ -145,9 +149,10 @@ function claimKeyFor(
   refusal: ClaimRefusal,
   id: string,
   props: Record<string, unknown>,
+  forms: UniqueKeyForms,
 ): string | undefined {
   if (refusal.kind === "disjointness") return id;
-  return uniqueConstraintKey(refusal.constraint, props);
+  return uniqueConstraintKey(refusal.constraint, props, forms);
 }
 
 /**
@@ -177,9 +182,12 @@ export function nodeClaimEntries(
   constraints: readonly UniqueConstraint[],
   operation: NodeClaimOperation,
 ): readonly NodeClaimEntry[] {
+  // The forms of the kind whose row `props` belong to, so the key is the same
+  // whether `props` were just validated or read back from the stored row.
+  const forms = uniqueKeyFormsFor(registry, kind);
   return nodeClaimSites(registry, kind, constraints, operation).flatMap(
     (site) => {
-      const key = claimKeyFor(site.refusal, id, props);
+      const key = claimKeyFor(site.refusal, id, props, forms);
       return key === undefined ?
           []
         : [

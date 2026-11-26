@@ -17,6 +17,7 @@ import {
   edgeCardinalityViolation,
 } from "../../src/store/claims/edge-claims";
 import { requireDefined } from "../../src/utils/presence";
+import { STRING_FIELD_KEY_FORMS } from "../string-field-key-forms";
 
 // ============================================================
 // Arbitrary Generators
@@ -146,8 +147,18 @@ describe("computeUniqueKey Properties", () => {
           fc.array(propertyNameArb, { minLength: 1, maxLength: 3 }),
           collationArb,
           (props, fields, collation) => {
-            const key1 = computeUniqueKey(props, fields, collation);
-            const key2 = computeUniqueKey(props, fields, collation);
+            const key1 = computeUniqueKey(
+              props,
+              fields,
+              collation,
+              STRING_FIELD_KEY_FORMS,
+            );
+            const key2 = computeUniqueKey(
+              props,
+              fields,
+              collation,
+              STRING_FIELD_KEY_FORMS,
+            );
 
             expect(key1).toBe(key2);
           },
@@ -169,8 +180,18 @@ describe("computeUniqueKey Properties", () => {
 
             if (value1 === value2) return; // Skip if same
 
-            const key1 = computeUniqueKey(props1, [field1], collation);
-            const key2 = computeUniqueKey(props2, [field1], collation);
+            const key1 = computeUniqueKey(
+              props1,
+              [field1],
+              collation,
+              STRING_FIELD_KEY_FORMS,
+            );
+            const key2 = computeUniqueKey(
+              props2,
+              [field1],
+              collation,
+              STRING_FIELD_KEY_FORMS,
+            );
 
             // Keys should differ (unless case-insensitive makes them same)
             const shouldDiffer =
@@ -189,7 +210,12 @@ describe("computeUniqueKey Properties", () => {
   describe("collation behavior", () => {
     it("binary collation preserves case", () => {
       const props = { name: "Alice" };
-      const key = computeUniqueKey(props, ["name"], "binary");
+      const key = computeUniqueKey(
+        props,
+        ["name"],
+        "binary",
+        STRING_FIELD_KEY_FORMS,
+      );
 
       expect(key).toContain("Alice");
       expect(key).not.toContain("alice");
@@ -197,7 +223,12 @@ describe("computeUniqueKey Properties", () => {
 
     it("caseInsensitive collation lowercases strings", () => {
       const props = { name: "ALICE" };
-      const key = computeUniqueKey(props, ["name"], "caseInsensitive");
+      const key = computeUniqueKey(
+        props,
+        ["name"],
+        "caseInsensitive",
+        STRING_FIELD_KEY_FORMS,
+      );
 
       expect(key).toContain("alice");
       expect(key).not.toContain("ALICE");
@@ -209,8 +240,18 @@ describe("computeUniqueKey Properties", () => {
           const upper = { name: value.toUpperCase() };
           const lower = { name: value.toLowerCase() };
 
-          const keyUpper = computeUniqueKey(upper, ["name"], "caseInsensitive");
-          const keyLower = computeUniqueKey(lower, ["name"], "caseInsensitive");
+          const keyUpper = computeUniqueKey(
+            upper,
+            ["name"],
+            "caseInsensitive",
+            STRING_FIELD_KEY_FORMS,
+          );
+          const keyLower = computeUniqueKey(
+            lower,
+            ["name"],
+            "caseInsensitive",
+            STRING_FIELD_KEY_FORMS,
+          );
 
           expect(keyUpper).toBe(keyLower);
         }),
@@ -228,8 +269,18 @@ describe("computeUniqueKey Properties", () => {
             const upper = { name: value.toUpperCase() };
             const lower = { name: value.toLowerCase() };
 
-            const keyUpper = computeUniqueKey(upper, ["name"], "binary");
-            const keyLower = computeUniqueKey(lower, ["name"], "binary");
+            const keyUpper = computeUniqueKey(
+              upper,
+              ["name"],
+              "binary",
+              STRING_FIELD_KEY_FORMS,
+            );
+            const keyLower = computeUniqueKey(
+              lower,
+              ["name"],
+              "binary",
+              STRING_FIELD_KEY_FORMS,
+            );
 
             expect(keyUpper).not.toBe(keyLower);
           },
@@ -245,15 +296,30 @@ describe("computeUniqueKey Properties", () => {
       const propsNull = { name: null };
       const propsUndef = { name: undefined };
 
-      const keyNull = computeUniqueKey(propsNull, ["name"], "binary");
-      const keyUndef = computeUniqueKey(propsUndef, ["name"], "binary");
+      const keyNull = computeUniqueKey(
+        propsNull,
+        ["name"],
+        "binary",
+        STRING_FIELD_KEY_FORMS,
+      );
+      const keyUndef = computeUniqueKey(
+        propsUndef,
+        ["name"],
+        "binary",
+        STRING_FIELD_KEY_FORMS,
+      );
 
       expect(keyNull).toBe(keyUndef);
     });
 
     it("missing field produces null marker", () => {
       const props = { age: 30 };
-      const key = computeUniqueKey(props, ["name"], "binary");
+      const key = computeUniqueKey(
+        props,
+        ["name"],
+        "binary",
+        STRING_FIELD_KEY_FORMS,
+      );
 
       // Should contain null marker (Unit Separator)
       expect(key).toBe("\u001F");
@@ -264,15 +330,30 @@ describe("computeUniqueKey Properties", () => {
     it("field order matters", () => {
       const props = { name: "Alice", age: "30" };
 
-      const key1 = computeUniqueKey(props, ["name", "age"], "binary");
-      const key2 = computeUniqueKey(props, ["age", "name"], "binary");
+      const key1 = computeUniqueKey(
+        props,
+        ["name", "age"],
+        "binary",
+        STRING_FIELD_KEY_FORMS,
+      );
+      const key2 = computeUniqueKey(
+        props,
+        ["age", "name"],
+        "binary",
+        STRING_FIELD_KEY_FORMS,
+      );
 
       expect(key1).not.toBe(key2);
     });
 
     it("keys are joined with separator", () => {
       const props = { a: "x", b: "y" };
-      const key = computeUniqueKey(props, ["a", "b"], "binary");
+      const key = computeUniqueKey(
+        props,
+        ["a", "b"],
+        "binary",
+        STRING_FIELD_KEY_FORMS,
+      );
 
       // Should contain Record Separator between fields
       expect(key).toBe("x\u001Ey");
@@ -282,7 +363,12 @@ describe("computeUniqueKey Properties", () => {
   describe("type coercion", () => {
     it("numbers are converted to strings", () => {
       const props = { age: 42 };
-      const key = computeUniqueKey(props, ["age"], "binary");
+      const key = computeUniqueKey(
+        props,
+        ["age"],
+        "binary",
+        STRING_FIELD_KEY_FORMS,
+      );
 
       expect(key).toBe("42");
     });
@@ -291,8 +377,18 @@ describe("computeUniqueKey Properties", () => {
       const propsTrue = { active: true };
       const propsFalse = { active: false };
 
-      const keyTrue = computeUniqueKey(propsTrue, ["active"], "binary");
-      const keyFalse = computeUniqueKey(propsFalse, ["active"], "binary");
+      const keyTrue = computeUniqueKey(
+        propsTrue,
+        ["active"],
+        "binary",
+        STRING_FIELD_KEY_FORMS,
+      );
+      const keyFalse = computeUniqueKey(
+        propsFalse,
+        ["active"],
+        "binary",
+        STRING_FIELD_KEY_FORMS,
+      );
 
       expect(keyTrue).toBe("true");
       expect(keyFalse).toBe("false");

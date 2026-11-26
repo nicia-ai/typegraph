@@ -30,6 +30,7 @@ import {
 } from "../src/store/claims/node-claims";
 import { uncapturedGraphWriteLock } from "../src/store/recorded-capture/clock";
 import { requireDefined } from "../src/utils/presence";
+import { STRING_FIELD_KEY_FORMS } from "./string-field-key-forms";
 import { createTestBackend } from "./test-utils";
 
 // ============================================================
@@ -755,7 +756,12 @@ describe("Uniqueness Scope: kindWithSubClasses", () => {
 
   it("reserves one row at the scope's axis and names the holder's own kind", async () => {
     const store = createStore(scopeGraph, backend);
-    const key = computeUniqueKey({ code: "AXIS-1" }, ["code"], "binary");
+    const key = computeUniqueKey(
+      { code: "AXIS-1" },
+      ["code"],
+      "binary",
+      STRING_FIELD_KEY_FORMS,
+    );
 
     const product = await store.nodes.Product.create({
       code: "AXIS-1",
@@ -875,13 +881,23 @@ describe("Uniqueness key for a field named after a prototype member", () => {
   };
 
   it("keys an absent field as absent under binary collation", () => {
-    const key = computeUniqueKey(absent, ["toString"], "binary");
+    const key = computeUniqueKey(
+      absent,
+      ["toString"],
+      "binary",
+      STRING_FIELD_KEY_FORMS,
+    );
 
     // The inherited `Object.prototype.toString` is a function, which
     // `JSON.stringify` drops — reading it produced the empty key.
     expect(key).not.toBe("");
     expect(key).toBe(
-      computeUniqueKey(explicitlyUndefined, ["toString"], "binary"),
+      computeUniqueKey(
+        explicitlyUndefined,
+        ["toString"],
+        "binary",
+        STRING_FIELD_KEY_FORMS,
+      ),
     );
   });
 
@@ -889,17 +905,41 @@ describe("Uniqueness key for a field named after a prototype member", () => {
     // Reading the inherited function here threw
     // "Cannot read properties of undefined (reading 'toLowerCase')".
     expect(() =>
-      computeUniqueKey(absent, ["toString"], "caseInsensitive"),
+      computeUniqueKey(
+        absent,
+        ["toString"],
+        "caseInsensitive",
+        STRING_FIELD_KEY_FORMS,
+      ),
     ).not.toThrow();
-    expect(computeUniqueKey(absent, ["toString"], "caseInsensitive")).toBe(
-      computeUniqueKey(absent, ["toString"], "binary"),
+    expect(
+      computeUniqueKey(
+        absent,
+        ["toString"],
+        "caseInsensitive",
+        STRING_FIELD_KEY_FORMS,
+      ),
+    ).toBe(
+      computeUniqueKey(absent, ["toString"], "binary", STRING_FIELD_KEY_FORMS),
     );
   });
 
   it("collides two bags that both omit the field", () => {
     for (const collation of ["binary", "caseInsensitive"] as const) {
-      expect(computeUniqueKey(absent, ["toString"], collation)).toBe(
-        computeUniqueKey(otherAbsent, ["toString"], collation),
+      expect(
+        computeUniqueKey(
+          absent,
+          ["toString"],
+          collation,
+          STRING_FIELD_KEY_FORMS,
+        ),
+      ).toBe(
+        computeUniqueKey(
+          otherAbsent,
+          ["toString"],
+          collation,
+          STRING_FIELD_KEY_FORMS,
+        ),
       );
     }
   });
@@ -909,11 +949,35 @@ describe("Uniqueness key for a field named after a prototype member", () => {
     const otherPresent = { label: "second", toString: "beta" };
 
     for (const collation of ["binary", "caseInsensitive"] as const) {
-      expect(computeUniqueKey(present, ["toString"], collation)).not.toBe(
-        computeUniqueKey(otherPresent, ["toString"], collation),
+      expect(
+        computeUniqueKey(
+          present,
+          ["toString"],
+          collation,
+          STRING_FIELD_KEY_FORMS,
+        ),
+      ).not.toBe(
+        computeUniqueKey(
+          otherPresent,
+          ["toString"],
+          collation,
+          STRING_FIELD_KEY_FORMS,
+        ),
       );
-      expect(computeUniqueKey(present, ["toString"], collation)).not.toBe(
-        computeUniqueKey(absent, ["toString"], collation),
+      expect(
+        computeUniqueKey(
+          present,
+          ["toString"],
+          collation,
+          STRING_FIELD_KEY_FORMS,
+        ),
+      ).not.toBe(
+        computeUniqueKey(
+          absent,
+          ["toString"],
+          collation,
+          STRING_FIELD_KEY_FORMS,
+        ),
       );
     }
 
@@ -923,8 +987,16 @@ describe("Uniqueness key for a field named after a prototype member", () => {
         { label: "first", toString: "ALPHA" },
         ["toString"],
         "caseInsensitive",
+        STRING_FIELD_KEY_FORMS,
       ),
-    ).toBe(computeUniqueKey(present, ["toString"], "caseInsensitive"));
+    ).toBe(
+      computeUniqueKey(
+        present,
+        ["toString"],
+        "caseInsensitive",
+        STRING_FIELD_KEY_FORMS,
+      ),
+    );
   });
 });
 

@@ -34,7 +34,11 @@ export type {
   TransactionOptions,
 } from "../backend/types";
 export { isLiveNodeRow } from "../backend/types";
-export { computeUniqueKey } from "../constraints";
+export {
+  computeUniqueKey,
+  type UniqueKeyForms,
+  uniqueKeyFormsFor,
+} from "../constraints";
 export {
   defineInternalGraph,
   getEdgeKinds,

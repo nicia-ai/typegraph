@@ -55,6 +55,7 @@ import type {
   SimilarityStrategy,
 } from "../../src/graph-merge/types";
 import { requireDefined } from "../../src/utils/presence";
+import { STRING_FIELD_KEY_FORMS } from "../string-field-key-forms";
 import { createSqliteMergeBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -189,11 +190,10 @@ describe("candidate sources + scoring stage (step 0)", () => {
       mrn: "MRN-2",
     });
 
-    const blocks = blockNodes(
-      [annaA, robertB, distinct],
-      blockByBirthDate,
-      MRN_CONSTRAINT,
-    );
+    const blocks = blockNodes([annaA, robertB, distinct], blockByBirthDate, {
+      constraints: MRN_CONSTRAINT,
+      forms: STRING_FIELD_KEY_FORMS,
+    });
     const produced = await uniqueSource.generate({ kind: "Patient", blocks });
 
     console.info(
@@ -316,7 +316,10 @@ describe("candidate sources + scoring stage (step 0)", () => {
         collation: "binary",
       },
     ];
-    const blocks = blockNodes([left, right], blockByBirthDate, constraints);
+    const blocks = blockNodes([left, right], blockByBirthDate, {
+      constraints: constraints,
+      forms: STRING_FIELD_KEY_FORMS,
+    });
     const scored = scoreCandidates(
       {
         pairs: pairsFromBlocks(blocks),
@@ -408,7 +411,10 @@ describe("candidate sources + scoring stage (step 0)", () => {
     });
 
     const nodes = [annaA, robertB, ana, distinct];
-    const blocks = blockNodes(nodes, blockByBirthDate, MRN_CONSTRAINT);
+    const blocks = blockNodes(nodes, blockByBirthDate, {
+      constraints: MRN_CONSTRAINT,
+      forms: STRING_FIELD_KEY_FORMS,
+    });
 
     // Path A: drive the sources, then score.
     const fromSources = scoreCandidates(

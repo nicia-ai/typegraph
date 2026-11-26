@@ -154,6 +154,7 @@ export { registerTransactionPortCallBudgetTests } from "./transaction-statement-
 export { registerTraversalLimitPushdownIntegrationTests } from "./traversal-limit-pushdown";
 export { registerTraversalIntegrationTests } from "./traversals";
 export { registerTrustedImportIntegrationTests } from "./trusted-import";
+export { registerUniqueKeyFormIntegrationTests } from "./unique-key-forms";
 export { registerUniquenessClaimGateIntegrationTests } from "./uniqueness-claim-gate";
 export { registerValidityEndClearingIntegrationTests } from "./validity-end-clearing";
 export { registerValidityLowerBoundIntegrationTests } from "./validity-lower-bound";

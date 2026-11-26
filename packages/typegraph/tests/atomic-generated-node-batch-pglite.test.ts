@@ -38,6 +38,7 @@ import { disjointWith, subClassOf } from "../src/ontology";
 import { vectorPhysicalName } from "../src/query/dialect/vector-strategy";
 import { migrateSchema } from "../src/schema";
 import { createStoreWithSchema } from "../src/store";
+import { STRING_FIELD_KEY_FORMS } from "./string-field-key-forms";
 
 const UniquePerson = defineNode("UniquePerson", {
   schema: z.object({ name: z.string() }),
@@ -205,7 +206,7 @@ function claimEntry(
   const claim = {
     axis: "UniquePerson",
     constraintName: "unique_person_name",
-    key: computeUniqueKey({ name }, ["name"], "binary"),
+    key: computeUniqueKey({ name }, ["name"], "binary", STRING_FIELD_KEY_FORMS),
     placement: "pre-insert",
     verdict: {
       kind: "uniqueness",
@@ -561,6 +562,7 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
       { email: "legacy@example.com" },
       ["email"],
       "binary",
+      STRING_FIELD_KEY_FORMS,
     );
     await directBackend.insertNode({
       graphId: scopedGraph.id,
@@ -655,7 +657,12 @@ describe("constrained generated-node atomic SQL on PGlite", () => {
       graphId: graph.id,
       nodeKind: "UniquePerson",
       constraintName: "unique_person_name",
-      key: computeUniqueKey({ name: "Conflict" }, ["name"], "binary"),
+      key: computeUniqueKey(
+        { name: "Conflict" },
+        ["name"],
+        "binary",
+        STRING_FIELD_KEY_FORMS,
+      ),
       nodeId: "generated-incumbent",
       concreteKind: "UniquePerson",
     });

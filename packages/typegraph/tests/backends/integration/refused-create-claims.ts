@@ -33,6 +33,7 @@ import {
   disjointnessClaimAxis,
   uniquenessClaimAxis,
 } from "../../../src/store/claims/axis";
+import { STRING_FIELD_KEY_FORMS } from "../../string-field-key-forms";
 import { type IntegrationTestContext } from "./test-context";
 
 const REFUSAL_A_UNIQUE = {
@@ -184,7 +185,12 @@ export function registerRefusedCreateClaimIntegrationTests(
           store.backend,
           uniquenessClaimAxis("RefusalChild", "kindWithSubClasses", registry),
           REFUSAL_A_UNIQUE.name,
-          computeUniqueKey({ a: "free-a" }, ["a"], "binary"),
+          computeUniqueKey(
+            { a: "free-a" },
+            ["a"],
+            "binary",
+            STRING_FIELD_KEY_FORMS,
+          ),
         ),
       ).toBeUndefined();
       const reuser = await store.nodes.RefusalParent.create({

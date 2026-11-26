@@ -36,6 +36,7 @@ import {
   type DefectScope,
   expectObservation,
 } from "../../helpers/known-defect";
+import { STRING_FIELD_KEY_FORMS } from "../../string-field-key-forms";
 import { type IntegrationTestContext } from "./test-context";
 
 /** #948 reproduces on every lane: a scope naming no facet covers them all. */
@@ -373,6 +374,7 @@ export function registerSetUpdateRefusalIntegrationTests(
               { name },
               REFUSAL_NAME_UNIQUE.fields,
               REFUSAL_NAME_UNIQUE.collation,
+              STRING_FIELD_KEY_FORMS,
             ),
             includeDeleted: false,
           });

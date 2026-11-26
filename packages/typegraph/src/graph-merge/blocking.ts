@@ -42,8 +42,18 @@ import { requireDefined } from "../utils/presence";
  */
 import { compareStrings } from "./node-key";
 import type { Node, NodeType, UniqueIntrospection } from "./typegraph-internal";
-import { computeUniqueKey } from "./typegraph-internal";
+import { computeUniqueKey, type UniqueKeyForms } from "./typegraph-internal";
 import type { ResolveConfig } from "./types";
+
+/**
+ * The unique constraints a kind's nodes are blocked on, with the key forms of
+ * that kind ({@link uniqueKeyFormsFor}), so a signature is the very key the
+ * store claims for the same value — in whichever form the staged node holds it.
+ */
+export type UniqueBlocking = Readonly<{
+  constraints: readonly UniqueIntrospection[];
+  forms: UniqueKeyForms;
+}>;
 
 /**
  * Bucket key for nodes that produced no blocking key from either `block()` or a
@@ -117,6 +127,7 @@ export function uniqueConstraintNameForBucket(key: string): string | undefined {
 function constraintSignature(
   node: Node<NodeType>,
   constraint: UniqueIntrospection,
+  forms: UniqueKeyForms,
 ): string | undefined {
   const props = node as unknown as Record<string, unknown>;
   for (const field of constraint.fields) {
@@ -133,6 +144,7 @@ function constraintSignature(
     props,
     constraint.fields,
     constraint.collation,
+    forms,
   )}`;
 }
 
@@ -150,7 +162,7 @@ function constraintSignature(
 function bucketKeysFor(
   node: Node<NodeType>,
   block: ResolveConfig["block"],
-  constraints: readonly UniqueIntrospection[],
+  uniqueBlocking: UniqueBlocking | undefined,
 ): readonly string[] {
   const keys: string[] = [];
 
@@ -159,8 +171,12 @@ function bucketKeysFor(
     keys.push(`${BLOCK_KEY_PREFIX}${KEY_PART_SEPARATOR}${blockKey}`);
   }
 
-  for (const constraint of constraints) {
-    const signature = constraintSignature(node, constraint);
+  for (const constraint of uniqueBlocking?.constraints ?? []) {
+    const signature = constraintSignature(
+      node,
+      constraint,
+      requireDefined(uniqueBlocking).forms,
+    );
     if (signature !== undefined) {
       keys.push(`${UNIQUE_KEY_PREFIX}${KEY_PART_SEPARATOR}${signature}`);
     }
@@ -178,9 +194,9 @@ function bucketKeysFor(
  *   one kind; the caller invokes `blockNodes` once per resolved kind.
  * @param resolveConfig The kind's resolution config; its optional `block`
  *   function supplies the application blocking key.
- * @param uniqueConstraints The kind's `unique` constraints from
- *   `store.introspect().kinds[k].unique`. Pass an empty array when blocking
- *   should rely on `block()` alone.
+ * @param uniqueBlocking The kind's `unique` constraints from
+ *   `store.introspect().kinds[k].unique`, with the kind's key forms. Omit it
+ *   when blocking should rely on `block()` alone.
  * @returns A map from bucket key → that bucket's nodes. Iteration order of the
  *   returned map is the lexicographic order of bucket keys, and each bucket's
  *   node list is sorted by `node.id`, so the result is a pure, order-independent
@@ -190,7 +206,7 @@ function bucketKeysFor(
 export function blockNodes<K extends NodeType>(
   newNodes: readonly Node<K>[],
   resolveConfig: Pick<ResolveConfig, "block">,
-  uniqueConstraints: readonly UniqueIntrospection[] = [],
+  uniqueBlocking?: UniqueBlocking,
 ): Map<string, Node<K>[]> {
   const buckets = new Map<string, Node<K>[]>();
 
@@ -198,7 +214,7 @@ export function blockNodes<K extends NodeType>(
     for (const key of bucketKeysFor(
       node,
       resolveConfig.block,
-      uniqueConstraints,
+      uniqueBlocking,
     )) {
       const bucket = buckets.get(key);
       if (bucket === undefined) {

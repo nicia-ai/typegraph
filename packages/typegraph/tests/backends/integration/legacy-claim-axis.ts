@@ -42,6 +42,7 @@ import {
   importGraph,
 } from "../../../src/interchange";
 import { requireDefined } from "../../../src/utils/presence";
+import { STRING_FIELD_KEY_FORMS } from "../../string-field-key-forms";
 import { type IntegrationTestContext } from "./test-context";
 
 const EMPLOYEE_EMAIL_CONSTRAINT = "employee_email";
@@ -123,7 +124,12 @@ const multiRootGraph = defineGraph({
 });
 
 function emailKey(email: string): string {
-  return computeUniqueKey({ email }, ["email"], "binary");
+  return computeUniqueKey(
+    { email },
+    ["email"],
+    "binary",
+    STRING_FIELD_KEY_FORMS,
+  );
 }
 
 /**

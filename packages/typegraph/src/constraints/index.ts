@@ -39,6 +39,9 @@ import { type KindRegistry } from "../registry/kind-registry";
 import { compareCodePoints } from "../utils/compare";
 import { hasOwnKey, readOwnProperty } from "../utils/object";
 import { isPresent } from "../utils/presence";
+import { type UniqueKeyForms } from "./unique-key-forms";
+
+export { type UniqueKeyForms, uniqueKeyFormsFor } from "./unique-key-forms";
 
 // ============================================================
 // Uniqueness Validation
@@ -58,23 +61,33 @@ import { isPresent } from "../utils/presence";
  * function — `""` under `binary` (the function stringified and dropped by
  * `JSON.stringify`) and a `TypeError` under `caseInsensitive` — instead of the
  * null marker every other absent value gets.
+ *
+ * THE one owner of a key's bytes, and the bytes do not depend on which form
+ * the props are in: `forms` ({@link uniqueKeyFormsFor}, for the kind whose row
+ * the props belong to) makes a date field key as the JSON text of its ISO
+ * timestamp whether it holds the validated `Date` or the stored text, and
+ * makes an object key in its schema's shape order whether or not the backend
+ * reordered it on the way back. A write keying its validated props and a
+ * release keying the row it reads back therefore name the same claim.
  */
 export function computeUniqueKey(
   props: Record<string, unknown>,
   fields: readonly string[],
   collation: Collation,
+  forms: UniqueKeyForms,
 ): string {
   const values = fields.map((field) => {
     const value = readOwnProperty(props, field);
     if (value === undefined || value === null) {
       return UNIQUE_KEY_NULL_MARKER;
     }
-    // Convert to string, handling primitives safely
+    // A date field's stored text keys as the JSON text a `Date` stringifies
+    // to, which is the form every claim has been written in.
     const stringValue =
-      typeof value === "string" ? value
+      typeof value === "string" && !forms.isDateField(field) ? value
       : typeof value === "number" || typeof value === "boolean" ?
         value.toString()
-      : JSON.stringify(value);
+      : JSON.stringify(forms.inOutputOrder(field, value));
     return uniqueCollationFoldsCase(collation) ?
         stringValue.toLowerCase()
       : stringValue;
@@ -136,9 +149,10 @@ export function checkWherePredicate(
 export function uniqueConstraintKey(
   constraint: UniqueConstraint,
   props: Record<string, unknown>,
+  forms: UniqueKeyForms,
 ): string | undefined {
   return checkWherePredicate(constraint, props) ?
-      computeUniqueKey(props, constraint.fields, constraint.collation)
+      computeUniqueKey(props, constraint.fields, constraint.collation, forms)
     : undefined;
 }
 

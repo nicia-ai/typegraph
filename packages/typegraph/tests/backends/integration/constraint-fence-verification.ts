@@ -38,6 +38,7 @@ import { compositionEdgeCardinalityDeclarations } from "../../../src/store/claim
 import { compareStrings } from "../../../src/utils/compare";
 import { requireDefined } from "../../../src/utils/presence";
 import { encodeTupleKey } from "../../../src/utils/tuple-key";
+import { STRING_FIELD_KEY_FORMS } from "../../string-field-key-forms";
 import { type IntegrationTestContext } from "./test-context";
 
 const STAFF_EMAIL_CONSTRAINT = "verify_staff_email";
@@ -120,7 +121,12 @@ const STAFF_AXIS = uniquenessClaimAxis(
 );
 
 function emailKey(email: string): string {
-  return computeUniqueKey({ email }, ["email"], "binary");
+  return computeUniqueKey(
+    { email },
+    ["email"],
+    "binary",
+    STRING_FIELD_KEY_FORMS,
+  );
 }
 
 const ROW_CONTRACT_EMAIL_CONSTRAINT = "row_contract_email";
@@ -910,7 +916,12 @@ export function registerConstraintFenceVerificationIntegrationTests(
           graphId,
           nodeKind: "RcWhole",
           constraintName: ROW_CONTRACT_EMAIL_CONSTRAINT,
-          key: computeUniqueKey({ email: planted.email }, ["email"], "binary"),
+          key: computeUniqueKey(
+            { email: planted.email },
+            ["email"],
+            "binary",
+            STRING_FIELD_KEY_FORMS,
+          ),
           nodeId: planted.nodeId,
           concreteKind: "RcWhole",
         });
@@ -922,6 +933,7 @@ export function registerConstraintFenceVerificationIntegrationTests(
           { email: "solo@example.com" },
           ["email"],
           "binary",
+          STRING_FIELD_KEY_FORMS,
         ),
         concreteKind: "RcWhole",
         nodeId: "ghost",
