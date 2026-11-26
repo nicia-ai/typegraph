@@ -195,7 +195,11 @@ export const postgresDialect: BuiltinDialectAdapter = {
   },
 
   relevanceCursorKey: {
-    select: (expression) => sql`CAST(${expression} AS TEXT)`,
+    // Float text is exact only at `extra_float_digits` >= 1 (the default):
+    // below it the key renders NULL, which the cursor refuses, rather than a
+    // rounded value that would skip or repeat nearly tied rows.
+    select: (expression) =>
+      sql`CASE WHEN current_setting('extra_float_digits')::integer >= 1 THEN CAST(${expression} AS TEXT) END`,
     // The text a float, real or numeric renders as: anything else would be a
     // database error, not a refused cursor.
     bind: (text) => (POSTGRES_NUMERIC_TEXT.test(text) ? text : undefined),

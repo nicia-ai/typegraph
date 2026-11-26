@@ -11,6 +11,7 @@ import { ConfigurationError, ValidationError } from "../errors";
 import { shortHash } from "../utils/hash";
 import { type FieldRef, type OrderSpec, type QueryAst } from "./ast";
 import { systemColumnSelectedPath } from "./builder/order-by-field";
+import { getNodeKindsForAlias } from "./compiler/predicate-utils";
 import {
   extractFulltextMatchPredicates,
   extractVectorSimilarityPredicates,
@@ -52,7 +53,16 @@ export type CursorData = Readonly<{
  * Encodes cursor data to a URL-safe base64 string.
  */
 export function encodeCursor(data: CursorData): string {
-  const json = JSON.stringify(data);
+  // `btoa` takes Latin-1 only. A character above U+00FF (an id or sort value
+  // in another script) is written as its JSON `\u` escape, which decodes to
+  // the same string; every cursor that encoded before keeps its bytes.
+  // Matched one UTF-16 code unit at a time, so a surrogate pair becomes two
+  // escapes, as JSON spells it.
+  const json = JSON.stringify(data).replaceAll(
+    /[\u0100-\uFFFF]/g,
+    (unit) =>
+      String.raw`\u${(unit.codePointAt(0) ?? 0).toString(16).padStart(4, "0")}`,
+  );
   // Use URL-safe base64: replace + with -, / with _, remove padding
   return btoa(json)
     .replaceAll("+", "-")
@@ -388,7 +398,7 @@ export const SEARCH_CURSOR_MISMATCH = "SEARCH_CURSOR_MISMATCH";
 /**
  * Identifies the search a full-text, vector or hybrid query runs: everything
  * that decides its candidates and their relevance values (each predicate's
- * target, query text or embedding, mode, language, metric, k, minimum score
+ * target alias and the kinds it searches, query text or embedding, mode, language, metric, k, minimum score
  * and approximate retrieval, and the hybrid fusion), on the dialect that scores
  * it. A cursor records it, and a cursor recorded for another search is
  * refused: its relevance values are positions in another ranking, and another
@@ -404,6 +414,7 @@ export function searchCursorFingerprint(
     (predicate) => [
       "fulltext",
       predicate.field.alias,
+      getNodeKindsForAlias(ast, predicate.field.alias),
       predicate.query,
       predicate.mode,
       predicate.language,
@@ -415,6 +426,7 @@ export function searchCursorFingerprint(
     (predicate) => [
       "vector",
       predicate.field.alias,
+      getNodeKindsForAlias(ast, predicate.field.alias),
       predicate.field.path,
       predicate.field.jsonPointer,
       predicate.queryEmbedding,
@@ -466,8 +478,13 @@ export function buildKeysetCursor(
     const value: unknown = relevanceValues.next().value;
     if (relevanceKeyBinding(key.key, value, input.search) === undefined) {
       throw new ConfigurationError(
-        `Cursor pagination cannot position a row whose ${key.key.source} relevance key is ${String(value)}.`,
-        { operation: "paginate" },
+        `Cursor pagination cannot position a row whose ${key.key.source} relevance key is ${String(value)}: ` +
+          "the database returned no exact text for it (on PostgreSQL, extra_float_digits is below 1).",
+        { code: "SEARCH_CURSOR_KEY_UNAVAILABLE", operation: "paginate" },
+        {
+          suggestion:
+            "Keep PostgreSQL's extra_float_digits at its default of 1 or above for the sessions that page searches.",
+        },
       );
     }
     return value;

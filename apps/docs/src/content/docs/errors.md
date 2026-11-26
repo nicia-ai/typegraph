@@ -1895,6 +1895,8 @@ position itself, instead of returning pages that silently lose rows:
 
 | `details.code` | Meaning |
 | --- | --- |
+| `GROUPED_SEARCH_PAGINATION_UNSUPPORTED` | A `ConfigurationError`: the query is a full-text, vector or hybrid search whose rows are groups (`groupByNode()`). A cursor positions match rows, and a group's relevance is an aggregate of its members. Read the groups with `execute()` and an explicit `limit()`, or page the search without `groupByNode()`. |
+| `SEARCH_CURSOR_KEY_UNAVAILABLE` | A `ConfigurationError` raised while issuing a search cursor: the database returned no exact text for a row's relevance key. On PostgreSQL this means the session's `extra_float_digits` is below 1, where float output is rounded; keep it at its default of 1 or above for sessions that page searches. |
 | `RECURSIVE_PAGINATION_UNSUPPORTED` | The query contains a recursive traversal (`recursive()`, `parts()` or `wholes()`). A recursive row has no single edge to extend the start node's keyset cursor with, so the rows of one start node that straddle a page boundary would be dropped. `details.operation` names the refused surface. Read the walk with `execute()` and an explicit `limit()` or `recursive({ maxHops })`, or page the start nodes in a query without the recursive traversal and run the walk for each page. See [Recursive traversals are not paginated](/queries/execute#recursive-traversals-are-not-paginated). |
 
 A cursor that cannot position a full-text, vector or hybrid query is refused with a

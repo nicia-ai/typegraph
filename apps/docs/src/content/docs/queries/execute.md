@@ -281,8 +281,10 @@ The cursor carries the boundary row's relevance values as the database rendered 
 text for the value, SQLite's 17 significant digits), with its `orderBy()` values and its identity,
 and the next page compares against them exactly, so rows with equal or nearly equal scores are not
 skipped or repeated at a page boundary. PostgreSQL's float text is exact at its default
-`extra_float_digits` of 1 or above; a session that lowers it gets cursors that can skip or repeat
-nearly tied rows.
+`extra_float_digits` of 1 or above; in a session that lowers it, issuing a search cursor is refused
+with a `ConfigurationError` whose `details.code` is `SEARCH_CURSOR_KEY_UNAVAILABLE`. A search whose
+rows are groups (`groupByNode()`) cannot be paged and is refused with
+`GROUPED_SEARCH_PAGINATION_UNSUPPORTED`.
 
 The cursor filters the completed match rows after the search has ranked its candidates and taken
 its top `k`, so every page ranks the same candidates `execute()` ranks and no page reaches past the

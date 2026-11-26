@@ -32,6 +32,7 @@ import {
   type SelectiveField,
   type SortDirection,
 } from "../ast";
+import { isAggregatedStatement } from "../compiler/aggregated-statement";
 import {
   compileNameCheckedQuery,
   type CompileQueryOptions,
@@ -1756,8 +1757,25 @@ export class ExecutableQuery<
     });
   }
 
-  /** The order-by refusal of a terminal that pages a query without an order. */
+  /**
+   * The refusals of a terminal that pages this query: a search whose rows
+   * are groups (a cursor positions match rows, and a group's relevance is an
+   * aggregate no row filter can compare), and a query without an order.
+   */
   #requirePaginationOrder(surface: "page" | "paginate" | "stream"): void {
+    if (
+      this.#searchCursorBinding() !== undefined &&
+      isAggregatedStatement(this.toAst())
+    )
+      throw new ConfigurationError(
+        `${surface}() cannot page a full-text, vector or hybrid query whose rows are groups (groupByNode()): ` +
+          "a cursor positions match rows, and a group's relevance is an aggregate of its members.",
+        { code: "GROUPED_SEARCH_PAGINATION_UNSUPPORTED", operation: surface },
+        {
+          suggestion:
+            "Read the groups with execute() and an explicit limit(), or page the search without groupByNode().",
+        },
+      );
     // A search is ordered by relevance whether or not it has an orderBy().
     if (
       this.#state.orderBy.length > 0 ||

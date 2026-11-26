@@ -11,7 +11,7 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { ValidationError } from "../../../src";
+import { ConfigurationError, ValidationError } from "../../../src";
 import type { PaginatedResult } from "../../../src/query/builder/types";
 import {
   SEARCH_CURSOR_MISMATCH,
@@ -503,19 +503,19 @@ export function registerSearchPaginationIntegrationTests(
     it("a fulltext search on a traversal's start alias pages each match row once", async (ctx) => {
       const store = storeWith(context, ctx, "fulltext");
       await seedRanked(store);
+      // Two parallel edges from each article to one author: the two rows of an
+      // article tie on relevance and on the author's name, so only the edge id
+      // the row identity appends tells them apart, and a page of three splits
+      // a pair.
       const alice = await store.nodes.Person.create({ name: "Alice" });
-      const bob = await store.nodes.Person.create({ name: "Bob" });
       for (const [id] of RANKED_ARTICLES) {
-        await store.edges.authoredBy.create(
-          { kind: "Article", id },
-          { kind: "Person", id: alice.id },
-          {},
-        );
-        await store.edges.authoredBy.create(
-          { kind: "Article", id },
-          { kind: "Person", id: bob.id },
-          {},
-        );
+        for (let parallel = 0; parallel < 2; parallel += 1) {
+          await store.edges.authoredBy.create(
+            { kind: "Article", id },
+            { kind: "Person", id: alice.id },
+            {},
+          );
+        }
       }
       const query = () =>
         store
@@ -525,7 +525,7 @@ export function registerSearchPaginationIntegrationTests(
           .traverse("authoredBy", "w")
           .to("Person", "p")
           .orderBy("p", "name", "desc")
-          .select((row) => ({ id: `${row.a.id}:${row.p.name}` }));
+          .select((row) => ({ id: `${row.a.id}:${row.w.id}` }));
       const rows = await query().execute();
       const executed = rows.map((row) => row.id);
       expect(executed).toHaveLength(RANKED_ARTICLES.length * 2);
@@ -541,6 +541,84 @@ export function registerSearchPaginationIntegrationTests(
         cursor = page.nextCursor;
       }
       expect(pages).toEqual(executed);
+    });
+
+    it("pages a search and a plain query whose ids and sort values are outside Latin-1", async (ctx) => {
+      const store = storeWith(context, ctx, "fulltext");
+      for (const [index, id] of ["東京", "😀-doc", "é-doc", "大阪"].entries()) {
+        await store.nodes.Article.create(
+          {
+            title: "climate report",
+            body: "notes",
+            category: `${id}-${index}`,
+            published: true,
+            embedding: embeddingAt(0.1 * index),
+          },
+          { id },
+        );
+      }
+      const supported = SEARCH_KINDS.filter((kind) =>
+        capabilitiesOf(kind).every(
+          (capability) =>
+            store.backend.capabilities[capability]?.supported === true,
+        ),
+      );
+      for (const kind of supported) {
+        const query = () => orderedSearch(store, { kind }, "relevance");
+        expect({
+          kind,
+          forward: await walk(store, query, "paginate", "forward", 1),
+          backward: await walk(store, query, "batchOnce", "backward", 1),
+        }).toEqual({
+          kind,
+          forward: await executedIds(query()),
+          backward: await executedIds(query()),
+        });
+      }
+      const plain = () =>
+        store
+          .query()
+          .from("Article", "a")
+          .orderBy("a", "category", "asc")
+          .select((row) => ({ id: row.a.id }));
+      const plainRows = await plain().execute();
+      const first = await plain().paginate({ first: 2 });
+      const second = await plain().paginate({
+        first: 2,
+        after: requireCursor(first.nextCursor),
+      });
+      expect([...first.data, ...second.data]).toEqual(plainRows);
+    });
+
+    it("refuses to page a search whose rows are groups, with GROUPED_SEARCH_PAGINATION_UNSUPPORTED", async (ctx) => {
+      const store = storeWith(context, ctx, "fulltext");
+      await seedRanked(store);
+      const grouped = () =>
+        store
+          .query()
+          .from("Article", "a")
+          .whereNode("a", (a) => a.$fulltext.matches("climate", 10))
+          .groupByNode("a")
+          .select((row) => ({ id: row.a.id }));
+      const refusals: readonly (() => Promise<unknown>)[] = [
+        () => grouped().paginate({ first: 2 }),
+        () => grouped().page({ first: 2 }).execute(),
+        () => grouped().stream({ batchSize: 2 })[Symbol.asyncIterator]().next(),
+      ];
+      for (const read of refusals) {
+        const error = await Promise.resolve()
+          .then(read)
+          .then(
+            () => "resolved without a refusal",
+            (error_: unknown) => error_,
+          );
+        expect(error).toBeInstanceOf(ConfigurationError);
+        expect((error as ConfigurationError).details).toEqual(
+          expect.objectContaining({
+            code: "GROUPED_SEARCH_PAGINATION_UNSUPPORTED",
+          }),
+        );
+      }
     });
 
     it("refuses a cursor that does not position the search, with SEARCH_CURSOR_MISMATCH", async (ctx) => {

@@ -209,8 +209,9 @@ export interface DialectAdapter {
    * which the cursor then refuses.
    *
    * PostgreSQL's float output is the shortest text that reads back as the same
-   * value (at the default `extra_float_digits` of 1 or above) and `numeric`
-   * text is exact, so the text is bound as it is: an untyped parameter
+   * value at the default `extra_float_digits` of 1 or above (below it the key
+   * renders NULL and the cursor is refused) and `numeric` text is exact, so
+   * the text is bound as it is: an untyped parameter
    * compared with the key takes the key's own type. SQLite renders the REAL
    * with 17 significant digits, which identify every double, and binds the
    * double that text denotes: before SQLite 3.43, which libSQL builds on,

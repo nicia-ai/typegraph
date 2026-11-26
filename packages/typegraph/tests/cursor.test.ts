@@ -9,17 +9,21 @@
  * - Column identifiers for validation
  */
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import { ValidationError } from "../src";
+import { defineGraph, defineNode, searchable, ValidationError } from "../src";
 import { type OrderSpec } from "../src/query/ast";
+import { createQueryBuilder } from "../src/query/builder";
 import {
   buildColumnId,
   buildCursorFromRow,
   decodeCursor,
   encodeCursor,
   extractCursorValue,
+  searchCursorFingerprint,
   validateCursorColumns,
 } from "../src/query/cursor";
+import { buildKindRegistry } from "../src/registry";
 
 describe("Cursor Encoding", () => {
   it("encodes cursor data to URL-safe base64", () => {
@@ -376,5 +380,52 @@ describe("validateCursorColumns", () => {
     expect(() => {
       validateCursorColumns(cursorData, orderSpecs);
     }).toThrow(ValidationError);
+  });
+});
+
+describe("searchCursorFingerprint", () => {
+  const Document = defineNode("Doc", {
+    schema: z.object({ title: searchable({ language: "english" }) }),
+  });
+  const Post = defineNode("Post", {
+    schema: z.object({ title: searchable({ language: "english" }) }),
+  });
+  const graph = defineGraph({
+    id: "fingerprint",
+    nodes: { Doc: { type: Document }, Post: { type: Post } },
+    edges: {},
+  });
+  const search = (kind: "Doc" | "Post", text: string) =>
+    createQueryBuilder<typeof graph>(graph.id, buildKindRegistry(graph))
+      .from(kind, "a")
+      .whereNode("a", (a) => a.$fulltext.matches(text, 10))
+      .select((ctx) => ({ id: ctx.a.id }))
+      .toAst();
+
+  it("tells apart searches over different kinds, texts and dialects", () => {
+    const document = searchCursorFingerprint(search("Doc", "climate"), "sqlite");
+    expect(searchCursorFingerprint(search("Doc", "climate"), "sqlite")).toBe(
+      document,
+    );
+    expect(
+      new Set([
+        document,
+        searchCursorFingerprint(search("Post", "climate"), "sqlite"),
+        searchCursorFingerprint(search("Doc", "report"), "sqlite"),
+        searchCursorFingerprint(search("Doc", "climate"), "postgres"),
+      ]).size,
+    ).toBe(4);
+  });
+});
+
+describe("encodeCursor", () => {
+  it("encodes values outside Latin-1 and decodes them unchanged", () => {
+    const data = {
+      v: 1,
+      d: "f",
+      vals: ["東京", "😀", "é"],
+      cols: ["a", "b", "c"],
+    } as const;
+    expect(decodeCursor(encodeCursor(data))).toEqual(data);
   });
 });
