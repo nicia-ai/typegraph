@@ -837,7 +837,22 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
    * that is already open.
    */
   nativeTransaction?: object | undefined;
+  /**
+   * Whether TypeGraph opened this transaction holding SQLite's writer slot
+   * (`BEGIN IMMEDIATE`). While it is open no other connection can commit, so
+   * a root marker read sees what this transaction sees even when it runs on
+   * a session of its own. Absent for an adopted transaction and for one
+   * opened deferred: such a transaction on a libSQL session of its own can
+   * hold a snapshot older than the root's reads.
+   */
+  beganWithWriterSlot?: boolean | undefined;
 }>;
+
+/** What a runner knows about an owned transaction when it binds it. */
+type OwnedTransactionBinding = Pick<
+  CreateSqliteTransactionBackendOptions,
+  "nativeTransaction" | "beganWithWriterSlot"
+>;
 
 function createSqliteOperationBackend(
   options: CreateSqliteOperationBackendOptions,
@@ -2163,6 +2178,8 @@ export function buildSqliteEngineProfile(
                     lineage: provisioning.lineage,
                     recordedTime: provisioning.recordedTime,
                     isFirstParty,
+                    // BEGIN IMMEDIATE, below.
+                    beganWithWriterSlot: true,
                   }),
                   fn,
                   recordEngineEnd,
@@ -2186,7 +2203,7 @@ export function buildSqliteEngineProfile(
     function bindTransactionBackend(
       tx: AnySqliteDatabase,
       txIsFirstParty: boolean,
-      nativeTransaction?: object,
+      binding: OwnedTransactionBinding = {},
     ): Readonly<{
       backend: TransactionBackend;
       route: TransactionStatementRoute;
@@ -2210,7 +2227,7 @@ export function buildSqliteEngineProfile(
         lineage: provisioning.lineage,
         recordedTime: provisioning.recordedTime,
         isFirstParty: txIsFirstParty,
-        nativeTransaction,
+        ...binding,
       });
       return {
         backend: gateFulltext(
@@ -2234,13 +2251,13 @@ export function buildSqliteEngineProfile(
         backend: TransactionBackend,
         route: TransactionStatementRoute,
       ) => Promise<T>,
-      nativeTransaction?: object,
+      binding: OwnedTransactionBinding = {},
       recordEngineEnd?: RecordEngineEnd,
     ): Promise<T> {
       const { backend, route, drainAndClose } = bindTransactionBackend(
         tx,
         isFirstParty,
-        nativeTransaction,
+        binding,
       );
       return runThenCloseView(
         drainAndClose,
@@ -2393,13 +2410,17 @@ export function buildSqliteEngineProfile(
             runOnOwnedTransaction(
               db,
               (txBackend, route) => fn(txBackend, db, route),
-              nativeTransaction,
+              { nativeTransaction },
             ),
           );
         }
 
         // transactionMode === "drizzle". Read-only work uses a deferred snapshot;
         // business transactions retain BEGIN IMMEDIATE for safe lock upgrades.
+        const behavior =
+          options?.accessMode === "read_only" || temporaryWrites ?
+            "deferred"
+          : "immediate";
         return runWithSerializedQueue(serializedQueue, async () =>
           runDriverOwnedTransaction(
             (recordEngineEnd) =>
@@ -2409,16 +2430,11 @@ export function buildSqliteEngineProfile(
                   return runOnOwnedTransaction(
                     tx,
                     (txBackend, route) => fn(txBackend, tx, route),
-                    undefined,
+                    { beganWithWriterSlot: behavior === "immediate" },
                     recordEngineEnd,
                   );
                 },
-                {
-                  behavior:
-                    options?.accessMode === "read_only" || temporaryWrites ?
-                      "deferred"
-                    : "immediate",
-                },
+                { behavior },
               ) as Promise<T>,
           ),
         );
@@ -2880,13 +2896,14 @@ function runInTransactionView<T>(
 async function runDriverOwnedTransaction<T>(
   open: (recordEngineEnd: RecordEngineEnd) => Promise<T>,
 ): Promise<T> {
-  const recorded: { outcome?: Readonly<{ error: unknown }> } = {};
+  // At most one entry: the attempt's callback layer settles once.
+  const recordedOutcomes: unknown[] = [];
   try {
     return await open((outcome) => {
-      recorded.outcome = { error: outcome };
+      recordedOutcomes.push(outcome);
     });
   } catch (error) {
-    throw recorded.outcome === undefined ? error : recorded.outcome.error;
+    throw recordedOutcomes.length === 0 ? error : recordedOutcomes[0];
   }
 }
 
@@ -2911,13 +2928,16 @@ function createTransactionBackend(
   const txExecutionAdapter = view.adapter;
   // Marker reads are admitted through this transaction's view, and
   // administration is refused. Where the transaction runs on the root's own
-  // connection, its reads share the root materializer's cache: the root
-  // reads what this transaction reads. A transaction on a libSQL session of
-  // its own can hold a snapshot older than the root's reads (a caller's
-  // deferred transaction), so its marker reads run on that session, with a
-  // cache of their own that never outlives it — as PostgreSQL's do.
+  // connection, or that TypeGraph opened holding the writer slot (no other
+  // connection can commit while it is open), its reads share the root
+  // materializer's cache: the root reads what this transaction reads. Any
+  // other transaction on a libSQL session of its own (a caller's adopted
+  // transaction, one opened deferred) can hold a snapshot older than the
+  // root's reads, so its marker reads run on that session, with a cache of
+  // their own that never outlives it — as PostgreSQL's do.
   const txContributionMaterializer = admitContributionReadsThroughView(
-    ownLibsqlSession(options.db) === undefined ?
+    ownLibsqlSession(options.db) === undefined ||
+      options.beganWithWriterSlot === true ?
       options.contributionMaterializer
     : options.contributionMaterializer.bindReadSession(
         createSessionMarkerBatchRead(
