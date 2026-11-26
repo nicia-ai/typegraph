@@ -861,27 +861,29 @@ TypeScript requires both `scope` and `collation`. An untyped caller that omits
 
 A unique key is derived from the value a write validated, and again from the
 stored row whenever the store releases or looks up that row's reservation.
-Both derivations produce the same key. A date property (a schema whose output
-is a `Date`: `z.date()`, `z.coerce.date()`, a pipe ending in one, possibly
-optional or nullable) keys by its timestamp, whether it holds a `Date` or the
-ISO text it is stored as. An object property keys in its schema's declared key
-order, whatever order the backend stores it in (PostgreSQL `jsonb` reorders
-keys).
+For a date property (a schema whose output is a `Date`: `z.date()`,
+`z.coerce.date()`, a pipe ending in one, possibly optional or nullable) both
+derivations produce the same key: the property keys by its timestamp, whether
+it holds a `Date` or the ISO text it is stored as.
 
 Two kinds of value cannot be keyed the same way from the stored row, so avoid
 unique constraints over them. The first is a `Date` held by a property whose
 schema output is not only a date: a union with another member, `z.unknown()`,
 or a `.transform()` that returns a `Date`. Its stored text cannot be told apart
-from a string. The second, on PostgreSQL, is the key order of a `z.record()`
-or of a loose object's undeclared keys.
+from a string. The second, on PostgreSQL, is an object-valued property: `jsonb`
+stores an object's keys in its own order, so the stored row no longer keys as
+the object that was written.
 
-Up to and including 0.76.0, a release keyed a date's
-stored text differently from the `Date` its claim was written from. An update
-that changed a unique date, or a delete, could therefore leave the old value
-reserved. A `UniquenessError`, or a `findByConstraint()` result, that names a
-holder whose current value differs, or a holder that is deleted, identifies
-such a leaked reservation. Update a live holder back onto the value and then
-off it again, or `hardDelete()` a deleted holder, to free it.
+Up to and including 0.76.0, a release keyed a date's stored text differently
+from the `Date` its claim was written from. An update that changed a unique
+date, or a delete, could therefore leave the old value reserved. A
+`UniquenessError`, or a `findByConstraint()` result, that names a holder whose
+current value differs, or a holder that is deleted, identifies such a leaked
+reservation. Update a live holder back onto the value and then off it again, or
+`hardDelete()` a deleted holder, to free it. A row revived through provenance
+in those versions holds its date reservation under a key no later write
+recognizes. Update it off the date and back onto it so that it holds a current
+reservation, or hard-delete it.
 
 ## Type Inference
 

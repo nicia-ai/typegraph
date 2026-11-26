@@ -1,17 +1,18 @@
 /**
- * A uniqueness key does not depend on which form its props are in.
+ * A uniqueness key of a date does not depend on which form its props are in,
+ * and no key changes bytes.
  *
  * For every value a kind accepts, the key derived from the VALIDATED props a
  * write stores equals the key derived from the STORED props a release reads
- * back — the JSON round trip of those props, with every object's keys in an
- * arbitrary order, as a backend that normalizes JSON (PostgreSQL `jsonb`)
- * returns them. And the key of the validated props is byte-for-byte the key
- * every create has always written (`JSON.stringify` for a non-string value,
- * the text itself for a string), so claims a store already holds keep matching.
+ * back (the JSON round trip of those props, key order preserved). And the key
+ * of the validated props is byte-for-byte the key every create has always
+ * written (`JSON.stringify` for a non-string value, the text itself for a
+ * string), so claims a store already holds keep matching — including an object
+ * `.default()`, which validation returns in its literal's key order.
  *
  * MUTATION CHECK: drop the `forms.isDateField` test in `computeUniqueKey` —
- * the stored-form property fails on the first date. Return the value as is
- * from `inOutputOrder` — it fails on the first reordered object.
+ * the stored-form property fails on the first date. Reorder an object's keys
+ * to its shape before keying — the legacy-bytes property fails on the default.
  */
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
@@ -37,6 +38,9 @@ const Sample = defineNode("Sample", {
       at: z.date(),
       inner: z.object({ second: z.number(), first: z.string() }),
     }),
+    defaulted: z
+      .object({ zone: z.string(), at: z.string() })
+      .default({ at: "morning", zone: "north" }),
     slots: z.array(z.object({ zone: z.string(), when: z.date() })),
     dates: z.array(z.date()),
   }),
@@ -58,61 +62,43 @@ const dateArb = fc.date({
   noInvalidDate: true,
 });
 
-const sampleInputArb = fc.record({
-  label: fc.string(),
-  count: fc.oneof(
-    fc.integer(),
-    fc.double({ noNaN: true, noDefaultInfinity: true }),
-  ),
-  flag: fc.boolean(),
-  at: dateArb,
-  maybeAt: fc.option(dateArb, { nil: undefined }),
-  piped: dateArb.map((date) => date.toISOString()),
-  isoText: dateArb.map((date) => date.toISOString()),
-  slot: fc.record({
-    zone: fc.string(),
+const sampleInputArb = fc.record(
+  {
+    label: fc.string(),
+    count: fc.oneof(
+      fc.integer(),
+      fc.double({ noNaN: true, noDefaultInfinity: true }),
+    ),
+    flag: fc.boolean(),
     at: dateArb,
-    inner: fc.record({ second: fc.integer(), first: fc.string() }),
-  }),
-  slots: fc.array(fc.record({ zone: fc.string(), when: dateArb }), {
-    maxLength: 3,
-  }),
-  dates: fc.array(dateArb, { maxLength: 3 }),
-});
-
-/**
- * `value` with every object's keys in the order `rank` gives them: what a
- * backend that normalizes JSON hands back.
- */
-function reorderKeys(
-  value: unknown,
-  rank: (keys: string[]) => string[],
-): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item: unknown) => reorderKeys(item, rank));
-  }
-  if (typeof value === "object" && value !== null) {
-    const record = value as Record<string, unknown>;
-    return Object.fromEntries(
-      rank(Object.keys(record)).map((key) => [
-        key,
-        reorderKeys(record[key], rank),
-      ]),
-    );
-  }
-  return value;
-}
-
-/** PostgreSQL `jsonb`'s key order: shorter keys first, then bytewise. */
-function jsonbOrder(keys: string[]): string[] {
-  return keys.toSorted((left, right) =>
-    left.length === right.length ?
-      left < right ? -1
-      : left > right ? 1
-      : 0
-    : left.length - right.length,
-  );
-}
+    maybeAt: fc.option(dateArb, { nil: undefined }),
+    piped: dateArb.map((date) => date.toISOString()),
+    isoText: dateArb.map((date) => date.toISOString()),
+    slot: fc.record({
+      zone: fc.string(),
+      at: dateArb,
+      inner: fc.record({ second: fc.integer(), first: fc.string() }),
+    }),
+    defaulted: fc.record({ zone: fc.string(), at: fc.string() }),
+    slots: fc.array(fc.record({ zone: fc.string(), when: dateArb }), {
+      maxLength: 3,
+    }),
+    dates: fc.array(dateArb, { maxLength: 3 }),
+  },
+  {
+    requiredKeys: [
+      "label",
+      "count",
+      "flag",
+      "at",
+      "piped",
+      "isoText",
+      "slot",
+      "slots",
+      "dates",
+    ],
+  },
+);
 
 /** The bytes a create wrote for one field before key forms existed. */
 function legacyFieldKey(value: unknown, collation: Collation): string {
@@ -124,42 +110,25 @@ function legacyFieldKey(value: unknown, collation: Collation): string {
 }
 
 describe("uniqueness key forms", () => {
-  it("keys validated props and their stored round trip identically, under any key order", () => {
+  it("keys validated props and their stored round trip identically", () => {
     fc.assert(
-      fc.property(
-        sampleInputArb,
-        fc.constantFrom<"insertion" | "jsonb" | "reversed">(
-          "insertion",
-          "jsonb",
-          "reversed",
-        ),
-        (input, order) => {
-          const validated = Sample.schema.parse(input) as Record<
-            string,
-            unknown
-          >;
-          // The stored form is the JSON text the store writes, read back: a
-          // deep clone would keep the `Date`s this round trip turns into text.
-          const storedText = JSON.stringify(validated);
-          const roundTripped = JSON.parse(storedText) as unknown;
-          const stored = reorderKeys(
-            roundTripped,
-            order === "insertion" ? (keys) => keys
-            : order === "jsonb" ? jsonbOrder
-            : (keys) => keys.toReversed(),
-          ) as Record<string, unknown>;
-          for (const collation of COLLATIONS) {
-            for (const field of FIELDS) {
-              expect(computeUniqueKey(stored, [field], collation, FORMS)).toBe(
-                computeUniqueKey(validated, [field], collation, FORMS),
-              );
-            }
-            expect(computeUniqueKey(stored, FIELDS, collation, FORMS)).toBe(
-              computeUniqueKey(validated, FIELDS, collation, FORMS),
+      fc.property(sampleInputArb, (input) => {
+        const validated = Sample.schema.parse(input) as Record<string, unknown>;
+        // The stored form is the JSON text the store writes, read back: a
+        // deep clone would keep the `Date`s this round trip turns into text.
+        const storedText = JSON.stringify(validated);
+        const stored = JSON.parse(storedText) as Record<string, unknown>;
+        for (const collation of COLLATIONS) {
+          for (const field of FIELDS) {
+            expect(computeUniqueKey(stored, [field], collation, FORMS)).toBe(
+              computeUniqueKey(validated, [field], collation, FORMS),
             );
           }
-        },
-      ),
+          expect(computeUniqueKey(stored, FIELDS, collation, FORMS)).toBe(
+            computeUniqueKey(validated, FIELDS, collation, FORMS),
+          );
+        }
+      }),
       { numRuns: propertyRuns({ ci: 500, local: 500 }) },
     );
   });

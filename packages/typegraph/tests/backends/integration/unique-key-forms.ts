@@ -4,9 +4,8 @@
  *
  * A write keys its claim from the props it validated; a release, an update's
  * before-image and a resolved-claim lookup key from the props they read back.
- * The two forms differ for a date (a `Date` before the write, ISO text after
- * it) and, on a backend whose props column normalizes JSON, for an object (its
- * keys come back reordered). Keyed as they arrived, the release named a claim
+ * The two forms differ for a date: a `Date` before the write, ISO text after
+ * it. Keyed as they arrived, the release named a claim
  * the write never took, so the value the row moved off stayed reserved: a
  * later create of it was refused and a lookup of it answered with a node that
  * no longer holds it.
@@ -17,9 +16,16 @@
  * `verifyConstraintFences` and `validateStore` report nothing.
  *
  * MUTATION CHECK: make `computeUniqueKey` key a date field's text raw again
- * (drop the `forms.isDateField` test) — every date case fails on every lane.
- * Make `inOutputOrder` return the value as is — the object cases fail on the
- * PostgreSQL lanes, whose `jsonb` props column reorders object keys.
+ * (drop the `forms.isDateField` test) — the update, upsert, lookup, import
+ * and piped cases fail on every lane, and the soft-delete cases on the lanes
+ * that release per key. The hard-delete cases and the deleted-owner repair
+ * pass either way (a hard delete removes every claim its node owns); they
+ * guard the paths, not the key.
+ *
+ * The last two cases guard what the key forms must NOT change: an object's
+ * key bytes (an object `.default()` is written in its literal's order, and
+ * claims already stored hold those bytes), and a kind with a recursive
+ * property, whose typing must not be walked to key an unrelated field.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -45,15 +51,27 @@ const UkfPipedEvent = defineNode("UkfPipedEvent", {
   }),
 });
 
-/**
- * An object whose shape order (`zone`, `at`) is not the order PostgreSQL
- * `jsonb` stores it in (shorter keys first: `at`, `zone`), with a date inside.
- */
+/** An object default whose literal order (`at`, `zone`) is not its shape's. */
 const UkfSlot = defineNode("UkfSlot", {
   schema: z.object({
     name: z.string(),
-    slot: z.object({ zone: z.string(), at: z.date() }),
+    slot: z
+      .object({ zone: z.string(), at: z.string() })
+      .default({ at: "morning", zone: "north" }),
   }),
+});
+
+type UkfTreeValue = Readonly<{ label: string; children: UkfTreeValue[] }>;
+const UkfTreeSchema: z.ZodType<UkfTreeValue> = z.object({
+  label: z.string(),
+  get children() {
+    return z.array(UkfTreeSchema);
+  },
+});
+
+/** A kind with a recursive property beside the constrained one. */
+const UkfTree = defineNode("UkfTree", {
+  schema: z.object({ name: z.string(), tree: UkfTreeSchema.optional() }),
 });
 
 function buildGraph(id: string) {
@@ -88,6 +106,17 @@ function buildGraph(id: string) {
           {
             name: "ukf_slot",
             fields: ["slot"],
+            scope: "kind",
+            collation: "binary",
+          },
+        ],
+      },
+      UkfTree: {
+        type: UkfTree,
+        unique: [
+          {
+            name: "ukf_tree_name",
+            fields: ["name"],
             scope: "kind",
             collation: "binary",
           },
@@ -149,7 +178,12 @@ async function expectEventValueHeld(
 
 async function expectNoViolations(store: EventStore): Promise<void> {
   expect(await store.verifyConstraintFences()).toEqual([]);
-  for (const kind of ["UkfEvent", "UkfPipedEvent", "UkfSlot"] as const) {
+  for (const kind of [
+    "UkfEvent",
+    "UkfPipedEvent",
+    "UkfSlot",
+    "UkfTree",
+  ] as const) {
     const page = await store.validateStore({ entity: "node", kind });
     expect(page.violations).toEqual([]);
   }
@@ -419,30 +453,31 @@ export function registerUniqueKeyFormIntegrationTests(
       await expectNoViolations(store);
     });
 
-    it("an object the row moved off is free again, whatever key order the backend stores", async () => {
-      const { store } = await createGraphStore(context);
-      const slotA = { zone: "north", at: A };
-      const slotB = { zone: "north", at: B };
-      const row = await store.nodes.UkfSlot.create({
-        name: "row",
-        slot: slotA,
+    it("an object default keeps the key bytes it has always been claimed under", async () => {
+      const { graphId, store } = await createGraphStore(context);
+      await store.nodes.UkfSlot.create({ name: "first" }, { id: "first" });
+
+      const claim = await store.backend.checkUnique({
+        graphId,
+        nodeKind: "UkfSlot",
+        constraintName: "ukf_slot",
+        key: JSON.stringify({ at: "morning", zone: "north" }),
       });
-
-      await store.nodes.UkfSlot.update(row.id, { slot: slotB });
-      expect(
-        await store.nodes.UkfSlot.findByConstraint("ukf_slot", {
-          name: "probe",
-          slot: slotA,
-        }),
-      ).toBeUndefined();
-      await store.nodes.UkfSlot.create({ name: "taker", slot: slotA });
+      expect(claim?.node_id).toBe("first");
       await expect(
-        store.nodes.UkfSlot.create({ name: "intruder", slot: slotB }),
+        store.nodes.UkfSlot.create({ name: "second" }),
       ).rejects.toBeInstanceOf(UniquenessError);
+    });
 
-      await store.nodes.UkfSlot.delete(row.id);
-      await store.nodes.UkfSlot.create({ name: "second", slot: slotB });
-      await expectNoViolations(store);
+    it("a kind with a recursive property keys its constrained field", async () => {
+      const { store } = await createGraphStore(context);
+      await store.nodes.UkfTree.create({
+        name: "root",
+        tree: { label: "a", children: [{ label: "b", children: [] }] },
+      });
+      await expect(
+        store.nodes.UkfTree.create({ name: "root" }),
+      ).rejects.toBeInstanceOf(UniquenessError);
     });
   });
 }
