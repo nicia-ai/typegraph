@@ -176,7 +176,7 @@ export function reviveStoredDateProps(
  * non-finite number is left for the caller's JSON check to refuse — and
  * `value` itself is returned when it holds no `Date`.
  */
-export function encodeStoredDates(value: unknown): unknown {
+function encodeStoredDates(value: unknown): unknown {
   if (value instanceof Date) return value.toJSON();
   if (Array.isArray(value)) {
     const items = value as readonly unknown[];
