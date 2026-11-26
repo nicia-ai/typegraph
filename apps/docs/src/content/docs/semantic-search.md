@@ -886,7 +886,13 @@ GUC can't, a per-call override can.
 
 **Mechanics and limits.** The override is applied transaction-locally
 (`SET LOCAL hnsw.ef_search`) around the vector `SELECT`, so it never
-leaks to the next query on a pooled connection. Omitting it preserves
+leaks to the next query on a pooled connection. Inside a transaction (a
+`store.transaction()`, an adopted transaction, or a backend over a caller's
+transaction) the search reads each parameter it overrides and restores it
+after the `SELECT`, so the rest of that transaction keeps its own value. The
+read tolerates a parameter the connection has not defined yet — pgvector
+defines its parameters only when its library first loads in a connection —
+and restores such a parameter to its default. Omitting it preserves
 today's behavior exactly — no transaction is opened. It applies to the
 **Postgres HNSW** path only:
 

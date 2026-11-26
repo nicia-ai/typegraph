@@ -3670,6 +3670,14 @@ function createPostgresOperationBackend(
 
   /** One transaction-local GUC override applied around a vector SELECT. */
   type SearchGucOverride = Readonly<{ name: string; value: string }>;
+  /**
+   * A parameter's value before a search overrode it. `previous` is undefined
+   * when the parameter was not defined on the session yet.
+   */
+  type SearchGucSnapshot = Readonly<{
+    name: string;
+    previous: string | undefined;
+  }>;
 
   // `hnsw.iterative_scan` exists on pgvector >= 0.8. The probe + "warn once"
   // state lives on the top-level backend and is SHARED with every
@@ -3768,14 +3776,21 @@ function createPostgresOperationBackend(
       );
     }
     return runExclusive(async (connection) => {
-      const snapshots: SearchGucOverride[] = [];
+      const snapshots: SearchGucSnapshot[] = [];
       for (const override of overrides) {
-        const [setting] = await connection.execute<{ v: string }>(
-          sql`SELECT current_setting(${override.name}) AS v`,
+        // `missing_ok => true`: pgvector defines its parameters only when its
+        // library loads in the backend process, and a session that has not
+        // used a vector value yet has not loaded it. Without the flag the read
+        // raises 42704 and aborts the caller's transaction. With it an
+        // undefined parameter reads as NULL, and the `set_config` below plants
+        // a placeholder that the library adopts when the SELECT loads it.
+        const [setting] = await connection.execute<{ v: unknown }>(
+          sql`SELECT current_setting(${override.name}, true) AS v`,
         );
-        if (setting !== undefined) {
-          snapshots.push({ name: override.name, value: setting.v });
-        }
+        snapshots.push({
+          name: override.name,
+          previous: typeof setting?.v === "string" ? setting.v : undefined,
+        });
         await connection.execute(
           sql`SELECT set_config(${override.name}, ${override.value}, true)`,
         );
@@ -3784,10 +3799,13 @@ function createPostgresOperationBackend(
       // Restore only on success: a failed SELECT aborts the caller's
       // transaction, so its rollback discards the overrides anyway and a
       // restore here would just fail against the aborted tx, masking the
-      // real error.
+      // real error. A parameter that was undefined before the search is
+      // restored with a NULL value, which resets it to its default.
       for (const snapshot of snapshots) {
+        const previous =
+          snapshot.previous === undefined ? sql`NULL` : sql`${snapshot.previous}`;
         await connection.execute(
-          sql`SELECT set_config(${snapshot.name}, ${snapshot.value}, true)`,
+          sql`SELECT set_config(${snapshot.name}, ${previous}, true)`,
         );
       }
       return rows;

@@ -1,0 +1,5 @@
+---
+"@nicia-ai/typegraph": patch
+---
+
+A PostgreSQL vector search inside a transaction no longer fails with `unrecognized configuration parameter "hnsw.ef_search"` (or `"hnsw.iterative_scan"`) and aborts the transaction when the connection has not used a vector value yet. pgvector defines its search parameters only when its library first loads in a connection. A search inside a transaction reads the current value of each parameter it overrides so it can restore it afterwards, and it read them with `current_setting(name)`, which raises for an undefined parameter. The error aborted the transaction the search ran in: `store.search.vector()` and hybrid search on a backend over a caller's transaction, a backend or adopted transaction's `vectorSearch`, and an approximate `similarTo()` query in `store.transaction()`, on node-postgres, postgres-js and a PGlite database reopened from its data directory. Any pooled application whose first vector statement on a new connection was such a search hit it. The read now tolerates an undefined parameter, and the restore resets that parameter to its default, so the override still ends with the search.

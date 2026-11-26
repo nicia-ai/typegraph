@@ -10,6 +10,7 @@ import type {
   LiveStoreOptions,
 } from "../../../src/store/types";
 import type { HistoryStoreBackend } from "../../../src/store-entry";
+import type { ReopenableStorage } from "../../helpers/reopenable-storage";
 import type {
   TracedConnection,
   TracedTableNames,
@@ -179,4 +180,12 @@ export type IntegrationTestContext = Readonly<{
   openTracedConnection: (
     tableNameSets: readonly TracedTableNames[],
   ) => Promise<TracedConnection>;
+  /**
+   * Opens storage of this lane's driver that a test can reach again through a
+   * NEW session, one that has executed nothing
+   * (`tests/helpers/reopenable-storage.ts`). Provisioning and seeding go
+   * through the first session. Use it for engine state that belongs to the
+   * session rather than the data. Closing it is the caller's responsibility.
+   */
+  openReopenableStorage: () => Promise<ReopenableStorage>;
 }>;

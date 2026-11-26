@@ -17,6 +17,7 @@ import { createPostgresTables } from "../../../src/backend/drizzle/schema/postgr
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { createPgliteFixturePool } from "../../graph-merge/pglite-fixture-pool";
+import { openReopenablePgliteStorage } from "../../helpers/reopenable-storage";
 import { openTracedPgliteConnection } from "../../helpers/traced-connection";
 import type { IntegrationSuiteSlice } from "../integration-registrations";
 import { createIntegrationTestSuite } from "../integration-test-suite";
@@ -95,6 +96,7 @@ export function registerPgliteIntegrationLane(
       slice: params.slice,
       driver: "pglite",
       openTracedConnection: openTracedPgliteConnection,
+      openReopenableStorage: openReopenablePgliteStorage,
       // Branches and review targets need independent transactions. Reuse an
       // engine only after its fixture schema has been dropped at test cleanup.
       createIsolatedBackend: () => isolatedPool.makeFixture(),
