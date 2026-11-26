@@ -989,6 +989,13 @@ adopt a caller-owned transaction:
   transaction instead. Operation hooks in these callbacks
   run as each write completes, before the native commit, so treat an
   `onOperationEnd` there as provisional until that commit succeeds.
+- **Two recorded adoptions of one better-sqlite3 transaction cannot write at
+  once.** A transaction you begin yourself on a better-sqlite3 connection is
+  identified only by that connection, so each `withRecordedTransaction`
+  adoption of it captures recorded time on its own. Two adoptions writing at
+  the same time allocate the same recorded revision, and the second fails with
+  the driver's `UNIQUE constraint failed: typegraph_recorded_anchors…` error.
+  Run the adoptions one after another, or roll back after that failure.
 - **Reconstruction cost.** Recorded reads rebuild from the history relations and
   are slower than live reads, most noticeably for full-graph subgraph /
   algorithm reconstructions on PostgreSQL.

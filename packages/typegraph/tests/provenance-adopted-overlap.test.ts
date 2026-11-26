@@ -22,7 +22,8 @@
  * The second adoption still rejects: its recorded-time capture allocates the
  * same revision as the first's on the one transaction, and its flush fails
  * on `typegraph_recorded_anchors`. That is a hazard of two history captures
- * on one transaction, not of the verbs, and an adopted caller rolls back
+ * on one transaction, not of the verbs (pinned as a known defect in
+ * `recorded-adoption-revision-collision.test.ts`), and an adopted caller rolls back
  * after a rejected callback. The rows are checked after the caller commits
  * anyway, the worst case: what a caller that ignores the rejection keeps.
  */
