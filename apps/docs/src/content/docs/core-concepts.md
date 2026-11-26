@@ -108,6 +108,29 @@ when you read it. Planning a [graph merge](/graph-merge) from staged
 operations already refuses a schema whose output does not survive a second
 parse.
 
+#### Date properties
+
+Properties are stored as JSON, so a `z.date()` property's `Date` is stored as
+its canonical ISO-8601 text (`2024-01-01T00:00:00.000Z`), and a read returns
+that text, not a `Date`, even though the property is typed `Date`. Convert it
+with `new Date(value)` where you need a `Date`.
+
+A write that parses stored properties again first turns that stored text back
+into a `Date`, so an update that does not touch a date property leaves it as
+it was. This covers `update()`, `upsertById()`, `getOrCreateByConstraint()` and
+`getOrCreateByEndpoints()` with `ifExists: "update"`, their bulk forms,
+`updateWhere()`, `compareAndSet()`, an edge `update()` that only states
+`validTo`, and `validateStore()`, which does not report a stored date as a
+violation. Text is turned back into a `Date` only where the schema accepts
+nothing but a `Date` — a `z.date()`, possibly inside `.optional()`,
+`.nullable()`, `.default()`, `.catch()` and similar wrappers, a nested
+`z.object()` or a `z.array()` — and only when it is exactly the text the store
+writes. A date under a union, a record, a tuple, a `.transform()` or an
+`.overwrite()` is parsed as stored. A value you pass yourself is never converted: state a date
+property as a `Date`. The `getOrCreate…` forms parse the properties you state
+as a create first, so a property you omit that declares a `.default()` or
+`.catch()` takes that value rather than the stored one.
+
 ### Node Operations
 
 ```typescript

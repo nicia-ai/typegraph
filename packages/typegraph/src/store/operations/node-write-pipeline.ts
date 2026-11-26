@@ -85,6 +85,7 @@ import {
 } from "../fulltext-sync";
 import type { OperationEntry, StatementBackend } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
+import { reviveStoredDateProps } from "../stored-date-revival";
 import { type NodeDeletePlan } from "../types";
 import { hardDeleteEdgeRows, softDeleteEdgeRows } from "./edge-write-pipeline";
 
@@ -1190,11 +1191,15 @@ export async function applyNodeSetUpdate(
 
   const sidecarItems = result.rows.map((row) => {
     const props = rowPropsToObject(row.props);
-    const validatedProps = validateNodeProps(schema, props, {
-      kind,
-      operation: "update",
-      id: row.id,
-    });
+    const validatedProps = validateNodeProps(
+      schema,
+      reviveStoredDateProps(schema, props),
+      {
+        kind,
+        operation: "update",
+        id: row.id,
+      },
+    );
     if (!canonicalEqual(validatedProps, props)) {
       throw new ValidationError(
         `Set update would persist a non-canonical ${kind} row`,

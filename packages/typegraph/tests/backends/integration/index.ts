@@ -139,6 +139,7 @@ export { registerSqlIdentifierIdentityIntegrationTests } from "./sql-identifier-
 export { registerStoreAnalysisIntegrationTests } from "./store-analysis";
 export { registerStoreOperationIntegrationTests } from "./store-operation";
 export { registerStoreViewIntegrationTests } from "./store-view";
+export { registerStoredDateRevalidationIntegrationTests } from "./stored-date-revalidation";
 export { registerSubgraphIntegrationTests } from "./subgraph";
 export { registerSubgraphSharedIdIntegrationTests } from "./subgraph-shared-ids";
 export { registerTemporalIntegrationTests } from "./temporal";
