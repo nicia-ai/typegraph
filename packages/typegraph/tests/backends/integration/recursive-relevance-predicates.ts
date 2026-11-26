@@ -61,6 +61,14 @@ function expectRecursiveRelevanceRefusal(
   });
 }
 
+function expectRecursiveFusionRefusal(error: unknown): void {
+  expect(error).toBeInstanceOf(UnsupportedPredicateError);
+  expect((error as UnsupportedPredicateError).details).toEqual({
+    option: "fuseWith",
+    reason: "recursive_traversal",
+  });
+}
+
 async function captureRejection(run: () => unknown): Promise<unknown> {
   try {
     await run();
@@ -82,6 +90,10 @@ export function registerRecursiveRelevancePredicateIntegrationTests(
 
     function skipUnlessFulltext(ctx: { skip: () => void }): void {
       if (store.backend.capabilities.fulltext?.supported !== true) ctx.skip();
+    }
+
+    function skipUnlessVector(ctx: { skip: () => void }): void {
+      if (store.backend.capabilities.vector?.supported !== true) ctx.skip();
     }
 
     function articlesByAuthor(
@@ -238,7 +250,7 @@ export function registerRecursiveRelevancePredicateIntegrationTests(
     });
 
     it("refuses similarTo() on the target of a multi-hop recursive traversal", async (ctx) => {
-      if (store.backend.capabilities.vector?.supported !== true) ctx.skip();
+      skipUnlessVector(ctx);
       const { authorId } = await seedAuthorWithArticles(store);
       const query = articlesByAuthor(authorId, { maxHops: 3 })
         .whereNode("article", (article) =>
@@ -250,6 +262,111 @@ export function registerRecursiveRelevancePredicateIntegrationTests(
         await captureRejection(() => query.execute()),
         "vector_similarity",
         "article",
+      );
+    });
+
+    it("filters a fixed stage chained before a recursive stage to its top-k set and orders rows by orderBy() alone", async (ctx) => {
+      skipUnlessVector(ctx);
+      const author = await store.nodes.Person.create({ name: "Author" });
+      // Created nearest first, so the stored order is the relevance order;
+      // the titles sort in the reverse of that order.
+      const candidates = [
+        ["Zebra notes", [1, 0, 0, 0]],
+        ["Apple notes", [0.8, 0.6, 0, 0]],
+        ["Mango notes", [0, 0, 0, 1]],
+      ] as const;
+      for (const [title, vector] of candidates) {
+        const article = await store.nodes.Article.create({
+          title,
+          body: "ordinary corpus text",
+          category: "recursive-relevance",
+          published: true,
+          embedding: [...vector],
+        });
+        await store.edges.authoredBy.create(article, author, {});
+      }
+      const query = store
+        .query()
+        .from("Article", "article")
+        .whereNode("article", (article) =>
+          article.embedding.similarTo([1, 0, 0, 0], 2),
+        )
+        .traverse("authoredBy", "e")
+        .to("Person", "author")
+        .traverse("knows", "k", { direction: "in" })
+        .recursive({ minHops: 0, maxHops: 2 })
+        .to("Person", "reader")
+        .orderBy("article", "title", "asc")
+        .select((select) => ({ title: select.article.title }));
+
+      expect(await query.execute()).toEqual([
+        { title: "Apple notes" },
+        { title: "Zebra notes" },
+      ]);
+      expect(await query.first()).toEqual({ title: "Apple notes" });
+    });
+
+    it("refuses fuseWith() on a chain whose hybrid predicates sit on a fixed stage after a recursive one", async (ctx) => {
+      skipUnlessFulltext(ctx);
+      skipUnlessVector(ctx);
+      const { authorId } = await seedAuthorWithArticles(store);
+      const query = store
+        .query()
+        .from("Person", "reader")
+        .traverse("knows", "k")
+        .recursive({ minHops: 0, maxHops: 2 })
+        .to("Person", "author")
+        .whereNode("author", (author) => author.id.eq(authorId))
+        .traverse("authoredBy", "e", { direction: "in" })
+        .to("Article", "article")
+        .whereNode("article", (article) =>
+          article.embedding.similarTo([1, 0, 0, 0], 10),
+        )
+        .whereNode("article", (article) =>
+          article.$fulltext.matches("climate", 10),
+        )
+        .fuseWith({ k: 10, weights: { vector: 2, fulltext: 1 } })
+        .select((select) => ({ id: select.article.id }));
+
+      for (const terminal of [() => query.toSQL(), () => query.execute()]) {
+        expectRecursiveFusionRefusal(await captureRejection(terminal));
+      }
+    });
+
+    it("refuses fuseWith() on a chain whose hybrid predicates sit on its fixed first stage", async (ctx) => {
+      skipUnlessFulltext(ctx);
+      skipUnlessVector(ctx);
+      await seedAuthorWithArticles(store);
+      const query = store
+        .query()
+        .from("Article", "article")
+        .whereNode("article", (article) =>
+          article.embedding.similarTo([1, 0, 0, 0], 10),
+        )
+        .whereNode("article", (article) =>
+          article.$fulltext.matches("climate", 10),
+        )
+        .traverse("authoredBy", "e")
+        .to("Person", "author")
+        .traverse("knows", "k", { direction: "in" })
+        .recursive({ minHops: 0, maxHops: 2 })
+        .to("Person", "reader")
+        .fuseWith({ k: 10 })
+        .select((select) => ({ id: select.article.id }));
+
+      expectRecursiveFusionRefusal(
+        await captureRejection(() => query.execute()),
+      );
+    });
+
+    it("refuses fuseWith() on a lone recursive traversal", async () => {
+      const { authorId } = await seedAuthorWithArticles(store);
+      const query = articlesByAuthor(authorId, { maxHops: 3 })
+        .fuseWith({ k: 10 })
+        .select((select) => ({ id: select.article.id }));
+
+      expectRecursiveFusionRefusal(
+        await captureRejection(() => query.execute()),
       );
     });
 
