@@ -403,7 +403,10 @@ describe("searchCursorFingerprint", () => {
       .toAst();
 
   it("tells apart searches over different kinds, texts and dialects", () => {
-    const document = searchCursorFingerprint(search("Doc", "climate"), "sqlite");
+    const document = searchCursorFingerprint(
+      search("Doc", "climate"),
+      "sqlite",
+    );
     expect(searchCursorFingerprint(search("Doc", "climate"), "sqlite")).toBe(
       document,
     );
