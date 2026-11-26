@@ -6145,7 +6145,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         options.preserveContributionMaterializations,
       );
       if (this.#revisionTrackingEnabled) {
-        await lockRecordedGraphWrite(target, this.graphId);
+        // On the base backend, outside capture: no memo.
+        await lockRecordedGraphWrite(target, this.graphId, undefined);
       }
       if (this.#graph.identity !== undefined) {
         await lockIdentityGraph(target, this.graphId);

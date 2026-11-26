@@ -372,7 +372,7 @@ function keyedRecordedGraphFence(
 export async function lockRecordedGraphWrite(
   target: GraphWriteFenceTarget,
   graphId: string,
-  memo?: RecordedGraphLockMemo,
+  memo: RecordedGraphLockMemo | undefined,
 ): Promise<GraphWriteLock> {
   const fence = keyedRecordedGraphFence(target, "recorded graph write");
   if (fence === undefined) return uncapturedGraphWriteLock();

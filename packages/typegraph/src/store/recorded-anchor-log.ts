@@ -289,7 +289,9 @@ export async function pruneRecordedAnchors(
           openTransactionSession(transaction),
         ).backend;
         // The same transaction-scoped graph fence used by writers, clear, and owner rotation.
-        await lockRecordedGraphWrite(target, graphId);
+        // The session this unit opened itself: no capture scope is bound to
+        // it, so it has no memo.
+        await lockRecordedGraphWrite(target, graphId, undefined);
         const row = await readRecordedAnchorSnapshot(
           target,
           schema,

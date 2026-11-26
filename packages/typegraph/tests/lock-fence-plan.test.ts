@@ -242,7 +242,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     try {
       logged.reset();
       await expect(
-        lockRecordedGraphWrite(logged.backend, "graph-a"),
+        lockRecordedGraphWrite(logged.backend, "graph-a", undefined),
       ).resolves.toBeDefined();
       expect(
         advisoryLockIndices(
@@ -260,7 +260,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     try {
       logged.reset();
       await expect(
-        lockRecordedGraphWrite(logged.backend, "graph-a"),
+        lockRecordedGraphWrite(logged.backend, "graph-a", undefined),
       ).resolves.toBeDefined();
       expect(
         advisoryLockIndices(
@@ -280,7 +280,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     try {
       logged.reset();
       await expect(
-        lockRecordedGraphWrite(logged.backend, "graph-a"),
+        lockRecordedGraphWrite(logged.backend, "graph-a", undefined),
       ).resolves.toBeDefined();
       expect(
         advisoryLockIndices(
@@ -300,7 +300,9 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
         logged.backend.capabilities;
       const target = overlayCapabilities(logged.backend, undeclared);
       logged.reset();
-      await expect(lockRecordedGraphWrite(target, "graph-a")).rejects.toThrow(
+      await expect(
+        lockRecordedGraphWrite(target, "graph-a", undefined),
+      ).rejects.toThrow(
         expect.objectContaining({
           details: expect.objectContaining({
             code: "WRITE_FENCE_UNAVAILABLE",
@@ -325,7 +327,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     try {
       logged.reset();
       await expect(
-        lockRecordedGraphWrite(logged.backend, "graph-a"),
+        lockRecordedGraphWrite(logged.backend, "graph-a", undefined),
       ).resolves.toBeDefined();
       expect(
         advisoryLockIndices(
@@ -345,7 +347,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     try {
       logged.reset();
       await expect(
-        lockRecordedGraphWrite(logged.backend, "graph-a"),
+        lockRecordedGraphWrite(logged.backend, "graph-a", undefined),
       ).resolves.toBeDefined();
       expect(
         rowFenceAcquireIndices(
@@ -372,7 +374,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     try {
       logged.reset();
       await expect(
-        lockRecordedGraphWrite(logged.backend, "graph-a"),
+        lockRecordedGraphWrite(logged.backend, "graph-a", undefined),
       ).resolves.toBeDefined();
       expect(
         advisoryLockIndices(

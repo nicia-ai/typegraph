@@ -714,7 +714,9 @@ export function identitySchemaCommitPreflight<G extends GraphDef>(
       ctx.graphId,
       options.provisionDerivedRelations ?? [],
     );
-    await lockRecordedGraphWrite(target, ctx.graphId);
+    // Taken before this step binds its capture scope, and on the transaction
+    // itself: no memo of this session covers it yet.
+    await lockRecordedGraphWrite(target, ctx.graphId, undefined);
     await lockIdentityGraph(target, ctx.graphId);
     const captureScope = await bindSchemaCommitCapture(
       operation,
@@ -867,7 +869,9 @@ export function identityKindCascadePreflight(
     operation: Operation<Engine>,
   ) => {
     const target: OperationBackend = operation.backend;
-    await lockRecordedGraphWrite(target, ctx.graphId);
+    // Taken before this step binds its capture scope, and on the transaction
+    // itself: no memo of this session covers it yet.
+    await lockRecordedGraphWrite(target, ctx.graphId, undefined);
     await lockIdentityGraph(target, ctx.graphId);
     const captureScope = await bindSchemaCommitCapture(
       operation,
