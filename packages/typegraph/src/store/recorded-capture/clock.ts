@@ -29,7 +29,11 @@ import {
   RECORDED_MAX_REVISION,
   type RecordedInstant,
 } from "../../core/temporal";
-import { ConfigurationError, TransactionConflictError } from "../../errors";
+import {
+  CompilerInvariantError,
+  ConfigurationError,
+  TransactionConflictError,
+} from "../../errors";
 import {
   recordedAnchorsTable,
   type SqlSchema,
@@ -411,6 +415,33 @@ function advancedFenceRow(
 }
 
 /**
+ * The single-flight memo a lock-only decision reads and updates: the memo of
+ * the caller's session when it names one, otherwise the one `held` was taken
+ * into. A lock carries the memo of the session that took it, so a held lock
+ * and a session memo that disagree are a lock from one session handed to a
+ * decision of another; that is refused, before any statement, rather than
+ * resolved in favour of either.
+ */
+function decisionGraphLockMemo(
+  graphId: string,
+  held: GraphWriteLock | undefined,
+  sessionGraphLocks: RecordedGraphLockMemo | undefined,
+): RecordedGraphLockMemo | undefined {
+  const heldGraphLocks = held?.graphLocks;
+  if (
+    heldGraphLocks !== undefined &&
+    sessionGraphLocks !== undefined &&
+    heldGraphLocks !== sessionGraphLocks
+  ) {
+    throw new CompilerInvariantError(
+      "A graph write lock taken in one transaction session cannot serve a lock-only decision of another session.",
+      { graphId },
+    );
+  }
+  return sessionGraphLocks ?? heldGraphLocks;
+}
+
+/**
  * The per-graph write fence of a holder about to make a LOCK-ONLY DECISION —
  * an edge-acyclicity probe, a composition whole's parts closure, a match-key
  * convergence: the keyed exclusion AND the advance of the graph's fence row.
@@ -440,9 +471,10 @@ export async function lockRecordedGraphDecision(
   graphId: string,
   held?: GraphWriteLock,
   // The memo of the caller's session; defaults to the one `held` was taken
-  // into.
+  // into, and must be that one when both are present.
   sessionGraphLocks?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
+  const memo = decisionGraphLockMemo(graphId, held, sessionGraphLocks);
   // Decided before the plan is resolved: evidence with no coordination is a
   // frame that holds no keyed fence, whatever its target could take.
   if (held !== undefined && held.coordination === undefined) return held;
@@ -451,7 +483,6 @@ export async function lockRecordedGraphDecision(
   if (held !== undefined && advancedFenceRow(target, graphId, held)) {
     return held;
   }
-  const memo = sessionGraphLocks ?? held?.graphLocks;
   const memoized = memo?.get(graphId);
   if (memoized !== undefined) {
     const lock = acquiredGraphWriteLock(target, graphId, await memoized, memo);

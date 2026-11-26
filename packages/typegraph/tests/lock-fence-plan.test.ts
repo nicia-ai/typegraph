@@ -83,6 +83,7 @@ import type {
   BackendCapabilities,
   TransactionBackend,
 } from "../src/backend/types";
+import { CompilerInvariantError } from "../src/errors";
 import { openProvenanceStore } from "../src/graph-merge";
 import { ensureIdentitySchemaStorage } from "../src/identity/schema-transition";
 import { rebuildIdentityClosureForContext } from "../src/identity/service";
@@ -105,6 +106,8 @@ import {
 } from "../src/store/operation-scope";
 import {
   allocateRecordedCommit,
+  createRecordedGraphLockMemo,
+  lockRecordedGraphDecision,
   lockRecordedGraphWrite,
 } from "../src/store/recorded-capture/clock";
 import { STORE_RUNTIME } from "../src/store/runtime-port";
@@ -413,6 +416,47 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
         }),
       );
       expect(logged.statements).toHaveLength(0);
+    } finally {
+      await logged.close();
+    }
+  });
+});
+
+describe("T15 — J1 a lock-only decision reads the memo of the session its lock was taken in", () => {
+  it("updates the memo the held lock carries, and refuses a held lock paired with another session's memo before any statement", async () => {
+    const logged = await createLoggedPostgresBackend();
+    try {
+      await logged.backend.transaction(async (target) => {
+        // Two sessions' single-flight memos over one transaction, as two
+        // capture scopes bind them.
+        const sessionMemo = createRecordedGraphLockMemo();
+        const otherSessionMemo = createRecordedGraphLockMemo();
+        const held = await lockRecordedGraphWrite(
+          target,
+          "graph-a",
+          sessionMemo,
+        );
+        expect(held.graphLocks).toBe(sessionMemo);
+
+        // With no session memo named, the decision reads and updates the one
+        // the held lock was taken into, and the other session's stays empty.
+        const before = sessionMemo.get("graph-a");
+        const decided = await lockRecordedGraphDecision(
+          target,
+          "graph-a",
+          held,
+        );
+        expect(decided.graphLocks).toBe(sessionMemo);
+        expect(sessionMemo.get("graph-a")).not.toBe(before);
+        expect(otherSessionMemo.size).toBe(0);
+
+        logged.reset();
+        await expect(
+          lockRecordedGraphDecision(target, "graph-a", held, otherSessionMemo),
+        ).rejects.toBeInstanceOf(CompilerInvariantError);
+        expect(logged.statements).toHaveLength(0);
+        expect(otherSessionMemo.size).toBe(0);
+      });
     } finally {
       await logged.close();
     }
