@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
-import { sql } from "drizzle-orm";
-import { afterEach, describe, expect, it } from "vitest";
+import { type SQL, sql } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createSqliteBackend } from "../../src/backend/drizzle/sqlite";
 import { createPostgresBackend } from "../../src/backend/postgres";
@@ -10,11 +11,60 @@ import type { GraphBackend } from "../../src/backend/types";
 import { ConfigurationError, SchemaFenceTimeoutError } from "../../src/errors";
 import { requireDefined } from "../../src/utils/presence";
 
+type StatementRunner = (
+  statement: string,
+  run: () => Promise<unknown>,
+) => Promise<unknown>;
+
 /**
- * Rolls back an attempt that did not reach the schema-row phase inside the
- * one-millisecond budget: it was adopted, or refused before any acquisition.
+ * Routes every `execute` on `nativeTx` through `intercept` with the
+ * statement's SQL text. The object itself is patched, not wrapped, so the
+ * transaction the fence is handed keeps its identity.
  */
-class RetriedAttempt extends Error {}
+function interceptStatements(
+  nativeTx: Readonly<{ execute: (query: SQL) => Promise<unknown> }>,
+  intercept: StatementRunner,
+): void {
+  const execute = nativeTx.execute.bind(nativeTx);
+  const dialect = new PgDialect();
+  Object.defineProperty(nativeTx, "execute", {
+    configurable: true,
+    value: (query: SQL) =>
+      intercept(dialect.sqlToQuery(query).sql, () => execute(query)),
+  });
+}
+
+/** The reason `promise` rejects with; `undefined` when it fulfills. */
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
+/**
+ * Replaces `performance.now()` with a clock that moves only when the test
+ * advances it.
+ */
+function controlledClock(): Readonly<{
+  advance: (milliseconds: number) => void;
+  restore: () => void;
+}> {
+  // An integral start keeps `deadline - now` exact: from a fractional real
+  // reading, `(t + 1000) - t` can floor to 999ms.
+  let now = 0;
+  const spy = vi.spyOn(performance, "now").mockImplementation(() => now);
+  return {
+    advance: (milliseconds) => {
+      now += milliseconds;
+    },
+    restore: () => {
+      spy.mockRestore();
+    },
+  };
+}
 
 const openedBackends: GraphBackend[] = [];
 
@@ -88,44 +138,85 @@ describe("schema-write transaction adoption", () => {
     openedBackends.push(backend);
     const adopt = requireDefined(backend.adoptSchemaWriteTransaction);
 
-    // A one-millisecond budget runs out between the fence's acquisitions, so
-    // the refusal comes from TypeGraph's own deadline check, and the caller's
-    // transaction stays usable. Only a refusal in the `schema-row` phase
-    // proves the advisory acquisition before it shortened lock_timeout; an
-    // attempt refused before that, or one that fits in the budget, is rolled
-    // back and retried.
-    const refusals: Readonly<{ error: unknown; setting: unknown }>[] = [];
-    for (let attempt = 0; attempt < 20 && refusals.length === 0; attempt++) {
-      const observed = await db
-        .transaction(async (nativeTx) => {
-          await nativeTx.execute(
-            sql`SELECT set_config('lock_timeout', '7s', true)`,
-          );
-          try {
-            await adopt(nativeTx, "adoption_budget", { waitBudgetMs: 1 });
-          } catch (error) {
-            if (
-              error instanceof SchemaFenceTimeoutError &&
-              error.details.phase !== "schema-row"
-            ) {
-              throw new RetriedAttempt();
-            }
+    // A controlled clock that stands still until the advisory acquisition
+    // returns and then jumps past the budget: the fence has shortened
+    // lock_timeout for that acquisition, and its deadline check before the
+    // schema-row acquisition refuses. The caller's transaction stays usable.
+    const clock = controlledClock();
+    try {
+      const observed = await db.transaction(async (nativeTx) => {
+        await nativeTx.execute(
+          sql`SELECT set_config('lock_timeout', '7s', true)`,
+        );
+        const settingsDuringAdvisory: unknown[] = [];
+        interceptStatements(nativeTx, async (statement, run) => {
+          const result = await run();
+          if (statement.includes("pg_advisory_xact_lock")) {
             const rows = await nativeTx.execute(
               sql`SELECT current_setting('lock_timeout') AS setting`,
             );
-            return { error, setting: rows.rows[0] };
+            settingsDuringAdvisory.push(rows.rows[0]);
+            clock.advance(60_000);
           }
-          throw new RetriedAttempt();
-        })
-        .catch((error: unknown) => {
-          if (error instanceof RetriedAttempt) return;
-          throw error;
+          return result;
         });
-      if (observed !== undefined) refusals.push(observed);
+        const error = await rejectionOf(
+          adopt(nativeTx, "adoption_budget", { waitBudgetMs: 1000 }),
+        );
+        const rows = await nativeTx.execute(
+          sql`SELECT current_setting('lock_timeout') AS setting`,
+        );
+        return { error, settingsDuringAdvisory, setting: rows.rows[0] };
+      });
+      expect(observed.error).toBeInstanceOf(SchemaFenceTimeoutError);
+      expect((observed.error as SchemaFenceTimeoutError).details.phase).toBe(
+        "schema-row",
+      );
+      expect(observed.settingsDuringAdvisory).toEqual([{ setting: "1s" }]);
+      expect(observed.setting).toEqual({ setting: "7s" });
+    } finally {
+      clock.restore();
     }
-    expect(refusals).toHaveLength(1);
-    expect(refusals[0]?.error).toBeInstanceOf(SchemaFenceTimeoutError);
-    expect(refusals[0]?.setting).toEqual({ setting: "7s" });
+  });
+
+  it("preserves a driver failure during the advisory acquisition and issues no restore", async () => {
+    const { backend, db } = await createLocalPgliteBackend({ vector: false });
+    openedBackends.push(backend);
+    const adopt = requireDefined(backend.adoptSchemaWriteTransaction);
+
+    // A client-side query timeout rejects without an SQLSTATE while the
+    // statement may still run on the server; the fence must not send a
+    // restore after it, and must report the driver's own error.
+    const driverTimeout = new Error("Query read timeout");
+    const statementsAfterFailure: string[] = [];
+    let observed: unknown;
+    await db
+      .transaction(async (nativeTx) => {
+        await nativeTx.execute(
+          sql`SELECT set_config('lock_timeout', '7s', true)`,
+        );
+        let failed = false;
+        interceptStatements(nativeTx, async (statement, run) => {
+          if (failed) statementsAfterFailure.push(statement);
+          if (statement.includes("pg_advisory_xact_lock")) {
+            failed = true;
+            throw driverTimeout;
+          }
+          return run();
+        });
+        observed = await rejectionOf(
+          adopt(nativeTx, "adoption_driver_timeout", { waitBudgetMs: 1000 }),
+        );
+        // Stop recording, then roll the probe transaction back.
+        failed = false;
+        throw observed;
+      })
+      .catch((error: unknown) => {
+        if (error !== observed) throw error;
+      });
+
+    expect(observed).toBe(driverTimeout);
+    expect(statementsAfterFailure).toEqual([]);
   });
 
   it("exposes transactional policy only when adapters opt in", async () => {
