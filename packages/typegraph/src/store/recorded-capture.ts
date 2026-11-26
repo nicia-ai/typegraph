@@ -692,12 +692,29 @@ function isRecordedSessionBinding(
  * The recorded-capture binding of the session `entry` belongs to: the capture
  * scope or engine-native mutation witness bound to it, or `undefined` for the
  * root backend and for a session nothing bound.
+ *
+ * Only {@link bindRecordedSession} writes the slot, so it holds a binding of
+ * this module or nothing. Anything else in it is refused rather than read as
+ * "not bound", which would silently skip capture for every write of the
+ * session.
  */
 function recordedSessionBinding(
   entry: OperationEntry,
 ): RecordedSessionBinding | undefined {
-  const binding = operationEntrySession(entry)?.recorded.binding;
-  return isRecordedSessionBinding(binding) ? binding : undefined;
+  const session = operationEntrySession(entry);
+  return session === undefined ? undefined : boundRecordedSession(session);
+}
+
+/** {@link recordedSessionBinding}, for a session the caller holds. */
+function boundRecordedSession(
+  session: TransactionSession,
+): RecordedSessionBinding | undefined {
+  const binding = session.recorded.binding;
+  if (binding === undefined || isRecordedSessionBinding(binding))
+    return binding;
+  throw new CompilerInvariantError(
+    "A transaction session's recorded-capture slot holds a value recorded capture did not bind.",
+  );
 }
 
 /**
@@ -717,9 +734,11 @@ function recordedControlStatementTarget<T extends object>(
 }
 
 /**
- * Binds `session` to a capture scope or an engine-native mutation witness.
+ * Binds `session` to a capture scope or an engine-native mutation witness:
+ * the one write of a session's recorded slot (`TransactionSession.recorded`).
  * A later binding replaces an earlier one, as a schema commit's preflight
- * steps each bind their own scope in turn.
+ * steps each bind their own scope in turn, and as an evolved callback's
+ * lifetime extends the binding it found.
  */
 function bindRecordedSession(
   session: TransactionSession,
@@ -738,15 +757,15 @@ export function guardRecordedSessionLifetime(
   session: TransactionSession,
   assertScopeOpen: () => void,
 ): void {
-  const binding = session.recorded.binding;
-  if (!isRecordedSessionBinding(binding)) return;
-  session.recorded.binding = {
+  const binding = boundRecordedSession(session);
+  if (binding === undefined) return;
+  bindRecordedSession(session, {
     ...binding,
     assertOpen: () => {
       assertScopeOpen();
       binding.assertOpen();
     },
-  };
+  });
 }
 
 /**

@@ -6,11 +6,16 @@ import {
 } from "../src/backend/capabilities/resolve";
 import { deriveBackend } from "../src/backend/derive-backend";
 import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
-import { SavepointRecoveryFailure } from "../src/backend/session-savepoint";
+import {
+  type SavepointDecision,
+  SavepointRecoveryFailure,
+} from "../src/backend/session-savepoint";
+import { CompilerInvariantError } from "../src/errors";
 import { createSqlSchema } from "../src/query/compiler/schema";
 import {
   enterOperation,
   openTransactionSession,
+  type OperationBackend,
 } from "../src/store/operation-scope";
 import {
   createRecordedBackend,
@@ -20,6 +25,7 @@ import {
   RECORDED_OPTIONAL_WRITE_METHODS,
   RECORDED_REQUIRED_WRITE_METHODS,
   recordedGraphLockMemoOf,
+  recordedTransactionControlTarget,
   runRecordedTransactionSavepoint,
 } from "../src/store/recorded-capture";
 import { createTestBackend } from "./test-utils";
@@ -65,6 +71,19 @@ function isWrapped(
   return (
     typeof wrapper[method] === "function" && wrapper[method] !== base[method]
   );
+}
+
+/** One captured node write, into a graph of its own named `graphId`. */
+function insertInto(
+  backend: OperationBackend,
+  graphId: string,
+): Promise<unknown> {
+  return backend.insertNode({
+    graphId,
+    kind: "Person",
+    id: graphId,
+    props: { name: graphId },
+  });
 }
 
 /**
@@ -226,6 +245,106 @@ describe("recorded-capture write-surface parity", () => {
         ),
       ).rejects.toBeInstanceOf(SavepointRecoveryFailure);
       expect(await scope.flush()).toEqual(new Map());
+    });
+  });
+
+  it("refuses a session whose recorded slot holds a value recorded capture did not bind, instead of reading it as unbound", () => {
+    const session = openTransactionSession(createTestBackend());
+    const operation = enterOperation(session);
+    expect(recordedTransactionControlTarget(operation)).toBe(operation.backend);
+    session.recorded.binding = { foreign: true };
+    expect(() => recordedTransactionControlTarget(operation)).toThrow(
+      CompilerInvariantError,
+    );
+  });
+
+  describe("a capture scope's savepoint checkpoint", () => {
+    // Each write goes to its own graph, so the graphs a flush allocates
+    // revisions for are exactly the writes the capture still holds.
+    async function capturedGraphs(
+      units: (
+        capture: OperationBackend,
+        unit: (
+          savepoint: string,
+          fn: () => Promise<SavepointDecision<undefined>>,
+        ) => Promise<undefined>,
+      ) => Promise<void>,
+    ): Promise<readonly string[]> {
+      const backend = createTestBackend();
+      const statementExecution = statementExecutionVerdict(backend);
+      if (!statementExecution.supported)
+        throw new Error("Fixture requires statement execution");
+      return backend.transaction(async (target) => {
+        const captureOperation = enterOperation(openTransactionSession(target));
+        const scope = createRecordedTransactionScope(
+          captureOperation,
+          captureOperation.backend,
+          batchPointReadVerdict(backend),
+          createSqlSchema(backend.tableNames),
+        );
+        await units(scope.backend, (savepoint, fn) =>
+          runRecordedTransactionSavepoint(
+            captureOperation,
+            scope.backend,
+            statementExecution,
+            savepoint,
+            fn,
+          ),
+        );
+        const instants = await scope.flush();
+        return [...instants.keys()].toSorted();
+      });
+    }
+
+    const ROLLBACK = {
+      action: "rollback",
+      value: undefined,
+      cause: new Error("expected test rollback"),
+    } as const;
+    const RELEASE = { action: "release", value: undefined } as const;
+
+    it("keeps what a released unit captured and restores what a rolled-back one did", async () => {
+      const graphs = await capturedGraphs(async (capture, unit) => {
+        await unit("typegraph_capture_kept", async () => {
+          await insertInto(capture, "released_unit");
+          return RELEASE;
+        });
+        await unit("typegraph_capture_dropped", async () => {
+          await insertInto(capture, "rolled_back_unit");
+          return ROLLBACK;
+        });
+      });
+      expect(graphs).toEqual(["released_unit"]);
+    });
+
+    it("restores an inner rolled-back unit inside an outer released one, keeping the outer's own capture", async () => {
+      const graphs = await capturedGraphs(async (capture, unit) => {
+        await unit("typegraph_capture_outer", async () => {
+          await insertInto(capture, "outer_before");
+          await unit("typegraph_capture_inner", async () => {
+            await insertInto(capture, "inner_rolled_back");
+            return ROLLBACK;
+          });
+          await insertInto(capture, "outer_after");
+          return RELEASE;
+        });
+      });
+      expect(graphs).toEqual(["outer_after", "outer_before"]);
+    });
+
+    it("restores an inner released unit with the outer unit that rolls back around it", async () => {
+      const graphs = await capturedGraphs(async (capture, unit) => {
+        await insertInto(capture, "before_units");
+        await unit("typegraph_capture_outer", async () => {
+          await insertInto(capture, "outer_rolled_back");
+          await unit("typegraph_capture_inner", async () => {
+            await insertInto(capture, "inner_released");
+            return RELEASE;
+          });
+          return ROLLBACK;
+        });
+      });
+      expect(graphs).toEqual(["before_units"]);
     });
   });
 
