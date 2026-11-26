@@ -499,7 +499,7 @@ const profiler = new QueryProfiler({
   and its index expression casts that text to `timestamptz`, a cast PostgreSQL refuses in an index
   because it depends on the session time zone. On every PostgreSQL driver,
   `store.materializeIndexes()` (and eager `store.evolve()`, before its schema commit),
-  `createPostgresTables({ indexes })`, `generateIndexDDL(index, "postgres")` and the PostgreSQL
+  `prepareNamespaceForkTarget()` against its target, `createPostgresTables({ indexes })`, `generateIndexDDL(index, "postgres")` and the PostgreSQL
   Drizzle index builders therefore refuse a node or
   edge index that reads a date property in a key, covering column or partial-index `where`, with
   `UnsupportedBackendCapabilityError` (`details.capability` `dateIndexExpressions`, plus `kind`,

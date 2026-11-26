@@ -525,9 +525,10 @@ export type BackendCapabilities = Readonly<{
    * index expression casts the stored text. PostgreSQL refuses that cast in an
    * index (`text` to `timestamptz` depends on the session time zone, so it is
    * not immutable), and the bundled PostgreSQL backends declare `false`:
-   * `store.materializeIndexes()` and `createPostgresTables({ indexes })`
-   * refuse such a declaration with `UnsupportedBackendCapabilityError` before
-   * any DDL. `findDateIndexExpression` (`indexes/compiler.ts`) is the one
+   * `store.materializeIndexes()` (and eager `store.evolve()`, before its
+   * schema commit), `prepareNamespaceForkTarget()` against its target, and
+   * `createPostgresTables({ indexes })` refuse such a declaration with
+   * `UnsupportedBackendCapabilityError` before any DDL. `findDateIndexExpression` (`indexes/compiler.ts`) is the one
    * classifier of which declarations read a date property.
    *
    * Absent means SUPPORTED, so a custom backend keeps materializing every

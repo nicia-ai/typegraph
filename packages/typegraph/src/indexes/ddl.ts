@@ -94,7 +94,9 @@ export function generateEdgeIndexDDL(
  * caller that already decided on its own backend's capabilities:
  * `materializeIndexes` (through `preflightIndexMaterialization`, against the
  * backend it runs on, which may be a custom backend of either dialect) and
- * the namespace fork's replay of indexes a source already materialized.
+ * `prepareNamespaceForkTarget`, which replays the indexes a source already
+ * materialized after checking them against the target backend's
+ * capabilities.
  *
  * @internal
  */
