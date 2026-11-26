@@ -109,8 +109,10 @@ import {
   buildStandardProjection,
   buildStandardRelevanceOrderBy,
   buildStandardResultWhere,
+  buildStandardSelectionOrderColumn,
   buildStandardStartCte,
   buildStandardTraversalCte,
+  compileStandardProjectedOutputValue,
   describeProjectedField,
   LATE_MAT_TOPK_CTE_ALIAS,
   lateMaterializedProjectedNodeAliases,
@@ -142,6 +144,7 @@ import { compileMultiStageRecursiveQuery } from "./recursive-chain";
 import {
   describeRelevanceOrder,
   type RelevanceSortKey,
+  SELECTION_ORDER_COLUMN,
 } from "./relevance-order";
 import { refuseReservedQueryAliases } from "./reserved-aliases";
 import {
@@ -327,8 +330,14 @@ export function compileNameCheckedQuery(
   graphId: string,
   options: CompileQueryOptions | SqlDialect,
   usage: SqlNameUsage,
+  shape: StatementShape = "rows",
 ): CompiledSelectSql {
-  const { compiled, names } = compileQueryWithSqlNames(ast, graphId, options);
+  const { compiled, names } = compileQueryWithSqlNames(
+    ast,
+    graphId,
+    options,
+    shape,
+  );
   if (names !== undefined) refuseConflictingSqlNames(names, usage);
   return compiled;
 }
@@ -342,12 +351,13 @@ export function compileQueryWithSqlNames(
   ast: QueryAst,
   graphId: string,
   options: CompileQueryOptions | SqlDialect,
+  shape: StatementShape = "rows",
 ): Readonly<{ compiled: CompiledSelectSql; names?: SqlStatementNames }> {
   // Every compile from outside the compiler enters here, with the aliases the
   // caller wrote; the compiler's own compiles of parts of a statement (which
   // may carry aliases it renamed into the reserved namespace) do not.
   refuseReservedQueryAliases(ast);
-  return compileQueryPart(ast, graphId, options);
+  return compileQueryPart(ast, graphId, options, shape);
 }
 
 /**
@@ -359,15 +369,19 @@ function compileQueryPart(
   ast: QueryAst,
   graphId: string,
   options: CompileQueryOptions | SqlDialect,
+  shape: StatementShape = "rows",
 ): Readonly<{ compiled: CompiledSelectSql; names?: SqlStatementNames }> {
   // The check covers the subqueries nested in the statement while their
   // aliases are still the caller's, before `compileExpressionSubquery`
   // renames them.
   assertAliasPredicatesReadOnlyTheirTarget(ast);
-  return compileQueryInExpressionContext(ast, graphId, options, {
-    aliasScopes: new Map(),
-    depth: 0,
-  });
+  return compileQueryInExpressionContext(
+    ast,
+    graphId,
+    options,
+    { aliasScopes: new Map(), depth: 0 },
+    shape,
+  );
 }
 
 function compileQueryInExpressionContext(
@@ -381,6 +395,7 @@ function compileQueryInExpressionContext(
     /** The caller's name of each alias renamed for this subquery. */
     callerAliases?: ReadonlyMap<string, string>;
   }>,
+  shape: StatementShape = "rows",
 ): Readonly<{ compiled: CompiledSelectSql; names?: SqlStatementNames }> {
   // Support legacy signature: compileQuery(ast, graphId, dialect)
   const options_: CompileQueryOptions =
@@ -403,11 +418,9 @@ function compileQueryInExpressionContext(
   const recursiveResultAliases = new Map(
     expressionContext.recursiveResultAliases,
   );
-  const variableLength = hasVariableLengthTraversal(ast);
-  const loweredRecursive =
-    variableLength ? tryLowerSingleHopRecursiveTraversal(ast) : undefined;
+  const standardAst = standardStatementAst(ast);
   const recursiveResultAlias =
-    variableLength && loweredRecursive === undefined ?
+    standardAst === undefined ?
       `__tg_recursive_result_${expressionCompileDepth}`
     : undefined;
   if (
@@ -545,7 +558,7 @@ function compileQueryInExpressionContext(
   }
 
   // Check for variable-length traversals
-  if (variableLength && loweredRecursive === undefined) {
+  if (standardAst === undefined) {
     const recursive =
       ast.traversals.length > 1 || ast.traversals[0]?.optional === true ?
         compileMultiStageRecursiveQuery(ast, graphId, ctx)
@@ -564,10 +577,49 @@ function compileQueryInExpressionContext(
   const names = createSqlStatementNames();
   const statement = recordStatementColumnReads(
     names,
-    compileStandardQuery(loweredRecursive ?? ast, graphId, ctx, names),
+    compileStandardQuery(standardAst, graphId, ctx, names, shape),
     ast.expressionScope,
   );
   return { compiled: finish(statement), names };
+}
+
+/**
+ * The AST `ast` compiles to a standard statement from: itself, or the
+ * standard form a single-hop recursive traversal lowers to. `undefined` when
+ * it compiles to a recursive statement. The one owner of that dispatch.
+ */
+function standardStatementAst(ast: QueryAst): QueryAst | undefined {
+  if (!hasVariableLengthTraversal(ast)) return ast;
+  return tryLowerSingleHopRecursiveTraversal(ast);
+}
+
+/**
+ * The shape of a compiled statement: its rows alone (`rows`), or, for a
+ * statement another statement wraps and reads in the order it selects its
+ * rows, those rows plus the selection-order column when it has one
+ * ({@link selectionOrderColumn}).
+ */
+export type StatementShape = "rows" | "selection-ordered";
+
+/**
+ * The column a statement compiled for `ast` in the `selection-ordered` shape
+ * carries its selection order in, or `undefined` when it carries none. The
+ * one owner of "a wrapper must read this query's order from a column": a
+ * standard statement with a relevance order (`describeRelevanceOrder`), whose
+ * ORDER BY reads values no wrapping statement can see. The emitter adds the
+ * column exactly when this names one, and every wrapper (the relation over a
+ * query, a `batchOnce()` item) orders by it exactly then.
+ */
+export function selectionOrderColumn(
+  ast: QueryAst,
+): typeof SELECTION_ORDER_COLUMN | undefined {
+  const standardAst = standardStatementAst(ast);
+  return (
+      standardAst !== undefined &&
+        describeRelevanceOrder(standardAst).length > 0
+    ) ?
+      SELECTION_ORDER_COLUMN
+    : undefined;
 }
 
 function tryLowerSingleHopRecursiveTraversal(
@@ -1568,6 +1620,7 @@ type StandardQueryStrategyHandler = (
   graphId: string,
   ctx: PredicateCompilerContext,
   names: SqlStatementNames,
+  shape: StatementShape,
 ) => SqlFragment;
 
 const STANDARD_QUERY_STRATEGY_HANDLERS: Record<
@@ -1582,10 +1635,11 @@ function compileStandardQuery(
   graphId: string,
   ctx: PredicateCompilerContext,
   names: SqlStatementNames,
+  shape: StatementShape,
 ): SqlFragment {
   const strategy = ctx.dialect.capabilities.standardQueryStrategy;
   const handler = STANDARD_QUERY_STRATEGY_HANDLERS[strategy];
-  return handler(ast, graphId, ctx, names);
+  return handler(ast, graphId, ctx, names, shape);
 }
 
 type SelectStandardOrderByInput = Readonly<{
@@ -1662,6 +1716,7 @@ function compileStandardQueryWithCteStrategy(
   graphId: string,
   ctx: PredicateCompilerContext,
   names: SqlStatementNames,
+  shape: StatementShape,
 ): SqlFragment {
   const { dialect } = ctx;
   const {
@@ -1793,6 +1848,26 @@ function compileStandardQueryWithCteStrategy(
     ...(vectorPredicate === undefined ? {} : { vectorPredicate }),
     ...(fulltextPredicate === undefined ? {} : { fulltextPredicate }),
   });
+  const selectionOrder =
+    shape === "selection-ordered" && selectionOrderColumn(ast) !== undefined ?
+      buildStandardSelectionOrderColumn({
+        aggregated,
+        ast,
+        dialect,
+        fusion,
+        keys: relevanceKeys,
+        names,
+        compileOutputValue: (outputName) =>
+          compileStandardProjectedOutputValue({
+            ast,
+            ...(collapsedTraversalCteAlias === undefined ?
+              {}
+            : { collapsedTraversalCteAlias }),
+            ctx,
+            outputName,
+          }),
+      })
+    : undefined;
   const where = buildStandardResultWhere({ ast, ctx });
   const groupBy = buildStandardGroupBy({ ast, dialect });
   const having = buildStandardHaving({ ast, ctx });
@@ -1821,6 +1896,9 @@ function compileStandardQueryWithCteStrategy(
     ...(orderBy === undefined ? {} : { orderBy }),
     ...(limitOffset === undefined ? {} : { limitOffset }),
     logicalPlan,
-    projection,
+    projection:
+      selectionOrder === undefined ? projection : (
+        sql`${projection}, ${selectionOrder}`
+      ),
   });
 }
