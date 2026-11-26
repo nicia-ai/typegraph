@@ -85,7 +85,11 @@ describe("reviveStoredDates", () => {
   it("returns the stored object itself when nothing is revived", () => {
     const schema = z.object({ title: z.string(), at: z.date().optional() });
     const stored = { title: "a", extra: TEXT };
-    expect(reviveStoredDateProps(schema, stored)).toBe(stored);
+    expect(reviveStoredDateProps(schema, stored)).toEqual({
+      kind: "revived",
+      props: stored,
+    });
+    expect(reviveStoredDateProps(schema, stored).props).toBe(stored);
   });
 
   it("leaves undeclared properties, including an own __proto__ key, as stored", () => {
@@ -93,7 +97,7 @@ describe("reviveStoredDates", () => {
     const stored = JSON.parse(
       `{"at":"${TEXT}","__proto__":"${TEXT}","other":"${TEXT}"}`,
     ) as Record<string, unknown>;
-    const revived = reviveStoredDateProps(schema, stored);
+    const revived = reviveStoredDateProps(schema, stored).props;
     expect(revived["at"]).toEqual(DATE);
     expect(Object.hasOwn(revived, "__proto__")).toBe(true);
     expect(Object.getOwnPropertyDescriptor(revived, "__proto__")?.value).toBe(
@@ -103,19 +107,41 @@ describe("reviveStoredDates", () => {
     expect(revived["other"]).toBe(TEXT);
   });
 
-  it("revives nothing under an object that rewrites itself on every parse", () => {
-    const schema = z
-      .object({ at: z.date() })
-      .overwrite((value) => ({ at: new Date(value.at.getTime() + 1) }));
-    const stored = { at: TEXT };
-    expect(reviveStoredDateProps(schema, stored)).toBe(stored);
+  it("reports, rather than revives, a date under an object that rewrites it on every parse", () => {
+    const schema = z.object({
+      range: z
+        .object({ at: z.date() })
+        .overwrite((value) => ({ at: new Date(value.at.getTime() + 1) })),
+    });
+    const revival = reviveStoredDateProps(schema, { range: { at: TEXT } });
+    expect(revival).toEqual({
+      kind: "rewritten",
+      path: "range",
+      props: { range: { at: DATE } },
+    });
+  });
+
+  it("revives under an overwrite that keeps the revived value", () => {
+    const schema = z.object({
+      at: z
+        .date()
+        .optional()
+        .overwrite((value) => value),
+    });
+    expect(reviveStoredDateProps(schema, { at: TEXT })).toEqual({
+      kind: "revived",
+      props: { at: DATE },
+    });
   });
 
   it("revives through a refined object schema", () => {
     const schema = z
       .object({ from: z.date(), to: z.date() })
       .refine((range) => range.from <= range.to);
-    const revived = reviveStoredDateProps(schema, { from: TEXT, to: TEXT });
+    const revived = reviveStoredDateProps(schema, {
+      from: TEXT,
+      to: TEXT,
+    }).props;
     expect(schema.safeParse(revived).success).toBe(true);
   });
 });
