@@ -1,7 +1,8 @@
 import { type SelectiveField } from "../ast";
 import { getDialect } from "../dialect";
 import { type DialectAdapter, type SqlDialect } from "../dialect/types";
-import { type DatabaseExpression, type DateOrigin } from "../expressions";
+import { type ExpressionDateRead } from "../expression-date-read";
+import { type DateOrigin } from "../expressions";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
 import { type SqlFragment } from "../sql-fragment";
 
@@ -89,7 +90,7 @@ export function compileSelectivePropsExtraction(
  * typed here.
  */
 export function resultDateOrigin(
-  expressionOrigin: DatabaseExpression["dateOrigin"],
+  expressionOrigin: ExpressionDateRead["dateOrigin"],
   dialect: SqlDialect,
 ): DateOrigin | undefined {
   return expressionOrigin ?? getDialect(dialect).jsonExtractDateOrigin;

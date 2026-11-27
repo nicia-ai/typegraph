@@ -32,11 +32,16 @@ import {
   type SqlNameUsage,
 } from "../compiler/sql-name-registry";
 import { getDialect } from "../dialect";
+import { type SqlDialect } from "../dialect/types";
+import {
+  dateReadOf,
+  sharedDateRead,
+  withDateRead,
+} from "../expression-date-read";
 import {
   createFieldExpression,
   type DatabaseExpression,
   expr,
-  expressionReadPlan,
 } from "../expressions";
 import { resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
@@ -171,26 +176,22 @@ function buildContext<Fields extends RelationProjection>(
   return Object.fromEntries(
     columns.map((column) => [
       column.outputName,
-      {
-        ...createFieldExpression(
-          outputField(column.outputName, column.valueType),
-          scopeIdentity,
-          column.nullable,
-          expressionReadPlan(column),
-        ),
-        ...(column.elementValueType === undefined ?
-          {}
-        : { elementValueType: column.elementValueType }),
-        ...(column.elementFields === undefined ?
-          {}
-        : { elementFields: column.elementFields }),
-        ...(column.dateOrigin === undefined ?
-          {}
-        : { dateOrigin: column.dateOrigin }),
-        ...(column.elementDateOrigins === undefined ?
-          {}
-        : { elementDateOrigins: column.elementDateOrigins }),
-      },
+      withDateRead(
+        {
+          ...createFieldExpression(
+            outputField(column.outputName, column.valueType),
+            scopeIdentity,
+            column.nullable,
+          ),
+          ...(column.elementValueType === undefined ?
+            {}
+          : { elementValueType: column.elementValueType }),
+          ...(column.elementFields === undefined ?
+            {}
+          : { elementFields: column.elementFields }),
+        },
+        dateReadOf(column),
+      ),
     ]),
   ) as RelationColumnContext<Fields>;
 }
@@ -203,25 +204,20 @@ function relationColumns(
   }> = {},
 ): readonly RelationColumn[] {
   return Object.entries(fields).map(([outputName, expression]) => {
-    const readPlan = expressionReadPlan(expression);
-    const base = {
-      outputName,
-      valueType: expression.valueType,
-      ...(expression.elementValueType === undefined ?
-        {}
-      : { elementValueType: expression.elementValueType }),
-      ...(expression.elementFields === undefined ?
-        {}
-      : { elementFields: expression.elementFields }),
-      ...(readPlan === undefined ? {} : { readPlan }),
-      ...(expression.dateOrigin === undefined ?
-        {}
-      : { dateOrigin: expression.dateOrigin }),
-      ...(expression.elementDateOrigins === undefined ?
-        {}
-      : { elementDateOrigins: expression.elementDateOrigins }),
-      nullable: expression.nullable,
-    };
+    const base = withDateRead(
+      {
+        outputName,
+        valueType: expression.valueType,
+        ...(expression.elementValueType === undefined ?
+          {}
+        : { elementValueType: expression.elementValueType }),
+        ...(expression.elementFields === undefined ?
+          {}
+        : { elementFields: expression.elementFields }),
+        nullable: expression.nullable,
+      },
+      dateReadOf(expression),
+    );
     if (
       expression.node.kind !== "field" ||
       expression.node.field.path.length !== 1
@@ -513,8 +509,44 @@ function mergedSetColumns(
       (column, index) =>
         column.identity?.component === right[index]?.identity?.component,
     );
-  if (preservesIdentity) return left;
-  return left.map(({ identity: _identity, ...column }) => column);
+  return left.map((column, index) => {
+    const { identity: _identity, ...withoutIdentity } = column;
+    const kept = preservesIdentity ? column : withoutIdentity;
+    const other = right[index];
+    return other === undefined ? kept : (
+        withDateRead(
+          kept,
+          sharedDateRead([dateReadOf(column), dateReadOf(other)]),
+        )
+      );
+  });
+}
+
+/**
+ * The rows of a set operation, as a read returns them: each column decoded
+ * by the date facts both operands share ({@link mergedSetColumns}), never by
+ * one operand's own decoder, so a row the other operand produced is not
+ * decoded under the first's typing.
+ */
+function setOperationRowDecoder<Result>(
+  columns: readonly RelationColumn[],
+  dialect: SqlDialect,
+): (row: Record<string, unknown>) => Result {
+  const context = buildContext<RelationProjection>(
+    columns,
+    relationScope(),
+  ) as Readonly<Record<string, DatabaseExpression>>;
+  return (row) =>
+    Object.fromEntries(
+      columns.map((column) => [
+        column.outputName,
+        decodeExpressionValue(
+          row[column.outputName],
+          requireDefined(context[column.outputName]),
+          dialect,
+        ),
+      ]),
+    ) as Result;
 }
 
 /** {@link executeRelationOn}'s work, as the relation class hands it out. */
@@ -941,6 +973,10 @@ export class ExecutableRelationQuery<
     return createExecutableRelation({
       ...this.#definition,
       columns,
+      decodeRow: setOperationRowDecoder<Result>(
+        columns,
+        compileDialect(this.#definition.config),
+      ),
       ast: {
         kind: "set",
         operator,

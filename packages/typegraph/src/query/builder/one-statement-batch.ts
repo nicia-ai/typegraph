@@ -1,11 +1,11 @@
 import { backendDerivationRoot } from "../../backend/derive-backend";
 import { ConfigurationError } from "../../errors";
 import type { StatementBackend } from "../../store/operation-scope";
-import type { QueryAst } from "../ast";
+import type { QueryAst, ValueType } from "../ast";
 import { selectionOrderColumn } from "../compiler";
 import { getDialect } from "../dialect";
 import { type DialectAdapter } from "../dialect/types";
-import { type DatabaseExpression, yieldsStoredDate } from "../expressions";
+import { yieldsStoredDate } from "../expressions";
 import { compileOrderTerm } from "../order";
 import {
   PORTABLE_COMPOUND_SELECT_TERMS_LIMIT,
@@ -79,15 +79,14 @@ function buildOrdinalOrder(
 /**
  * The output columns of a batched read that hold a date read from storage —
  * every date-typed column but one whose dates the caller stated
- * (`dateOrigin: "stated"`, a literal or parameter, which binds as its text
+ * (`ExpressionDateRead.dateOrigin` `"stated"`, a literal or parameter, which binds as its text
  * and is never cast). On PostgreSQL such a column is a `timestamptz`, which
  * JSON would render in the session time zone, so the batch carries it as the
  * dialect's canonical date text (`DialectAdapter.jsonDateText`) and the read
  * decodes it exactly as the same read run alone.
  */
 export function storedDateOutputNames(
-  columns: readonly (Readonly<{ outputName: string }> &
-    Pick<DatabaseExpression, "dateOrigin" | "valueType">)[],
+  columns: readonly Readonly<{ outputName: string; valueType: ValueType }>[],
 ): readonly string[] {
   return columns
     .filter((column) => yieldsStoredDate(column))

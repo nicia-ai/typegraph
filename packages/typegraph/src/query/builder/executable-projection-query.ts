@@ -15,6 +15,7 @@ import { resultDateOrigin } from "../compiler/typed-json-extract";
 import { type SqlDialect } from "../dialect/types";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import { decodeExpressionDate } from "../execution/value-decoder";
+import { dateReadOf } from "../expression-date-read";
 import {
   type DatabaseExpression,
   type DateOrigin,
@@ -298,11 +299,8 @@ export class ExecutableProjectionQuery<
       outputNames: envelope.projection.fields.map((field) => field.outputName),
       dateOutputNames: storedDateOutputNames(
         Object.entries(this.#fields).map(([outputName, expression]) => ({
+          ...expression,
           outputName,
-          valueType: expression.valueType,
-          ...(expression.dateOrigin === undefined ?
-            {}
-          : { dateOrigin: expression.dateOrigin }),
         })),
       ),
       orderBy,
@@ -583,7 +581,7 @@ export function decodeExpressionValue(
       return decodeScalarExpressionValue(
         value,
         expression.valueType,
-        resultDateOrigin(expression.dateOrigin, dialect),
+        resultDateOrigin(dateReadOf(expression).dateOrigin, dialect),
       );
     }
     case "object":
@@ -606,12 +604,12 @@ export function decodeExpressionValue(
             decodeScalarExpressionValue(
               element,
               elementValueType,
-              expression.dateOrigin,
+              dateReadOf(expression).dateOrigin,
             )
           : decodeRecordExpressionValue(
               element,
               elementFields,
-              expression.elementDateOrigins,
+              dateReadOf(expression).elementDateOrigins,
             );
       });
     }

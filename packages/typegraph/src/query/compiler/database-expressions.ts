@@ -161,7 +161,7 @@ function aggregateFunction(operator: AggregateOperator): SqlFragment {
 function collectedValue(
   name: string,
   value: SqlFragment,
-  expression: Pick<DatabaseExpression, "dateOrigin" | "valueType">,
+  expression: DatabaseExpression,
   context: DatabaseExpressionCompilerContext,
 ): Readonly<{ name: string; value: SqlFragment; valueType: ValueType }> {
   if (yieldsStoredDate(expression))

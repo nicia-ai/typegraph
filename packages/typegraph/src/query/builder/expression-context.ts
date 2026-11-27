@@ -142,13 +142,10 @@ const DATABASE_EXPRESSION_KEYS: ReadonlySet<PropertyKey> = new Set([
   "__scope",
   "__type",
   "__value",
-  "dateOrigin",
-  "elementDateOrigins",
   "elementValueType",
   "elementFields",
   "node",
   "nullable",
-  "readPlan",
   "scopeIdentity",
   "valueType",
 ]);
