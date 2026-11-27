@@ -690,9 +690,10 @@ describe(".matches() with polymorphic alias", () => {
     // The fulltext CTE's inner LIMIT must break rank ties by kind and
     // node_id: within one kind the top-k cutoff matches the backend's
     // single-kind fulltextSearch (rank DESC, node_id ASC), and across kinds
-    // it stays total where two nodes share an id.
+    // it stays total where two nodes share an id, in byte order as
+    // store.search breaks the tie.
     expect(sqlText).toMatch(
-      /ORDER BY rank DESC NULLS LAST,\s+"typegraph_node_fulltext"\."node_kind" ASC,\s+"typegraph_node_fulltext"\."node_id" ASC\s+LIMIT/,
+      /ORDER BY rank DESC NULLS LAST,\s+"typegraph_node_fulltext"\."node_kind" COLLATE "C" ASC,\s+"typegraph_node_fulltext"\."node_id" COLLATE "C" ASC\s+LIMIT/,
     );
 
     const malformedAst = {
