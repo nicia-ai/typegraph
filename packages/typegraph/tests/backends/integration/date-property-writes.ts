@@ -122,6 +122,30 @@ const ShiftedDateDocument = defineNode("ShiftedDateDoc", {
   }),
 });
 
+const NOON = new Date("2024-01-02T12:00:00.000Z");
+const MIDNIGHT = new Date("2024-01-02T00:00:00.000Z");
+
+/** A date its OPTIONAL wrapper normalizes to the start of its UTC day. */
+const MidnightDateDocument = defineNode("MidnightDateDoc", {
+  schema: z.object({
+    title: z.string(),
+    at: z
+      .date()
+      .optional()
+      .overwrite((date) =>
+        date === undefined ? date : (
+          new Date(
+            Date.UTC(
+              date.getUTCFullYear(),
+              date.getUTCMonth(),
+              date.getUTCDate(),
+            ),
+          )
+        ),
+      ),
+  }),
+});
+
 function buildEdgeCaseGraph(id: string) {
   return defineGraph({
     id,
@@ -138,6 +162,7 @@ function buildEdgeCaseGraph(id: string) {
         ],
       },
       ShiftedDateDoc: { type: ShiftedDateDocument },
+      MidnightDateDoc: { type: MidnightDateDocument },
     },
     edges: {},
   });
@@ -548,6 +573,36 @@ export function registerDatePropertyWriteIntegrationTests(
       const read = await store.nodes.DatedWriteDoc.getById(document.id);
       expect(read?.title).toBe("guarded");
       expect(documentDates(read)).toEqual(STORED_LATER_DATES);
+    });
+
+    it("compareAndSet compares the instant the caller states, not what the schema makes of it", async () => {
+      const store = await context.createStore(
+        buildEdgeCaseGraph("date_property_expectation_instant"),
+      );
+      const document = await store.nodes.MidnightDateDoc.create({
+        title: "a",
+        at: NOON,
+      });
+      expect(document.at).toBe(MIDNIGHT.toISOString());
+      // The row holds midnight. An expectation of noon names a different
+      // instant, whatever the schema would make of noon on a write.
+      const atNoon = await store.nodes.MidnightDateDoc.compareAndSet(
+        document.id,
+        { expected: { at: NOON }, patch: { title: "noon" } },
+      );
+      expect(atNoon).toBe(false);
+      const unchanged = await store.nodes.MidnightDateDoc.getById(document.id);
+      expect(unchanged?.title).toBe("a");
+      const atMidnight = await store.nodes.MidnightDateDoc.compareAndSet(
+        document.id,
+        { expected: { at: MIDNIGHT }, patch: { title: "midnight" } },
+      );
+      expect(atMidnight).toBe(true);
+      const read = await store.nodes.MidnightDateDoc.getById(document.id);
+      expect([read?.title, read?.at]).toEqual([
+        "midnight",
+        MIDNIGHT.toISOString(),
+      ]);
     });
 
     it("still refuses date text a caller states, in the patch and the expectation", async () => {

@@ -121,6 +121,7 @@ import {
 } from "../../errors";
 import {
   unrecognizedOptionKeyIssues,
+  unstorableDateIssue,
   validateNodeProps,
 } from "../../errors/validation";
 import { type IdentityFoldPlan } from "../../identity/service";
@@ -6448,6 +6449,32 @@ function encodeSetUpdateValue(
   );
 }
 
+/**
+ * The stored text a `compareAndSet()` expectation's `Date` compares as: the
+ * instant the caller stated, encoded by the encoder every write uses
+ * (`encodeSetUpdateValue`). Only its type is validated: it must be a
+ * storable `Date` (`unstorableDateIssue`, the decision every write makes)
+ * at a position the store reads back as a `Date`. A schema's transforms and
+ * `.overwrite()` checks decide what a WRITE stores; applying one here would
+ * compare a different instant than the caller stated, so an expectation of
+ * noon matched a row holding the midnight a normalizing schema writes.
+ */
+function expectedDateText(
+  schema: z.ZodObject<z.ZodRawShape>,
+  kind: string,
+  property: string,
+  value: Date,
+): JsonScalar {
+  const unstorable = unstorableDateIssue({ [property]: value });
+  if (unstorable !== undefined) {
+    throw new ValidationError(
+      `compareAndSet() expected property "${property}": ${unstorable.path}: ${unstorable.message}`,
+      { entityType: "node", kind, operation: "update", issues: [unstorable] },
+    );
+  }
+  return encodeSetUpdateValue(schema, kind, property, value) as JsonScalar;
+}
+
 function normalizeCompareAndSetExpectations(
   schema: z.ZodObject<z.ZodRawShape>,
   kind: string,
@@ -6488,12 +6515,18 @@ function normalizeCompareAndSetExpectations(
       expected[property] = { kind: "absent" };
       continue;
     }
-    // A `Date` is the one object an expectation may state: it is compared as
-    // the stored text the store writes for it, encoded after parsing below.
-    if (
-      value === undefined ||
-      (typeof value === "object" && value !== null && !(value instanceof Date))
-    ) {
+    // A `Date` is the one object an expectation may state. It names an
+    // instant to compare, not a value to write, so it is not parsed through
+    // the property's schema: a transform or `.overwrite()` there would turn
+    // it into a different instant than the caller stated.
+    if (value instanceof Date) {
+      expected[property] = {
+        kind: "value",
+        value: expectedDateText(schema, kind, property, value),
+      };
+      continue;
+    }
+    if (value === undefined || (typeof value === "object" && value !== null)) {
       throw new ValidationError(
         `compareAndSet() expected property "${property}" must be a JSON scalar, a Date, or compareAndSetAbsent`,
         {
@@ -6513,6 +6546,7 @@ function normalizeCompareAndSetExpectations(
     scalarExpectedInput[property] = value;
   }
 
+  if (Object.keys(scalarExpectedInput).length === 0) return expected;
   const parsedExpected = validateNodePropertySubset(
     schema,
     scalarExpectedInput,
