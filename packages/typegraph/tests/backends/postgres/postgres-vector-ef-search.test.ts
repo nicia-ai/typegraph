@@ -526,3 +526,117 @@ describe("Postgres iterative scan — hnsw.iterative_scan on filtered searches",
     });
   });
 });
+
+describe("Postgres search parameters — a session that has not loaded pgvector", () => {
+  // pgvector defines `hnsw.*` only when its library loads in the backend
+  // process. A search inside a transaction on such a session snapshots an
+  // undefined parameter; restoring it must reset it to its default rather than
+  // leave the search's value in force for the rest of the transaction.
+  it("resets a parameter that was undefined before the search to its default", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    const iterativeScan = await iterativeScanAvailable(pool);
+    await seed(pool, "ef_cold_restore");
+    // A new pool: its one connection has not used a vector value.
+    const cold = new Pool({ connectionString: TEST_DATABASE_URL, max: 1 });
+    try {
+      const backend = createPostgresBackend(drizzle(cold));
+      await backend.transaction(async (tx) => {
+        const read = async (
+          statement: Parameters<typeof asCompiledRowsSql>[0],
+        ) => {
+          const rows = await tx.execute<Record<string, unknown>>(
+            asCompiledRowsSql(statement),
+          );
+          return rows[0];
+        };
+        // The precondition the case is about: nothing defined the parameter.
+        const before = await read(
+          sql`SELECT current_setting('hnsw.ef_search', true) AS ef_search`,
+        );
+        expect(before?.["ef_search"]).toBeNull();
+
+        const hits = await requireDefined(tx.vectorSearch)({
+          graphId: "ef_cold_restore",
+          nodeKind: "Doc",
+          fieldPath: "embedding",
+          queryEmbedding: [1, 0, 0, 0],
+          metric: "cosine",
+          dimensions: 4,
+          indexType: "hnsw",
+          limit: 1,
+          efSearch: 256,
+        });
+        expect(hits).toHaveLength(1);
+
+        const settings = await read(sql`
+          SELECT current_setting('hnsw.ef_search') AS ef_search,
+                 (SELECT boot_val FROM pg_settings WHERE name = 'hnsw.ef_search') AS ef_search_default,
+                 current_setting('hnsw.iterative_scan', true) AS iterative_scan,
+                 (SELECT boot_val FROM pg_settings WHERE name = 'hnsw.iterative_scan') AS iterative_scan_default
+        `);
+        // `hnsw.iterative_scan` is overridden only on pgvector >= 0.8.
+        const observed = {
+          efSearch: settings?.["ef_search"],
+          iterativeScan:
+            iterativeScan ? settings?.["iterative_scan"] : undefined,
+        };
+        expect(observed).toEqual({
+          efSearch: settings?.["ef_search_default"],
+          iterativeScan:
+            iterativeScan ? settings?.["iterative_scan_default"] : undefined,
+        });
+        expect(observed.efSearch).not.toBe("256");
+        expect(observed.iterativeScan).not.toBe("strict_order");
+      });
+    } finally {
+      await cold.end();
+    }
+  });
+
+  it("resets a placeholder a rolled-back SET LOCAL left empty", async (ctx) => {
+    const { pool } = requirePostgres(ctx);
+    await seed(pool, "ef_empty_placeholder");
+    const cold = new Pool({ connectionString: TEST_DATABASE_URL, max: 1 });
+    try {
+      // Before pgvector loads, a rolled-back SET LOCAL leaves a placeholder
+      // with no value, which reads as the empty string.
+      const client = await cold.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SET LOCAL hnsw.ef_search = 60");
+        await client.query("ROLLBACK");
+        const placeholder = await client.query<{ v: string }>(
+          "SELECT current_setting('hnsw.ef_search', true) AS v",
+        );
+        expect(placeholder.rows[0]?.v).toBe("");
+      } finally {
+        client.release();
+      }
+
+      const backend = createPostgresBackend(drizzle(cold));
+      await backend.transaction(async (tx) => {
+        const hits = await requireDefined(tx.vectorSearch)({
+          graphId: "ef_empty_placeholder",
+          nodeKind: "Doc",
+          fieldPath: "embedding",
+          queryEmbedding: [1, 0, 0, 0],
+          metric: "cosine",
+          dimensions: 4,
+          indexType: "hnsw",
+          limit: 1,
+          efSearch: 256,
+        });
+        expect(hits).toHaveLength(1);
+        const rows = await tx.execute<Record<string, unknown>>(
+          asCompiledRowsSql(sql`
+            SELECT current_setting('hnsw.ef_search') AS ef_search,
+                   (SELECT boot_val FROM pg_settings WHERE name = 'hnsw.ef_search') AS ef_search_default
+          `),
+        );
+        expect(rows[0]?.["ef_search"]).toBe(rows[0]?.["ef_search_default"]);
+      });
+    } finally {
+      await cold.end();
+    }
+  });
+});
