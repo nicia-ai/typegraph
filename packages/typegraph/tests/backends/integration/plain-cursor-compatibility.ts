@@ -16,6 +16,7 @@ import type { IntegrationStore } from "./fixtures";
 import { PLAIN_CURSOR_FIXTURES } from "./plain-cursor-fixtures";
 import {
   PLAIN_CURSOR_SEED,
+  PLAIN_CURSOR_SORTS,
   type PlainCursorFixture,
   type PlainCursorSort,
 } from "./plain-cursor-seed";
@@ -113,9 +114,18 @@ export function registerPlainCursorCompatibilityIntegrationTests(
       const fixtures = PLAIN_CURSOR_FIXTURES.filter((fixture) =>
         lanes.includes(fixture.lane),
       );
-      // A boolean key as 0/1 and as true/false, a date with an offset: the
-      // forms the fixtures exist to carry.
-      expect(fixtures.length).toBeGreaterThan(100);
+      // Every sort, on each lane of this dialect, has its fixtures.
+      const covered = (lane: PlainCursorFixture["lane"]) =>
+        new Set(
+          fixtures
+            .filter((fixture) => fixture.lane === lane)
+            .map((fixture) => JSON.stringify(fixture.sort)),
+        );
+      expect(lanes.map((lane) => covered(lane))).toEqual(
+        lanes.map(
+          () => new Set(PLAIN_CURSOR_SORTS.map((sort) => JSON.stringify(sort))),
+        ),
+      );
       for (const fixture of fixtures) {
         for (const terminal of ["paginate", "page", "batchOnce"] as const) {
           for (const selection of ["node", "fields"] as const) {
