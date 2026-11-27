@@ -12,6 +12,4 @@ Every write now stores, and every comparison binds, the instant a `Date` holds, 
 
 A graph merge now applies dated rows. Merge plans carry each row's properties in their stored form, so `applyMergePlan()` refused a plan `planMerge()` had just returned for a branch that added or edited a node or edge with a `z.date()` property, `merge()` failed while committing it, and candidate write sets and mutation plans planned what apply refused. Every merge apply path now turns stored date text back into a `Date` by the rule updates use before it validates and writes.
 
-What a write that re-parses a stored row does under an `.overwrite()`, a `.catch()` or a transform is unchanged. In particular, an `.overwrite()` on a wrapper around a date (`z.date().optional().overwrite(…)`) still runs on the stored date whenever another property is updated, and now also on an import or merge of the row.
-
 The `ConfigurationError` for a value that is not JSON, such as a `Map` in a set-update patch or in a durable operation document, no longer says "Annotations must be JSON-serializable" when no annotation is involved; it names the value and the JSON types allowed.

@@ -2731,9 +2731,13 @@ merge writes, rather than replaying each staged operation. Ordinary merge
 identity reconciliation and conflict policies therefore still apply. Planning
 does not invoke the target's application hooks. Property parsers must be deterministic on
 persisted values. Postimages must survive the existing merge wire
-codec and schema revalidation unchanged. Schemas with non-idempotent output
-transforms, or serialized values that their input schema refuses, receive a
-typed `stableMergePostimage` capability refusal in either scope. For date
+codec and schema revalidation unchanged. Application writes each postimage in
+its stored form, validated through the target's schema but not rewritten by it
+([What an update stores](/core-concepts#what-an-update-stores)), so a
+non-idempotent transform is applied once, while staging. A serialized value
+that its input schema refuses, such as the number a type-changing transform
+produced, receives a typed `stableMergePostimage` capability refusal in either
+scope. For date
 properties, use a schema that accepts its persisted representation, such as
 `z.coerce.date()`. Tombstoned durable edge owners excluded from a live-state copy
 are also refused in both scopes. Default validity timestamps are

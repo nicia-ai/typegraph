@@ -154,6 +154,23 @@ the schema accepts nothing but a `Date` (the rule
 other string for a date property, such as `2024-01-01` or a timestamp without
 milliseconds, still fails the schema and refuses the row, reported in `errors`.
 
+### Properties are imported as stored
+
+Because a document carries the values the store wrote, which are a schema's
+output, import does not run the schema's rewriting steps on them again. Each
+row is validated as a whole through the kind's schema, and every property the
+document carries is stored as carried: a `.transform()`, `.overwrite()` or
+`.catch()` fallback does not change it, so an export of a row whose transform
+is not idempotent re-imports byte for byte. A property the document lacks is
+filled as the schema makes it, such as a `.default()`, under every
+`onUnknownProperty` strategy. This holds for a new row
+and for `onConflict: "update"`, which replaces the existing row's properties
+with the document's. A row whose stored value is not valid input to its own
+schema, such as the number a type-changing transform produced, is refused and
+reported in `errors`. See
+[What an update stores](/core-concepts#what-an-update-stores) for the same
+rule on updates.
+
 ### Format Version Compatibility
 
 Exports always write `formatVersion: "3.0"`. The read side — both
@@ -1017,12 +1034,16 @@ await importGraph(store, data, { onUnknownProperty: "strip" });
 // { name: "Alice", unknownField: "value" } becomes { name: "Alice" }
 ```
 
-**`allow`** - Pass through to storage:
+**`allow`** - Keep them in storage, after validating the declared properties:
 
 ```typescript
 await importGraph(store, data, { onUnknownProperty: "allow" });
-// Behavior depends on your database and schema strictness
+// { name: "Alice", unknownField: "value" } is stored as is
 ```
+
+Under every strategy the declared properties are stored as the document
+carries them ([Properties are imported as stored](#properties-are-imported-as-stored)).
+A `.strict()` schema refuses an unknown property even under `allow`.
 
 ## Backup and Restore
 

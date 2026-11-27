@@ -82,31 +82,60 @@ const Product = defineNode("Product", {
 });
 ```
 
-#### Transforms must be idempotent
+<a id="transforms-must-be-idempotent"></a>
 
-TypeGraph stores a schema's parsed output, and an `update()` parses the
-merged stored properties through the schema again. A `.transform()` therefore
-runs again on every update, on the value it produced last time. A transform
-is safe when its output is valid input that parses to itself, as `slug` above
-is: slugging an already-slugged value changes nothing.
+#### What an update stores
 
-Two kinds of transform are not safe:
+TypeGraph stores a schema's parsed output. A write that leaves a row behind an
+existing one validates the whole row it leaves: the properties you state are
+merged over the stored ones and the result is parsed through the complete
+schema, so constraints, refinements and cross-field checks see every
+property, a `.default()` added since the row was written is filled, and a
+schema tightened since then is enforced. What the write stores differs by
+property:
 
-- **One that is not idempotent is applied again.** With
-  `z.string().transform((v) => v + "!")`, a create stores `"x!"`, and an
-  `update()` that does not touch the field stores `"x!!"`.
-- **One that changes the type makes every later update throw.** With
-  `z.string().transform((v) => v.length)`, a create stores a number, and the
-  next `update()` is refused with a `ValidationError`, even one that does not
-  touch the field, because the stored number is not a string.
+- **A property you state** is stored as the schema makes it, exactly as a
+  create stores it: its `.transform()`, `.overwrite()`, `.catch()` fallback,
+  default or coercion applies once. Stating `undefined` removes an optional
+  property or fills its default.
+- **A property you do not state** is stored as it was stored. The parse checks
+  it but does not rewrite it, so a transform such as
+  `z.string().transform((v) => v + "!")` is not applied again (a create stores
+  `"x!"`, and an `update()` of another property keeps `"x!"`), an
+  `.overwrite()` does not shift it, and a `.catch()` does not replace it with
+  its fallback. This includes a stored key the schema no longer declares.
+- **A property the row lacks and you do not state** is filled as the schema
+  makes it, such as a newly added `.default()`.
 
-This holds for node and edge properties, and for every write that updates a
-stored row: an edge `update()` that only states `validTo`, and a `reparent`
-that ends a `oneActive` incumbent's window, re-parse the stored properties too.
-Keep a value that must change type in its input form and derive the other form
-when you read it. Planning a [graph merge](/graph-merge) from staged
-operations already refuses a schema whose output does not survive a second
-parse.
+A property is stated when its top-level key is in what you pass, whatever its
+value. A nested object or array is one property: stating `address` stores the
+schema's output for the whole object, and leaving it out keeps every byte of
+it. A value an object-level `.overwrite()` derives from other properties, such
+as a slug computed from a title, is recomputed only when you state it; an
+update that states the title alone keeps the stored slug.
+
+When the row fails validation at a property you did not state, and that
+property's stored value is not valid input to its own schema, the write is
+refused with a `ValidationError` whose issue carries the code
+`STORED_PROPERTY_INVALID` (`STORED_PROPERTY_INVALID_CODE`, from
+`@nicia-ai/typegraph/errors`) and names the property. That happens for a
+transform that changes the type (`z.string().transform((v) => v.length)` stores
+a number, which is not a string), a constraint tightened since the row was
+written, or an undeclared key under a `.strict()` schema. State a valid value
+for the property, or repair the rows `validateStore()` reports. A cross-field
+refinement that fails because of a property you did state is reported as Zod
+reports it.
+
+This holds for node and edge properties and for every write over an existing
+row: `update()`, `upsertById()`, `getOrCreateByConstraint()` and
+`getOrCreateByEndpoints()` with `ifExists: "update"`, their bulk forms,
+`updateWhere()`, `compareAndSet()`, an edge `update()` that only states
+`validTo`, and a `reparent` that ends a `oneActive` incumbent's window. An
+[import](/interchange) and a [graph merge](/graph-merge) write rows in their
+stored form, so they state nothing: every property the document or plan
+carries is stored as carried, after the same whole-row validation. Because the
+uniqueness keys, index and search entries, and history of a row are derived
+from what it stores, an untouched property cannot change any of them.
 
 #### Date properties
 
@@ -115,9 +144,9 @@ its canonical ISO-8601 text (`2024-01-01T00:00:00.000Z`), and a read returns
 that text, not a `Date`, even though the property is typed `Date`. Convert it
 with `new Date(value)` where you need a `Date`.
 
-A write that parses stored properties again first turns that stored text back
-into a `Date`, so an update that does not touch a date property leaves it as
-it was. This covers `update()`, `upsertById()`, `getOrCreateByConstraint()` and
+A write that validates stored properties again first turns that stored text
+back into a `Date`, so an update that does not touch a date property passes
+validation and keeps the stored text. This covers `update()`, `upsertById()`, `getOrCreateByConstraint()` and
 `getOrCreateByEndpoints()` with `ifExists: "update"`, their bulk forms,
 `updateWhere()`, `compareAndSet()`, an edge `update()` that only states
 `validTo`, and `validateStore()`, which does not report a stored date as a
@@ -127,15 +156,12 @@ nothing but a `Date` — a `z.date()`, possibly inside `.optional()`,
 `z.object()` or a `z.array()` — and only when it is exactly the text the store
 writes. A date under a union, a record, a tuple, a `.transform()`, or an
 `.overwrite()` on the date itself or on an object or array holding it, is
-parsed as stored. An `.overwrite()` on a wrapper around the date
-(`z.date().optional().overwrite(…)`) runs on the revived `Date`, so one that
-changes its input changes the stored date on every update of another property,
-and on an import or merge of the row; this is a known limitation of
-re-validating the whole row. A value you pass
+parsed as stored, so an update that does not state it is refused
+([What an update stores](#what-an-update-stores)), except under a `.catch()`,
+which accepts it and keeps the stored text. An `.overwrite()` on a wrapper
+around the date (`z.date().optional().overwrite(…)`) runs on the revived
+`Date` only to validate it: the stored date is kept. A value you pass
 yourself is never converted: state a date property as a `Date`.
-The `getOrCreate…` forms parse the properties you state as a create first, so a
-property you omit that declares a `.default()` or `.catch()` takes that value
-rather than the stored one.
 
 Every write stores a `Date` you state the same way: as the ISO text of the
 instant it holds, read from the `Date` itself, never from a `toJSON()` or
