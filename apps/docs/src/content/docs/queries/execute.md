@@ -338,7 +338,8 @@ object for a string field), or that the field's predicate operand contract refus
 the database. Every form a terminal has issued is a value: a Boolean key accepts `true`/`false` and
 the `0`/`1` that SQLite's and libSQL's `store.batchOnce()` issue it as, and a timestamp key accepts
 the text with the session's UTC offset (`2024-01-01T19:04:05.678-08:00`) that PostgreSQL's
-`store.batchOnce()` issues it as, compared as the instant it names. On PostgreSQL, whose text
+`store.batchOnce()` issues it as, or the rendering a PostgreSQL driver returns, compared as the instant
+it names. On PostgreSQL, whose text
 cannot hold a NUL character, a cursor whose text holds one (in an `orderBy()` value, an id or a
 hybrid search's node-id tiebreak) is refused the same way; SQLite's text can hold one, so it pages
 there. A cursor whose text holds a lone UTF-16 surrogate, which no database stores or returns, is
