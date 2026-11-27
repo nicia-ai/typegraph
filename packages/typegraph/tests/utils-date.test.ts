@@ -5,8 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import { ValidationError } from "../src/errors";
 import {
+  canonicalDatabaseTimestampText,
   canonicalizeDatabaseTimestamp,
-  canonicalOffsetTimestampText,
   decodeDate,
   encodeDate,
   isCanonicalIsoDate,
@@ -202,20 +202,30 @@ describe("date utilities", () => {
   });
 });
 
-describe("canonicalOffsetTimestampText", () => {
-  it("reads PostgreSQL's offset rendering of a millisecond instant as its canonical UTC text", () => {
+describe("canonicalDatabaseTimestampText", () => {
+  it("reads a driver's rendering of a millisecond instant, with any offset or none, as its canonical UTC text", () => {
     expect(
       [
         "2024-01-01T19:04:05.678-08:00",
         "2024-01-02T03:04:05.678+00:00",
+        "2024-01-02 03:04:05.678+00",
         "2024-01-02T08:34:05.678+05:30",
+        "2024-01-02T03:04:05.678+0000",
+        "2024-01-02T03:04:05.678Z",
+        "2024-01-02T03:04:05Z",
+        "2024-01-02 03:04:05.678",
         "2024-01-01T19:04:05-08:00",
         "2024-01-01T19:04:05.6-08:00",
         "1999-12-31T15:59:59.999-08:00",
-      ].map((text) => canonicalOffsetTimestampText(text)),
+      ].map((text) => canonicalDatabaseTimestampText(text)),
     ).toEqual([
       "2024-01-02T03:04:05.678Z",
       "2024-01-02T03:04:05.678Z",
+      "2024-01-02T03:04:05.678Z",
+      "2024-01-02T03:04:05.678Z",
+      "2024-01-02T03:04:05.678Z",
+      "2024-01-02T03:04:05.678Z",
+      "2024-01-02T03:04:05.000Z",
       "2024-01-02T03:04:05.678Z",
       "2024-01-02T03:04:05.000Z",
       "2024-01-02T03:04:05.600Z",
@@ -223,21 +233,21 @@ describe("canonicalOffsetTimestampText", () => {
     ]);
   });
 
-  it("refuses any other text, a time past millisecond precision, an invalid field, and an instant outside 0001 to 9999", () => {
+  it("refuses text without a full date and time, past millisecond precision, with an invalid field, or outside 0001 to 9999", () => {
     expect(
       [
-        "2024-01-02T03:04:05.678Z",
         "2024-01-02T03:04:05.678912+00:00",
+        "2024-01-02T03:04:05.6780+00:00",
         "2024-13-02T03:04:05.678+00:00",
         "2024-02-30T03:04:05.678+00:00",
         "2024-01-02T24:04:05.678+00:00",
         "2024-01-02T03:04:05.678+00:60",
-        "2024-01-02 03:04:05.678+00:00",
-        "2024-01-02T03:04:05.678+0000",
+        "2024-01-02T03:04Z",
+        "2024-01-02",
         "9999-12-31T20:00:00.000-08:00",
         "0001-01-01T03:00:00.000+08:00",
         "not a timestamp",
-      ].filter((text) => canonicalOffsetTimestampText(text) !== undefined),
+      ].filter((text) => canonicalDatabaseTimestampText(text) !== undefined),
     ).toEqual([]);
   });
 });

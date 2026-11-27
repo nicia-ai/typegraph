@@ -426,7 +426,7 @@ export function registerCursorFieldContractIntegrationTests(
         ["meta.version", 2 ** 31],
         ["meta.createdAt", "not a timestamp"],
         ["meta.createdAt", "2024-01-02"],
-        ["meta.createdAt", "2024-01-02T03:04:05Z"],
+        ["meta.createdAt", "2024-01-02T03:04Z"],
         ["publishedAt", "not a date"],
         ["publishedAt", "2024-13-02T03:04:05.678Z"],
         ["publishedAt", "2024-01-02T03:04:05.678912+00:00"],

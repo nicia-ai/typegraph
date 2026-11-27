@@ -12,7 +12,7 @@ import {
   UnsupportedPredicateError,
   ValidationError,
 } from "../errors";
-import { canonicalOffsetTimestampText } from "../utils/date";
+import { canonicalDatabaseTimestampText } from "../utils/date";
 import { sha256HexSync } from "../utils/hash";
 import {
   type FieldRef,
@@ -394,8 +394,8 @@ function isBindableCursorText(
  * timestamp). Accepts every form a terminal has issued, read back as the
  * canonical value every dialect binds: SQLite's `batchOnce()` carries a
  * boolean as `0`/`1` (read as `false`/`true`), and PostgreSQL's carries a
- * timestamp with the session's offset (read as its canonical UTC text,
- * `canonicalOffsetTimestampText`). A cursor holding anything else was not
+ * timestamp with the session's offset, and a driver may render one in its
+ * own form (read as its canonical UTC text, `canonicalDatabaseTimestampText`). A cursor holding anything else was not
  * issued for this query, and comparing it would be a database error (a text
  * compared as a PostgreSQL number or timestamp) or a position among values
  * of another type.
@@ -438,7 +438,7 @@ function canonicalCursorFieldScalar(
     case "date": {
       if (typeof value !== "string") return undefined;
       if (!isTimestampFieldReference(reference)) return { value };
-      const offsetCanonical = canonicalOffsetTimestampText(value);
+      const offsetCanonical = canonicalDatabaseTimestampText(value);
       return { value: offsetCanonical ?? value };
     }
     case "number": {
