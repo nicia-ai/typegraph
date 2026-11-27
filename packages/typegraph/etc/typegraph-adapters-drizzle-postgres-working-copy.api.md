@@ -7305,20 +7305,20 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         done: boolean;
     }>>;
     lockIdentityImportTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>) => Promise<void>;
-    foldImportedIdentityNodes: (entry: OperationEntry, references: readonly Readonly<{
+    foldImportedIdentityNodes: (entry: OperationEntry | Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, references: readonly Readonly<{
         kind: string;
         id: string;
     }>[]) => Promise<void>;
-    applyImportedNodeWindowEnd: (entry: OperationEntry, input: Readonly<{
+    applyImportedNodeWindowEnd: (entry: OperationEntry | Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, input: Readonly<{
         kind: string;
         id: string;
         validTo?: string;
     }>) => Promise<void>;
-    detachDeletedImportedIdentityNode: (entry: OperationEntry, reference: Readonly<{
+    detachDeletedImportedIdentityNode: (entry: OperationEntry | Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, reference: Readonly<{
         kind: string;
         id: string;
     }>) => Promise<void>;
-    importIdentityAssertionsAtTarget: (entry: OperationEntry, assertions: readonly Readonly<{
+    importIdentityAssertionsAtTarget: (entry: OperationEntry | Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, assertions: readonly Readonly<{
         id: string;
         relation: "same" | "different";
         a: Readonly<{
@@ -7348,7 +7348,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         done: boolean;
     }>>;
     identityTransitionRetentionAtTarget: (target: OperationEntry) => Promise<IdentityTransitionRetention>;
-    importIdentityTransitionsAtTarget: (entry: OperationEntry, transitions: readonly IdentityTransitionTransfer[], carriedCut: IdentityTransitionCut | undefined) => Promise<Readonly<{
+    importIdentityTransitionsAtTarget: (entry: OperationEntry | Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, transitions: readonly IdentityTransitionTransfer[], carriedCut: IdentityTransitionCut | undefined) => Promise<Readonly<{
         created: number;
     }>>;
     applyIdentityMergeAtTarget: (target: OperationEntry, retractions: readonly Readonly<{
