@@ -7,7 +7,12 @@
  * - Version for forward compatibility
  */
 
-import { ConfigurationError, ValidationError } from "../errors";
+import {
+  ConfigurationError,
+  UnsupportedPredicateError,
+  ValidationError,
+} from "../errors";
+import { canonicalOffsetTimestampText } from "../utils/date";
 import { sha256HexSync } from "../utils/hash";
 import {
   type FieldRef,
@@ -15,7 +20,11 @@ import {
   type OrderSpec,
   type QueryAst,
 } from "./ast";
-import { systemColumnSelectedPath } from "./builder/order-by-field";
+import {
+  assertComparedOperand,
+  isTimestampFieldReference,
+  systemColumnSelectedPath,
+} from "./builder/order-by-field";
 import { getNodeKindsForAlias } from "./compiler/predicate-utils";
 import {
   extractFulltextMatchPredicates,
@@ -379,24 +388,58 @@ function isBindableCursorText(
  * The value a cursor carries for a key over `spec`'s field, in the form its
  * position compares, or `undefined` when the cursor cannot have been issued
  * for this field: NULL, or a JSON scalar of the field's value type (any JSON
- * value for a field of unknown type, which may hold one). Accepts every form
- * a terminal has issued: SQLite's `batchOnce()` carries a boolean as `0`/`1`,
- * read back here as `false`/`true` so every dialect binds a boolean. A
- * cursor holding anything else was not issued for this query, and comparing
- * it would be a database error (a text compared as a PostgreSQL number) or a
- * position among values of another type.
+ * value for a field of unknown type, which may hold one) that the field's
+ * operand contract accepts (`assertComparedOperand`, the check a predicate's
+ * operand gets: a 32-bit integer for `version`, a canonical UTC instant for a
+ * timestamp). Accepts every form a terminal has issued, read back as the
+ * canonical value every dialect binds: SQLite's `batchOnce()` carries a
+ * boolean as `0`/`1` (read as `false`/`true`), and PostgreSQL's carries a
+ * timestamp with the session's offset (read as its canonical UTC text,
+ * `canonicalOffsetTimestampText`). A cursor holding anything else was not
+ * issued for this query, and comparing it would be a database error (a text
+ * compared as a PostgreSQL number or timestamp) or a position among values
+ * of another type.
  */
 function canonicalCursorFieldValue(
   value: unknown,
   spec: OrderSpec,
 ): Readonly<{ value: unknown }> | undefined {
   if (value === null) return { value };
-  const valueType =
-    spec.field.__type === "field_ref" ? spec.field.valueType : undefined;
-  switch (valueType) {
+  if (spec.field.__type !== "field_ref") return { value };
+  const reference = spec.field;
+  const canonical = canonicalCursorFieldScalar(value, reference);
+  if (canonical === undefined) return undefined;
+  try {
+    assertComparedOperand(reference, canonical.value);
+  } catch (error) {
+    // The contract's refusals: an operand of the wrong form
+    // (ValidationError) or one backends compare differently
+    // (UnsupportedPredicateError).
+    if (
+      error instanceof ValidationError ||
+      error instanceof UnsupportedPredicateError
+    )
+      return undefined;
+    throw error;
+  }
+  return canonical;
+}
+
+/**
+ * The value of `reference`'s JSON type that `value` is, in its canonical
+ * form, or `undefined` when it is a value of another type.
+ */
+function canonicalCursorFieldScalar(
+  value: unknown,
+  reference: FieldRef,
+): Readonly<{ value: unknown }> | undefined {
+  switch (reference.valueType) {
     case "string":
     case "date": {
-      return typeof value === "string" ? { value } : undefined;
+      if (typeof value !== "string") return undefined;
+      if (!isTimestampFieldReference(reference)) return { value };
+      const offsetCanonical = canonicalOffsetTimestampText(value);
+      return { value: offsetCanonical ?? value };
     }
     case "number": {
       return typeof value === "number" && Number.isFinite(value) ?

@@ -332,9 +332,13 @@ outside the range its key type holds, with a `ValidationError` whose issue `code
 digest. A query without a search issues the same cursors as before.
 
 On every query, a cursor value that is not a value of its field (a string for a numeric field, an
-object for a string field) is refused with a `ValidationError` before the query reaches the
-database. Every form a terminal has issued is a value: a Boolean key accepts `true`/`false` and
-the `0`/`1` that SQLite's and libSQL's `store.batchOnce()` issue it as. On PostgreSQL, whose text
+object for a string field), or that the field's predicate operand contract refuses (anything but a
+32-bit integer for `meta.version`, anything but a canonical UTC instant for a timestamp such as
+`meta.createdAt` or a date property), is refused with a `ValidationError` before the query reaches
+the database. Every form a terminal has issued is a value: a Boolean key accepts `true`/`false` and
+the `0`/`1` that SQLite's and libSQL's `store.batchOnce()` issue it as, and a timestamp key accepts
+the text with the session's UTC offset (`2024-01-01T19:04:05.678-08:00`) that PostgreSQL's
+`store.batchOnce()` issues it as, compared as the instant it names. On PostgreSQL, whose text
 cannot hold a NUL character, a cursor whose text holds one (in an `orderBy()` value, an id or a
 hybrid search's node-id tiebreak) is refused the same way; SQLite's text can hold one, so it pages
 there. A cursor whose text holds a lone UTF-16 surrogate, which no database stores or returns, is

@@ -234,6 +234,34 @@ export function canonicalDateOperandText(operand: unknown): string | undefined {
 }
 
 /**
+ * PostgreSQL's JSON rendering of a `timestamptz` at millisecond precision:
+ * the date, the time with a fraction of one to three digits or none, and the
+ * session's UTC offset in hours and minutes (`2024-01-01T19:04:05.678-08:00`).
+ */
+const OFFSET_TIMESTAMP_TEXT_PATTERN =
+  /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?([+-])(\d{2}):(\d{2})$/;
+
+/**
+ * The canonical UTC text ({@link canonicalDateOperandText}) of the instant a
+ * PostgreSQL `timestamptz` rendered as JSON text denotes, or `undefined`
+ * for any other text: a time past millisecond precision, an invalid date or
+ * time, or an instant outside the years 0001 to 9999. A value the store
+ * wrote has millisecond precision, so its rendering converts exactly.
+ */
+export function canonicalOffsetTimestampText(text: string): string | undefined {
+  const match = OFFSET_TIMESTAMP_TEXT_PATTERN.exec(text);
+  if (match === null) return undefined;
+  const [, date, time, fraction = "", sign, hours, minutes] = match;
+  const local = `${date}T${time}.${fraction.padEnd(3, "0")}Z`;
+  if (!isCanonicalIsoDate(local) || Number(hours) > 23 || Number(minutes) > 59)
+    return undefined;
+  const offsetMilliseconds =
+    (Number(hours) * 60 + Number(minutes)) * 60_000 * (sign === "-" ? -1 : 1);
+  const instant = new Date(Date.parse(local) - offsetMilliseconds);
+  return canonicalDateOperandText(instant);
+}
+
+/**
  * Whether {@link canonicalDateOperandText} accepts an operand: whether it
  * compares with a stored timestamp the same way on every backend.
  */
