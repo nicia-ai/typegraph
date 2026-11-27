@@ -536,6 +536,13 @@ export function buildPaginatedResult<
 
 /**
  * Constructs a paginated result from rows and a caller-owned cursor encoder.
+ *
+ * The one owner of a page's cursors, and so of the guarantee that paging
+ * advances: a page read past `cursor` whose furthest row (the last row
+ * forward, the first backward) encodes to `cursor` itself returned the
+ * cursor's own row again, and following its cursor would read the same page
+ * forever (`stream()` would never end). That page is refused with a
+ * `CompilerInvariantError` rather than returned.
  */
 export function buildPaginatedResultFromRows<R, Row>(
   data: readonly R[],
@@ -551,6 +558,12 @@ export function buildPaginatedResultFromRows<R, Row>(
     firstRow === undefined ? undefined : buildCursor(firstRow, "b");
   const nextCursor =
     lastRow === undefined ? undefined : buildCursor(lastRow, "f");
+  const advancedTo = isBackward ? previousCursor : nextCursor;
+  if (cursor !== undefined && advancedTo === cursor)
+    throw new CompilerInvariantError(
+      "A cursor page did not advance: its furthest row is the row the cursor positions, so following its cursor would repeat the page forever",
+      { phase: "keyset-pagination", direction: isBackward ? "b" : "f" },
+    );
 
   return {
     data,

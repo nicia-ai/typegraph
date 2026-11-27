@@ -23,13 +23,22 @@ import {
   ValidationError,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
-import { UnsupportedBackendCapabilityError } from "../../../src/errors";
+import {
+  CompilerInvariantError,
+  UnsupportedBackendCapabilityError,
+} from "../../../src/errors";
 import type { PaginatedResult } from "../../../src/query/builder/types";
 import {
   SEARCH_CURSOR_MISMATCH,
   searchCursorFingerprint,
 } from "../../../src/query/cursor";
 import { getDialect } from "../../../src/query/dialect";
+import { parseExactDoubleText } from "../../../src/query/dialect/exact-double-text";
+import { sql } from "../../../src/query/sql-fragment";
+import {
+  asCompiledRowsSql,
+  type CompiledRowsSql,
+} from "../../../src/query/sql-intent";
 import type { Store } from "../../../src/store/store";
 import { propertyRuns } from "../../property/run-budget";
 import { type IntegrationStore, integrationTestGraph } from "./fixtures";
@@ -292,6 +301,34 @@ async function walk(
     if (!more || cursor === undefined) break;
   }
   return direction === "forward" ? pages.flat() : pages.toReversed().flat();
+}
+
+/**
+ * The text a cursor carries for a double relevance key of the value
+ * `double`, rendered by the dialect's own `relevanceCursorKey` in SQL.
+ */
+async function renderedRelevanceKey(
+  store: IntegrationStore,
+  double: number,
+): Promise<string> {
+  const { relevanceCursorKey } = getDialect(store.backend.dialect);
+  const source = "vector_distance" as const;
+  const [row] = await store.backend.execute<{ key_text: unknown }>(
+    asCompiledRowsSql(
+      sql`SELECT ${relevanceCursorKey.select(relevanceCursorKey.value(sql`${double}`, source), source)} AS key_text`,
+    ),
+  );
+  const text = row?.key_text;
+  if (typeof text !== "string")
+    throw new Error(`The dialect rendered no key text for ${double}`);
+  return text;
+}
+
+/** A refusal as a test compares it: the class name of an invariant refusal. */
+function invariantRefusal(error: unknown): unknown {
+  return error instanceof CompilerInvariantError ?
+      "CompilerInvariantError"
+    : error;
 }
 
 async function executedIds(query: SearchQuery): Promise<readonly string[]> {
@@ -1213,6 +1250,106 @@ export function registerSearchPaginationIntegrationTests(
       });
     }
 
+    it("refuses a page that does not advance past its cursor instead of returning it, so stream() ends", async () => {
+      const laneStore = context.getStore();
+      const laneBackend = laneStore.backend;
+      await seedRanked(laneStore);
+      // A backend that, once armed, answers every statement with the rows
+      // of the last statement it ran: the page after a cursor then reads the
+      // cursor's own row again, the condition a key that does not round-trip
+      // produces.
+      let lastRows: readonly unknown[] = [];
+      let replaying = false;
+      const store = createStore(
+        integrationTestGraph,
+        deriveBackend(laneBackend, {
+          execute: async <T>(query: CompiledRowsSql): Promise<readonly T[]> => {
+            if (!replaying) lastRows = await laneBackend.execute<T>(query);
+            return lastRows as readonly T[];
+          },
+        }),
+      );
+      const kinds = SEARCH_KINDS.filter((kind) =>
+        capabilitiesOf(kind).every(
+          (capability) =>
+            laneBackend.capabilities[capability]?.supported === true,
+        ),
+      );
+      const queries = [
+        ...kinds.map(
+          (kind) =>
+            [kind, () => orderedSearch(store, { kind }, "relevance")] as const,
+        ),
+        [
+          "plain",
+          () =>
+            store
+              .query()
+              .from("Article", "a")
+              .orderBy("a", "category", "desc")
+              .select((row) => ({ id: row.a.id })),
+        ] as const,
+      ];
+      const outcomes = [];
+      for (const [kind, query] of queries) {
+        for (const direction of ["forward", "backward"] as const) {
+          replaying = false;
+          const first = await query().paginate(
+            direction === "forward" ? { first: 1 } : { last: 1 },
+          );
+          const cursor =
+            direction === "forward" ? first.nextCursor : first.prevCursor;
+          replaying = true;
+          const options =
+            direction === "forward" ?
+              { first: 1, after: requireCursor(cursor) }
+            : { last: 1, before: requireCursor(cursor) };
+          outcomes.push({
+            kind,
+            direction,
+            paginate: await query()
+              .paginate(options)
+              .then(() => "page", invariantRefusal),
+            page: await query()
+              .page(options)
+              .execute()
+              .then(() => "page", invariantRefusal),
+          });
+        }
+        const streamed: string[] = [];
+        let streamOutcome: unknown = "ended";
+        replaying = false;
+        try {
+          for await (const row of query().stream({ batchSize: 1 })) {
+            streamed.push(row.id);
+            // The first batch has been read; every later one replays it.
+            replaying = true;
+            if (streamed.length > MAX_PAGES) break;
+          }
+        } catch (error) {
+          streamOutcome = invariantRefusal(error);
+        }
+        outcomes.push({ kind, stream: streamOutcome, streamed });
+      }
+      expect(outcomes).toEqual(
+        queries.flatMap(([kind]) => [
+          {
+            kind,
+            direction: "forward",
+            paginate: "CompilerInvariantError",
+            page: "CompilerInvariantError",
+          },
+          {
+            kind,
+            direction: "backward",
+            paginate: "CompilerInvariantError",
+            page: "CompilerInvariantError",
+          },
+          { kind, stream: "CompilerInvariantError", streamed: ["r1"] },
+        ]),
+      );
+    });
+
     it("pages a search through a custom strategy whose engine form is exact, approximate or not, even when it declares no approximate repeatability", async (ctx) => {
       const laneStore = storeWith(context, ctx, "vector");
       const laneBackend = laneStore.backend;
@@ -1443,6 +1580,68 @@ export function registerSearchPaginationIntegrationTests(
       });
     });
 
+    it("pages a hybrid search whose fused scores are large finite doubles exactly as execute() orders it, one row a page", async (ctx) => {
+      const store = storeWith(context, ctx, "hybrid");
+      // Every order of the vector leg against the full-text leg, so the
+      // fused scores take every sum of two ordinals' shares, ties included.
+      const titles = [
+        "climate climate climate",
+        "climate climate report",
+        "climate and a longer report",
+      ];
+      const angleOrders = [
+        [0, 0.3, 0.6],
+        [0, 0.6, 0.3],
+        [0.3, 0, 0.6],
+        [0.3, 0.6, 0],
+        [0.6, 0, 0.3],
+        [0.6, 0.3, 0],
+      ];
+      // Fused scores near 1e126: weight / (1 + ordinal) summed over the legs.
+      const weight = 2.1720897273118987e126;
+      const outcomes = [];
+      for (const [order, angles] of angleOrders.entries()) {
+        const category = `large${order}`;
+        for (const [index, title] of titles.entries()) {
+          await store.nodes.Article.create(
+            {
+              title,
+              body: "notes",
+              category,
+              published: true,
+              embedding: embeddingAt(angles[index] ?? 0),
+            },
+            { id: `h${order}${index}` },
+          );
+        }
+        const query = () =>
+          searchArticles(store, { kind: "hybrid", category })
+            .fuseWith({ k: 1, weights: { vector: weight, fulltext: weight } })
+            .select((row) => ({ id: row.a.id }));
+        const executed = await executedIds(query());
+        outcomes.push({
+          order,
+          sorted: executed.toSorted(),
+          forward: await walk(store, query, "paginate", "forward", 1),
+          backward: await walk(store, query, "page", "backward", 1),
+          batched: await walk(store, query, "batchOnce", "forward", 1),
+          stream: await walk(store, query, "stream", "forward", 1),
+          executed,
+        });
+      }
+      expect(outcomes).toEqual(
+        outcomes.map(({ order, executed }) => ({
+          order,
+          sorted: [`h${order}0`, `h${order}1`, `h${order}2`],
+          forward: executed,
+          backward: executed,
+          batched: executed,
+          stream: executed,
+          executed,
+        })),
+      );
+    });
+
     it("pages a vector search whose distance is infinite exactly as execute() orders it", async (ctx) => {
       const store = storeWith(context, ctx, "vector");
       await seedRanked(store);
@@ -1577,7 +1776,8 @@ export function registerSearchPaginationIntegrationTests(
         // every written fraction digit (less the exponent), trailing zeros
         // and a zero's included, and holds at most 16383 of them. Refused
         // where the key is a NUMERIC; a valid position (0 or 1) where it is
-        // a double.
+        // a PostgreSQL double. SQLite carries a key only as its exact binary
+        // text, so it refuses every decimal text as text it never renders.
         const outsideNumericScale = [
           "0e-20000",
           `0.${"0".repeat(20_000)}`,
@@ -1597,14 +1797,17 @@ export function registerSearchPaginationIntegrationTests(
         expect({ kind, scaleOutcomes }).toEqual({
           kind,
           scaleOutcomes: outsideNumericScale.map(() =>
-            keyIsNumeric ? SEARCH_CURSOR_MISMATCH : "page",
+            keyIsNumeric || store.backend.dialect === "sqlite" ?
+              SEARCH_CURSOR_MISMATCH
+            : "page",
           ),
         });
         // Representable as a double but not as PostgreSQL's `real` (the type
-        // `ts_rank_cd` returns): a valid position past every row.
+        // `ts_rank_cd` returns): a valid position past every row, carried as
+        // the dialect renders the key.
         const large = encodeCursorJson({
           ...json,
-          vals: ["1e39", ...vals.slice(1)],
+          vals: [await renderedRelevanceKey(store, 1e39), ...vals.slice(1)],
         });
         const page = await query().paginate({ first: 2, after: large });
         // Past every distance, so no vector row follows it; a rank or fused
@@ -1739,6 +1942,91 @@ export function registerSearchPaginationIntegrationTests(
           },
         ),
         { numRuns: propertyRuns({ ci: 200, local: 150 }) },
+      );
+    });
+
+    it("carries every finite double as a relevance key and as a batched numeric key back exactly", async () => {
+      const { backend } = context.getStore();
+      const dialect = getDialect(backend.dialect);
+      const { value, select, bind, operand } = dialect.relevanceCursorKey;
+      const source = "vector_distance" as const;
+      async function readRow(
+        fragment: ReturnType<typeof sql>,
+      ): Promise<Record<string, unknown>> {
+        const [row] = await backend.execute<Record<string, unknown>>(
+          asCompiledRowsSql(fragment),
+        );
+        return row ?? {};
+      }
+      // A key is carried exactly when the cursor's comparison finds the
+      // double the statement computed equal to the value the cursor binds,
+      // and when a batch envelope's key reads back as that double.
+      async function carried(double: number) {
+        const key = value(sql`${double}`, source);
+        const rendered = await readRow(
+          sql`WITH r AS (SELECT ${dialect.batchExactNumber(key)} AS k, 1 AS o) SELECT ${select(key, source)} AS key_text, ${dialect.orderedRowsJsonArray("r", ["k"], "o")} AS batch`,
+        );
+        const text = rendered["key_text"];
+        const bound = typeof text === "string" ? bind(text, source) : undefined;
+        const comparison =
+          bound === undefined ? undefined : (
+            await readRow(
+              sql`SELECT CASE WHEN ${value(sql`${double}`, source)} = ${operand(bound)} THEN 'equal' ELSE 'unequal' END AS outcome`,
+            )
+          );
+        const compared = comparison?.["outcome"];
+        const envelope = rendered["batch"];
+        const [batchRow] = (
+          typeof envelope === "string" ?
+            JSON.parse(envelope)
+          : envelope) as readonly Readonly<{ k: unknown }>[];
+        const batched = batchRow?.k;
+        const batchedDouble =
+          typeof batched === "string" ? parseExactDoubleText(batched) : batched;
+        return {
+          compared,
+          batched: batchedDouble === double ? "equal" : batched,
+        };
+      }
+      const boundaries = [
+        Number.MIN_VALUE,
+        -Number.MIN_VALUE,
+        3 * Number.MIN_VALUE,
+        2 ** -1022 - Number.MIN_VALUE,
+        2 ** -1022,
+        2 ** -1024,
+        2 ** -768,
+        2 ** -256,
+        1 - 2 ** -53,
+        1,
+        2 ** 32 - 2 ** -20,
+        2 ** 32,
+        2 ** 256,
+        2 ** 768,
+        Number.MAX_VALUE,
+        -Number.MAX_VALUE,
+        0.1,
+        0.30000000000000004,
+        2.1720897273118987e126 / 3,
+        0,
+      ];
+      const expected = { compared: "equal", batched: "equal" };
+      for (const double of boundaries)
+        expect({ double, ...(await carried(double)) }).toEqual({
+          double,
+          ...expected,
+        });
+      await fc.assert(
+        fc.asyncProperty(
+          fc.double({ noNaN: true, noDefaultInfinity: true }),
+          async (double) => {
+            expect({ double, ...(await carried(double)) }).toEqual({
+              double,
+              ...expected,
+            });
+          },
+        ),
+        { numRuns: propertyRuns({ ci: 300, local: 200 }) },
       );
     });
 

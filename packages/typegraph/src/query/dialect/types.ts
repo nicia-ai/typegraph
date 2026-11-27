@@ -227,11 +227,14 @@ export interface DialectAdapter {
    * fusion options produce (a double does not: weights near the largest
    * double overflow it); in both, the text is bound as it is: an untyped
    * parameter compared with the key takes the key's type. SQLite's keys are
-   * REAL: it renders them with 17 significant digits, which identify every
-   * double, an infinity as `Inf` / `-Inf`, and binds the double that text
-   * denotes, relying on none of the engine's own float conversions: the
-   * SQLite libSQL ships (3.45.1) renders a REAL with 15 significant digits
-   * in `CAST(x AS TEXT)` and in JSON.
+   * REAL: it renders them as their exact binary text
+   * (`sqliteExactDoubleText`: an integral significand and a power of two,
+   * computed with exact REAL arithmetic), an infinity as `Inf` / `-Inf`,
+   * and binds the double that text denotes (`parseExactDoubleText`),
+   * relying on none of the engine's decimal conversions: the SQLite libSQL
+   * ships (3.45.1) renders a REAL with 15 significant digits in
+   * `CAST(x AS TEXT)` and in JSON, and SQLite does not promise that any
+   * `printf` rendering reads back as the same double.
    */
   readonly relevanceCursorKey: Readonly<{
     /**
@@ -275,10 +278,12 @@ export interface DialectAdapter {
    * exactly the double the statement computed, as a page read alone does.
    * The SQLite libSQL ships (3.45.1) renders a REAL inside JSON with 15
    * significant digits, which puts two nearly equal keys at one cursor
-   * position, so SQLite carries a number as its 17-significant-digit text
-   * and any other value unchanged. PostgreSQL's JSON renders a number as its
-   * own text output, so it carries the value unchanged. The cursor reads a
-   * text back with `parseRepresentableDouble`.
+   * position, and no decimal text SQLite renders is guaranteed to read back
+   * as the same double, so SQLite carries a REAL as its exact binary text
+   * (`sqliteExactDoubleText`) and any other value unchanged. PostgreSQL's
+   * JSON renders a number as its own shortest exact text output, so it
+   * carries the value unchanged. The cursor reads a text back with
+   * `parseExactDoubleText`.
    */
   readonly batchExactNumber: (
     this: void,

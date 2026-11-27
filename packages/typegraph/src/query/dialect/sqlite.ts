@@ -15,13 +15,18 @@ import {
 } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { applyAggregateFilter } from "./aggregate-filter";
+import {
+  NEGATIVE_INFINITY_TEXT,
+  parseExactDoubleText,
+  POSITIVE_INFINITY_TEXT,
+  sqliteExactDoubleText,
+} from "./exact-double-text";
 import { fts5Strategy } from "./fulltext-strategy";
 import { likeEscapeClause, sqliteGlobFromLikePattern } from "./like-escape";
 import {
   DOUBLE_OVERFLOW_BOUNDARY,
   MAXIMUM_FINITE_DOUBLE_INTEGER,
   MAXIMUM_FINITE_DOUBLE_TEXT,
-  parseRepresentableDouble,
 } from "./numeric-conversion";
 import { getSqlDialectProfile, packSqlListValue } from "./profile";
 import { type BuiltinDialectAdapter } from "./types";
@@ -128,12 +133,12 @@ function mergeJsonObjects(parts: readonly SqlFragment[]): SqlFragment {
  * SQLite dialect adapter implementation.
  */
 /**
- * The text SQLite's `printf('%!.17g')` renders a REAL infinity as, and the
+ * The text `sqliteExactDoubleText` renders a REAL infinity as, and the
  * literal SQLite reads as that infinity (a decimal past the largest double).
  */
 const SQLITE_INFINITY_LITERALS: ReadonlyMap<string, string> = new Map([
-  ["Inf", "9e999"],
-  ["-Inf", "-9e999"],
+  [POSITIVE_INFINITY_TEXT, "9e999"],
+  [NEGATIVE_INFINITY_TEXT, "-9e999"],
 ]);
 
 export const sqliteDialect: BuiltinDialectAdapter = {
@@ -191,15 +196,15 @@ export const sqliteDialect: BuiltinDialectAdapter = {
 
   relevanceCursorKey: {
     value: (expression) => expression,
-    // `%!.17g` renders an infinity (an L2 distance or a fused score past the
-    // largest double) as `Inf` / `-Inf`. No driver binds an infinite
-    // parameter, so that text stays the bound value and `operand` writes it
-    // as a literal SQLite reads as the infinity.
-    select: (expression) => sql`printf('%!.17g', ${expression})`,
+    // The key's exact binary text (`sqliteExactDoubleText`), which reads
+    // back as the very double the statement computed: no decimal rendering
+    // SQLite offers is guaranteed to. An infinity (an L2 distance or a fused
+    // score past the largest double) renders as `Inf` / `-Inf`. No driver
+    // binds an infinite parameter, so that text stays the bound value and
+    // `operand` writes it as a literal SQLite reads as the infinity.
+    select: (expression) => sqliteExactDoubleText(expression),
     bind: (text) =>
-      SQLITE_INFINITY_LITERALS.has(text) ? text : (
-        parseRepresentableDouble(text)
-      ),
+      SQLITE_INFINITY_LITERALS.has(text) ? text : parseExactDoubleText(text),
     operand: (bound) => {
       const literal =
         typeof bound === "string" ?
@@ -210,7 +215,7 @@ export const sqliteDialect: BuiltinDialectAdapter = {
   },
 
   batchExactNumber: (expression) =>
-    sql`CASE WHEN typeof(${expression}) IN ('integer', 'real') THEN printf('%!.17g', ${expression}) ELSE ${expression} END`,
+    sql`CASE WHEN typeof(${expression}) = 'real' THEN ${sqliteExactDoubleText(expression)} ELSE ${expression} END`,
 
   keyText(expression) {
     return sql`${expression} COLLATE BINARY`;

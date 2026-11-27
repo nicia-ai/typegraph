@@ -60,7 +60,7 @@ import {
   validateKeysetCursor,
 } from "../cursor";
 import { getDialect } from "../dialect";
-import { parseRepresentableDouble } from "../dialect/numeric-conversion";
+import { parseExactDoubleText } from "../dialect/exact-double-text";
 import { type SqlDialect } from "../dialect/types";
 import {
   adjustOrderByForDirection,
@@ -197,8 +197,9 @@ function carriesBatchExactNumber(
 
 /**
  * A hidden keyset column's value as the page's cursor carries it: the
- * double the text `batchExactNumber` rendered denotes, where the column
- * carries one, and the value itself otherwise.
+ * double the exact binary text `batchExactNumber` rendered denotes
+ * (`parseExactDoubleText`), where the column carries one, and the value
+ * itself otherwise.
  */
 function readBatchKeyValue(
   value: unknown,
@@ -207,10 +208,10 @@ function readBatchKeyValue(
 ): unknown {
   if (!carriesBatchExactNumber(order, shape) || typeof value !== "string")
     return value;
-  const parsed = parseRepresentableDouble(value);
+  const parsed = parseExactDoubleText(value);
   if (parsed === undefined)
     throw new CompilerInvariantError(
-      `A batched page's numeric keyset key came back as text that is not a double: ${value}`,
+      `A batched page's numeric keyset key came back as text that is not a double's exact binary text: ${value}`,
       { phase: "relevance-cursor-key" },
     );
   return parsed;
