@@ -1203,14 +1203,20 @@ export function createRecordedTransactionScope<
   );
   bindRecordedSession(owner, binding);
   const graphLocks = requireDefined(binding.capture).graphLocks;
-  // The scope's pending capture and graph-lock memo mirror the writes on this
-  // transaction, so a savepoint unit that rolls back restores them. Only
-  // until the flush seals the session: nothing is pending after it.
+  // The scope's pending capture and graph-lock memo mirror the writes and
+  // locks on this transaction, so a savepoint unit that rolls back restores
+  // them. The flush stops every savepoint opened later from checkpointing the
+  // scope (`unregisterCheckpoint`). A savepoint already open when the scope
+  // flushed may still roll back over the flush. Its writes, history rows
+  // included, are discarded by the engine, and the sealed session has nothing
+  // pending to restore, so it stays sealed. The memo is still restored: the
+  // rollback released every graph lock taken after the savepoint opened.
+  let flushed = false;
   const captureCheckpoint = (): (() => void) => {
     const captured = session.checkpoint();
     const locks = new Map(graphLocks);
     return () => {
-      session.restore(captured);
+      if (!flushed) session.restore(captured);
       graphLocks.clear();
       for (const [graphId, lock] of locks) graphLocks.set(graphId, lock);
     };
@@ -1222,6 +1228,7 @@ export function createRecordedTransactionScope<
   return {
     backend: overlay,
     async flush(): Promise<RecordedFlushInstants> {
+      flushed = true;
       unregisterCheckpoint();
       // By flush time the live write has committed within this transaction, so a
       // missing-table error can only be a recorded relation — surface it as the
