@@ -55,7 +55,11 @@ import {
   runInsertBatchReturning,
   runInsertNoReturn,
 } from "../insert-dispatch";
-import type { OperationBackend } from "../operation-scope";
+import {
+  type OperationBackend,
+  sessionSurfaceMembers,
+  type TransactionSession,
+} from "../operation-scope";
 import { registerSavepointState } from "../savepoint-state";
 import type {
   RECORDED_OPTIONAL_WRITE_METHODS,
@@ -628,7 +632,10 @@ export function buildRecordedCommandsPort(
  * routed through a member this witness can see.
  */
 export function createMutationWitness(): Readonly<{
-  wrap: (target: OperationBackend) => OperationBackend;
+  wrap: (
+    target: OperationBackend,
+    owner: TransactionSession,
+  ) => OperationBackend;
   readonly mutated: boolean;
   /** The sink `wrap` installs, for `registerRecordedIdentityMutationWitness`
    * to register against the same wrapped target so an identity assertion
@@ -654,12 +661,18 @@ export function createMutationWitness(): Readonly<{
     };
   };
   return {
-    wrap(target: OperationBackend): OperationBackend {
+    wrap(
+      target: OperationBackend,
+      owner: TransactionSession,
+    ): OperationBackend {
       registerSavepointState(target, checkpoint);
-      return deriveBackend(target, {
-        ...buildRecordedWriteMembers(target, sink),
-        commands: buildRecordedCommandsPort(target, sink),
-      });
+      return deriveBackend(
+        target,
+        sessionSurfaceMembers(owner, {
+          ...buildRecordedWriteMembers(target, sink),
+          commands: buildRecordedCommandsPort(target, sink),
+        }),
+      );
     },
     get mutated(): boolean {
       return mutated;

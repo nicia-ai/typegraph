@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
 import { snapshotExportContention } from "../../../src/backend/transaction-resource";
 import { type IdentityTransferAssertion } from "../../../src/identity/service";
 import { IdentityEndpointValidityError } from "../../../src/identity-entry";
+import type * as InterchangeModule from "../../../src/interchange";
 import {
   exportGraph,
   exportGraphStream,
@@ -222,6 +223,57 @@ export function registerIdentityImportIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("Operational Identity interchange", () => {
+    it("imports identity into a history store from another copy of the library", async () => {
+      // Another copy's importer: the registry is reset so the interchange
+      // module tree evaluates afresh, as an ES module and a CommonJS build of
+      // one release do in one process. It reaches the Store through the
+      // runtime port's global symbol and opens its write transaction through
+      // the Store's capture overlay, whose session it cannot see.
+      vi.resetModules();
+      const foreign: typeof InterchangeModule =
+        await import("../../../src/interchange");
+      expect(foreign.importGraph).not.toBe(importGraph);
+      const store = await context.createHistoryStore(
+        identityInterchangeGraph("identity_import_foreign_copy"),
+      );
+      const validFrom = isoAt(-HOUR_MS);
+      const result = await foreign.importGraph(
+        store,
+        {
+          formatVersion: FORMAT_VERSION,
+          exportedAt: validFrom,
+          source: { type: "external" },
+          nodes: [
+            { kind: "Person", id: "a", properties: { name: "A" }, validFrom },
+            { kind: "Person", id: "b", properties: { name: "B" }, validFrom },
+          ],
+          edges: [],
+          identity: {
+            profile: "typegraph-identity-v1",
+            mode: "state",
+            assertions: [
+              {
+                id: "assertion-foreign-copy",
+                relation: "same",
+                a: { kind: "Person", id: "a" },
+                b: { kind: "Person", id: "b" },
+                validFrom,
+              },
+            ],
+          },
+        },
+        { onConflict: "error", onUnknownProperty: "error" },
+      );
+
+      expect(result.errors).toEqual([]);
+      expect(result.identity).toEqual({ created: 1, skipped: 0 });
+      const members = await store.identity.membersOf({
+        kind: "Person",
+        id: "a",
+      });
+      expect(members.map((member) => member.id).toSorted()).toEqual(["a", "b"]);
+    });
+
     describe("a node window end stated by onConflict: update", () => {
       it("refuses an end an open identity assertion would outlive, as the store update does", async () => {
         const store = await context.createHistoryStore(

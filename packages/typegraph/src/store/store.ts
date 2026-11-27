@@ -4816,7 +4816,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 createMutationWitness()
               : undefined;
             const writeTarget =
-              mutationWitness === undefined ? held : mutationWitness.wrap(held);
+              mutationWitness === undefined ? held : (
+                mutationWitness.wrap(held, opened)
+              );
             if (mutationWitness !== undefined) {
               // Identity assertions run through a wholly separate seam
               // (`withRecordedIdentityMutationTarget`) that `wrap`'s overlay
@@ -5262,7 +5264,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const writeTarget =
         mutationWitness === undefined ?
           scope.backend
-        : mutationWitness.wrap(scope.backend);
+        : mutationWitness.wrap(scope.backend, opened);
       if (mutationWitness !== undefined) {
         // Same registration as the other engine-native receipt site: identity
         // assertions bypass `wrap`'s overlay entirely, so the witness's sink

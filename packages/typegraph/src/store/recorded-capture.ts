@@ -70,6 +70,7 @@ import {
   operationEntryControl,
   operationEntrySession,
   operationSession,
+  sessionSurfaceMembers,
   type StatementBackend,
   type StoreTransactionBackend,
   type TransactionSession,
@@ -1059,6 +1060,7 @@ function createRecordedTransactionBackend(
   target: OperationBackend,
   session: RecordedCaptureSession,
   schema: SqlSchema,
+  owner: TransactionSession,
 ): Readonly<{ overlay: OperationBackend; binding: RecordedSessionBinding }> {
   // One advisory-lock round trip per graph per transaction: the memo is
   // the binding's, so a lock path taken through any operation of the bound
@@ -1110,11 +1112,17 @@ function createRecordedTransactionBackend(
       queryConnectedEdgeIds(target, schema, params),
   };
 
-  const overlay = deriveBackend(target, {
-    ...rawWriteGuards(target, "tx.backend"),
-    ...buildRecordedWriteMembers(target, sink, hooks),
-    commands: buildRecordedCommandsPort(target, sink, hooks),
-  });
+  // The surface is `owner`'s alone: an operation another copy of TypeGraph
+  // opens over it re-enters `owner` at the runtime port
+  // (`portOperationEntry`), so its recorded writes reach this binding.
+  const overlay = deriveBackend(
+    target,
+    sessionSurfaceMembers(owner, {
+      ...rawWriteGuards(target, "tx.backend"),
+      ...buildRecordedWriteMembers(target, sink, hooks),
+      commands: buildRecordedCommandsPort(target, sink, hooks),
+    }),
+  );
   return {
     overlay,
     binding: {
@@ -1186,12 +1194,14 @@ export function createRecordedTransactionScope<
   // store passes its resolved schema so capture targets the same recorded
   // relations recorded reads do; the fallback covers standalone capture.
   const resolvedSchema = schema ?? requireRecordedSchema(target);
+  const owner = operationSession(operation);
   const { overlay, binding } = createRecordedTransactionBackend(
     target,
     session,
     resolvedSchema,
+    owner,
   );
-  bindRecordedSession(operationSession(operation), binding);
+  bindRecordedSession(owner, binding);
   const graphLocks = requireDefined(binding.capture).graphLocks;
   // The scope's pending capture and graph-lock memo mirror the writes on this
   // transaction, so a savepoint unit that rolls back restores them. Only

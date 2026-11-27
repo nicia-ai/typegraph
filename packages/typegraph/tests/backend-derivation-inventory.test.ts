@@ -216,7 +216,7 @@ const INVENTORY: readonly InventoryEntry[] = [
   },
   {
     file: "store/recorded-capture.ts",
-    line: "const overlay = deriveBackend(target, {",
+    line: "const overlay = deriveBackend(",
     reason:
       "Recorded capture intercepts the write members of a transaction target to append recorded rows in the same frame as the write they record.",
   },
@@ -234,7 +234,7 @@ const INVENTORY: readonly InventoryEntry[] = [
   },
   {
     file: "store/recorded-capture/write-touch.ts",
-    line: "return deriveBackend(target, {",
+    line: "return deriveBackend(",
     reason:
       "The engine-native mutation witness: the same write-member overlay recorded-time capture installs, wrapping a transaction target so every write member is observed at the point it changed a row (or did not), reported through a boolean sink instead of capture's after-image one.",
   },

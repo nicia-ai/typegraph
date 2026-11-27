@@ -631,14 +631,63 @@ export function decorateOperation<Engine extends TransactionBackend>(
  *
  * An operation another copy of TypeGraph minted (the same release loaded as
  * both an ES module and a CommonJS build) reaches this copy's Store through
- * the port's global symbol but carries that copy's private keys, so its
- * session is invisible here: its handle joins as a binding of its own
- * ({@link enterTargetOperation}), exactly as a bare transaction handed across
- * the port did. Read off the value handed in; nothing is looked up.
+ * the port's global symbol but carries that copy's private keys, so its own
+ * session is invisible here. When it was opened over a surface this copy
+ * built for one of its sessions ({@link sessionSurfaceMembers}: a Store's
+ * recorded capture overlay its importer opened a transaction through), it
+ * becomes an operation of that session, keeping its handle: the member runs
+ * under the session's recorded binding and graph-lock memo, and its recorded
+ * control statements go through the session's undecorated holding. Otherwise
+ * its handle joins as a binding of its own ({@link enterTargetOperation}),
+ * exactly as a bare transaction handed across the port did. Read off the
+ * value handed in; nothing is looked up.
  */
 export function portOperationEntry(entry: OperationEntry): OperationEntry {
   if (isRootBackend(entry) || isOwnOperation(entry)) return entry;
-  return enterTargetOperation(entry.backend);
+  const session = surfaceSession(entry.control);
+  if (session === undefined) return enterTargetOperation(entry.backend);
+  /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
+  return {
+    [OPERATION_SESSION]: session,
+    backend: entry.backend,
+    control: session[SESSION_CONTROL],
+  } as Operation;
+  /* eslint-enable no-restricted-syntax */
+}
+
+// Module-private: only `sessionSurfaceMembers` puts a session on a statement
+// surface's members, and only `portOperationEntry` reads one back.
+const SURFACE_SESSION: unique symbol = Symbol("typegraph.surfaceSession");
+
+/**
+ * Marks `members`, the overlay members of a statement surface a backend layer
+ * builds for `session` alone (recorded capture's overlay, an engine-native
+ * mutation witness), as that session's, and returns them: the surface
+ * `deriveBackend` builds from them, and every derivation of it, carries the
+ * session. An operation another copy of TypeGraph opened over that surface
+ * hands it back as its undecorated holding, and {@link portOperationEntry}
+ * re-enters it as an operation of `session`, so a runtime port member it
+ * calls runs under the session's recorded binding and graph-lock memo. The
+ * key is non-enumerable and module-private: no backend member lists or copies
+ * it, and nothing else reads it.
+ */
+export function sessionSurfaceMembers<Members extends object>(
+  session: TransactionSession,
+  members: Members,
+): Members {
+  Object.defineProperty(members, SURFACE_SESSION, { value: session });
+  return members;
+}
+
+/** A statement surface as {@link surfaceSession} reads it. */
+type SessionCarryingSurface = Pick<OperationBackend, "dialect"> &
+  Readonly<{ [SURFACE_SESSION]?: TransactionSession }>;
+
+/** The session `surface` was built for ({@link sessionSurfaceMembers}), if any. */
+function surfaceSession(
+  surface: SessionCarryingSurface,
+): TransactionSession | undefined {
+  return surface[SURFACE_SESSION];
 }
 
 /** Whether `operation` was minted by this copy of the module. */
