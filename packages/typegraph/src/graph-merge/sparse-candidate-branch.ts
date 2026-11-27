@@ -1,13 +1,15 @@
 import type { EdgeRow } from "../backend/types";
 import type { GraphData } from "../interchange";
-import { validateImportProperties } from "../interchange/import";
+import {
+  importedEdgeMatchIdentity,
+  validateImportProperties,
+} from "../interchange/import";
 import { acyclicEdgeRelations } from "../store/acyclicity";
 import { COMPOSITION_RELATION_NAME } from "../store/claims/axis";
 import {
   edgeCardinalityAxisReferences,
   edgeCardinalitySpec,
 } from "../store/claims/edge-claims";
-import { resolveEdgeMatchIdentityStorage } from "../store/edge-match-key";
 import {
   type CandidateIdentityScope,
   readCandidateIdentityClosure,
@@ -231,16 +233,11 @@ function candidateEdgeMatchIdentity<G extends GraphDef>(
   );
   if (!validatedProperties.success) return "malformed";
   try {
-    return resolveEdgeMatchIdentityStorage(
-      registration.matchIdentity,
-      {
-        fromKind: edge.from.kind,
-        fromId: edge.from.id,
-        toKind: edge.to.kind,
-        toId: edge.to.id,
-        props: validatedProperties.data,
-      },
-      { graphId: target.graphId, edgeKind: edge.kind },
+    return importedEdgeMatchIdentity(
+      target.graphId,
+      edge,
+      registration,
+      validatedProperties.parsed,
     );
   } catch {
     return "malformed";

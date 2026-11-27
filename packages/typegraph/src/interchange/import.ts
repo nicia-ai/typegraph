@@ -71,6 +71,7 @@ import {
   snapshotExportContention,
 } from "../backend/transaction-resource";
 import {
+  type EdgeMatchIdentityStorage,
   type EdgeRow,
   type GraphBackend,
   type InsertEdgeParams,
@@ -3941,7 +3942,10 @@ function recordEdgeOutcome(
 
 type EdgeImportCandidate = Readonly<{
   edge: InterchangeEdge;
+  /** The props the row is written with. */
   props: Record<string, unknown>;
+  /** The schema's parse of them, which the match identity is keyed from. */
+  identityProps: Record<string, unknown>;
 }>;
 
 type PreparedEdgeImportCreate = Readonly<{
@@ -3965,16 +3969,11 @@ function prepareEdgeImportCreate(
   registration: EdgeRegistration,
 ): PreparedEdgeImportCreate {
   const { edge, props } = candidate;
-  const matchIdentity = resolveEdgeMatchIdentityStorage(
-    registration.matchIdentity,
-    {
-      fromKind: edge.from.kind,
-      fromId: edge.from.id,
-      toKind: edge.to.kind,
-      toId: edge.to.id,
-      props,
-    },
-    { graphId, edgeKind: edge.kind },
+  const matchIdentity = importedEdgeMatchIdentity(
+    graphId,
+    edge,
+    registration,
+    candidate.identityProps,
   );
   const params: InsertEdgeParams = {
     graphId,
@@ -3995,6 +3994,32 @@ function prepareEdgeImportCreate(
     declarations: registration,
     work: importEdgeInsertWork(registry, params, registration),
   };
+}
+
+/**
+ * THE match identity an imported edge holds: keyed from the schema's parse of
+ * its properties under every `onUnknownProperty` mode, as a create keys it
+ * from the props it validated, so an edge imported under `"allow"` (written
+ * verbatim) and a create of the same value hold the same identity. Graph
+ * merge reads a candidate edge's identity through this same function.
+ */
+export function importedEdgeMatchIdentity(
+  graphId: string,
+  edge: InterchangeEdge,
+  registration: EdgeRegistration,
+  parsedProps: Record<string, unknown>,
+): EdgeMatchIdentityStorage | undefined {
+  return resolveEdgeMatchIdentityStorage(
+    registration.matchIdentity,
+    {
+      fromKind: edge.from.kind,
+      fromId: edge.from.id,
+      toKind: edge.to.kind,
+      toId: edge.to.id,
+      props: parsedProps,
+    },
+    { graphId, edgeKind: edge.kind },
+  );
 }
 
 function pendingEdgeMatchIdentityOwnerKey(
@@ -4195,6 +4220,7 @@ type ClassifiedEdgeRow = Readonly<{
   index: number;
   edge: InterchangeEdge;
   props: Record<string, unknown>;
+  identityProps: Record<string, unknown>;
   registration: EdgeRegistration;
   /** The row the existence probe found under this id; `undefined` creates. */
   existing: EdgeRow | undefined;
@@ -4242,6 +4268,7 @@ function validateEdgeRow(
   | Readonly<{
       ok: true;
       props: Record<string, unknown>;
+      identityProps: Record<string, unknown>;
       registration: EdgeRegistration;
     }>
   | Readonly<{ ok: false; error: string }> {
@@ -4282,6 +4309,7 @@ function validateEdgeRow(
   return {
     ok: true,
     props: propsResult.data,
+    identityProps: propsResult.parsed,
     registration: schemaEntry.registration,
   };
 }
@@ -4366,6 +4394,7 @@ async function classifyEdges(
         index,
         edge,
         props: validation.props,
+        identityProps: validation.identityProps,
         registration: validation.registration,
       });
     }
@@ -5634,11 +5663,7 @@ async function createClassifiedEdge(
   frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
-  row: Readonly<{
-    edge: InterchangeEdge;
-    props: Record<string, unknown>;
-    registration: EdgeRegistration;
-  }>,
+  row: EdgeImportCandidate & Readonly<{ registration: EdgeRegistration }>,
 ): Promise<ProcessResult> {
   const preparation = await catchEdgeCreateRefusal(() =>
     prepareEdgeImportCreate(registry, graphId, row, row.registration),
@@ -6078,6 +6103,7 @@ async function processEdge(
   const row = {
     edge,
     props: validation.props,
+    identityProps: validation.identityProps,
     registration: validation.registration,
   };
 
