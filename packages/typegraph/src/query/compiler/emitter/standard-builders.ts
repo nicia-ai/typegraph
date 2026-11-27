@@ -15,6 +15,7 @@ import {
   type FieldRef,
   type FulltextMatchPredicate,
   type HybridFusionOptions,
+  type OrderSpec,
   type QueryAst,
   type RelevanceComparisonPredicate,
   type RelevanceSortSource,
@@ -76,8 +77,10 @@ import {
   type PredicateCompilerContext,
 } from "../predicates";
 import {
+  carriesFieldCursorKey,
   describeRelevanceOrder,
   describeSelectionOrder,
+  fieldCursorKeyColumn,
   relevanceCursorKeyColumn,
   type RelevanceSortKey,
   SELECTION_ORDER_COLUMN,
@@ -103,7 +106,7 @@ import { compileSelectivePropsExtraction } from "../typed-json-extract";
 import {
   EDGE_COLUMNS,
   EMPTY_REQUIRED_COLUMNS,
-  findSelectivePropsFieldForFieldRef,
+  findSelectiveFieldHoldingOrderValue,
   isAggregateExpr,
   mapSelectiveSystemFieldToColumn,
   NODE_COLUMNS,
@@ -824,7 +827,7 @@ function compileOrderFieldValue(
   if (field.__type === "database_expression") {
     return compileStandardDatabaseExpression(ast, field, dialect, cteAlias);
   }
-  const selectiveField = findSelectivePropsFieldForFieldRef(
+  const selectiveField = findSelectiveFieldHoldingOrderValue(
     ast.selectiveFields,
     field,
   );
@@ -1076,25 +1079,10 @@ function createStandardOrderTermCompiler(
       );
     }
     const orderSpec = key.spec;
-    const valueType = orderSpec.field.valueType;
-    if (valueType === "array" || valueType === "object") {
-      throw new UnsupportedPredicateError(
-        "Ordering by JSON arrays or objects is not supported",
-      );
-    }
     aliasToCte ??= buildAliasToCteMap(ast);
-    const cteAlias =
-      collapsedTraversalCteAlias ??
-      (orderSpec.field.__type === "field_ref" ?
-        (aliasToCte.get(orderSpec.field.alias) ??
-        aliasCteName(orderSpec.field.alias))
-      : undefined) ??
-      "";
-    const field = compileOrderFieldValue(
-      ast,
-      orderSpec.field,
-      dialect,
-      cteAlias,
+    const field = compileOrderSpecValue(
+      { ast, dialect, aliasToCte, collapsedTraversalCteAlias },
+      orderSpec,
     );
     return compileOrderTerm(
       field,
@@ -1102,6 +1090,40 @@ function createStandardOrderTermCompiler(
       resolveNullOrdering(orderSpec),
     );
   };
+}
+
+type OrderSpecValueInput = Readonly<{
+  ast: QueryAst;
+  aliasToCte: ReadonlyMap<string, string>;
+  collapsedTraversalCteAlias: string | undefined;
+  dialect: DialectAdapter;
+}>;
+
+/**
+ * The value a field ordering term sorts by: the one owner of that value, for
+ * the ORDER BY term and for the cursor key a search statement projects for
+ * the term (`buildStandardRelevanceCursorKeyColumns`), which a keyset
+ * cursor then compares against the same value.
+ */
+function compileOrderSpecValue(
+  input: OrderSpecValueInput,
+  orderSpec: OrderSpec,
+): SqlFragment {
+  const { ast, aliasToCte, collapsedTraversalCteAlias, dialect } = input;
+  const valueType = orderSpec.field.valueType;
+  if (valueType === "array" || valueType === "object") {
+    throw new UnsupportedPredicateError(
+      "Ordering by JSON arrays or objects is not supported",
+    );
+  }
+  const cteAlias =
+    collapsedTraversalCteAlias ??
+    (orderSpec.field.__type === "field_ref" ?
+      (aliasToCte.get(orderSpec.field.alias) ??
+      aliasCteName(orderSpec.field.alias))
+    : undefined) ??
+    "";
+  return compileOrderFieldValue(ast, orderSpec.field, dialect, cteAlias);
 }
 
 // ============================================================
@@ -2098,14 +2120,18 @@ function compileRelevanceCursorKeyValue(
  */
 export function buildStandardRelevanceCursorKeyColumns(
   input: RelevanceSortValueInput &
-    Readonly<{ ast: QueryAst; names: SqlStatementNames }>,
+    Readonly<{
+      ast: QueryAst;
+      collapsedTraversalCteAlias: string | undefined;
+      names: SqlStatementNames;
+    }>,
 ): readonly SqlFragment[] {
   if (input.aggregated)
     throw new CompilerInvariantError(
       "A relevance cursor key was requested for a statement whose rows are groups",
       { phase: "relevance-cursor-key" },
     );
-  return describeRelevanceOrder(input.ast).map((key, index) => {
+  const relevanceKeys = describeRelevanceOrder(input.ast).map((key, index) => {
     const outputName = declareResultColumn(
       input.names,
       relevanceCursorKeyColumn(index),
@@ -2113,6 +2139,27 @@ export function buildStandardRelevanceCursorKeyColumns(
     );
     return sql`${compileRelevanceCursorKeyValue(key.source, input)} AS ${quoteIdentifier(outputName)}`;
   });
+  const valueInput: OrderSpecValueInput = {
+    ast: input.ast,
+    aliasToCte: buildAliasToCteMap(input.ast),
+    collapsedTraversalCteAlias: input.collapsedTraversalCteAlias,
+    dialect: input.dialect,
+  };
+  const fieldKeys = describeSelectionOrder(input.ast).flatMap((key) =>
+    key.kind === "field" ? [key.spec] : [],
+  );
+  const fieldKeyColumns = fieldKeys.flatMap((spec, index) => {
+    if (!carriesFieldCursorKey(spec)) return [];
+    const outputName = declareResultColumn(
+      input.names,
+      fieldCursorKeyColumn(index),
+      `the cursor key of field sort key ${index}`,
+    );
+    return [
+      sql`${compileOrderSpecValue(valueInput, spec)} AS ${quoteIdentifier(outputName)}`,
+    ];
+  });
+  return [...relevanceKeys, ...fieldKeyColumns];
 }
 
 /**

@@ -39,7 +39,9 @@ import {
   selectionOrderColumn,
 } from "../compiler/index";
 import {
+  carriesFieldCursorKey,
   describeSelectionOrder,
+  fieldCursorKeyColumn,
   relevanceCursorKeyColumn,
 } from "../compiler/relevance-order";
 import {
@@ -1769,12 +1771,16 @@ export class ExecutableQuery<
     relevanceRow: Record<string, unknown>,
     direction: "f" | "b",
   ): string {
-    const fieldKeys = this.#paginationOrderBy();
-    return this.#cursorFromValues(
-      fieldKeys.map((spec) => extractCursorValue(context, spec)),
-      relevanceRow,
-      direction,
+    const search = this.#searchCursorBinding() !== undefined;
+    // A search statement projects the value a field key's ORDER BY term
+    // sorts by where the row does not return it (`carriesFieldCursorKey`).
+    // Its field keys are these, in this order (`describeSelectionOrder`).
+    const fieldValues = this.#paginationOrderBy().map((spec, index) =>
+      search && carriesFieldCursorKey(spec) ?
+        relevanceRow[fieldCursorKeyColumn(index)]
+      : extractCursorValue(context, spec),
     );
+    return this.#cursorFromValues(fieldValues, relevanceRow, direction);
   }
 
   /** {@link #cursorFromRow} from the field keys' values, in keyset order. */
@@ -2024,9 +2030,16 @@ export class ExecutableQuery<
         );
         const relevanceOutputNames =
           search ?
-            this.#keyset()
-              .filter((key) => key.kind === "relevance")
-              .map((_key, index) => relevanceCursorKeyColumn(index))
+            [
+              ...this.#keyset()
+                .filter((key) => key.kind === "relevance")
+                .map((_key, index) => relevanceCursorKeyColumn(index)),
+              ...paginationOrderBy.flatMap((spec, index) =>
+                carriesFieldCursorKey(spec) ?
+                  [fieldCursorKeyColumn(index)]
+                : [],
+              ),
+            ]
           : [];
         const cursorFromRow = (
           row: Record<string, unknown>,

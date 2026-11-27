@@ -40,6 +40,7 @@ import {
   type CompiledRowsSql,
 } from "../../../src/query/sql-intent";
 import type { Store } from "../../../src/store/store";
+import { expectObservation } from "../../helpers/known-defect";
 import { propertyRuns } from "../../property/run-budget";
 import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
@@ -77,6 +78,23 @@ const SearchScored = defineNode("SpScored", {
 const scoredSearchGraph = defineGraph({
   id: "search_pagination_scored",
   nodes: { SpScored: { type: SearchScored } },
+  edges: {},
+});
+
+/**
+ * A searchable kind whose sort field holds a string or a number: to the
+ * database its value is neither text nor a number, so every read of it must
+ * agree on one SQL value.
+ */
+const SearchMixed = defineNode("SpMixed", {
+  schema: z.object({
+    title: searchable({ language: "english" }),
+    rank: z.union([z.string(), z.number()]),
+  }),
+});
+const mixedSearchGraph = defineGraph({
+  id: "search_pagination_mixed",
+  nodes: { SpMixed: { type: SearchMixed } },
   edges: {},
 });
 
@@ -465,6 +483,62 @@ async function expectSearchCursorRefusal(
   expect((error as ValidationError).details.issues).toEqual([
     expect.objectContaining({ path: "cursor", code: SEARCH_CURSOR_MISMATCH }),
   ]);
+}
+
+type MixedStore = Store<typeof mixedSearchGraph>;
+
+/**
+ * Seeds one `SpMixed` row per rank (ids `m0`, `m1`, …), all tied on
+ * relevance, and walks them one row a page, ordered by the rank in both
+ * directions, as a full-text search and as a plain query, selecting the id
+ * alone and the whole node.
+ */
+async function walkMixedRanks(
+  store: MixedStore,
+  ranks: readonly (string | number)[],
+) {
+  for (const [index, rank] of ranks.entries()) {
+    await store.nodes.SpMixed.create(
+      { title: "climate report", rank },
+      { id: `m${index}` },
+    );
+  }
+  const outcomes = [];
+  for (const search of [true, false]) {
+    for (const selection of ["id", "node"] as const) {
+      for (const direction of ["asc", "desc"] as const) {
+        const query = () => {
+          const from = store.query().from("SpMixed", "m");
+          const searched =
+            search ?
+              from.whereNode("m", (m) => m.$fulltext.matches("climate", 10))
+            : from;
+          return searched
+            .orderBy("m", "rank", direction)
+            .select((row) =>
+              selection === "id" ?
+                { id: row.m.id }
+              : { id: row.m.id, node: row.m },
+            );
+        };
+        // The walk reads rows by id alone, whatever else they hold.
+        const walked = query as unknown as () => SearchQuery;
+        const searchStore = store as unknown as SearchStore;
+        const executed = await executedIds(walked());
+        outcomes.push({
+          search,
+          selection,
+          direction,
+          executed,
+          forward: await walk(searchStore, walked, "paginate", "forward", 1),
+          backward: await walk(searchStore, walked, "page", "backward", 1),
+          batched: await walk(searchStore, walked, "batchOnce", "forward", 1),
+          stream: await walk(searchStore, walked, "stream", "forward", 1),
+        });
+      }
+    }
+  }
+  return outcomes;
 }
 
 export function registerSearchPaginationIntegrationTests(
@@ -1354,6 +1428,68 @@ export function registerSearchPaginationIntegrationTests(
         }
       });
     }
+
+    it("pages a search and a plain query ordered by a field typed as a string or a number exactly as execute() orders it, one row a page", async (ctx) => {
+      storeWith(context, ctx, "fulltext");
+      const store = await context.createStore(mixedSearchGraph);
+      // Tied on relevance, so only the mixed field orders them. PostgreSQL
+      // orders it as text (10, 2, x), its JSON values order 2, 10, x.
+      const outcomes = await walkMixedRanks(store, [10, 2, "x"]);
+      expect(outcomes).toEqual(
+        outcomes.map((outcome) => ({
+          ...outcome,
+          forward: outcome.executed,
+          backward: outcome.executed,
+          batched: outcome.executed,
+          stream: outcome.executed,
+        })),
+      );
+    });
+
+    it("pages a search ordered by a field typed as a string or a number by the value its ORDER BY sorts, not the row's JSON value", async (ctx) => {
+      storeWith(context, ctx, "fulltext");
+      const store = await context.createStore(mixedSearchGraph);
+      // PostgreSQL's text for 1e21 is 1000000000000000000000, which sorts
+      // before "1000000000000000000000a"; the JSON value renders as 1e+21,
+      // which sorts after it.
+      const outcomes = await walkMixedRanks(store, [
+        1e21,
+        "1000000000000000000000a",
+        "x",
+      ]);
+      const correct = outcomes.map((outcome) => ({
+        ...outcome,
+        forward: outcome.executed,
+        backward: outcome.executed,
+        batched: outcome.executed,
+        stream: outcome.executed,
+      }));
+      expect(outcomes.filter((outcome) => outcome.search)).toEqual(
+        correct.filter((outcome) => outcome.search),
+      );
+      // A plain query's cursor carries the row's JSON value, as it does on
+      // main, so PostgreSQL resumes after 1e21 from the text 1e+21 and skips
+      // m1 wherever the walk passes m0 before m1.
+      expectObservation({
+        lane: { dialect: store.backend.dialect },
+        observed: outcomes.filter((outcome) => !outcome.search),
+        correct: correct.filter((outcome) => !outcome.search),
+        defects: [
+          {
+            label:
+              "fix5-mixed-key (a plain cursor over a field of unknown type carries its JSON value)",
+            on: { dialect: ["postgres"] },
+            today: correct
+              .filter((outcome) => !outcome.search)
+              .map((outcome) =>
+                outcome.direction === "asc" ?
+                  { ...outcome, forward: ["m0", "m2"], stream: ["m0", "m2"] }
+                : { ...outcome, backward: ["m2", "m0"] },
+              ),
+          },
+        ],
+      });
+    });
 
     it("refuses a page that does not advance past its cursor instead of returning it, so stream() ends", async () => {
       const laneStore = context.getStore();

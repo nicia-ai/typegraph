@@ -7,6 +7,7 @@ import { type AggregateExpr, type FieldRef, type SelectiveField } from "../ast";
 import { parseJsonPointer } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { getFieldPointer } from "./predicates";
+import { selectiveExtractionIsFieldValue } from "./typed-json-extract";
 
 // ============================================================
 // Constants
@@ -131,7 +132,19 @@ function getTopLevelPropsFieldName(field: FieldRef): string | undefined {
   return segments.length === 1 ? segments[0] : undefined;
 }
 
-export function findSelectivePropsFieldForFieldRef(
+/**
+ * The selectively projected field whose extracted column holds the value an
+ * ORDER BY term over `field` sorts by, or `undefined` when no column does
+ * and the term must read the field itself. A selective column holds that
+ * value only when it reads the same top-level property with the same typed
+ * extraction (`selectiveExtractionIsFieldValue`): a property of unknown type
+ * is selected as its JSON value, while it is ordered and compared as the
+ * value `compileFieldValue` reads, which on PostgreSQL is its text.
+ *
+ * The one decision every consumer of an ordering term makes: the ORDER BY,
+ * the column-pruning pass and late materialization's sort keys.
+ */
+export function findSelectiveFieldHoldingOrderValue(
   selectiveFields: readonly SelectiveField[] | undefined,
   field: FieldRef,
 ): SelectiveField | undefined {
@@ -146,7 +159,9 @@ export function findSelectivePropsFieldForFieldRef(
     (selectiveField) =>
       !selectiveField.isSystemField &&
       selectiveField.alias === field.alias &&
-      selectiveField.field === propsFieldName,
+      selectiveField.field === propsFieldName &&
+      selectiveField.valueType === field.valueType &&
+      selectiveExtractionIsFieldValue(selectiveField.valueType),
   );
 }
 

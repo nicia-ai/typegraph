@@ -30,7 +30,7 @@ import { assertRecordedQueryDoesNotUseCurrentIndexes } from "./recorded-current-
 import { describeRelevanceOrder, orderedFieldSpecs } from "./relevance-order";
 import {
   addRequiredColumn,
-  findSelectivePropsFieldForFieldRef,
+  findSelectiveFieldHoldingOrderValue,
   isIdFieldRef,
   mapSelectiveSystemFieldToColumn,
   markFieldRefAsRequired,
@@ -273,7 +273,7 @@ export function collectRequiredColumnsByAlias(
     // from that extracted column, so it needs nothing else carried.
     if (
       use === "order-by-field" &&
-      findSelectivePropsFieldForFieldRef(ast.selectiveFields, field) !==
+      findSelectiveFieldHoldingOrderValue(ast.selectiveFields, field) !==
         undefined
     )
       return;

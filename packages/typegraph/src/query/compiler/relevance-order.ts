@@ -12,6 +12,7 @@ import {
   extractVectorSimilarityPredicates,
 } from "./predicates";
 import { missingRowIdentityOrder } from "./row-identity-order";
+import { selectiveExtractionIsFieldValue } from "./typed-json-extract";
 
 /**
  * One term of the relevance ORDER BY a full-text, vector or hybrid statement
@@ -131,6 +132,34 @@ export const SELECTION_ORDER_COLUMN = "__tg_selection_order";
  */
 export function relevanceCursorKeyColumn(index: number): string {
   return `__tg_relevance_key_${index}`;
+}
+
+/**
+ * The column a relevance-ordered statement compiled in the `cursor-keyed`
+ * shape carries the value of its `index`-th field sort key in (counted
+ * among the field keys of {@link describeSelectionOrder}), when that key
+ * {@link carriesFieldCursorKey}.
+ */
+export function fieldCursorKeyColumn(index: number): string {
+  return `__tg_field_key_${index}`;
+}
+
+/**
+ * Whether a keyset cursor over a full-text, vector or hybrid statement reads
+ * a field sort key from the statement's {@link fieldCursorKeyColumn}, the
+ * value its ORDER BY term sorts by, rather than from the row it returns: a
+ * property of unknown type (a union of a string and a number, say), which a
+ * row returns as its JSON value while PostgreSQL orders and compares it as
+ * its text. The one decision the projection and the cursor that reads it
+ * both make.
+ */
+export function carriesFieldCursorKey(spec: OrderSpec): boolean {
+  const { field } = spec;
+  return (
+    field.__type === "field_ref" &&
+    field.path[0] === "props" &&
+    !selectiveExtractionIsFieldValue(field.valueType)
+  );
 }
 
 /**

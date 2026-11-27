@@ -177,7 +177,7 @@ import {
   shouldMaterializeTraversalCte,
 } from "./standard-pass-pipeline";
 import {
-  findSelectivePropsFieldForFieldRef,
+  findSelectiveFieldHoldingOrderValue,
   isAggregateExpr,
   isIdFieldRef,
   mapSelectiveSystemFieldToColumn,
@@ -1506,7 +1506,7 @@ function resolveLateMaterializationPlan(
   const orderReferenced = new Set<SelectiveField>();
   for (const orderSpec of orderBy) {
     if (orderSpec.field.__type !== "field_ref") return undefined;
-    const matched = findSelectivePropsFieldForFieldRef(
+    const matched = findSelectiveFieldHoldingOrderValue(
       selectiveFields,
       orderSpec.field,
     );
@@ -1888,6 +1888,7 @@ function compileStandardQueryWithCteStrategy(
       buildStandardRelevanceCursorKeyColumns({
         ...relevanceSortValueInput,
         ast,
+        collapsedTraversalCteAlias,
         names,
       })
     : [];
