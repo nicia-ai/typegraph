@@ -1142,11 +1142,24 @@ export function registerSearchPaginationIntegrationTests(
               { id },
             );
           }
+          // A zero embedding on a row the full-text leg does not match: only
+          // the vector leg could bring it into either search.
+          await store.nodes.Article.create(
+            {
+              title: "shipping lanes",
+              body: "notes",
+              category: "m",
+              published: true,
+              embedding: [0, 0, 0, 0],
+            },
+            { id: "z4" },
+          );
           const query = () => orderedSearch(store, { kind }, ordering);
           const executed = await executedIds(query());
           // SQLite computes the distance as NULL and sorted it first,
           // PostgreSQL as NaN and sorted it last: neither is a neighbor. A
-          // hybrid search still finds the rows through its full-text leg.
+          // hybrid search still finds z1-z3 through its full-text leg, and
+          // never z4, which only the vector leg could match.
           expect(executed.toSorted()).toEqual(
             kind === "vector" ?
               ["r1", "r2", "r3", "r4", "r5"]
