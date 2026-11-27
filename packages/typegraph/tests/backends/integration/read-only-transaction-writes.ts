@@ -1018,6 +1018,7 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
       );
     });
 
+    // Compatibility guard: passes on main too; no claim of this change rests on it.
     it("ends the read-only scope of a transaction whose callback throws synchronously or rejects", async () => {
       const graph = buildGraph(nextGraphId());
       const [store] = await createAdapterStoreWithSchema(
@@ -1054,6 +1055,7 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
       ]);
     });
 
+    // Compatibility guard: passes on main too; no claim of this change rests on it.
     it("leaves a later read-write transaction writable through the same adoption (a native transaction of its own)", async () => {
       const graph = buildGraph(nextGraphId());
       const [store] = await createAdapterStoreWithSchema(
@@ -1136,6 +1138,7 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
       });
     });
 
+    // Compatibility guard: passes on main too; no claim of this change rests on it.
     it("leaves a native read-only transaction the Store did not open to the engine", async () => {
       const graph = buildGraph(nextGraphId());
       const backend = context.getBackend();

@@ -544,6 +544,7 @@ import {
 import {
   createTransactionReceiptRecorder,
   type TransactionReceiptRecorder,
+  type TransactionWriteAccess,
   wrapEdgeCollections,
   wrapNodeCollections,
   wrapTransactionCollections,
@@ -4694,7 +4695,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       tx: AdapterTransactionContext<G, TNativeTransaction>,
     ) => Promise<T>,
     options: StoreTransactionOptions | undefined,
-    createReceiptRecorder: (() => TransactionReceiptRecorder) | undefined,
+    createReceiptRecorder:
+      | ((access: TransactionWriteAccess) => TransactionReceiptRecorder)
+      | undefined,
     operation: "store.transaction()" | "store.transactionWithReceipt()",
   ): Promise<TransactionRunResult<T>> {
     // A read-write unit opened inside a read-only scope could only have its
@@ -4786,9 +4789,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // when the callback settles, receipt requested or not; only a requested
       // receipt is reported, counted by the mutation witness, and measurable.
       const receiptRequested = createReceiptRecorder !== undefined;
-      const receiptRecorder = (
-        createReceiptRecorder ?? createTransactionReceiptRecorder
-      )();
+      // Built once the attempt's session exists, with that session's write
+      // access: the one gate its context's writes pass, read-only or not.
+      let receiptRecorder: TransactionReceiptRecorder | undefined;
       let recordedByGraph: RecordedFlushInstants | undefined;
       // The read-only scope a read-only attempt opens once its session
       // exists, released only once the backend's transaction call has
@@ -4860,6 +4863,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           // Everything the attempt runs on its session, the callback and the
           // pre-commit hook included, runs in the read-only scope a read-only
           // transaction opens on `session.native` (`openReadOnlyScope`).
+          const recorder = (
+            createReceiptRecorder ?? createTransactionReceiptRecorder
+          )({ graphId: this.graphId, native: session.native });
+          receiptRecorder = recorder;
           const runOnSession = async (): Promise<T> => {
             const runHooks = this.#createBufferedHookRunner(
               pending,
@@ -4875,7 +4882,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                   session,
                   nativeTransaction,
                   runHooks,
-                  receiptRecorder,
+                  recorder,
                   runBulkHooks,
                   frame.attempt,
                   receiptRequested,
@@ -4884,7 +4891,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                   try {
                     return await invoke(activeContext);
                   } finally {
-                    receiptRecorder.seal();
+                    recorder.seal();
                   }
                 },
               );
@@ -4962,7 +4969,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         return {
           result,
           recordedByGraph,
-          recorder: receiptRequested ? receiptRecorder : undefined,
+          recorder:
+            receiptRequested ? requireDefined(receiptRecorder) : undefined,
           pending,
         };
       } catch (error) {
@@ -5763,11 +5771,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const isReadOnly = (): boolean =>
       isNativeTransactionReadOnly(session.native);
     // The write gate every write this context offers passes first, measured
-    // or not: it refuses while `isReadOnly` holds. Its counts are never read.
-    const accessGate = createTransactionReceiptRecorder({
-      graphId: this.graphId,
-      native: session.native,
-    });
+    // or not: it refuses while `isReadOnly` holds. A receipt recorder built
+    // with this session's access is that gate already (`store.transaction`
+    // builds one per attempt); otherwise one of its own, whose counts are
+    // never read.
+    const accessGate =
+      receiptRecorder?.accessNative === session.native ?
+        undefined
+      : createTransactionReceiptRecorder({
+          graphId: this.graphId,
+          native: session.native,
+        });
     // The context's own operation of the session: what the parts of this
     // context that do not yet enter an operation per call (the transaction
     // runtime port, the identity facade's context, the read-set fence, the
@@ -5907,10 +5921,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       };
     };
 
-    const outerRecorders =
-      receiptRecorder === undefined ?
-        [accessGate]
-      : [accessGate, receiptRecorder];
+    const outerRecorders = [accessGate, receiptRecorder].filter(
+      (recorder): recorder is TransactionReceiptRecorder =>
+        recorder !== undefined,
+    );
     const outerSurface = buildSurface(outerRecorders);
     const {
       nodes,

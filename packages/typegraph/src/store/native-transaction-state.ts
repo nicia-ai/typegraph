@@ -33,10 +33,10 @@
  * the same connection whose state nothing proved to be this one.
  */
 import {
-  backendSerializingQueue,
   connectionReadOnlyScopeGraph,
+  engineTransactionConnection,
   holdConnectionReadOnlyScope,
-  nativeTransactionSerializingQueue,
+  isEngineTransactionToken,
   resolveNativeTransactionConnection,
   resolveNativeTransactionHandle,
 } from "../backend/native-transaction-handle";
@@ -61,9 +61,9 @@ const CONNECTION: unique symbol = Symbol(
 );
 
 // Module-private: only `createNativeTransactionState` writes it, and only
-// `openReadOnlyScope` and `nativeTransactionReadOnlyScopeGraph` read it.
-const SERIALIZED_BY: unique symbol = Symbol(
-  "typegraph.nativeTransactionSerializedBy",
+// `nativeTransactionReadOnlyScopeGraph` reads it.
+const ENGINE_OPENED: unique symbol = Symbol(
+  "typegraph.nativeTransactionEngineOpened",
 );
 
 /** State every session of one native transaction shares. */
@@ -81,21 +81,23 @@ export type NativeTransactionState = Readonly<{
    */
   [CONNECTION]: object | undefined;
   /**
-   * The serialized queue the transaction holds from BEGIN to its end, when
-   * the engine opened it inside one (`nativeTransactionSerializingQueue`).
+   * Whether the transaction is one the engine opened and minted a token for
+   * (`isEngineTransactionToken`): every session of it is proven to run in it,
+   * so its own scopes answer the read-only question and the connection is
+   * not consulted.
    */
-  readonly [SERIALIZED_BY]: object | undefined;
+  readonly [ENGINE_OPENED]: boolean;
 };
 
 function createNativeTransactionState(
   connection: object | undefined,
-  serializedBy: object | undefined,
+  engineOpened: boolean,
 ): NativeTransactionState {
   return {
     [NATIVE_TRANSACTION_STATE]: true,
     [READ_ONLY_SCOPES]: [],
     [CONNECTION]: connection,
-    [SERIALIZED_BY]: serializedBy,
+    [ENGINE_OPENED]: engineOpened,
   };
 }
 
@@ -112,7 +114,8 @@ const nativeTransactionStates = new WeakMap<object, NativeTransactionState>();
 
 /**
  * The state of the native transaction the engine identified, created once.
- * A state first resolved by a binding that names no connection learns it from
+ * A transaction the engine opened knows its connection from its token; a
+ * state first resolved by a binding that names no connection learns it from
  * the first one that does, so a scope opened after that holds the connection.
  */
 function stateOfNativeTransaction(
@@ -124,9 +127,10 @@ function stateOfNativeTransaction(
     existing[CONNECTION] ??= connection;
     return existing;
   }
+  const engineOpened = isEngineTransactionToken(nativeTransaction);
   const created = createNativeTransactionState(
-    connection,
-    nativeTransactionSerializingQueue(nativeTransaction),
+    engineOpened ? engineTransactionConnection(nativeTransaction) : connection,
+    engineOpened,
   );
   nativeTransactionStates.set(nativeTransaction, created);
   return created;
@@ -145,7 +149,7 @@ export function resolveNativeTransactionState(
   const nativeTransaction = resolveNativeTransactionHandle(transaction);
   const connection = resolveNativeTransactionConnection(transaction);
   return nativeTransaction === undefined ?
-      createNativeTransactionState(connection, undefined)
+      createNativeTransactionState(connection, false)
     : stateOfNativeTransaction(nativeTransaction, connection);
 }
 
@@ -172,30 +176,21 @@ export function resolveBackendNativeTransactionState(
  * THE read-only question of a backend object: the graph of the innermost
  * read-only scope TypeGraph has open on what `backend` runs its statements
  * in, or `undefined` when there is none. That is the native transaction the
- * engine recorded for `backend` (a transaction backend, or a backend built
- * over a caller's transaction handle), and otherwise the driver connection
- * it runs on (a root backend over a one-connection SQLite driver), since a
- * connection runs one transaction at a time. There `member` is the backend
- * member whose work is asked about (none for a transaction the backend
- * opens): a scope whose transaction holds the serialized queue that work goes
- * through does not apply, as it is admitted to the connection only after the
- * transaction ended, while work the member issues directly is admitted inside
- * it (`connectionReadOnlyScopeGraph`). A backend over a pool names neither and
- * is never read-only here.
+ * engine recorded for `backend` (a transaction backend, a backend built over
+ * a caller's transaction handle, or one built over a connection while a
+ * transaction the engine opened is published on it), and otherwise, for a
+ * bind of a handle nothing proved, the driver connection the handle runs on,
+ * since a connection runs one transaction at a time. A root backend over a
+ * database or a pool is neither: it is never read-only here, whatever its
+ * connection runs.
  */
-export function backendReadOnlyScopeGraph(
-  backend: object,
-  member?: string,
-): string | undefined {
+export function backendReadOnlyScopeGraph(backend: object): string | undefined {
   if (openScopes.count === 0) return undefined;
   const native = resolveBackendNativeTransactionState(backend);
   if (native !== undefined) return nativeTransactionReadOnlyScopeGraph(native);
   const connection = resolveNativeTransactionConnection(backend);
   return connection === undefined ? undefined : (
-      connectionReadOnlyScopeGraph(
-        connection,
-        backendSerializingQueue(backend, member),
-      )
+      connectionReadOnlyScopeGraph(connection)
     );
 }
 
@@ -221,7 +216,7 @@ export function isBackendNativeTransactionReadOnly(backend: object): boolean {
  * it refuses its write members (`read-only-write-gate.ts`), for as long as
  * anything can still reach it, a write left floating after the callback
  * settled included. The connection the transaction runs on holds the scope
- * too, for as long.
+ * too, for as long, for a bind of a handle nothing proved.
  *
  * The fact is a scope, not a property set for the transaction's life: a
  * read-only `store.transaction` on a backend built over a caller's
@@ -238,7 +233,7 @@ export function openReadOnlyScope(
   openScopes.count += 1;
   const releaseConnection =
     connection === undefined ? undefined : (
-      holdConnectionReadOnlyScope(connection, graphId, state[SERIALIZED_BY])
+      holdConnectionReadOnlyScope(connection, graphId)
     );
   let released = false;
   return () => {
@@ -254,21 +249,20 @@ export function openReadOnlyScope(
 
 /**
  * The graph of the innermost read-only scope TypeGraph opened on the native
- * transaction `state` belongs to, or on the driver connection it runs on;
- * `undefined` when there is none. A scope another transaction opened through
- * the serialized queue this one holds does not apply: the two never overlap
- * on the connection (`connectionReadOnlyScopeGraph`).
+ * transaction `state` belongs to, or, for a transaction the engine did not
+ * open, on the driver connection it runs on; `undefined` when there is none.
+ * A transaction the engine opened is proven by its token, so another
+ * transaction's scope on the same connection never applies to it.
  */
 function nativeTransactionReadOnlyScopeGraph(
   state: NativeTransactionState,
 ): string | undefined {
+  const own = state[READ_ONLY_SCOPES].at(-1);
+  if (own !== undefined || state[ENGINE_OPENED]) return own;
   const connection = state[CONNECTION];
-  return (
-    state[READ_ONLY_SCOPES].at(-1) ??
-    (connection === undefined ? undefined : (
-      connectionReadOnlyScopeGraph(connection, state[SERIALIZED_BY])
-    ))
-  );
+  return connection === undefined ? undefined : (
+      connectionReadOnlyScopeGraph(connection)
+    );
 }
 
 /**
@@ -284,9 +278,9 @@ function nativeTransactionReadOnlyScopeGraph(
  * as read-only while a read-only scope is open on its driver connection. A
  * connection runs one transaction at a time, so the session's statements run
  * inside that scope's transaction whatever state the session holds: a handle
- * on a driver that reports no transaction state, a context bound in an
- * earlier transaction on the same connection, or a caller savepoint on the
- * same pooled client.
+ * on a driver that reports no transaction state, or a caller savepoint on the
+ * same pooled client. A session of a transaction the engine opened is proven
+ * by its token and reads only its own transaction's scopes.
  */
 export function isNativeTransactionReadOnly(
   state: NativeTransactionState,

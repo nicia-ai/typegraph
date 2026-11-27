@@ -105,18 +105,20 @@ import {
 } from "../capabilities/write-fence";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
-import type { BackendMemberName } from "../member-access";
 import {
   type ConnectionTransactionProbe,
   createNativeTransactionToken,
+  identifyNativeTransaction,
   type NativeHandle,
   publishConnectionNativeTransaction,
-  recordBackendConnection,
   recordEngineSavepoint,
   recordNativeTransactionHandle,
   recordOpenedNativeTransaction,
 } from "../native-transaction-handle";
-import { gateBackendUnderConstruction } from "../read-only-write-gate";
+import {
+  assertBackendWritable,
+  gateBackendUnderConstruction,
+} from "../read-only-write-gate";
 import {
   REVISION_JOURNAL_ENTITY,
   type RevisionJournalEntity,
@@ -841,6 +843,17 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
    * privileged schema-write one does not.
    */
   gatesFulltext?: boolean | undefined;
+  /**
+   * Whether the backend carries the read-only write gate
+   * (`read-only-write-gate.ts`); `true` when absent. An adoption of a handle
+   * always does: it cannot know whether the transaction it binds is inside a
+   * read-only scope. A transaction the engine opens read-write passes
+   * `false`: its backend is reached only by the unit that opened it, whose
+   * context refuses each write inside any read-only scope later opened on
+   * the transaction (a read-only savepoint of a Store built over its
+   * `tx.sql`), so it constructs nothing for the gate.
+   */
+  readOnlyGate?: boolean | undefined;
 }>;
 
 function createSqliteOperationBackend(
@@ -1327,125 +1340,33 @@ export function createSqliteBackend(
   options: SqliteBackendOptions = {},
 ): AdapterBackend<AnySqliteDatabase> {
   const profile = buildSqliteEngineProfile(db, options);
-  const backend = createSqlBackend(profile);
   // Built over a caller's transaction object, every statement of this
   // backend, and every savepoint it opens, runs in that object's native
   // transaction: recorded as for a bind, so a Store over this backend reaches
   // that transaction's state before a write of its own opens a savepoint. A
-  // database handle names a connection, which runs many transactions over
-  // its life, so no transaction is recorded for one, only the connection:
-  // while a read-only scope is open on a transaction running on it, every
-  // statement of this backend admitted to it runs in that transaction, and
-  // its write members refuse (`read-only-write-gate.ts`). Its queued members
-  // are admitted through its serialized queue, which a transaction it opened
-  // itself holds until it has ended, so that transaction's scope does not
-  // apply to them.
+  // database handle names a connection, which runs many transactions over its
+  // life, so a backend over one is a root backend: it is bound to a
+  // transaction only when it is built while a transaction the engine opened
+  // is published on that connection (proof 4, the handle a better-sqlite3
+  // transaction hands its callback as `tx.sql`), and only until that
+  // transaction ends. Only a backend bound to a native transaction carries the
+  // read-only write gate (`read-only-write-gate.ts`); a root backend runs
+  // every member as it would without it, whatever its connection has open.
+  const handle = sqliteNativeHandle(db);
   if (isSqliteTransactionHandle(db)) {
-    recordNativeTransactionHandle(backend, sqliteNativeHandle(db));
-  } else {
-    const serializedBy = SQLITE_PROFILE_SERIALIZED_QUEUES.get(profile);
-    recordBackendConnection(
-      backend,
-      nativeTransactionConnection(db),
-      serializedBy === undefined ? undefined : (
-        { serializedBy, queuedMembers: SQLITE_ROOT_QUEUED_WRITE_MEMBERS }
-      ),
-    );
+    const backend = createSqlBackend(profile, { overNativeTransaction: true });
+    recordNativeTransactionHandle(backend, handle);
+    return backend;
   }
+  const publishedTransaction =
+    handle.kind === "connection" ?
+      identifyNativeTransaction(handle)
+    : undefined;
+  if (publishedTransaction === undefined) return createSqlBackend(profile);
+  const backend = createSqlBackend(profile, { overNativeTransaction: true });
+  recordOpenedNativeTransaction(backend, publishedTransaction);
   return backend;
 }
-
-/**
- * Profile → the serialized queue the root backend built from it admits its
- * queued members' statements (`SQLITE_ROOT_QUEUED_WRITE_MEMBERS`) to the
- * connection through, and every transaction it opens holds from BEGIN to its
- * end. Absent for a driver without transactions (`transactionMode: "none"`),
- * which has no queue.
- */
-const SQLITE_PROFILE_SERIALIZED_QUEUES = new WeakMap<object, object>();
-
-/**
- * The write and raw-SQL members of a root SQLite backend whose writes reach
- * the connection only through its serialized queue: the transaction openers,
- * and every member whose statements run through the operation layer's
- * queued execution (`execGet` / `execAll` / `execRun`). Called while a
- * transaction this backend opened holds the queue, their writes are admitted
- * to the connection once it has ended; a read some of them make first
- * (a schema or marker check) runs at once.
- *
- * Every other write member of the root (provisioning, DDL, statistics,
- * materialization records, schema-write adoption) runs its statements on the
- * connection as it is called, inside whatever transaction is open there, so
- * a read-only scope held on the connection applies to it
- * (`connectionReadOnlyScopeGraph`). A member missing here is refused inside
- * a read-only scope rather than let through: the shared suite's
- * "root write members from another flow" case pins each listed member to
- * issuing no write inside the transaction.
- */
-const SQLITE_ROOT_QUEUED_WRITE_MEMBERS: ReadonlySet<BackendMemberName> =
-  new Set<BackendMemberName>([
-    "transaction",
-    "transactionWithNative",
-    "schemaWriteTransaction",
-    "trustedImport",
-    "commands",
-    "lockNodes",
-    "lockSchemaVersionForWrite",
-    "insertNode",
-    "insertNodeIfAbsent",
-    "insertNodeIfAbsentWithSchemaFence",
-    "insertNodeWithSchemaFence",
-    "insertNodeNoReturn",
-    "insertNodesBatch",
-    "insertNodesBatchReturning",
-    "updateNode",
-    "updateResolvedNodesBatch",
-    "compareAndSetNode",
-    "updateNodeSet",
-    "deleteNode",
-    "hardDeleteNode",
-    "hardDeleteNodesBatch",
-    "insertEdge",
-    "insertEdgeNoReturn",
-    "insertEdgesBatch",
-    "insertEdgesBatchReturning",
-    "insertEdgesDurableBatchReturning",
-    "updateEdge",
-    "deleteEdge",
-    "deleteEdgesBatch",
-    "hardDeleteEdge",
-    "hardDeleteEdgesBatch",
-    "insertUnique",
-    "insertUniqueBatch",
-    "deleteUnique",
-    "hardDeleteUniquesByNodeIds",
-    "hardDeleteUniquesByConcreteKind",
-    "claimEdgeCardinality",
-    "claimEdgeCardinalityGuarded",
-    "claimEdgeCardinalityBatch",
-    "purgeEdgeClaims",
-    "upsertEmbedding",
-    "upsertEmbeddingBatch",
-    "deleteEmbedding",
-    "deleteEmbeddingBatch",
-    "dropVectorIndex",
-    "upsertFulltext",
-    "upsertFulltextBatch",
-    "deleteFulltext",
-    "deleteFulltextBatch",
-    "commitSchemaVersion",
-    "commitSchemaVersionIfKindsEmpty",
-    "commitSchemaVersionWithPreflight",
-    "instantiateGraphTemplate",
-    "setActiveVersion",
-    "setActiveVersionWithPreflight",
-    "clearGraph",
-    "clearGraphPreservingContributionMaterializations",
-    "execute",
-    "executeRaw",
-    "executeStatement",
-    "executeTemporaryStatement",
-  ]);
 
 /**
  * Builds the SQLite {@link SqlEngineProfile} `createSqlBackend` (from
@@ -2091,7 +2012,6 @@ export function buildSqliteEngineProfile(
         storage.transaction(() => {
           const nativeTransaction = createNativeTransactionToken(
             sqliteConnectionProbe(db),
-            serializedQueue,
           );
           return publishConnectionNativeTransaction(nativeTransaction, () =>
             run(nativeTransaction),
@@ -2202,7 +2122,6 @@ export function buildSqliteEngineProfile(
           // InternalOperationBackend is used intentionally (see its type).
           const nativeTransaction = createNativeTransactionToken(
             sqliteConnectionProbe(db),
-            serializedQueue,
           );
           const txBackend = createTransactionBackend({
             capabilities,
@@ -2218,6 +2137,10 @@ export function buildSqliteEngineProfile(
             lineage: provisioning.lineage,
             recordedTime: provisioning.recordedTime,
             isFirstParty,
+            // A schema-write unit is read-write and opened by a member of this
+            // backend, which a gated backend refuses before it opens: its own
+            // backend carries no gate.
+            readOnlyGate: false,
             nativeTransaction,
           });
           await runFrameStatement(sql`BEGIN IMMEDIATE`);
@@ -2262,6 +2185,10 @@ export function buildSqliteEngineProfile(
             lineage: provisioning.lineage,
             recordedTime: provisioning.recordedTime,
             isFirstParty,
+            // A schema-write unit is read-write and opened by a member of this
+            // backend, which a gated backend refuses before it opens: its own
+            // backend carries no gate.
+            readOnlyGate: false,
             nativeTransaction,
           });
           return fn(txBackend);
@@ -2291,6 +2218,10 @@ export function buildSqliteEngineProfile(
                 lineage: provisioning.lineage,
                 recordedTime: provisioning.recordedTime,
                 isFirstParty,
+                // A schema-write unit is read-write and opened by a member of this
+                // backend, which a gated backend refuses before it opens: its own
+                // backend carries no gate.
+                readOnlyGate: false,
               });
               return fn(txBackend);
             },
@@ -2312,6 +2243,7 @@ export function buildSqliteEngineProfile(
       tx: AnySqliteDatabase,
       txIsFirstParty: boolean,
       nativeTransaction?: object,
+      readOnlyGate = true,
     ): TransactionBackend {
       const txBackend = createTransactionBackend({
         capabilities,
@@ -2328,6 +2260,7 @@ export function buildSqliteEngineProfile(
         isFirstParty: txIsFirstParty,
         nativeTransaction,
         gatesFulltext: true,
+        readOnlyGate,
       });
       return txBackend;
     }
@@ -2399,7 +2332,6 @@ export function buildSqliteEngineProfile(
               // `:memory:`) must be avoided.
               const nativeTransaction = createNativeTransactionToken(
                 sqliteConnectionProbe(db),
-                serializedQueue,
               );
               const txBackend = createTransactionBackend({
                 capabilities,
@@ -2417,6 +2349,7 @@ export function buildSqliteEngineProfile(
                 isFirstParty,
                 nativeTransaction,
                 gatesFulltext: true,
+                readOnlyGate: options?.accessMode === "read_only",
               });
               // Read-only multi-statement operations need one snapshot but must not
               // reserve SQLite's single writer slot. Business transactions retain
@@ -2456,7 +2389,12 @@ export function buildSqliteEngineProfile(
             return runDoSqliteStorageTransaction(async (nativeTransaction) =>
               fn(
                 markSchemaFencedInsertEligibleUnderFence(
-                  bindTransactionBackend(db, isFirstParty, nativeTransaction),
+                  bindTransactionBackend(
+                    db,
+                    isFirstParty,
+                    nativeTransaction,
+                    options?.accessMode === "read_only",
+                  ),
                   fencePlan,
                 ),
                 db,
@@ -2474,7 +2412,12 @@ export function buildSqliteEngineProfile(
                   recordSqliteEngineSavepoint(db, tx);
                   return fn(
                     markSchemaFencedInsertEligibleUnderFence(
-                      bindTransactionBackend(tx, isFirstParty),
+                      bindTransactionBackend(
+                        tx,
+                        isFirstParty,
+                        undefined,
+                        options?.accessMode === "read_only",
+                      ),
                       fencePlan,
                     ),
                     tx,
@@ -2564,6 +2507,12 @@ export function buildSqliteEngineProfile(
                 }
 
                 const backend = bindPrivilegedTransactionBackend(externalTx);
+                // An adoption of a handle TypeGraph opened read-only is refused
+                // before its first statement: it fences and commits the schema.
+                assertBackendWritable(
+                  backend,
+                  "backend.adoptSchemaWriteTransaction()",
+                );
                 if (!(await backend.tableExists(tableNames.nodes))) {
                   throw new ConfigurationError(
                     "Schema adoption requires TypeGraph bootstrap storage before the caller transaction.",
@@ -2820,9 +2769,6 @@ export function buildSqliteEngineProfile(
     },
     assembly: assembleEngine({ buildOperations, lateMembers }),
   };
-  if (serializedQueue !== undefined) {
-    SQLITE_PROFILE_SERIALIZED_QUEUES.set(profile, serializedQueue);
-  }
   return registerFirstPartyProfile(profile);
 }
 
@@ -2860,7 +2806,7 @@ function createTransactionBackend(
   // (`read-only-write-gate.ts`). The gate is the outermost member layer, so
   // a refused fulltext write never reaches the marker read `gateFulltext`
   // puts in front of it.
-  const txBackend = gateBackendUnderConstruction(
+  const fulltextGated =
     options.gatesFulltext === true ?
       gateFulltext(
         operationBackend,
@@ -2868,8 +2814,11 @@ function createTransactionBackend(
         options.contributionMaterializer.refuseUnavailableFulltext,
         "outside",
       )
-    : operationBackend,
-  );
+    : operationBackend;
+  const txBackend =
+    options.readOnlyGate === false ?
+      fulltextGated
+    : gateBackendUnderConstruction(fulltextGated);
   recordSqliteNativeTransaction(txBackend, options);
   return options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
 }
@@ -2964,8 +2913,9 @@ function sqliteNativeHandle(db: AnySqliteDatabase): NativeHandle {
  */
 function readSqliteInTransaction(client: object): boolean {
   try {
-    return (client as Readonly<{ inTransaction?: unknown }>).inTransaction ===
-      true;
+    return (
+      (client as Readonly<{ inTransaction?: unknown }>).inTransaction === true
+    );
   } catch {
     return false;
   }

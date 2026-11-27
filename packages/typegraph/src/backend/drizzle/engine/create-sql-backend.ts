@@ -394,6 +394,20 @@ export function buildCallerSerializedBackend<TTx>(
   return deriveBackend(backend, buildQueuedWriteUnits(backend, queue));
 }
 
+/** How {@link createSqlBackend} assembles one backend beyond its profile. */
+export type CreateSqlBackendOptions = Readonly<{
+  /**
+   * Whether every statement of the backend runs inside one native
+   * transaction: it is built over a caller's transaction handle, or over a
+   * connection while a transaction the engine opened is published on it. Its
+   * write members then refuse inside a read-only scope TypeGraph opened on
+   * that transaction (`read-only-write-gate.ts`). A root backend over a
+   * database or a pool is not gated, so its members run exactly as they would
+   * without the gate.
+   */
+  overNativeTransaction?: boolean | undefined;
+}>;
+
 /**
  * Assembles one `AdapterBackend` from a {@link SqlEngineProfile}.
  *
@@ -418,6 +432,7 @@ export function buildCallerSerializedBackend<TTx>(
  */
 export function createSqlBackend<TTx>(
   profile: SqlEngineProfile<TTx>,
+  options: CreateSqlBackendOptions = {},
 ): AdapterBackend<TTx> {
   if (profile.declaredCapabilities.writeFence === undefined) {
     throw new ConfigurationError(
@@ -757,15 +772,16 @@ export function createSqlBackend<TTx>(
   // function actually returns, instead of always to the pre-queue `backend`
   // nothing outside this function can still reach, is what keeps every mark
   // and registration attached to the backend a caller actually holds.
-  // Every write member refuses inside a read-only scope TypeGraph opened on
-  // what this backend runs in (`read-only-write-gate.ts`). The gate is
+  // A backend over a native transaction handle refuses every write member
+  // inside a read-only scope TypeGraph opened on that transaction
+  // (`read-only-write-gate.ts`); a root backend carries no gate. The gate is
   // applied first, so `ctx.self()` (the gated object) keeps reaching every
   // member unqueued, as before; it asks the object this factory returns,
   // the one its builder records a native transaction or connection on.
-  const gatedBackend = gateBackendUnderConstruction(
-    backend,
-    () => queuedBackend,
-  );
+  const gatedBackend =
+    options.overNativeTransaction === true ?
+      gateBackendUnderConstruction(backend, () => queuedBackend)
+    : backend;
   const queuedBackend: AdapterBackend<TTx> =
     fencePlan.kind === "caller-serialized" ?
       buildCallerSerializedBackend(gatedBackend)

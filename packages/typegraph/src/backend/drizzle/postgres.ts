@@ -169,7 +169,10 @@ import {
   registerRawSqlReleasingView,
   resolveRawSqlReleasingView,
 } from "../raw-sql-release-view";
-import { gateBackendUnderConstruction } from "../read-only-write-gate";
+import {
+  assertBackendWritable,
+  gateBackendUnderConstruction,
+} from "../read-only-write-gate";
 import {
   RECORDED_ANCHOR_RETENTION_COLUMN,
   recordedAnchorAdoptionTimeoutBudget,
@@ -1156,8 +1159,7 @@ async function enterReadOnlySavepoint(tx: AnyPgTransaction): Promise<void> {
       ((result as Readonly<{ rows?: readonly unknown[] }>).rows ?? [])
     );
   const [row] = rows as readonly (
-    | Readonly<{ transaction_read_only?: unknown }>
-    | undefined
+    Readonly<{ transaction_read_only?: unknown }> | undefined
   )[];
   const mode = row?.transaction_read_only;
   if (mode === "on") return;
@@ -1227,7 +1229,8 @@ function postgresNativeHandle(db: object): NativeHandle {
         pinned,
         // PGlite marks its transaction client closed once the transaction
         // has committed or rolled back, and refuses statements from then on.
-        isOpen: () => (pinned as Readonly<{ closed?: unknown }>).closed !== true,
+        isOpen: () =>
+          (pinned as Readonly<{ closed?: unknown }>).closed !== true,
       };
 }
 
@@ -1268,7 +1271,9 @@ export function createPostgresTransactionBackend(
 ): AdapterBackend<AnyPgTransaction> {
   assertAdoptedDialect(tx, isPostgresTransactionHandle, "postgres");
   const backend = markAllocationBound(
-    createSqlBackend(buildPostgresEngineProfileInternal(tx, options, true)),
+    createSqlBackend(buildPostgresEngineProfileInternal(tx, options, true), {
+      overNativeTransaction: true,
+    }),
     options,
   );
   // Every statement of this backend, and every savepoint it opens, runs in
@@ -1419,8 +1424,7 @@ function buildPostgresEngineProfileInternal(
   // object carries one anyway, so it is read as what it may be.
   const requestedCommitOutcome: unknown = (
     options.capabilities?.execution as
-      | Readonly<{ commitOutcome?: unknown }>
-      | undefined
+      Readonly<{ commitOutcome?: unknown }> | undefined
   )?.commitOutcome;
   if (transactionScoped && requestedCommitOutcome === "commit-reply") {
     throw new ConfigurationError(
@@ -2652,58 +2656,59 @@ function buildPostgresEngineProfileInternal(
           SCHEMA_WRITE_ADVISORY_FENCE_TRANSACTION
         : undefined;
       const attempt = (): Promise<T> =>
-        openCommittingTransaction(
-          transactionConfig,
-          async (tx) => {
-            await acquireSchemaWriteFence(tx, graphId, fence, {
-              kind: "read-with-lock",
+        openCommittingTransaction(transactionConfig, async (tx) => {
+          await acquireSchemaWriteFence(tx, graphId, fence, {
+            kind: "read-with-lock",
+          });
+          // Schema writes run DDL: over an allocation, where it lives.
+          await bindSchemaWriteSessionToAllocation(tx);
+          // The fence resolved above is held here, so the schema-write-capable
+          // InternalOperationBackend is used intentionally (see its type).
+          const { backend: txBackend, drainAndClose } =
+            createTransactionBackend({
+              db: tx,
+              connection: nestedTransactionConnection,
+              adapterOptions,
+              operationStrategy,
+              tableNames,
+              capabilities,
+              fulltextStrategy,
+              vectorStrategy,
+              contributionMaterializer: ctx.contributionMaterializer,
+              iterativeScanProbe,
+              schemaVersionsTable: tables.schemaVersions,
+              contributionMaterializationsTable:
+                tables.contributionMaterializations,
+              fenceTarget,
+              allocationSchema,
+              lineage: provisioning.lineage,
+              recordedTime: provisioning.recordedTime,
+              isFirstParty,
+              // A schema-write unit is read-write and opened by a member of
+              // this backend, which a gated backend refuses before it opens:
+              // its own backend carries no gate.
+              readOnlyGate: false,
             });
-            // Schema writes run DDL: over an allocation, where it lives.
-            await bindSchemaWriteSessionToAllocation(tx);
-            // The fence resolved above is held here, so the schema-write-capable
-            // InternalOperationBackend is used intentionally (see its type).
-            const { backend: txBackend, drainAndClose } =
-              createTransactionBackend({
-                db: tx,
-                connection: nestedTransactionConnection,
-                adapterOptions,
-                operationStrategy,
-                tableNames,
-                capabilities,
-                fulltextStrategy,
-                vectorStrategy,
-                contributionMaterializer: ctx.contributionMaterializer,
-                iterativeScanProbe,
-                schemaVersionsTable: tables.schemaVersions,
-                contributionMaterializationsTable:
-                  tables.contributionMaterializations,
-                fenceTarget,
-                allocationSchema,
-                lineage: provisioning.lineage,
-                recordedTime: provisioning.recordedTime,
-                isFirstParty,
-              });
-            // `executeSchemaDdl` forwards any SQL text, transaction control
-            // included: the view handed to code TypeGraph does not own (a
-            // preflight, a public `schemaWriteTransaction` callback)
-            // releases control of the transaction before its statement is
-            // sent.
-            registerRawSqlReleasingView(
-              txBackend,
-              deriveBackend(txBackend, {
-                executeSchemaDdl(ddl: string): Promise<void> {
-                  releaseNativeTransaction(tx);
-                  return txBackend.executeSchemaDdl(ddl);
-                },
-              }),
-            );
-            try {
-              return await fn(txBackend);
-            } finally {
-              await drainAndClose();
-            }
-          },
-        );
+          // `executeSchemaDdl` forwards any SQL text, transaction control
+          // included: the view handed to code TypeGraph does not own (a
+          // preflight, a public `schemaWriteTransaction` callback)
+          // releases control of the transaction before its statement is
+          // sent.
+          registerRawSqlReleasingView(
+            txBackend,
+            deriveBackend(txBackend, {
+              executeSchemaDdl(ddl: string): Promise<void> {
+                releaseNativeTransaction(tx);
+                return txBackend.executeSchemaDdl(ddl);
+              },
+            }),
+          );
+          try {
+            return await fn(txBackend);
+          } finally {
+            await drainAndClose();
+          }
+        });
 
       if (!isOptimisticRetryTier(fenceTarget)) return attempt();
       return runRetriedUnit(
@@ -2728,6 +2733,7 @@ function buildPostgresEngineProfileInternal(
       tx: AnyPgTransaction,
       txIsFirstParty: boolean,
       connection?: object,
+      readOnlyGate = true,
     ): Readonly<{
       backend: TransactionBackend;
       privilegedBackend: InternalOperationBackend;
@@ -2753,6 +2759,7 @@ function buildPostgresEngineProfileInternal(
           lineage: provisioning.lineage,
           recordedTime: provisioning.recordedTime,
           isFirstParty: txIsFirstParty,
+          readOnlyGate,
         });
       const gatedBackend = carryAtomicMutationSessionRegistration(
         backend,
@@ -2831,35 +2838,30 @@ function buildPostgresEngineProfileInternal(
               }
             : undefined;
 
-          return openCommittingTransaction(
-            txConfig,
-            async (tx) => {
-              const { backend: txBackend, drainAndClose } =
-                bindTransactionBackend(
-                  tx,
-                  isFirstParty,
-                  nestedTransactionConnection,
-                );
-              try {
-                return await fn(
-                  markSchemaFencedInsertEligibleUnderFence(
-                    txBackend,
-                    fencePlan,
-                  ),
-                  nativeHandleForCallback(tx, options),
-                );
-              } finally {
-                // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
-                // instant the callback settles, and those control statements do not
-                // travel through the backend's statement queue. Wait for whatever is
-                // on the wire, and refuse anything the callback left running — a
-                // `Promise.all` that rejects orphans its siblings, whose statements
-                // would otherwise overlap the ROLLBACK and then land on a connection
-                // the pool had already handed to somebody else.
-                await drainAndClose();
-              }
-            },
-          );
+          return openCommittingTransaction(txConfig, async (tx) => {
+            const { backend: txBackend, drainAndClose } =
+              bindTransactionBackend(
+                tx,
+                isFirstParty,
+                nestedTransactionConnection,
+                options?.accessMode === "read_only",
+              );
+            try {
+              return await fn(
+                markSchemaFencedInsertEligibleUnderFence(txBackend, fencePlan),
+                nativeHandleForCallback(tx, options),
+              );
+            } finally {
+              // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
+              // instant the callback settles, and those control statements do not
+              // travel through the backend's statement queue. Wait for whatever is
+              // on the wire, and refuse anything the callback left running — a
+              // `Promise.all` that rejects orphans its siblings, whose statements
+              // would otherwise overlap the ROLLBACK and then land on a connection
+              // the pool had already handed to somebody else.
+              await drainAndClose();
+            }
+          });
         },
 
         adoptTransaction(externalTx: AnyPgTransaction): TransactionBackend {
@@ -2944,6 +2946,17 @@ function buildPostgresEngineProfileInternal(
                   );
                 }
 
+                // An adoption of a handle TypeGraph opened read-only is refused
+                // before its first statement: it fences and commits the schema.
+                const { privilegedBackend } = bindTransactionBackend(
+                  externalTx,
+                  false,
+                );
+                assertBackendWritable(
+                  privilegedBackend,
+                  "backend.adoptSchemaWriteTransaction()",
+                );
+
                 // SAVEPOINT refuses outside an explicit transaction. Release it
                 // immediately: this proves the literal pinned session is active,
                 // without opening another transaction or changing application data.
@@ -2967,10 +2980,6 @@ function buildPostgresEngineProfileInternal(
                   );
                 }
 
-                const { privilegedBackend } = bindTransactionBackend(
-                  externalTx,
-                  false,
-                );
                 const schemaVersionsTableName = getTableName(
                   tables.schemaVersions,
                 );
@@ -3711,6 +3720,15 @@ type CreatePostgresOperationBackendOptions = Readonly<{
 type CreatePostgresTransactionBackendOptions = Readonly<{
   db: AnyPgDatabase;
   /**
+   * Whether the backend carries the read-only write gate
+   * (`read-only-write-gate.ts`); `true` when absent. An adoption of a handle
+   * always does. A transaction the engine opens read-write passes `false`:
+   * its backend is reached only by the unit that opened it, whose context
+   * refuses each write inside any read-only scope later opened on the
+   * transaction, so it constructs nothing for the gate.
+   */
+  readOnlyGate?: boolean | undefined;
+  /**
    * The physical connection `db` runs on, the identity of its statement
    * queue. Required when `db` is a savepoint scope on an enclosing
    * transaction (a transaction opened by a transaction-scoped backend): the
@@ -3938,7 +3956,9 @@ function createPostgresOperationBackend(
       // restored with a NULL value, which resets it to its default.
       for (const snapshot of snapshots) {
         const previous =
-          snapshot.previous === undefined ? sql`NULL` : sql`${snapshot.previous}`;
+          snapshot.previous === undefined ?
+            sql`NULL`
+          : sql`${snapshot.previous}`;
         await connection.execute(
           sql`SELECT set_config(${snapshot.name}, ${previous}, true)`,
         );
@@ -4707,11 +4727,14 @@ function createTransactionBackend(
   // Gated before anything is registered or recorded on it: every write
   // member refuses inside a read-only scope on the native transaction
   // recorded below (`read-only-write-gate.ts`).
-  const backend = gateBackendUnderConstruction(
+  const marked =
     options.isFirstParty ?
       markFirstPartyFactory(txOperationBackend)
-    : txOperationBackend,
-  );
+    : txOperationBackend;
+  const backend =
+    options.readOnlyGate === false ?
+      marked
+    : gateBackendUnderConstruction(marked);
   if (enterDriverScope !== undefined) {
     registerDriverSavepointScope(backend, enterDriverScope);
   }

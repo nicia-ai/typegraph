@@ -4,7 +4,10 @@
  * from one, the two bundled builders that produce a profile in the first
  * place, and `deriveEngineProfile` for building a variant of one.
  */
-export { createSqlBackend } from "./create-sql-backend";
+export {
+  createSqlBackend,
+  type CreateSqlBackendOptions,
+} from "./create-sql-backend";
 export {
   DERIVABLE_ENGINE_PROFILE_KEYS,
   type DerivableEngineProfileKey,
@@ -50,7 +53,10 @@ export type {
  * profile author implementing `instantiateStatement` needs the type to
  * switch on its `kind`.
  */
-export type { FenceStatements, WriteFencePlan } from "../../capabilities/write-fence";
+export type {
+  FenceStatements,
+  WriteFencePlan,
+} from "../../capabilities/write-fence";
 /**
  * The PostgreSQL {@link SqlEngineProfile} builder — the derivation base
  * `deriveEngineProfile` (this entrypoint) starts every derived PostgreSQL

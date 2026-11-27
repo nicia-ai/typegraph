@@ -76,6 +76,13 @@ type IdentityWriteCounterName = Exclude<
 >;
 
 export type TransactionReceiptRecorder = Readonly<{
+  /**
+   * The native transaction state this recorder's write gate asks at each
+   * write (its {@link TransactionWriteAccess}), or `undefined` for a recorder
+   * that never refuses for access. A context whose recorder already asks its
+   * own session's state needs no second gate.
+   */
+  accessNative: NativeTransactionState | undefined;
   recordNode: (kind: string, count: number) => void;
   recordEdge: (kind: string, count: number) => void;
   recordIdentity: (kind: IdentityWriteCounterName, count: number) => void;
@@ -255,6 +262,7 @@ export function createTransactionReceiptRecorder(
   let sealed = false;
 
   return {
+    accessNative: access?.native,
     recordNode(kind, count): void {
       increment(counters.nodes, kind, count);
       counters.total += count;

@@ -5,9 +5,9 @@
  * A read-only `store.transaction` opens a read-only scope on the native
  * transaction it runs on and on the driver connection that transaction runs
  * on (`openReadOnlyScope`). A backend object bound to that transaction (a
- * transaction backend the engine opened, a backend built over the caller's
- * `tx.sql`, a savepoint either opens) or running on that connection (a root
- * backend over a one-connection SQLite driver) resolves the same fact
+ * transaction backend the engine opened, a backend built or adopted over the
+ * caller's `tx.sql`, a savepoint either opens), or an adoption of a handle
+ * nothing proved, running on that connection, resolves the same fact
  * (`backendReadOnlyScopeGraph`), so each member that can write refuses with
  * the typed read-only refusal before any statement, whichever entry point
  * reached it: a Store surface, a schema entry point that takes a backend, a
@@ -24,6 +24,11 @@
  * question at dispatch (`atomic-mutation-program.ts`). A raw-SQL member
  * refuses only a statement library code marked as a write
  * (`asCompiledWriteStatementSql`): SQL a caller wrote is the engine's to refuse.
+ *
+ * A root backend over a database or a pool is not gated at all
+ * (`createSqlBackend`'s `overNativeTransaction`): it is not over the
+ * transaction, so it runs every member as it would without the gate, on
+ * whatever its connection is running meanwhile.
  *
  * A hand-written backend is not gated here: nothing ties its objects to a
  * native transaction. The Store's own refusals still apply to every write
@@ -48,17 +53,13 @@ const READ_ONLY_SUGGESTION =
 /**
  * Refuses `operation` with the typed read-only refusal when `backend` runs
  * inside a read-only scope TypeGraph opened (`backendReadOnlyScopeGraph`),
- * naming the graph whose transaction opened it. `member` is the backend
- * member whose work is about to be admitted, where one is: on a root backend
- * over one connection, whether it is admitted behind the transaction or
- * inside it depends on the member.
+ * naming the graph whose transaction opened it.
  */
 export function assertBackendWritable(
   backend: object,
   operation: string,
-  member?: string,
 ): void {
-  const graphId = backendReadOnlyScopeGraph(backend, member);
+  const graphId = backendReadOnlyScopeGraph(backend);
   if (graphId === undefined) return;
   refuseReadOnlyTransactionWrite(operation, graphId, READ_ONLY_SUGGESTION);
 }
@@ -70,7 +71,7 @@ function refusalOf(
   operation = `backend.${member}()`,
 ): Promise<never> | undefined {
   try {
-    assertBackendWritable(backend, operation, member);
+    assertBackendWritable(backend, operation);
     return undefined;
   } catch (error) {
     return Promise.reject(

@@ -4645,7 +4645,12 @@ type CreatePostgresTablesOptions = Readonly<{
 }>;
 
 // @public
-export function createSqlBackend<TTx>(profile: SqlEngineProfile<TTx>): AdapterBackend<TTx>;
+export function createSqlBackend<TTx>(profile: SqlEngineProfile<TTx>, options?: CreateSqlBackendOptions): AdapterBackend<TTx>;
+
+// @public
+export type CreateSqlBackendOptions = Readonly<{
+    overNativeTransaction?: boolean | undefined;
+}>;
 
 // @public
 function createSqliteTables(names?: Partial<SqliteTableNames>, options?: CreateSqliteTablesOptions): {

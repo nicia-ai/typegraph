@@ -14,7 +14,6 @@ import {
   type ConnectionTransactionProbe,
   createNativeTransactionToken,
   publishConnectionNativeTransaction,
-  recordBackendConnection,
   recordEngineSavepoint,
   recordNativeTransactionHandle,
   recordOpenedNativeTransaction,
@@ -242,7 +241,7 @@ describe("native transaction record of a connection token (proof 4)", () => {
     expect(resolveNativeTransactionHandle(opener)).toBeUndefined();
   });
 
-  it("records the connection a bind runs on, proof or not, along the derivation chain; never for a pinned handle", () => {
+  it("records the connection a bind of a handle runs on, proof or not, along the derivation chain; never for a pinned handle or the engine's own bind of a transaction it opened", () => {
     const connection = { connection: true };
     const unproven = bindOnConnection(connection);
     expect(resolveNativeTransactionHandle(unproven)).toBeUndefined();
@@ -264,7 +263,7 @@ describe("native transaction record of a connection token (proof 4)", () => {
     });
     const opener = boundBackend();
     recordOpenedNativeTransaction(opener, token);
-    expect(resolveNativeTransactionConnection(opener)).toBe(connection);
+    expect(resolveNativeTransactionConnection(opener)).toBeUndefined();
     const pinned = boundBackend();
     recordNativeTransactionHandle(pinned, {
       kind: "pinned",
@@ -369,7 +368,11 @@ describe("native transaction state", () => {
     expect(resolveNativeTransactionState(second)).toBe(state);
     // A session on the same connection whose state nothing ties to `state`.
     const unproven = boundBackend();
-    recordBackendConnection(unproven, connection, undefined);
+    recordNativeTransactionHandle(unproven, {
+      kind: "connection",
+      handle: { unproven: true },
+      connection,
+    });
     const release = openReadOnlyScope(state, "graph");
     expect(
       isNativeTransactionReadOnly(resolveNativeTransactionState(unproven)),
@@ -377,6 +380,44 @@ describe("native transaction state", () => {
     expect(backendReadOnlyScopeGraph(unproven)).toBe("graph");
     release();
     expect(backendReadOnlyScopeGraph(unproven)).toBeUndefined();
+  });
+
+  it("never reads another transaction's read-only scope on its connection for a transaction the engine opened", async () => {
+    const connection = { connection: true };
+    const readOnly = createNativeTransactionToken({
+      connection,
+      isTransactionOpen: undefined,
+    });
+    const other = createNativeTransactionToken({
+      connection,
+      isTransactionOpen: undefined,
+    });
+    const readOnlyOpener = boundBackend();
+    recordOpenedNativeTransaction(readOnlyOpener, readOnly);
+    const otherOpener = boundBackend();
+    recordOpenedNativeTransaction(otherOpener, other);
+    await publishConnectionNativeTransaction(readOnly, () => {
+      const release = openReadOnlyScope(
+        resolveNativeTransactionState(readOnlyOpener),
+        "graph",
+      );
+      // The other transaction is proven by its own token: the scope on the
+      // connection is not its, so neither its sessions nor its backend read
+      // as read-only. A bind nothing proved on that connection does.
+      expect({
+        otherSession: isNativeTransactionReadOnly(
+          resolveNativeTransactionState(otherOpener),
+        ),
+        otherBackend: backendReadOnlyScopeGraph(otherOpener),
+        unprovenBind: backendReadOnlyScopeGraph(bindOnConnection(connection)),
+      }).toEqual({
+        otherSession: false,
+        otherBackend: undefined,
+        unprovenBind: "graph",
+      });
+      release();
+      return Promise.resolve();
+    });
   });
 
   it("reads a read-only scope through the connection for a session on it whose state is not the scope's, without sharing the state", async () => {

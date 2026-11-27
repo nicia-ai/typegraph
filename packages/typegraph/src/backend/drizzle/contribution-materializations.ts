@@ -527,7 +527,11 @@ export function gateFulltextMethods(
         assert,
         refuseUnavailable,
         () => raw(params),
-        beforeWrite === undefined ? undefined : () => { beforeWrite("upsertFulltext"); },
+        beforeWrite === undefined ? undefined : (
+          () => {
+            beforeWrite("upsertFulltext");
+          }
+        ),
       );
     };
   }
@@ -539,7 +543,11 @@ export function gateFulltextMethods(
         assert,
         refuseUnavailable,
         () => raw(params),
-        beforeWrite === undefined ? undefined : () => { beforeWrite("deleteFulltext"); },
+        beforeWrite === undefined ? undefined : (
+          () => {
+            beforeWrite("deleteFulltext");
+          }
+        ),
       );
     };
   }
@@ -554,7 +562,11 @@ export function gateFulltextMethods(
         assert,
         refuseUnavailable,
         () => raw(params),
-        beforeWrite === undefined ? undefined : () => { beforeWrite("upsertFulltextBatch"); },
+        beforeWrite === undefined ? undefined : (
+          () => {
+            beforeWrite("upsertFulltextBatch");
+          }
+        ),
       );
     };
   }
@@ -567,7 +579,11 @@ export function gateFulltextMethods(
         assert,
         refuseUnavailable,
         () => raw(params),
-        beforeWrite === undefined ? undefined : () => { beforeWrite("deleteFulltextBatch"); },
+        beforeWrite === undefined ? undefined : (
+          () => {
+            beforeWrite("deleteFulltextBatch");
+          }
+        ),
       );
     };
   }
@@ -591,7 +607,11 @@ export function gateFulltextMethods(
       assert,
       refuseUnavailable,
       () => rawHardDelete(params),
-      beforeWrite === undefined ? undefined : () => { beforeWrite("hardDeleteNode"); },
+      beforeWrite === undefined ? undefined : (
+        () => {
+          beforeWrite("hardDeleteNode");
+        }
+      ),
     );
   };
   // Its batched form deletes from the fulltext table too, so it is gated
@@ -605,7 +625,9 @@ export function gateFulltextMethods(
         refuseUnavailable,
         () => raw(params),
         beforeWrite === undefined ? undefined : (
-          () => { beforeWrite("hardDeleteNodesBatch"); }
+          () => {
+            beforeWrite("hardDeleteNodesBatch");
+          }
         ),
       );
   }
@@ -650,7 +672,6 @@ export function gateFulltext<T extends TransactionBackend>(
       assertBackendWritable(
         requireDefined(holder.gated),
         `backend.${member}()`,
-        member,
       );
     }) as ExactBackendOverlay<T, Partial<T>>,
   );

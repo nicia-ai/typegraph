@@ -2655,6 +2655,9 @@ type EndpointNotFoundErrorDetails = Readonly<{
 }>;
 
 // @public (undocumented)
+const ENGINE_OPENED: unique symbol;
+
+// @public (undocumented)
 const ENGINE_RECORDED_READ_SOURCE: unique symbol;
 
 // @public (undocumented)
@@ -5632,7 +5635,7 @@ type NativeTransactionState = Readonly<{
 }> & {
     [READ_ONLY_SCOPES]: readonly string[];
     [CONNECTION]: object | undefined;
-    readonly [SERIALIZED_BY]: object | undefined;
+    readonly [ENGINE_OPENED]: boolean;
 };
 
 // @public
@@ -7800,9 +7803,6 @@ type SelectiveField = Readonly<{
     isSystemField: boolean;
     valueType?: ValueType | undefined;
 }>;
-
-// @public (undocumented)
-const SERIALIZED_BY: unique symbol;
 
 // @public
 type SerializedClosures = Readonly<{

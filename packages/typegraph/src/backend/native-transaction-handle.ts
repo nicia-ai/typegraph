@@ -40,21 +40,14 @@
  * sessions a state of its own: wrongly sharing is the worse error, wrongly
  * splitting is what every binding had before this record existed.
  *
- * Every bind also records the driver connection it runs on, where the
- * dialect names one ({@link resolveNativeTransactionConnection}), proof or
+ * Every bind of a handle also records the driver connection it runs on, where
+ * the dialect names one ({@link resolveNativeTransactionConnection}), proof or
  * not. That is never proof of a transaction and never shares state: it is
  * what a fact that must fail closed (a read-only scope TypeGraph opened)
- * consults, because a connection runs one transaction at a time.
- *
- * Work on a connection is ordered by the serialized queue of the root backend
- * that issues it, where it has one: a transaction the engine opens through
- * that queue holds it from BEGIN to COMMIT or ROLLBACK, so the root's other
- * work, and every other transaction it opens, is admitted to the connection
- * only once that transaction has ended. A token records the queue it was
- * opened under ({@link createNativeTransactionToken}) and a root backend which
- * of its members go through that queue ({@link recordBackendConnection}), so a
- * read-only scope held on a connection applies only to work that can be
- * admitted inside its transaction ({@link connectionReadOnlyScopeGraph}).
+ * consults for a bind nothing proved, because a connection runs one
+ * transaction at a time. Only a bind of a handle records it: the engine's own
+ * bind of a transaction it opened is proven by its token, and a root backend
+ * is not a bind at all, so neither consults the connection.
  *
  * A savepoint a caller opens resolves the enclosing transaction only where
  * proof 2 or 4 covers it (libSQL and PGlite keep the pinned handle;
@@ -161,34 +154,8 @@ const PUBLISHED_TOKENS = new WeakMap<object, object>();
  */
 const BOUND_CONNECTIONS = new WeakMap<object, object>();
 
-/**
- * Engine token → the serialized queue its transaction holds from BEGIN to
- * its end. Absent where the engine opened it inside none.
- */
-const SERIALIZING_QUEUES = new WeakMap<object, object>();
-
-/**
- * How a root backend's work is admitted to its connection: through the
- * serialized queue `serializedBy` for a transaction it opens and for each
- * member `queuedMembers` names, and directly, as it is called, for every
- * other member.
- */
-export type ConnectionAdmission = Readonly<{
-  serializedBy: object;
-  queuedMembers: ReadonlySet<string>;
-}>;
-
-/** Root backend → how its work is admitted to its connection. */
-const BACKEND_ADMISSIONS = new WeakMap<object, ConnectionAdmission>();
-
-/**
- * One read-only scope held on a connection: the graph whose transaction
- * opened it, and the serialized queue that transaction holds, if any.
- */
-type ConnectionReadOnlyScope = Readonly<{
-  graphId: string;
-  serializedBy: object | undefined;
-}>;
+/** One read-only scope held on a connection: the graph whose transaction opened it. */
+type ConnectionReadOnlyScope = Readonly<{ graphId: string }>;
 
 /**
  * Driver connection → each read-only scope the Store has open on a
@@ -238,8 +205,13 @@ function liveIdentity(identity: object): object | undefined {
   return identity;
 }
 
-/** The native transaction `handle` runs in, by the proof its kind offers. */
-function identifyNativeTransaction(handle: NativeHandle): object | undefined {
+/**
+ * The native transaction `handle` runs in now, by the proof its kind offers,
+ * or `undefined` without proof.
+ */
+export function identifyNativeTransaction(
+  handle: NativeHandle,
+): object | undefined {
   // Proof 1: a savepoint the engine opened.
   const enclosing = ENGINE_SAVEPOINTS.get(handle.handle);
   if (enclosing !== undefined) return liveIdentity(enclosing);
@@ -267,7 +239,8 @@ function identifyNativeTransaction(handle: NativeHandle): object | undefined {
 
 /**
  * Records, once per bind, the native transaction `backend` runs on (see
- * {@link identifyNativeTransaction}). Records nothing without proof.
+ * {@link identifyNativeTransaction}), and the driver connection the handle
+ * names, where it names one. Records no transaction without proof.
  */
 export function recordNativeTransactionHandle(
   backend: object,
@@ -282,16 +255,18 @@ export function recordNativeTransactionHandle(
 }
 
 /**
- * Records that `backend` is the opener's own bind of the engine transaction
- * `token` identifies. Resolves only while the token is live.
+ * Records that every statement of `backend` runs in the engine transaction
+ * `token` identifies: the opener's own bind, or a backend built over the
+ * connection while `token` is published on it (proof 4,
+ * {@link identifyNativeTransaction}). Resolves only while the token is live.
+ * The token is the proof, and neither is a bind of a handle, so no connection
+ * is recorded ({@link engineTransactionConnection} names the token's).
  */
 export function recordOpenedNativeTransaction(
   backend: object,
   token: object,
 ): void {
   BOUND_NATIVE_TRANSACTIONS.set(backend, token);
-  const connection = TOKEN_PROBES.get(token)?.connection;
-  if (connection !== undefined) BOUND_CONNECTIONS.set(backend, connection);
 }
 
 /**
@@ -312,54 +287,35 @@ export function recordEngineSavepoint(
 
 /**
  * A new identity for one transaction the engine is about to open on a
- * connection-level handle. `probe` is how the driver confirms the transaction
- * is still open; `undefined` when it cannot, and the token is then never
- * honoured through the connection. `serializedBy` is the serialized queue
- * the transaction holds from BEGIN to its end, when the engine opens it
- * inside one.
+ * connection-level handle. `probe` names the connection and how the driver
+ * confirms the transaction is still open; a token whose probe cannot confirm
+ * it is never honoured through the connection.
  */
 export function createNativeTransactionToken(
   probe: ConnectionTransactionProbe | undefined,
-  serializedBy?: object,
 ): object {
   const token = Object.freeze({});
   TOKEN_PROBES.set(token, probe);
-  if (serializedBy !== undefined) SERIALIZING_QUEUES.set(token, serializedBy);
   return token;
 }
 
 /**
- * The serialized queue the native transaction `nativeTransaction` (an
- * identity {@link resolveNativeTransactionHandle} returned) holds from BEGIN
- * to its end, or `undefined` when the engine opened it inside none.
+ * Whether `nativeTransaction` (an identity
+ * {@link resolveNativeTransactionHandle} returned) is a token the engine
+ * minted for a transaction it opened ({@link createNativeTransactionToken}):
+ * every session that resolves it is proven to run in that transaction.
  */
-export function nativeTransactionSerializingQueue(
-  nativeTransaction: object,
-): object | undefined {
-  return SERIALIZING_QUEUES.get(nativeTransaction);
+export function isEngineTransactionToken(nativeTransaction: object): boolean {
+  return TOKEN_PROBES.has(nativeTransaction);
 }
 
 /**
- * The serialized queue the work of `backend`'s member `member` is admitted
- * to its connection through, as the nearest link of its derivation chain
- * that recorded how ({@link recordBackendConnection}), or `undefined` when
- * the member's work goes to the connection directly. Without a `member`,
- * the work is a transaction the backend opens, which goes through the queue.
+ * The driver connection the engine opened the transaction `token` identifies
+ * on, or `undefined` when its probe names none.
  */
-export function backendSerializingQueue(
-  backend: object,
-  member: string | undefined,
-): object | undefined {
-  for (const link of backendDerivationChain(backend)) {
-    const admission = BACKEND_ADMISSIONS.get(link);
-    if (admission === undefined) continue;
-    return member === undefined || admission.queuedMembers.has(member) ?
-        admission.serializedBy
-      : undefined;
-  }
-  return undefined;
+export function engineTransactionConnection(token: object): object | undefined {
+  return TOKEN_PROBES.get(token)?.connection;
 }
-
 /**
  * Runs `run` with `token` published on its connection. Call it once the
  * transaction `token` identifies has begun, around the work that runs inside
@@ -408,12 +364,13 @@ export function resolveNativeTransactionHandle(
 }
 
 /**
- * The driver connection `backend` runs on, as the nearest link of its
- * derivation chain that has one recorded: the connection-level handle's
+ * The driver connection the bind `backend` runs on, as the nearest link of
+ * its derivation chain that has one recorded: the connection-level handle's
  * connection (better-sqlite3's database, `@libsql/client` before 0.18,
- * sql.js, Durable Object storage), the connection a token was opened on, or
- * the pooled client a node-postgres transaction object runs on. `undefined`
- * where the dialect names none (a per-transaction pinned handle).
+ * sql.js, Durable Object storage) or the pooled client a node-postgres
+ * transaction object runs on. `undefined` where the dialect names none (a
+ * per-transaction pinned handle), and for anything that is not a bind of a
+ * handle (a root backend, the engine's own bind of a transaction it opened).
  *
  * This is never proof of which transaction `backend` runs in, so no state
  * is shared through it. A connection runs one transaction at a time, so it is
@@ -431,39 +388,18 @@ export function resolveNativeTransactionConnection(
 }
 
 /**
- * Records the driver connection a backend that is not bound to one
- * transaction runs every statement on: a root backend over a one-connection
- * SQLite driver, whose statements run inside whatever transaction that
- * connection has open, and how its work is admitted to it (`admission`),
- * when a serialized queue orders some of it. Never proof of a transaction:
- * read only by {@link resolveNativeTransactionConnection} and
- * {@link backendSerializingQueue}.
- */
-export function recordBackendConnection(
-  backend: object,
-  connection: object,
-  admission: ConnectionAdmission | undefined,
-): void {
-  BOUND_CONNECTIONS.set(backend, connection);
-  if (admission !== undefined) BACKEND_ADMISSIONS.set(backend, admission);
-}
-
-/**
  * Holds a read-only scope the Store opened for the graph `graphId` on
  * `connection` until the returned release is called. The Store holds one for
  * as long as a read-only scope it opened on a transaction running on that
  * connection is open: a connection runs one transaction at a time, so
- * meanwhile every statement admitted to it runs in that transaction
- * ({@link connectionReadOnlyScopeGraph}). `serializedBy` is the serialized
- * queue that transaction holds, if any
- * ({@link nativeTransactionSerializingQueue}).
+ * meanwhile every statement a bind nothing proved issues on it runs in that
+ * transaction ({@link connectionReadOnlyScopeGraph}).
  */
 export function holdConnectionReadOnlyScope(
   connection: object,
   graphId: string,
-  serializedBy: object | undefined,
 ): () => void {
-  const scope: ConnectionReadOnlyScope = { graphId, serializedBy };
+  const scope: ConnectionReadOnlyScope = { graphId };
   const held = READ_ONLY_CONNECTIONS.get(connection) ?? [];
   READ_ONLY_CONNECTIONS.set(connection, [...held, scope]);
   let released = false;
@@ -480,33 +416,12 @@ export function holdConnectionReadOnlyScope(
 
 /**
  * THE connection half of the read-only question: the graph of the innermost
- * read-only scope held on `connection` that work admitted through the
- * serialized queue `serializedBy` can run inside, or `undefined` when there
- * is none. Work behind the queue a scope's transaction holds is admitted to
- * the connection only once that transaction has ended, so that scope does
- * not apply to it: a root backend's work queued behind the transaction, or
- * another transaction opened through the same queue. Work the queue does not
- * order (`serializedBy` `undefined`, or another queue) is admitted inside
- * whatever transaction the connection has open, so every scope applies.
- *
- * Work issued from inside the transaction through the queue it holds is never
- * admitted while the transaction runs: the queue refuses it as reentrant, or,
- * where it cannot detect reentrancy, it waits behind the transaction.
+ * read-only scope held on `connection`, or `undefined` when there is none.
+ * Asked only for a bind of a handle that nothing proved to run in a given
+ * transaction: on that connection it runs in whichever transaction is open.
  */
 export function connectionReadOnlyScopeGraph(
   connection: object,
-  serializedBy: object | undefined,
 ): string | undefined {
-  const scopes = READ_ONLY_CONNECTIONS.get(connection);
-  if (scopes === undefined) return undefined;
-  for (let index = scopes.length - 1; index >= 0; index -= 1) {
-    const scope = scopes[index];
-    if (
-      scope !== undefined &&
-      (serializedBy === undefined || scope.serializedBy !== serializedBy)
-    ) {
-      return scope.graphId;
-    }
-  }
-  return undefined;
+  return READ_ONLY_CONNECTIONS.get(connection)?.at(-1)?.graphId;
 }
