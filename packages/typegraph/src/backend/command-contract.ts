@@ -21,7 +21,7 @@ const graphCommandCoordinationBindings = new WeakMap<
   Readonly<{
     graphId: string;
     acquisition: GraphWriteFenceAcquisition;
-    owner: GraphCommandSessionOwner;
+    sessionIdentity: object;
   }>
 >();
 const graphCommandPortSessionIdentities = new WeakMap<object, object>();
@@ -60,41 +60,6 @@ function graphCommandPortSessionIdentity(port: GraphCommandPort): object {
   return graphCommandPortSessionIdentities.get(port) ?? port;
 }
 
-// Module-private: only `graphCommandSessionOwner` records a session identity,
-// and only `isGraphCommandSessionOf` reads one back.
-const SESSION_IDENTITY: unique symbol = Symbol(
-  "typegraph.graphCommandSessionIdentity",
-);
-
-/**
- * The transaction session behind a command port, recorded by evidence earned
- * on it — coordination, a recorded graph-lock memo — so a reader can refuse
- * that evidence on any other session ({@link isGraphCommandSessionOf}).
- */
-export type GraphCommandSessionOwner = Readonly<{ [SESSION_IDENTITY]: object }>;
-
-/** The owner evidence earned on `port`'s transaction session records. */
-export function graphCommandSessionOwner(
-  port: GraphCommandPort,
-): GraphCommandSessionOwner {
-  return Object.freeze({
-    [SESSION_IDENTITY]: graphCommandPortSessionIdentity(port),
-  });
-}
-
-/**
- * THE ownership test of evidence bound to a transaction session: whether
- * `owner` is the session behind `port`. A transparent port wrapper derived
- * through `deriveBackend` answers as its base
- * ({@link carryGraphCommandPortSessionMetadata}).
- */
-export function isGraphCommandSessionOf(
-  port: GraphCommandPort,
-  owner: GraphCommandSessionOwner,
-): boolean {
-  return owner[SESSION_IDENTITY] === graphCommandPortSessionIdentity(port);
-}
-
 /**
  * Internal evidence mint used only after a graph's write fence has been
  * acquired on the command port's transaction. The binding prevents a real
@@ -111,7 +76,7 @@ export function mintGraphCommandCoordination(
   graphCommandCoordinationBindings.set(coordination, {
     graphId,
     acquisition,
-    owner: graphCommandSessionOwner(port),
+    sessionIdentity: graphCommandPortSessionIdentity(port),
   });
   return coordination;
 }
@@ -181,8 +146,7 @@ function boundGraphCommandCoordination(
 ) {
   const binding = graphCommandCoordinationBindings.get(coordination);
   return (
-      binding !== undefined &&
-        isGraphCommandSessionOf(port, binding.owner) &&
+      binding?.sessionIdentity === graphCommandPortSessionIdentity(port) &&
         binding.graphId === graphId
     ) ?
       binding

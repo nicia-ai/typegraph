@@ -431,8 +431,12 @@ describe("T15 — J1 a lock-only decision reads the memo of the session its lock
       await logged.backend.transaction(async (target) => {
         // Two sessions' single-flight memos over one transaction, as two
         // capture scopes bind them.
-        const sessionMemo = createRecordedGraphLockMemo(target.commands);
-        const otherSessionMemo = createRecordedGraphLockMemo(target.commands);
+        const sessionMemo = createRecordedGraphLockMemo(
+          openTransactionSession(target),
+        );
+        const otherSessionMemo = createRecordedGraphLockMemo(
+          openTransactionSession(target),
+        );
         const held = await lockRecordedGraphWrite(
           target,
           "graph-a",
@@ -472,7 +476,9 @@ describe("T15 — J1 a lock-only decision never takes a memo from another transa
     try {
       await first.backend.transaction(async (firstTarget) => {
         // An advanced fence in the first transaction's memo.
-        const firstMemo = createRecordedGraphLockMemo(firstTarget.commands);
+        const firstMemo = createRecordedGraphLockMemo(
+          openTransactionSession(firstTarget),
+        );
         const firstLock = await lockRecordedGraphDecision(
           firstTarget,
           "graph-a",
@@ -502,7 +508,9 @@ describe("T15 — J1 a graph-lock memo serves only the transaction that filled i
     try {
       await first.backend.transaction(async (firstTarget) => {
         // An advanced fence in the first transaction's memo.
-        const firstMemo = createRecordedGraphLockMemo(firstTarget.commands);
+        const firstMemo = createRecordedGraphLockMemo(
+          openTransactionSession(firstTarget),
+        );
         const firstLock = await lockRecordedGraphDecision(
           firstTarget,
           "graph-a",

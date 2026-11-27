@@ -65,7 +65,10 @@
  * mints below. ESLint's `OPERATION_BRAND_RESTRICTIONS` reports the
  * spellings a selector can see before the test runs.
  */
-import { isBackendDerivedFrom } from "../backend/derive-backend";
+import {
+  backendDerivationChain,
+  isBackendDerivedFrom,
+} from "../backend/derive-backend";
 import type {
   AdapterBackend,
   AdoptedSchemaWriteTransaction,
@@ -688,6 +691,28 @@ function surfaceSession(
   surface: SessionCarryingSurface,
 ): TransactionSession | undefined {
   return surface[SURFACE_SESSION];
+}
+
+/**
+ * THE test of whether `target` is a statement surface of `session`: what the
+ * session holds or hands out, a backend derived from either through
+ * `src/backend/derive-backend.ts`, or a surface a backend layer built for the
+ * session ({@link sessionSurfaceMembers}), which carries the session through
+ * every derivation of it, another copy of TypeGraph's included. Evidence the
+ * session's operations earned (a recorded graph-lock memo) serves a statement
+ * on `target` only when this holds. It reads which backend `target` is and
+ * was derived from, never a value off one of its members.
+ */
+export function isSessionStatementSurface(
+  session: TransactionSession,
+  target: Pick<OperationBackend, "dialect">,
+): boolean {
+  if (surfaceSession(target) === session) return true;
+  const chain: readonly object[] = backendDerivationChain(target);
+  return (
+    chain.includes(session[SESSION_CONTROL]) ||
+    chain.includes(session[SESSION_TRANSACTION])
+  );
 }
 
 /** Whether `operation` was minted by this copy of the module. */

@@ -1281,7 +1281,7 @@ function runInWriteTransactionAttempt<T>(
             acquireCombinedFence(fenceParams),
           );
           memoizeAcquiredRecordedGraphWriteLock(
-            target.commands,
+            target,
             recordedGraphLockMemoOf(frame),
             ctx.graphId,
             fenceAcquisition,

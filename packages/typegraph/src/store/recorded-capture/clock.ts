@@ -11,9 +11,6 @@ import {
 import {
   assertFencedSnapshotIsFresh,
   graphCommandCoordinationAcquisition,
-  type GraphCommandSessionOwner,
-  graphCommandSessionOwner,
-  isGraphCommandSessionOf,
   mintGraphCommandCoordination,
   normalizeGraphCommandIsolation,
   readGraphWriteFenceAcquisition,
@@ -23,7 +20,6 @@ import type {
   GraphBackend,
   GraphCommandCoordination,
   GraphCommandIsolation,
-  GraphCommandPort,
   GraphWriteFenceAcquisition,
 } from "../../backend/types";
 import {
@@ -51,6 +47,10 @@ import {
   isSerializationFailure,
   withRecordedRelationsPrecondition,
 } from "../../utils/sql-errors";
+import {
+  isSessionStatementSurface,
+  type TransactionSession,
+} from "../operation-scope";
 import { recordedAnchorOwner } from "../recorded-anchor-origin";
 import { executeStatement } from "./guards";
 
@@ -207,7 +207,7 @@ function acquiredGraphWriteLock(
 
 /** Record a graph write fence acquired by a combined backend primitive. */
 export function acquiredGraphWriteLockFromCombinedFence(
-  target: Pick<GraphBackend, "commands">,
+  target: Pick<GraphBackend, "commands" | "dialect">,
   graphId: string,
   acquisition: GraphWriteFenceAcquisition,
   graphLocks: RecordedGraphLockMemo | undefined,
@@ -216,7 +216,7 @@ export function acquiredGraphWriteLockFromCombinedFence(
     target,
     graphId,
     acquisition,
-    ownGraphLockMemo(target.commands, graphId, graphLocks),
+    ownGraphLockMemo(target, graphId, graphLocks),
   );
 }
 
@@ -280,33 +280,37 @@ export type RecordedGraphLockMemo = Map<
 
 /** A memo as {@link ownGraphLockMemo} reads its owner. */
 type OwnedGraphLockMemo = RecordedGraphLockMemo &
-  Readonly<{ [GRAPH_LOCK_MEMO_OWNER]?: GraphCommandSessionOwner }>;
+  Readonly<{ [GRAPH_LOCK_MEMO_OWNER]?: TransactionSession }>;
 
-/** A new memo, bound to the transaction session behind `commands`. */
+/** A new memo, bound to `session`, the transaction session it serves. */
 export function createRecordedGraphLockMemo(
-  commands: GraphCommandPort,
+  session: TransactionSession,
 ): RecordedGraphLockMemo {
   const memo: RecordedGraphLockMemo = new Map();
-  Object.defineProperty(memo, GRAPH_LOCK_MEMO_OWNER, {
-    value: graphCommandSessionOwner(commands),
-  });
+  Object.defineProperty(memo, GRAPH_LOCK_MEMO_OWNER, { value: session });
   return memo;
 }
 
 /**
- * THE gate every path that reads, fills or carries a memo passes it through:
- * `memo` when it was created on the transaction session behind `commands`,
- * refused otherwise, before any statement. A memo with no owner was not made
- * by {@link createRecordedGraphLockMemo} and is refused as well.
+ * THE gate every path that reads, fills or carries a memo passes it through,
+ * before any statement and only on a path that goes on to consult it: `memo`
+ * when `target`, the surface the fence statement runs on, is a statement
+ * surface of the session the memo was created for
+ * ({@link isSessionStatementSurface}), refused otherwise. A memo with no owner
+ * was not made by {@link createRecordedGraphLockMemo} and is refused as well.
+ *
+ * The test is on the backend `target` is and was derived from, never on a
+ * value read off one of its members: a backend may hand out a new command
+ * port wrapper on every read of the same pinned transaction.
  */
 function ownGraphLockMemo(
-  commands: GraphCommandPort,
+  target: Pick<GraphBackend, "dialect">,
   graphId: string,
   memo: OwnedGraphLockMemo | undefined,
 ): RecordedGraphLockMemo | undefined {
   if (memo === undefined) return undefined;
   const owner = memo[GRAPH_LOCK_MEMO_OWNER];
-  if (owner === undefined || !isGraphCommandSessionOf(commands, owner)) {
+  if (owner === undefined || !isSessionStatementSurface(owner, target)) {
     throw new CompilerInvariantError(
       "A graph-lock memo filled on one transaction cannot serve another.",
       { graphId },
@@ -326,12 +330,12 @@ function ownGraphLockMemo(
  * eviction/error semantics.
  */
 export function memoizeAcquiredRecordedGraphWriteLock(
-  commands: GraphCommandPort,
+  target: Pick<GraphBackend, "dialect">,
   graphLocks: RecordedGraphLockMemo | undefined,
   graphId: string,
   acquisition: GraphWriteFenceAcquisition,
 ): void {
-  const memo = ownGraphLockMemo(commands, graphId, graphLocks);
+  const memo = ownGraphLockMemo(target, graphId, graphLocks);
   if (memo === undefined || memo.has(graphId)) return;
   memo.set(graphId, Promise.resolve(acquisition));
 }
@@ -430,9 +434,9 @@ export async function lockRecordedGraphWrite(
   graphId: string,
   graphLocks: RecordedGraphLockMemo | undefined,
 ): Promise<GraphWriteLock> {
-  const memo = ownGraphLockMemo(target.commands, graphId, graphLocks);
   const fence = keyedRecordedGraphFence(target, "recorded graph write");
   if (fence === undefined) return uncapturedGraphWriteLock();
+  const memo = ownGraphLockMemo(target, graphId, graphLocks);
   const acquire = (): Promise<GraphWriteFenceAcquisition> =>
     executeGraphWriteFenceStatement(
       target,
@@ -499,11 +503,7 @@ function decisionGraphLockMemo(
       { graphId },
     );
   }
-  return ownGraphLockMemo(
-    target.commands,
-    graphId,
-    sessionGraphLocks ?? heldGraphLocks,
-  );
+  return ownGraphLockMemo(target, graphId, sessionGraphLocks ?? heldGraphLocks);
 }
 
 /**
@@ -539,7 +539,6 @@ export async function lockRecordedGraphDecision(
   // into, and must be that one when both are present.
   sessionGraphLocks?: RecordedGraphLockMemo,
 ): Promise<GraphWriteLock> {
-  const memo = decisionGraphLockMemo(target, graphId, held, sessionGraphLocks);
   // Decided before the plan is resolved: evidence with no coordination is a
   // frame that holds no keyed fence, whatever its target could take.
   if (held !== undefined && held.coordination === undefined) return held;
@@ -548,6 +547,8 @@ export async function lockRecordedGraphDecision(
   if (held !== undefined && advancedFenceRow(target, graphId, held)) {
     return held;
   }
+  // Only from here on is a memo read or filled.
+  const memo = decisionGraphLockMemo(target, graphId, held, sessionGraphLocks);
   const memoized = memo?.get(graphId);
   if (memoized !== undefined) {
     const lock = acquiredGraphWriteLock(target, graphId, await memoized, memo);
