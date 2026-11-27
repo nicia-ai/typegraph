@@ -1212,10 +1212,14 @@ export async function assertNodeClaimTransitionsAvailable(
   // Per (constraint, owner) given up by an earlier row: the keys it keeps.
   const released = new Map<string, ReadonlySet<string>>();
   const claimed = new Map<string, UniqueRow>();
+  // The pending claims indexed by (constraint, owner), so a release visits only
+  // the claims its own owner took under its own constraint rather than every
+  // claim the set has taken so far.
+  const claimedByOwner = new Map<string, Set<string>>();
+  const ownerKey = (row: UniqueRow): string =>
+    encodeTupleKey([row.constraint_name, row.concrete_kind, row.node_id]);
   const releasedByOwner = (row: UniqueRow): boolean => {
-    const kept = released.get(
-      encodeTupleKey([row.constraint_name, row.concrete_kind, row.node_id]),
-    );
+    const kept = released.get(ownerKey(row));
     return kept !== undefined && !kept.has(row.key);
   };
   const pendingContext: UniquenessProbeContext = {
@@ -1239,30 +1243,51 @@ export async function assertNodeClaimTransitionsAvailable(
     // A disjointness claim's key is this row's own id at its pair's axis:
     // registered like any other, it can only ever answer this row.
     for (const claim of plan.claims) {
-      claimed.set(
-        encodeTupleKey([claim.axis, claim.constraintName, claim.key]),
-        {
-          graph_id: ctx.graphId,
-          node_kind: claim.axis,
-          constraint_name: claim.constraintName,
-          key: claim.key,
-          node_id: id,
-          concrete_kind: kind,
-          deleted_at: undefined,
-        },
-      );
+      const row: UniqueRow = {
+        graph_id: ctx.graphId,
+        node_kind: claim.axis,
+        constraint_name: claim.constraintName,
+        key: claim.key,
+        node_id: id,
+        concrete_kind: kind,
+        deleted_at: undefined,
+      };
+      const target = encodeTupleKey([
+        claim.axis,
+        claim.constraintName,
+        claim.key,
+      ]);
+      claimed.set(target, row);
+      const owned = claimedByOwner.get(ownerKey(row));
+      if (owned === undefined)
+        claimedByOwner.set(ownerKey(row), new Set([target]));
+      else owned.add(target);
+    }
+    const keptByConstraint = new Map<string, Set<string>>();
+    for (const entry of plan.release.keep) {
+      const keys = keptByConstraint.get(entry.constraintName);
+      if (keys === undefined) {
+        keptByConstraint.set(entry.constraintName, new Set([entry.key]));
+      } else keys.add(entry.key);
     }
     for (const constraintName of plan.release.constraintNames) {
-      const kept = new Set(
-        plan.release.keep
-          .filter((entry) => entry.constraintName === constraintName)
-          .map((entry) => entry.key),
-      );
-      released.set(encodeTupleKey([constraintName, kind, id]), kept);
+      const kept = keptByConstraint.get(constraintName) ?? new Set<string>();
+      const owner = encodeTupleKey([constraintName, kind, id]);
+      released.set(owner, kept);
       // A key an EARLIER row of the set claimed for this owner and this row
-      // gives up is given up too.
-      for (const [target, row] of claimed) {
-        if (releasedByOwner(row)) claimed.delete(target);
+      // gives up is given up too. Only this owner's claims under this
+      // constraint can be, and a target a later claim re-took for another
+      // owner is that owner's, not this one's.
+      const owned = claimedByOwner.get(owner);
+      if (owned === undefined) continue;
+      for (const target of owned) {
+        const row = claimed.get(target);
+        if (row === undefined || ownerKey(row) !== owner) {
+          owned.delete(target);
+        } else if (releasedByOwner(row)) {
+          claimed.delete(target);
+          owned.delete(target);
+        }
       }
     }
   }
