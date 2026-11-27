@@ -52,11 +52,34 @@
  * the `compareAndSet` expectation). Both encode a `Date` with the one encoder
  * every stored text comes from, `dateInstantText`.
  *
- * Reads are unchanged: they return the stored text.
+ * Reads ask a different question — not "does this position's input accept
+ * only a `Date`" but "is this position's OUTPUT a `Date`" — and the query
+ * compiler's field typing already answers it: a `FieldTypeInfo` whose
+ * `valueType` is `"date"` (a `z.date()`, a `z.coerce.date()`, a pipe whose
+ * output is one, under the same wrappers, inside a nested object, array or
+ * record). {@link storedReadPlan} compiles that typing once into the list of
+ * positions that lead to a date, and every read decoder applies it through
+ * {@link decodeStoredValue}, whose one leaf is {@link decodeStoredDate}: only
+ * portable timestamp text becomes a `Date`; a `Date` a driver already decoded
+ * passes through; anything else — non-canonical text, a number, garbage — is
+ * returned exactly as stored, so a read never produces an `Invalid Date`. A
+ * mixed union (`z.union([z.date(), z.string()])`), a tuple and a
+ * `.transform()` type as `unknown` there, so they still read as text. A read
+ * applies no parse, transform or refinement: user code never runs on a read.
+ *
+ * Whole rows reach callers through `rowToNode` / `rowToEdge` and the query
+ * compiler's selectable rows, which take a {@link StoredPropsReader} resolved
+ * from the registry ({@link storedPropsReaders}); a graph whose kinds hold no
+ * date position gets the reader that returns the props it is handed.
  */
 import { type z } from "zod";
 
 import { objectSchemaShape } from "../core/kind-schema";
+import {
+  type FieldTypeInfo,
+  kindShapeTypeInfo,
+} from "../query/schema-introspector";
+import { type KindRegistry } from "../registry/kind-registry";
 import { dateInstantText, isPortableTimestamp } from "../utils/date";
 import { isPlainObject } from "../utils/object";
 
@@ -240,9 +263,10 @@ function findUnrevivedDate(
 /**
  * `value`, validated by `schema`, encoded for a write that hands the backend
  * JSON ({@link encodeStoredDates}) — but only when every `Date` it holds sits
- * where {@link reviveStoredDates} reads the stored text back as that `Date`.
- * Anywhere else (a union, a record, `z.any()`, an `.overwrite()`) the stored
- * text would be read back as a string, so the row would hold a value the
+ * where {@link reviveStoredDates} revives the stored text as that `Date` when
+ * the row is parsed through its schema again. Anywhere else (a union, a
+ * record, `z.any()`, an `.overwrite()`) the stored text would be re-parsed as
+ * a string — whatever a read returns there — so the row would hold a value the
  * schema distinguishes from the `Date` that was written, and a uniqueness
  * claim rebuilt from it would not match the claim a create takes for that
  * `Date`. Such a value is reported with the path of the first such `Date`, for
@@ -263,4 +287,245 @@ export function encodeStoredDatesFor(
   return unrevived === undefined ?
       { kind: "encoded", value: encoded }
     : { kind: "not-revivable", path: unrevived };
+}
+
+/**
+ * A stored value at a position whose schema output is a `Date`, as a read
+ * returns it: portable timestamp text ({@link isPortableTimestamp}) becomes the
+ * `Date` it encodes, a `Date` (a driver's `timestamptz`, or a custom backend
+ * that already decoded) passes through, and every other value is returned
+ * exactly as stored — never an `Invalid Date`. The single leaf of every read
+ * decoder: row props, selected fields, projections and aggregates.
+ */
+export function decodeStoredDate(value: unknown): unknown {
+  return typeof value === "string" && isPortableTimestamp(value) ?
+      new Date(value)
+    : value;
+}
+
+/**
+ * The positions under a value that lead to a date, compiled from its field
+ * typing: the date itself, the declared keys of an object that lead to one,
+ * the element of an array, or the value of a record. A value with no date
+ * position has no plan.
+ */
+export type StoredReadPlan =
+  | Readonly<{ form: "date" }>
+  | Readonly<{
+      form: "object";
+      keys: readonly (readonly [key: string, plan: StoredReadPlan])[];
+    }>
+  | Readonly<{ form: "array"; element: StoredReadPlan }>
+  | Readonly<{ form: "record"; value: StoredReadPlan }>;
+
+const DATE_PLAN: StoredReadPlan = Object.freeze({ form: "date" });
+
+function compileStoredReadPlan(
+  info: FieldTypeInfo,
+): StoredReadPlan | undefined {
+  switch (info.valueType) {
+    case "date": {
+      return DATE_PLAN;
+    }
+    case "array": {
+      const element =
+        info.elementTypeInfo === undefined ?
+          undefined
+        : storedReadPlan(info.elementTypeInfo);
+      return element === undefined ? undefined : (
+          Object.freeze({ form: "array", element })
+        );
+    }
+    case "object": {
+      if (info.shape !== undefined) return shapeReadPlan(info.shape);
+      const value =
+        info.recordValueType === undefined ?
+          undefined
+        : storedReadPlan(info.recordValueType);
+      return value === undefined ? undefined : (
+          Object.freeze({ form: "record", value })
+        );
+    }
+    case "boolean":
+    case "embedding":
+    case "number":
+    case "string":
+    case "unknown": {
+      return undefined;
+    }
+  }
+}
+
+function shapeReadPlan(
+  shape: Readonly<Record<string, FieldTypeInfo>>,
+): StoredReadPlan | undefined {
+  const keys = Object.entries(shape).flatMap(([key, info]) => {
+    const plan = storedReadPlan(info);
+    return plan === undefined ? [] : [[key, plan] as const];
+  });
+  return keys.length === 0 ?
+      undefined
+    : Object.freeze({ form: "object", keys: Object.freeze(keys) });
+}
+
+/** `FieldTypeInfo` objects are built once per kind and cached, so a plan is too. */
+const readPlanCache = new WeakMap<
+  FieldTypeInfo,
+  Readonly<{ plan: StoredReadPlan | undefined }>
+>();
+
+/**
+ * The read plan of a position typed `info`, or `undefined` when nothing at
+ * or below it is typed as a date. Compiled once per `FieldTypeInfo`.
+ */
+export function storedReadPlan(
+  info: FieldTypeInfo,
+): StoredReadPlan | undefined {
+  const cached = readPlanCache.get(info);
+  if (cached !== undefined) return cached.plan;
+  const plan = compileStoredReadPlan(info);
+  readPlanCache.set(info, { plan });
+  return plan;
+}
+
+function decodeObjectPositions(
+  keys: readonly (readonly [string, StoredReadPlan])[],
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  const changed: (readonly [string, unknown])[] = [];
+  for (const [key, plan] of keys) {
+    if (!Object.hasOwn(value, key)) continue;
+    const element = value[key];
+    const next = decodeStoredValue(plan, element);
+    if (next !== element) changed.push([key, next]);
+  }
+  if (changed.length === 0) return value;
+  // Copied, never mutated: `value` may be an object a driver or a custom
+  // backend handed over. `Object.fromEntries` and the spread define own data
+  // properties, so a stored `__proto__` key stays a property rather than
+  // reaching the setter, and every key keeps its stored position.
+  return { ...value, ...Object.fromEntries(changed) };
+}
+
+function decodeRecordPositions(
+  plan: StoredReadPlan,
+  value: Record<string, unknown>,
+): Record<string, unknown> {
+  return decodeObjectPositions(
+    Object.keys(value).map((key) => [key, plan] as const),
+    value,
+  );
+}
+
+/**
+ * `value`, as stored at a position whose read plan is `plan`, with every
+ * date position decoded ({@link decodeStoredDate}). Returns `value` itself
+ * when there is no plan or nothing changed, and never mutates it.
+ */
+export function decodeStoredValue(
+  plan: StoredReadPlan | undefined,
+  value: unknown,
+): unknown {
+  if (plan === undefined) return value;
+  switch (plan.form) {
+    case "date": {
+      return decodeStoredDate(value);
+    }
+    case "array": {
+      if (!Array.isArray(value)) return value;
+      const items = value as readonly unknown[];
+      const decoded = items.map((item) =>
+        decodeStoredValue(plan.element, item),
+      );
+      return decoded.some((item, index) => item !== items[index]) ? decoded : (
+          value
+        );
+    }
+    case "object": {
+      return isPlainObject(value) ?
+          decodeObjectPositions(plan.keys, value)
+        : value;
+    }
+    case "record": {
+      return isPlainObject(value) ?
+          decodeRecordPositions(plan.value, value)
+        : value;
+    }
+  }
+}
+
+/**
+ * A row's parsed props, as a read returns them, for the row's kind. Never
+ * mutates `props`; returns it itself when the kind has no date position.
+ */
+export type StoredPropsReader = (
+  kind: string,
+  props: Record<string, unknown>,
+) => Record<string, unknown>;
+
+/** The node and edge readers of one registry. */
+export type StoredPropsReaders = Readonly<{
+  node: StoredPropsReader;
+  edge: StoredPropsReader;
+}>;
+
+/** The reader of a graph with no date position: the props as stored. */
+export const passStoredProps: StoredPropsReader = (_kind, props) => props;
+
+function kindReadPlans(
+  kinds: ReadonlyMap<string, Readonly<{ schema: z.ZodType }>>,
+): ReadonlyMap<string, StoredReadPlan> {
+  const plans = new Map<string, StoredReadPlan>();
+  for (const [kind, type] of kinds) {
+    const shape = kindShapeTypeInfo(type.schema);
+    const plan = shape === undefined ? undefined : shapeReadPlan(shape);
+    if (plan !== undefined) plans.set(kind, plan);
+  }
+  return plans;
+}
+
+function readerFor(
+  plans: ReadonlyMap<string, StoredReadPlan>,
+): StoredPropsReader {
+  if (plans.size === 0) return passStoredProps;
+  return (kind, props) => {
+    const plan = plans.get(kind);
+    return plan === undefined ? props : (
+        (decodeStoredValue(plan, props) as Record<string, unknown>)
+      );
+  };
+}
+
+const registryReaders = new WeakMap<KindRegistry, StoredPropsReaders>();
+
+/**
+ * The node and edge props readers of a registry, compiled once per registry.
+ * A kind the registry does not hold, and every kind of a graph with no date
+ * position, reads its props as stored.
+ */
+export function storedPropsReaders(registry: KindRegistry): StoredPropsReaders {
+  const cached = registryReaders.get(registry);
+  if (cached !== undefined) return cached;
+  const readers: StoredPropsReaders = Object.freeze({
+    node: readerFor(kindReadPlans(registry.nodeKinds)),
+    edge: readerFor(kindReadPlans(registry.edgeKinds)),
+  });
+  registryReaders.set(registry, readers);
+  return readers;
+}
+
+/**
+ * Props a read returned, back in the form the store persists them: every
+ * `Date` a read decoded replaced by the text it was decoded from. A read
+ * decodes only portable timestamp text, which `Date.prototype.toJSON` writes
+ * back byte for byte, so this is the exact inverse of
+ * {@link decodeStoredValue} for a read's own output. For a consumer whose
+ * contract is the stored form — graph merge compares, fingerprints and
+ * re-writes a committed row's props as JSON — and that reads the row through
+ * the public read surface. Returns `props` itself when it holds no `Date`.
+ */
+export function storedFormOfReadProps(
+  props: Record<string, unknown>,
+): Record<string, unknown> {
+  return encodeStoredDates(props) as Record<string, unknown>;
 }

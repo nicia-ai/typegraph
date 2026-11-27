@@ -14,6 +14,7 @@ import {
   type StatementBackend,
   type StoreTransactionBackend,
 } from "../../store/operation-scope";
+import { storedPropsReaders } from "../../store/stored-date-revival";
 import { requireDefined } from "../../utils/presence";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import {
@@ -369,6 +370,7 @@ export class UnionableQuery<G extends GraphDef, R> {
         rows,
         this.#state.startAlias,
         this.#state.traversals ?? [],
+        storedPropsReaders(this.#config.registry),
         this.#state.selectFn,
       ) as readonly R[];
     }

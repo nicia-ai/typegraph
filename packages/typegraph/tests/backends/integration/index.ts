@@ -38,6 +38,7 @@ export { registerCrossBackendConsistencyTests } from "./cross-backend";
 export { registerDatabaseExpressionQueryIntegrationTests } from "./database-expression-queries";
 export { registerDatePredicateIntegrationTests } from "./date-predicates";
 export { registerDatePropertyMergeIntegrationTests } from "./date-property-merges";
+export { registerDatePropertyReadIntegrationTests } from "./date-property-reads";
 export { registerDatePropertyWriteIntegrationTests } from "./date-property-writes";
 export { registerDurableEdgeMatchIdentityIntegrationTests } from "./durable-edge-match-identity";
 export { registerEdgeAcyclicityIntegrationTests } from "./edge-acyclicity";

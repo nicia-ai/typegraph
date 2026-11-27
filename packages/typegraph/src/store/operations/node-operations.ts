@@ -234,6 +234,8 @@ import { type NodeRow, rowToEdge, rowToNode } from "../row-mappers";
 import {
   encodeStoredDatesFor,
   reviveStoredDateProps,
+  type StoredPropsReader,
+  storedPropsReaders,
 } from "../stored-date-revival";
 import {
   type BulkOperationHookContext,
@@ -1917,15 +1919,20 @@ async function performNodeUpdate<G extends GraphDef>(
     options,
     resolvedExisting,
   );
-  return writePreparedNodeUpdate(session, prepared);
+  return writePreparedNodeUpdate(
+    session,
+    prepared,
+    storedPropsReaders(ctx.registry).node,
+  );
 }
 
 /** The WRITE half of {@link performNodeUpdate}: one prepared update's statement. */
 async function writePreparedNodeUpdate(
   session: NodeWriteSession,
   { work, fences }: NodeUpdatePrepared,
+  reader: StoredPropsReader,
 ): Promise<Node> {
-  return rowToNode(await session.reviseNode(work, fences));
+  return rowToNode(await session.reviseNode(work, fences), reader);
 }
 
 /** The READ half of {@link performNodeUpdate}; see {@link NodeUpdatePrepared}. */
@@ -2411,7 +2418,11 @@ async function writeNodeUpdateSet<G extends GraphDef>(
         nodes.push(
           await writeNodeRowMovingWindowEnd(ctx, target, entry.input, () =>
             preparedAgainstStoredRow ?
-              writePreparedNodeUpdate(session, update)
+              writePreparedNodeUpdate(
+                session,
+                update,
+                storedPropsReaders(ctx.registry).node,
+              )
             : performNodeUpdate(
                 ctx,
                 entry.input,
@@ -2847,7 +2858,7 @@ export async function executeNodeReplacementBatch<G extends GraphDef>(
   memoizeLeasedSchemaFence(ctx, entry);
   return appliedResolvedMutationSet(
     restoreAtomicNodeBatchRows(ctx.graphId, preparedCreates, returnedRows).map(
-      (row) => rowToNode(row),
+      (row) => rowToNode(row, storedPropsReaders(ctx.registry).node),
     ),
   );
 }
@@ -3984,6 +3995,7 @@ async function readHeldEdge(
   target: WriteTarget,
   graphId: string,
   id: string,
+  reader: StoredPropsReader,
 ): Promise<Edge> {
   const row = await target.getEdge(graphId, id);
   return rowToEdge(
@@ -3991,6 +4003,7 @@ async function readHeldEdge(
       row,
       `composition edge "${id}" was written but not readable`,
     ),
+    reader,
   );
 }
 
@@ -4340,7 +4353,10 @@ async function writeCompositionAttachmentMoves<G extends GraphDef>(
           edge:
             decided.incumbent === undefined ?
               undefined
-            : rowToEdge(decided.incumbent.edge),
+            : rowToEdge(
+                decided.incumbent.edge,
+                storedPropsReaders(ctx.registry).edge,
+              ),
         }
       : {
           wrote: true,
@@ -4348,6 +4364,7 @@ async function writeCompositionAttachmentMoves<G extends GraphDef>(
             target,
             ctx.graphId,
             replacement.insertParams.id,
+            storedPropsReaders(ctx.registry).edge,
           ),
         },
     );
@@ -4719,7 +4736,10 @@ async function writeOwedExistingGetOrCreateLeg<G extends GraphDef>(
       ),
       entry,
     );
-    return { node: rowToNode(existing), action: "found" };
+    return {
+      node: rowToNode(existing, storedPropsReaders(ctx.registry).node),
+      action: "found",
+    };
   }
   const node = await executeNodeUpsertUpdate(
     ctx,
@@ -4764,7 +4784,10 @@ async function applyExistingGetOrCreateLeg<G extends GraphDef>(
       leg.request,
     );
   }
-  return { node: rowToNode(existing), action: "found" };
+  return {
+    node: rowToNode(existing, storedPropsReaders(ctx.registry).node),
+    action: "found",
+  };
 }
 
 /**
@@ -5646,7 +5669,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       );
       await foldCreated("restore");
       await attachCompositionEdge();
-      return shouldReturnRow ? rowToNode(resurrected) : undefined;
+      return shouldReturnRow ?
+          rowToNode(resurrected, storedPropsReaders(ctx.registry).node)
+        : undefined;
     }
 
     if (fuseSchemaFenceInFirstWrite) {
@@ -5664,7 +5689,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         : await session.createNodeWithSchemaFence(work, schemaFence);
       if (inserted !== undefined) {
         memoizeLeasedSchemaFence(ctx, frame);
-        return shouldReturnRow ? rowToNode(inserted) : undefined;
+        return shouldReturnRow ?
+            rowToNode(inserted, storedPropsReaders(ctx.registry).node)
+          : undefined;
       }
 
       // The fused statement's empty result is intentionally ambiguous. Its
@@ -5715,7 +5742,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           ),
         ),
       );
-      return rowToNode(row);
+      return rowToNode(row, storedPropsReaders(ctx.registry).node);
     }
 
     if (prepared.insertIfAbsent) {
@@ -5726,7 +5753,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       if (inserted !== undefined) {
         await foldCreated("fold");
         await attachCompositionEdge();
-        return shouldReturnRow ? rowToNode(inserted) : undefined;
+        return shouldReturnRow ?
+            rowToNode(inserted, storedPropsReaders(ctx.registry).node)
+          : undefined;
       }
 
       // `ON CONFLICT DO NOTHING` leaves PostgreSQL's transaction usable. A
@@ -5771,7 +5800,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       );
       await foldCreated("restore");
       await attachCompositionEdge();
-      return shouldReturnRow ? rowToNode(resurrected) : undefined;
+      return shouldReturnRow ?
+          rowToNode(resurrected, storedPropsReaders(ctx.registry).node)
+        : undefined;
     }
 
     // The existence probe above is not the last word: on an engine that does
@@ -5806,7 +5837,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     await attachCompositionEdge();
 
     if (row === undefined) return;
-    return rowToNode(row);
+    return rowToNode(row, storedPropsReaders(ctx.registry).node);
   };
 
   if (autocommitSingleStatement) {
@@ -6090,7 +6121,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
         ctx.graphId,
         preparedCreates,
         returnedRows,
-      ).map((row) => rowToNode(row));
+      ).map((row) => rowToNode(row, storedPropsReaders(ctx.registry).node));
     }
   }
 
@@ -6180,7 +6211,9 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
         preparedCompositionEdges,
       );
 
-      return rows.map((row) => rowToNode(row));
+      return rows.map((row) =>
+        rowToNode(row, storedPropsReaders(ctx.registry).node),
+      );
     },
     { didWrite: writeResultAlwaysChanges },
   );
@@ -7018,12 +7051,15 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
     ctx.graphId,
     preparedCreates,
     result.created,
-  ).map((row) => rowToNode(row));
+  ).map((row) => rowToNode(row, storedPropsReaders(ctx.registry).node));
   const updatedById = new Map(result.updated.map((row) => [row.id, row]));
   return appliedResolvedMutationSet({
     created,
     updated: updates.map((entry) =>
-      rowToNode(requireDefined(updatedById.get(entry.input.id))),
+      rowToNode(
+        requireDefined(updatedById.get(entry.input.id)),
+        storedPropsReaders(ctx.registry).node,
+      ),
     ),
   });
 }
@@ -7143,7 +7179,10 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
           if (rows !== undefined) {
             const byId = new Map(rows.map((row) => [row.id, row]));
             return entries.map((entry) =>
-              rowToNode(requireDefined(byId.get(entry.input.id))),
+              rowToNode(
+                requireDefined(byId.get(entry.input.id)),
+                storedPropsReaders(ctx.registry).node,
+              ),
             );
           }
           batchMissed = true;
@@ -7235,7 +7274,10 @@ async function executeAtomicNodeResolvedUpdates<G extends GraphDef>(
       memoizeLeasedSchemaFence(ctx, entry);
       const returned = new Map(rows.map((row) => [row.id, row]));
       return entries.map((entry) =>
-        rowToNode(requireDefined(returned.get(entry.input.id))),
+        rowToNode(
+          requireDefined(returned.get(entry.input.id)),
+          storedPropsReaders(ctx.registry).node,
+        ),
       );
     }
     if (rows.length > 0) {
@@ -8339,7 +8381,7 @@ export async function executeNodeFindByConstraint<G extends GraphDef>(
   if (existingRow === undefined || existingRow.deleted_at !== undefined)
     return undefined;
 
-  return rowToNode(existingRow);
+  return rowToNode(existingRow, storedPropsReaders(ctx.registry).node);
 }
 
 // ============================================================
@@ -8450,7 +8492,10 @@ export async function executeNodeBulkFindByConstraint<G extends GraphDef>(
       continue;
     }
 
-    results[index] = rowToNode(existingRow);
+    results[index] = rowToNode(
+      existingRow,
+      storedPropsReaders(ctx.registry).node,
+    );
   }
 
   return results;
@@ -8782,6 +8827,7 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
     ctx.graphId,
     kind,
     matches.map((match) => match.id),
+    storedPropsReaders(ctx.registry).node,
   );
 
   const results: Node[][] = Array.from({ length: items.length }, () => []);
@@ -8827,6 +8873,7 @@ async function hydrateNodesById(
   graphId: string,
   kind: string,
   ids: readonly string[],
+  reader: StoredPropsReader,
 ): Promise<Map<string, Node>> {
   const rowsById = await getNodeRowsByIds(
     backend,
@@ -8838,7 +8885,7 @@ async function hydrateNodesById(
   const nodesById = new Map<string, Node>();
   for (const [id, row] of rowsById) {
     if (row.deleted_at !== undefined) continue;
-    nodesById.set(id, rowToNode(row));
+    nodesById.set(id, rowToNode(row, reader));
   }
   return nodesById;
 }
@@ -9024,7 +9071,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     }
     for (const match of held) {
       results[match.index] = {
-        node: rowToNode(match.existing),
+        node: rowToNode(match.existing, storedPropsReaders(ctx.registry).node),
         action: "found",
       };
     }

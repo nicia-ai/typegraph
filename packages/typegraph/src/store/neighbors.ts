@@ -24,6 +24,10 @@ import { sql, type SqlFragment } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import type { KindRegistry } from "../registry";
 import { rowToEdge, rowToNode } from "./row-mappers";
+import {
+  type StoredPropsReader,
+  storedPropsReaders,
+} from "./stored-date-revival";
 import type {
   Edge,
   GraphEdgeForKinds,
@@ -139,9 +143,10 @@ export function createNeighborRead<G extends GraphDef, K extends EdgeKinds<G>>(
   function mapRows(
     rows: readonly NeighborRow[],
   ): readonly NeighborResult<G, K>[] {
+    const readers = storedPropsReaders(ctx.registry);
     return rows.map((row) => ({
-      edge: mapEdge(row) as GraphEdgeForKinds<G, K>,
-      node: mapNode(row) as Node<AllNodeTypes<G>>,
+      edge: mapEdge(row, readers.edge) as GraphEdgeForKinds<G, K>,
+      node: mapNode(row, readers.node) as Node<AllNodeTypes<G>>,
     }));
   }
   return {
@@ -495,57 +500,63 @@ function neighborOutputNames(): readonly string[] {
   ];
 }
 
-function mapEdge(row: NeighborRow): Edge {
-  return rowToEdge({
-    id: String(row["edge_id"]),
-    kind: String(row["edge_kind"]),
-    from_kind: String(row["edge_from_kind"]),
-    from_id: String(row["edge_from_id"]),
-    to_kind: String(row["edge_to_kind"]),
-    to_id: String(row["edge_to_id"]),
-    props: row["edge_props"] as RowProps,
-    valid_from: normalizeRowTimestamp(
-      row["edge_valid_from"],
-      "edge_valid_from",
-    ),
-    valid_to: normalizeRowTimestamp(row["edge_valid_to"], "edge_valid_to"),
-    created_at: normalizeRequiredRowTimestamp(
-      row["edge_created_at"],
-      "edge_created_at",
-    ),
-    updated_at: normalizeRequiredRowTimestamp(
-      row["edge_updated_at"],
-      "edge_updated_at",
-    ),
-    deleted_at: normalizeRowTimestamp(
-      row["edge_deleted_at"],
-      "edge_deleted_at",
-    ),
-  });
+function mapEdge(row: NeighborRow, reader: StoredPropsReader): Edge {
+  return rowToEdge(
+    {
+      id: String(row["edge_id"]),
+      kind: String(row["edge_kind"]),
+      from_kind: String(row["edge_from_kind"]),
+      from_id: String(row["edge_from_id"]),
+      to_kind: String(row["edge_to_kind"]),
+      to_id: String(row["edge_to_id"]),
+      props: row["edge_props"] as RowProps,
+      valid_from: normalizeRowTimestamp(
+        row["edge_valid_from"],
+        "edge_valid_from",
+      ),
+      valid_to: normalizeRowTimestamp(row["edge_valid_to"], "edge_valid_to"),
+      created_at: normalizeRequiredRowTimestamp(
+        row["edge_created_at"],
+        "edge_created_at",
+      ),
+      updated_at: normalizeRequiredRowTimestamp(
+        row["edge_updated_at"],
+        "edge_updated_at",
+      ),
+      deleted_at: normalizeRowTimestamp(
+        row["edge_deleted_at"],
+        "edge_deleted_at",
+      ),
+    },
+    reader,
+  );
 }
 
-function mapNode(row: NeighborRow): Node {
-  return rowToNode({
-    id: String(row["node_id"]),
-    kind: String(row["node_kind"]),
-    props: row["node_props"] as RowProps,
-    version: Number(row["node_version"]),
-    valid_from: normalizeRowTimestamp(
-      row["node_valid_from"],
-      "node_valid_from",
-    ),
-    valid_to: normalizeRowTimestamp(row["node_valid_to"], "node_valid_to"),
-    created_at: normalizeRequiredRowTimestamp(
-      row["node_created_at"],
-      "node_created_at",
-    ),
-    updated_at: normalizeRequiredRowTimestamp(
-      row["node_updated_at"],
-      "node_updated_at",
-    ),
-    deleted_at: normalizeRowTimestamp(
-      row["node_deleted_at"],
-      "node_deleted_at",
-    ),
-  });
+function mapNode(row: NeighborRow, reader: StoredPropsReader): Node {
+  return rowToNode(
+    {
+      id: String(row["node_id"]),
+      kind: String(row["node_kind"]),
+      props: row["node_props"] as RowProps,
+      version: Number(row["node_version"]),
+      valid_from: normalizeRowTimestamp(
+        row["node_valid_from"],
+        "node_valid_from",
+      ),
+      valid_to: normalizeRowTimestamp(row["node_valid_to"], "node_valid_to"),
+      created_at: normalizeRequiredRowTimestamp(
+        row["node_created_at"],
+        "node_created_at",
+      ),
+      updated_at: normalizeRequiredRowTimestamp(
+        row["node_updated_at"],
+        "node_updated_at",
+      ),
+      deleted_at: normalizeRowTimestamp(
+        row["node_deleted_at"],
+        "node_deleted_at",
+      ),
+    },
+    reader,
+  );
 }

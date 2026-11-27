@@ -1266,6 +1266,7 @@ type DatabaseExpression<out T = unknown, out Scope extends string = string> = Re
     arrayElementType?: ValueType;
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
+    readPlan?: StoredReadPlan;
     nullable: boolean;
     scopeIdentity: symbol;
     __value?: T;
@@ -5599,6 +5600,7 @@ type PreparedQueryConfig<R> = Readonly<{
     selectiveFields: readonly SelectiveField[] | undefined;
     selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
     schemaIntrospector: SchemaIntrospector;
+    registry: KindRegistry;
 }>;
 
 // @public (undocumented)
@@ -6268,6 +6270,7 @@ type RelationColumn = Readonly<{
     valueType: ValueType;
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
+    readPlan?: StoredReadPlan;
     nullable: boolean;
     identity?: Readonly<{
         component: "id" | "kind";
@@ -7044,6 +7047,20 @@ type StoreCore<G extends GraphDef> = Readonly<{
 type StoreDescription = Readonly<{
     schema: SchemaIntrospection;
     statistics: StorePopulationStatistics;
+}>;
+
+// @public
+type StoredReadPlan = Readonly<{
+    form: "date";
+}> | Readonly<{
+    form: "object";
+    keys: readonly (readonly [key: string, plan: StoredReadPlan])[];
+}> | Readonly<{
+    form: "array";
+    element: StoredReadPlan;
+}> | Readonly<{
+    form: "record";
+    value: StoredReadPlan;
 }>;
 
 // @public

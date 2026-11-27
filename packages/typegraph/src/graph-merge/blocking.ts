@@ -1,5 +1,6 @@
 import { readOwnProperty } from "../utils/object";
 import { requireDefined } from "../utils/presence";
+import { callbackNode } from "./callback-node";
 /**
  * Per-kind blocking (design §9 phase 2): bucket a kind's NEW nodes by a cheap
  * exact-equality key so candidate-gen (T6) only compares pairs that could
@@ -41,7 +42,12 @@ import { requireDefined } from "../utils/presence";
  * read synchronously by the caller and passed in); it performs no I/O.
  */
 import { compareStrings } from "./node-key";
-import type { Node, NodeType, UniqueIntrospection } from "./typegraph-internal";
+import type {
+  Node,
+  NodeType,
+  StoredPropsReader,
+  UniqueIntrospection,
+} from "./typegraph-internal";
 import { computeUniqueKey } from "./typegraph-internal";
 import type { ResolveConfig } from "./types";
 
@@ -151,10 +157,14 @@ function bucketKeysFor(
   node: Node<NodeType>,
   block: ResolveConfig["block"],
   constraints: readonly UniqueIntrospection[],
+  propsReader: StoredPropsReader,
 ): readonly string[] {
   const keys: string[] = [];
 
-  const blockKey = block?.(node);
+  // `block()` is user code reading the node, so it receives it as a read
+  // returns it; the unique signatures below key the stored form, as before.
+  const blockKey =
+    block === undefined ? undefined : block(callbackNode(node, propsReader));
   if (blockKey !== undefined) {
     keys.push(`${BLOCK_KEY_PREFIX}${KEY_PART_SEPARATOR}${blockKey}`);
   }
@@ -181,6 +191,8 @@ function bucketKeysFor(
  * @param uniqueConstraints The kind's `unique` constraints from
  *   `store.introspect().kinds[k].unique`. Pass an empty array when blocking
  *   should rely on `block()` alone.
+ * @param propsReader How a read decodes the kind's stored props: `block()`
+ *   receives each node decoded by it (`callbackNode`).
  * @returns A map from bucket key → that bucket's nodes. Iteration order of the
  *   returned map is the lexicographic order of bucket keys, and each bucket's
  *   node list is sorted by `node.id`, so the result is a pure, order-independent
@@ -190,7 +202,8 @@ function bucketKeysFor(
 export function blockNodes<K extends NodeType>(
   newNodes: readonly Node<K>[],
   resolveConfig: Pick<ResolveConfig, "block">,
-  uniqueConstraints: readonly UniqueIntrospection[] = [],
+  uniqueConstraints: readonly UniqueIntrospection[],
+  propsReader: StoredPropsReader,
 ): Map<string, Node<K>[]> {
   const buckets = new Map<string, Node<K>[]>();
 
@@ -199,6 +212,7 @@ export function blockNodes<K extends NodeType>(
       node,
       resolveConfig.block,
       uniqueConstraints,
+      propsReader,
     )) {
       const bucket = buckets.get(key);
       if (bucket === undefined) {

@@ -15,6 +15,7 @@ import {
   scorePair,
 } from "../../src/graph-merge/similarity";
 import type { SimilarityStrategy } from "../../src/graph-merge/types";
+import { passStoredProps } from "../../src/store/stored-date-revival";
 import {
   backendMatrix,
   createSqliteMergeBackend,
@@ -57,7 +58,7 @@ async function makeHarness(backend: GraphBackend): Promise<
       store.nodes.Patient.create(
         birthDate === undefined ? { name } : { name, birthDate },
       ),
-    ctx: { backend },
+    ctx: { backend, propsReader: passStoredProps },
   };
 }
 
@@ -220,6 +221,7 @@ describe.each(backendMatrix())("scorePair on $name", (entry) => {
 
     const ctx: SimilarityContext = {
       backend: fixture.backend,
+      propsReader: passStoredProps,
       embeddings: await fakeEmbeddings([
         "Anna Rivera",
         "Ana Rivera",
@@ -255,6 +257,7 @@ describe.each(backendMatrix())("scorePair on $name", (entry) => {
 
     const ctx: SimilarityContext = {
       backend: fixture.backend,
+      propsReader: passStoredProps,
       embeddings: await fakeEmbeddings([
         "Anna Rivera",
         "Ana Rivera",

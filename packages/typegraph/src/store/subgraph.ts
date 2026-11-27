@@ -96,6 +96,11 @@ import {
   rowToNode,
   rowToNodeMeta,
 } from "./row-mappers";
+import {
+  type StoredPropsReader,
+  type StoredPropsReaders,
+  storedPropsReaders,
+} from "./stored-date-revival";
 import type {
   Edge,
   EdgeMeta,
@@ -1060,6 +1065,7 @@ export async function executeSubgraph<
     }
   }
 
+  const readers = storedPropsReaders(params.registry);
   const [nodeRows, edgeRows] = await Promise.all([
     fetchSubgraphNodes(readContext, membership, nodeProjectionPlan),
     fetchSubgraphEdges(readContext, membership, edgeProjectionPlan),
@@ -1067,8 +1073,12 @@ export async function executeSubgraph<
 
   return assembleSubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>(
     ctx.root,
-    nodeRows.map((row) => mapSubgraphNodeRow(row, nodeProjectionPlan)),
-    edgeRows.map((row) => mapSubgraphEdgeRow(row, edgeProjectionPlan)),
+    nodeRows.map((row) =>
+      mapSubgraphNodeRow(row, nodeProjectionPlan, readers.node),
+    ),
+    edgeRows.map((row) =>
+      mapSubgraphEdgeRow(row, edgeProjectionPlan, readers.edge),
+    ),
   );
 }
 
@@ -1224,7 +1234,13 @@ export function createSubgraphRead<
       NK,
       SubgraphResultEdgeKinds<G, EK, C>,
       P
-    >(ctx.root, rows as readonly OneStatementSubgraphRow[], nodePlan, edgePlan);
+    >(
+      ctx.root,
+      rows as readonly OneStatementSubgraphRow[],
+      nodePlan,
+      edgePlan,
+      storedPropsReaders(params.registry),
+    );
   }
   return {
     execute: async () =>
@@ -1944,15 +1960,16 @@ function mapOneStatementSubgraphRows<
   rows: readonly OneStatementSubgraphRow[],
   nodePlan: ProjectionPlan,
   edgePlan: ProjectionPlan,
+  readers: StoredPropsReaders,
 ): SubgraphResult<G, NK, EK, P> {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
   for (const row of rows) {
     if (row.typegraph_entity === "node") {
-      nodes.push(mapSubgraphNodeRow(row, nodePlan));
+      nodes.push(mapSubgraphNodeRow(row, nodePlan, readers.node));
       continue;
     }
-    edges.push(mapSubgraphEdgeRow(row, edgePlan));
+    edges.push(mapSubgraphEdgeRow(row, edgePlan, readers.edge));
   }
   return assembleSubgraphResult<G, NK, EK, P>(root, nodes, edges);
 }
@@ -2431,14 +2448,18 @@ function normalizeSubgraphRowTimestamps<
 function mapSubgraphNodeRow(
   row: SubgraphNodeFetchRow,
   projectionPlan: ProjectionPlan,
+  reader: StoredPropsReader,
 ): Node {
   const kindPlan = projectionPlan.projectedKinds.get(row.kind);
   if (kindPlan === undefined) {
     const normalizedRow = normalizeSubgraphRowTimestamps(row);
-    return rowToNode({
-      ...normalizedRow,
-      props: normalizeProps(normalizedRow.props),
-    });
+    return rowToNode(
+      {
+        ...normalizedRow,
+        props: normalizeProps(normalizedRow.props),
+      },
+      reader,
+    );
   }
 
   const projectedNode: Record<string, unknown> = {
@@ -2457,14 +2478,18 @@ function mapSubgraphNodeRow(
 function mapSubgraphEdgeRow(
   row: SubgraphEdgeFetchRow,
   projectionPlan: ProjectionPlan,
+  reader: StoredPropsReader,
 ): Edge {
   const kindPlan = projectionPlan.projectedKinds.get(row.kind);
   if (kindPlan === undefined) {
     const normalizedRow = normalizeSubgraphRowTimestamps(row);
-    return rowToEdge({
-      ...normalizedRow,
-      props: normalizeProps(normalizedRow.props),
-    });
+    return rowToEdge(
+      {
+        ...normalizedRow,
+        props: normalizeProps(normalizedRow.props),
+      },
+      reader,
+    );
   }
 
   const projectedEdge: Record<string, unknown> = {

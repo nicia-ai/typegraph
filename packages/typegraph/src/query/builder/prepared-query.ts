@@ -26,6 +26,11 @@
  */
 import { type GraphBackend } from "../../backend/types";
 import { ConfigurationError, UnsupportedPredicateError } from "../../errors";
+import { type KindRegistry } from "../../registry/kind-registry";
+import {
+  type StoredPropsReaders,
+  storedPropsReaders,
+} from "../../store/stored-date-revival";
 import { readOwnProperty } from "../../utils/object";
 import {
   type BetweenPredicate,
@@ -520,6 +525,8 @@ export type PreparedQueryConfig<R> = Readonly<{
   selectiveFields: readonly SelectiveField[] | undefined;
   selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
   schemaIntrospector: SchemaIntrospector;
+  /** The kinds whose stored props a row decodes (`storedPropsReaders`). */
+  registry: KindRegistry;
 }>;
 
 /**
@@ -560,6 +567,7 @@ export class PreparedQuery<R> {
   readonly #selectiveFields: readonly SelectiveField[] | undefined;
   readonly #selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
   readonly #schemaIntrospector: SchemaIntrospector;
+  readonly #propsReaders: StoredPropsReaders;
   readonly #parameterMetadata: ParameterMetadata;
   #selectiveExecutionDisabled = false;
   /**
@@ -586,6 +594,7 @@ export class PreparedQuery<R> {
     this.#selectiveFields = config.selectiveFields;
     this.#selectFn = config.selectFn;
     this.#schemaIntrospector = config.schemaIntrospector;
+    this.#propsReaders = storedPropsReaders(config.registry);
     this.#parameterMetadata = collectParameterMetadata(this.#ast);
     assertDistinctParameterRoles(this.#parameterMetadata);
   }
@@ -676,6 +685,7 @@ export class PreparedQuery<R> {
       rows,
       this.#state.startAlias,
       this.#state.traversals,
+      this.#propsReaders,
       this.#selectFn,
     );
   }

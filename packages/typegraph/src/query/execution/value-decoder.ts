@@ -7,6 +7,10 @@
  * values based on schema type information.
  */
 
+import {
+  decodeStoredValue,
+  storedReadPlan,
+} from "../../store/stored-date-revival";
 import { type ValueType } from "../ast";
 import { type FieldTypeInfo } from "../schema-introspector";
 
@@ -25,7 +29,13 @@ export function decodeSelectedValue(
     return normalized;
   }
 
-  return decodeByValueType(normalized, typeInfo.valueType);
+  // Every position the field's typing says reads as a `Date` — the field
+  // itself, or one nested in an object, array or record — is decoded by the
+  // one read owner, exactly as a whole row's props are.
+  return decodeStoredValue(
+    storedReadPlan(typeInfo),
+    decodeByValueType(normalized, typeInfo.valueType),
+  );
 }
 
 function decodeByValueType(value: unknown, valueType: ValueType): unknown {

@@ -318,6 +318,8 @@ import {
   runRetriedUnit,
   storeBackend,
   storeCaptureEnabled,
+  storedFormOfReadProps,
+  storedPropsReaders,
   storeRuntime,
   transactionAssertWritable,
   transactionDeleteNodeWithPolicy,
@@ -799,7 +801,12 @@ async function generateAllCandidates<G extends GraphDef>(
           introspectionKinds,
           kind,
         );
-        const blocks = blockNodes(nodes, resolveConfig, uniqueConstraints);
+        const blocks = blockNodes(
+          nodes,
+          resolveConfig,
+          uniqueConstraints,
+          ctx.propsReader,
+        );
         const keylessConfig = keylessConfigFor(resolveConfig);
         const scope: SourceScope = {
           kind,
@@ -4631,6 +4638,7 @@ async function resolveMerge<G extends GraphDef, Output>(
         );
     const ctx: SimilarityContext = {
       backend: storeBackend(store),
+      propsReader: storedPropsReaders(store.registry).node,
       ...(embeddings === undefined ? {} : { embeddings }),
     };
     const candidates = await generateAllCandidates(
@@ -6835,7 +6843,9 @@ export function writeWouldChangeRow(
 
 /**
  * Public node objects spread props at top-level. Strip TypeGraph structural keys so
- * write comparisons operate on the persisted props bag only.
+ * write comparisons operate on the persisted props bag only — in its persisted
+ * form: a read decodes a date property to a `Date`, which is written back as the
+ * stored text it was read from (`storedFormOfReadProps`).
  */
 function nodeProps(node: Node): Record<string, unknown> {
   // Data-keyed: schema property names spread onto the public node.
@@ -6844,12 +6854,13 @@ function nodeProps(node: Node): Record<string, unknown> {
     if (key === "id" || key === "kind" || key === "meta") continue;
     props[key] = value;
   }
-  return props;
+  return storedFormOfReadProps(props);
 }
 
 /**
  * Public edge objects spread props at top-level. Strip TypeGraph structural keys so
- * write comparisons operate on the persisted props bag only.
+ * write comparisons operate on the persisted props bag only, in its persisted form
+ * (see {@link nodeProps}).
  */
 function edgeProps(edge: Edge): Record<string, unknown> {
   // Data-keyed: schema property names spread onto the public edge.
@@ -6868,7 +6879,7 @@ function edgeProps(edge: Edge): Record<string, unknown> {
     }
     props[key] = value;
   }
-  return props;
+  return storedFormOfReadProps(props);
 }
 
 const INCLUDE_TOMBSTONES = { temporalMode: "includeTombstones" as const };

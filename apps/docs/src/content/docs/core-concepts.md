@@ -111,9 +111,34 @@ parse.
 #### Date properties
 
 Properties are stored as JSON, so a `z.date()` property's `Date` is stored as
-its canonical ISO-8601 text (`2024-01-01T00:00:00.000Z`), and a read returns
-that text, not a `Date`, even though the property is typed `Date`. Convert it
-with `new Date(value)` where you need a `Date`.
+its canonical ISO-8601 text (`2024-01-01T00:00:00.000Z`). Every read turns
+that text back into a `Date` wherever the property's schema output is a
+`Date`: a `z.date()`, a `z.coerce.date()`, or a pipe that ends in one
+(`z.string().pipe(z.coerce.date())`), inside `.optional()`, `.nullable()`,
+`.default()` and similar wrappers, a nested `z.object()`, a `z.array()` or a
+`z.record()`. That covers collection reads and the nodes and edges a write
+returns, query rows and selected fields, `.project()` and aggregates,
+`first()`, `paginate()` and `stream()`, traversals, `subgraph()`,
+`neighbors()`, search hits, `asOf()` and `asOfRecorded()` views, reads inside
+a transaction, and the nodes a [graph merge](/graph-merge) hands to `block()`
+and a `custom` similarity `score()`.
+
+The stored form does not change. `JSON.stringify` of a read, an export
+document, a pagination cursor and a graph-merge plan hold the same text as
+before. A read runs no part of the schema: it applies no parse, transform or
+refinement. So these still read as stored:
+
+- A `z.string()` or `z.iso.datetime()`, whose output is a string.
+- A union with a date member (`z.union([z.date(), z.string()])`), a tuple, and
+  a `.transform()`, even one that returns a `Date`. Declare
+  `z.string().pipe(z.coerce.date())` rather than
+  `z.string().transform((text) => new Date(text))` when you want a `Date`.
+- Stored text that is not the canonical form the store writes (years 0001 to
+  9999, UTC, milliseconds), for example text an older schema or raw SQL
+  wrote. A read returns it exactly as stored and never an `Invalid Date`, and
+  `validateStore()` reports it. On PostgreSQL, a selected field, `.project()`
+  scalar or aggregate over a date is extracted with a `timestamptz` cast, so
+  there the engine's cast decides what such text becomes.
 
 A write that parses stored properties again first turns that stored text back
 into a `Date`, so an update that does not touch a date property leaves it as

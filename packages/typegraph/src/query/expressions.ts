@@ -1,5 +1,6 @@
 import { UnsupportedPredicateError } from "../errors";
 import { dateTimeValue } from "../utils/date";
+import type { StoredReadPlan } from "../store/stored-date-revival";
 import {
   assertPortableCountDistinctValueType,
   assertPortableScalarValueType,
@@ -222,6 +223,13 @@ export type DatabaseExpression<
   elementValueType?: ValueType;
   /** Scalar codecs for fields of each collected record. */
   elementFields?: Readonly<Record<string, ValueType>>;
+  /**
+   * @internal The date positions under a structured (array or object) property
+   * this expression reads, from the property's schema typing: its result decodes
+   * them as every other read does (`decodeStoredValue`). A scalar date decodes
+   * by `valueType` alone.
+   */
+  readPlan?: StoredReadPlan;
   nullable: boolean;
   scopeIdentity: symbol;
   /** @internal Carries the public result type without runtime data. */
@@ -263,6 +271,7 @@ function createExpression<T, Scope extends string>(
   elementValueType?: ValueType,
   elementFields?: Readonly<Record<string, ValueType>>,
   arrayElementType?: ValueType,
+  readPlan?: StoredReadPlan,
 ): DatabaseExpression<T, Scope> {
   return {
     __type: "database_expression",
@@ -273,7 +282,25 @@ function createExpression<T, Scope extends string>(
     ...(arrayElementType === undefined ? {} : { arrayElementType }),
     ...(elementValueType === undefined ? {} : { elementValueType }),
     ...(elementFields === undefined ? {} : { elementFields }),
+    ...(readPlan === undefined ? {} : { readPlan }),
   };
+}
+
+/**
+ * The read plan a composed expression keeps: its operands' shared one, only
+ * when every operand that yields its result reads a structured property with
+ * date positions, so a branch reading anything else never has its text decoded.
+ */
+function sharedReadPlan(
+  operands: readonly DatabaseExpression[],
+): StoredReadPlan | undefined {
+  const [first] = operands;
+  return (
+      first?.readPlan !== undefined &&
+        operands.every((operand) => operand.readPlan !== undefined)
+    ) ?
+      first.readPlan
+    : undefined;
 }
 
 function assertExpression(value: unknown): asserts value is DatabaseExpression {
@@ -431,21 +458,25 @@ export function createFieldExpression<T, Scope extends string>(
   field: FieldRef<T>,
   scopeIdentity: symbol,
   nullable: false,
+  readPlan?: StoredReadPlan,
 ): DatabaseExpression<Exclude<T, undefined>, Scope>;
 export function createFieldExpression<T, Scope extends string>(
   field: FieldRef<T>,
   scopeIdentity: symbol,
   nullable: true,
+  readPlan?: StoredReadPlan,
 ): DatabaseExpression<Exclude<T, undefined> | undefined, Scope>;
 export function createFieldExpression<T, Scope extends string>(
   field: FieldRef<T>,
   scopeIdentity: symbol,
   nullable: boolean,
+  readPlan?: StoredReadPlan,
 ): DatabaseExpression<T | undefined, Scope>;
 export function createFieldExpression<T, Scope extends string>(
   field: FieldRef<T>,
   scopeIdentity: symbol,
   nullable: boolean,
+  readPlan?: StoredReadPlan,
 ): DatabaseExpression<T | undefined, Scope> {
   return createExpression(
     { field, kind: "field" },
@@ -455,6 +486,7 @@ export function createFieldExpression<T, Scope extends string>(
     undefined,
     undefined,
     field.elementType,
+    readPlan,
   );
 }
 
@@ -512,6 +544,7 @@ export function createOuterReferenceExpression<T, Scope extends string>(
     expression.elementValueType,
     expression.elementFields,
     expression.arrayElementType,
+    expression.readPlan,
   );
 }
 
@@ -963,6 +996,7 @@ function coalesce<T, Scope extends string>(
     first.elementValueType,
     first.elementFields,
     first.arrayElementType,
+    sharedReadPlan(operands),
   );
 }
 
@@ -991,6 +1025,7 @@ function when<
     then.elementValueType,
     then.elementFields,
     then.arrayElementType,
+    sharedReadPlan([then, otherwise]),
   );
 }
 

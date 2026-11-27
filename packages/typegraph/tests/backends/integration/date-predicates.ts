@@ -1040,7 +1040,7 @@ export function registerDatePredicateIntegrationTests(
 
       // Nothing stored holds a date outside the range: every stamp written
       // (the nodes of the edge cases) holds only the storable instant, read
-      // back as its stored text.
+      // back as its `Date`.
       const stored = await storedStamps(store);
       for (const node of stored.nodes) {
         expect({
@@ -1048,9 +1048,9 @@ export function registerDatePredicateIntegrationTests(
           history: node.history,
           nested: node.nested,
         }).toEqual({
-          at: MIDNIGHT,
-          history: [MIDNIGHT],
-          nested: { at: MIDNIGHT },
+          at: new Date(MIDNIGHT),
+          history: [new Date(MIDNIGHT)],
+          nested: { at: new Date(MIDNIGHT) },
         });
       }
       expect(stored.edges.map((edge) => edge.id)).toEqual([

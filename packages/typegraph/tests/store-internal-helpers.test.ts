@@ -47,6 +47,7 @@ import { createRecordedBackend } from "../src/store/recorded-capture";
 import { recordedBindParamBudget } from "../src/store/recorded-capture/relations";
 import { createRecordedReadService } from "../src/store/recorded-read-service";
 import { getRowsByIds } from "../src/store/row-fetch";
+import { passStoredProps } from "../src/store/stored-date-revival";
 import { requireDefined } from "../src/utils/presence";
 
 type TestRow = Readonly<{ id: string; value: number }>;
@@ -445,6 +446,7 @@ describe("recorded read dispatch", () => {
       recordedReadBinding: createRecordedReadBinding(createSqlSchema()),
       mapRecordedNodeRow: (row) => row as unknown as NodeRow,
       mapRecordedEdgeRow: (row) => row as unknown as EdgeRow,
+      propsReaders: { node: passStoredProps, edge: passStoredProps },
     });
     const recordedBackend = service.backendForCoordinate(
       {
@@ -625,6 +627,7 @@ describe("backend overlay wrappers", () => {
       recordedReadBinding: createRecordedReadBinding(createSqlSchema()),
       mapRecordedNodeRow: (row) => row as unknown as NodeRow,
       mapRecordedEdgeRow: (row) => row as unknown as EdgeRow,
+      propsReaders: { node: passStoredProps, edge: passStoredProps },
     });
     const recordedBackend = service.backendForCoordinate(
       {

@@ -13,6 +13,7 @@ import { isErr } from "../../src/graph-merge/result";
 import type { SimilarityContext } from "../../src/graph-merge/similarity";
 import { scorePair } from "../../src/graph-merge/similarity";
 import type { SimilarityStrategy } from "../../src/graph-merge/types";
+import { passStoredProps } from "../../src/store/stored-date-revival";
 import {
   createPgliteMergeBackend,
   createSqliteMergeBackend,
@@ -123,7 +124,10 @@ describe("search-parity probe (Open-Q#1)", () => {
     const b = { kind: "Document", id: "b", title: "y" } as unknown as Node;
     // No `embeddings` on the context == MergeOptions.embedder was not configured.
     // The error fires regardless of the backend's own vector capability.
-    const ctx: SimilarityContext = { backend: fixture.backend };
+    const ctx: SimilarityContext = {
+      backend: fixture.backend,
+      propsReader: passStoredProps,
+    };
 
     for (const kind of ["vector", "hybrid"] as const) {
       const strategy: SimilarityStrategy =

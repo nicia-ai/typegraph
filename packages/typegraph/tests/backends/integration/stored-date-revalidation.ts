@@ -90,14 +90,14 @@ const datedGraph = defineGraph({
   },
 });
 
-/** The stored text of every date property `fullDoc` writes. */
+/** Every date property `fullDoc` writes, as a read returns it: the same `Date`. */
 const STORED_DOC_DATES = {
-  publishedAt: PUBLISHED.toISOString(),
-  reviewedAt: REVIEWED.toISOString(),
-  archivedAt: REVISED.toISOString(),
-  checkedAt: REVIEWED.toISOString(),
-  review: { at: REVIEWED.toISOString(), by: "editor" },
-  revisions: [PUBLISHED.toISOString(), REVISED.toISOString()],
+  publishedAt: PUBLISHED,
+  reviewedAt: REVIEWED,
+  archivedAt: REVISED,
+  checkedAt: REVIEWED,
+  review: { at: REVIEWED, by: "editor" },
+  revisions: [PUBLISHED, REVISED],
 } as const;
 
 function fullDocument(title: string) {
@@ -112,7 +112,7 @@ function fullDocument(title: string) {
   };
 }
 
-/** What a read returns for the date properties: the stored ISO text. */
+/** What a read returns for the date properties. */
 function documentDates(node: Readonly<Record<string, unknown>> | undefined) {
   const read = requireDefined(node);
   return {
@@ -126,8 +126,8 @@ function documentDates(node: Readonly<Record<string, unknown>> | undefined) {
 }
 
 const STORED_EDGE_DATES = {
-  at: PUBLISHED.toISOString(),
-  seenAt: REVIEWED.toISOString(),
+  at: PUBLISHED,
+  seenAt: REVIEWED,
 } as const;
 
 function edgeDates(edge: Readonly<Record<string, unknown>> | undefined) {
@@ -173,7 +173,7 @@ export function registerStoredDateRevalidationIntegrationTests(
       const updated = await store.nodes.CaughtDoc.update(document.id, {
         title: "a2",
       });
-      expect(updated.checkedAt).toBe(REVIEWED.toISOString());
+      expect(updated.checkedAt).toEqual(REVIEWED);
     });
 
     it("node update still refuses a date its schema rewrites on every parse, rather than rewriting it", async () => {
@@ -188,7 +188,7 @@ export function registerStoredDateRevalidationIntegrationTests(
       ).rejects.toThrow(/expected date, received string/u);
       const read = await store.nodes.StampedDoc.getById(document.id);
       expect(read?.title).toBe("a");
-      expect(read?.stampedAt).toBe(stored);
+      expect(read?.stampedAt).toEqual(stored);
     });
 
     it("node update inside a transaction", async () => {

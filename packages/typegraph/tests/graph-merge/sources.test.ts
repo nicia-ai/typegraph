@@ -54,6 +54,7 @@ import type {
   ResolveConfig,
   SimilarityStrategy,
 } from "../../src/graph-merge/types";
+import { passStoredProps } from "../../src/store/stored-date-revival";
 import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend } from "./test-utils";
 
@@ -142,7 +143,7 @@ describe("candidate sources + scoring stage (step 0)", () => {
     const [store] = await createStoreWithSchema(patientGraph, fixture.backend);
     return {
       create: (props) => store.nodes.Patient.create(props),
-      ctx: { backend: fixture.backend },
+      ctx: { backend: fixture.backend, propsReader: passStoredProps },
     };
   }
 
@@ -152,7 +153,12 @@ describe("candidate sources + scoring stage (step 0)", () => {
     const ana = await create({ name: "Ana Rivera", birthDate: "1974-03-09" });
     const other = await create({ name: "Bob Lee", birthDate: "1990-01-01" });
 
-    const blocks = blockNodes([anna, ana, other], blockByBirthDate);
+    const blocks = blockNodes(
+      [anna, ana, other],
+      blockByBirthDate,
+      [],
+      passStoredProps,
+    );
     const produced = await exactKeySource.generate({ kind: "Patient", blocks });
 
     const proposed = produced.pairs
@@ -193,6 +199,7 @@ describe("candidate sources + scoring stage (step 0)", () => {
       [annaA, robertB, distinct],
       blockByBirthDate,
       MRN_CONSTRAINT,
+      passStoredProps,
     );
     const produced = await uniqueSource.generate({ kind: "Patient", blocks });
 
@@ -228,7 +235,12 @@ describe("candidate sources + scoring stage (step 0)", () => {
     const x = await create({ name: "Zoe Adams", birthDate: "2000-01-01" });
     const y = await create({ name: "Quinn Webb", birthDate: "2000-01-01" });
 
-    const blocks = blockNodes([anna, ana, x, y], blockByBirthDate);
+    const blocks = blockNodes(
+      [anna, ana, x, y],
+      blockByBirthDate,
+      [],
+      passStoredProps,
+    );
     const pairs = pairsFromBlocks(blocks);
     const xKey = mergeKeyOf(x);
     const yKey = mergeKeyOf(y);
@@ -273,7 +285,12 @@ describe("candidate sources + scoring stage (step 0)", () => {
     const anna = await create({ name: "Anna Rivera", birthDate: "1974-03-09" });
     const ana = await create({ name: "Ana Rivera", birthDate: "1974-03-09" });
 
-    const blocks = blockNodes([anna, ana], blockByBirthDate);
+    const blocks = blockNodes(
+      [anna, ana],
+      blockByBirthDate,
+      [],
+      passStoredProps,
+    );
     const pairs = pairsFromBlocks(blocks);
     expect(pairs).toHaveLength(1);
     const forced: readonly CandidateEdge[] = [
@@ -316,7 +333,12 @@ describe("candidate sources + scoring stage (step 0)", () => {
         collation: "binary",
       },
     ];
-    const blocks = blockNodes([left, right], blockByBirthDate, constraints);
+    const blocks = blockNodes(
+      [left, right],
+      blockByBirthDate,
+      constraints,
+      passStoredProps,
+    );
     const scored = scoreCandidates(
       {
         pairs: pairsFromBlocks(blocks),
@@ -369,7 +391,12 @@ describe("candidate sources + scoring stage (step 0)", () => {
       threshold: 0,
     };
 
-    const blocks = blockNodes([alice, bob], textlessAtZero);
+    const blocks = blockNodes(
+      [alice, bob],
+      textlessAtZero,
+      [],
+      passStoredProps,
+    );
     const pairs = pairsFromBlocks(blocks);
     expect(pairs).toHaveLength(1); // both unblocked → compared all-vs-all
     expect(pairs[0]?.sources).toEqual([
@@ -408,7 +435,12 @@ describe("candidate sources + scoring stage (step 0)", () => {
     });
 
     const nodes = [annaA, robertB, ana, distinct];
-    const blocks = blockNodes(nodes, blockByBirthDate, MRN_CONSTRAINT);
+    const blocks = blockNodes(
+      nodes,
+      blockByBirthDate,
+      MRN_CONSTRAINT,
+      passStoredProps,
+    );
 
     // Path A: drive the sources, then score.
     const fromSources = scoreCandidates(

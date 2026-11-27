@@ -218,7 +218,11 @@ import {
   unsupportedResolvedMutationSet,
 } from "../resolved-mutation-set";
 import { type EdgeRow, rowToEdge } from "../row-mappers";
-import { reviveStoredDateProps } from "../stored-date-revival";
+import {
+  reviveStoredDateProps,
+  type StoredPropsReader,
+  storedPropsReaders,
+} from "../stored-date-revival";
 import {
   type CompositionNodeRef,
   type CreateEdgeInput,
@@ -1016,8 +1020,11 @@ function createdEdgeResult(edge: Edge | undefined): EdgeCreateInternalResult {
   return { outcome: "created", edge };
 }
 
-function foundEdgeResult(row: BackendEdgeRow): EdgeCreateInternalResult {
-  return { outcome: "found", edge: rowToEdge(row), row };
+function foundEdgeResult(
+  row: BackendEdgeRow,
+  reader: StoredPropsReader,
+): EdgeCreateInternalResult {
+  return { outcome: "found", edge: rowToEdge(row, reader), row };
 }
 
 function edgeCreateDidWrite(result: EdgeCreateInternalResult): boolean {
@@ -1316,7 +1323,10 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
           convergeOn,
         );
         if (matchedRow !== undefined) {
-          return foundEdgeResult(matchedRow);
+          return foundEdgeResult(
+            matchedRow,
+            storedPropsReaders(ctx.registry).edge,
+          );
         }
         prepared = await validateAndPrepareEdgeCreate(ctx, input, id, target, {
           endpoints: canFuseEndpointCheck ? "inWrite" : "read",
@@ -1374,7 +1384,9 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
               work.claims,
             );
           }
-          return createdEdgeResult(rowToEdge(result.row));
+          return createdEdgeResult(
+            rowToEdge(result.row, storedPropsReaders(ctx.registry).edge),
+          );
         }
         if (result.outcome === "found") {
           if (command.match.kind === "dynamic") {
@@ -1401,7 +1413,10 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
               ],
             });
           }
-          return foundEdgeResult(result.row);
+          return foundEdgeResult(
+            result.row,
+            storedPropsReaders(ctx.registry).edge,
+          );
         }
         if (result.outcome === "unsupported") {
           if (command.match.kind === "durable") {
@@ -1427,7 +1442,10 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
             requireDefined(convergeOn),
           );
           if (matchedRow !== undefined) {
-            return foundEdgeResult(matchedRow);
+            return foundEdgeResult(
+              matchedRow,
+              storedPropsReaders(ctx.registry).edge,
+            );
           }
         }
         if (
@@ -1478,7 +1496,10 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
           convergeOn,
         );
         if (matchedRow !== undefined) {
-          return foundEdgeResult(matchedRow);
+          return foundEdgeResult(
+            matchedRow,
+            storedPropsReaders(ctx.registry).edge,
+          );
         }
       }
 
@@ -1536,7 +1557,9 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
         if (fuseSchemaFenceInFirstWrite) {
           memoizeLeasedSchemaFence(ctx, frame);
         }
-        return createdEdgeResult(rowToEdge(fusedResult.row));
+        return createdEdgeResult(
+          rowToEdge(fusedResult.row, storedPropsReaders(ctx.registry).edge),
+        );
       }
 
       // A fused refusal has no row, so the ordered fallback owns the full
@@ -1564,7 +1587,11 @@ async function executeEdgeCreateInternal<G extends GraphDef>(
       return;
     });
 
-    return createdEdgeResult(row === undefined ? undefined : rowToEdge(row));
+    return createdEdgeResult(
+      row === undefined ? undefined : (
+        rowToEdge(row, storedPropsReaders(ctx.registry).edge)
+      ),
+    );
   };
 
   if (autocommitSingleStatement) {
@@ -2331,7 +2358,9 @@ async function executeDecidedEdgeCreateBatch<G extends GraphDef>(
       "rows",
     );
     return {
-      edges: rows.map((row) => rowToEdge(row)),
+      edges: rows.map((row) =>
+        rowToEdge(row, storedPropsReaders(ctx.registry).edge),
+      ),
       compositionWindows: undefined,
     };
   }
@@ -2431,7 +2460,12 @@ async function executeDecidedEdgeCreateBatch<G extends GraphDef>(
           requireDefined(session.createEdgesDurable)(batchInsertWork),
         );
         assertDurableBatchRows(batchInsertWork, rows);
-        return { edges: rows.map((row) => rowToEdge(row)), compositionWindows };
+        return {
+          edges: rows.map((row) =>
+            rowToEdge(row, storedPropsReaders(ctx.registry).edge),
+          ),
+          compositionWindows,
+        };
       }
 
       const compositionWindows = await assertBatchEdgeRelations(
@@ -2445,7 +2479,12 @@ async function executeDecidedEdgeCreateBatch<G extends GraphDef>(
         session.createEdges(batchInsertWork),
       );
 
-      return { edges: rows.map((row) => rowToEdge(row)), compositionWindows };
+      return {
+        edges: rows.map((row) =>
+          rowToEdge(row, storedPropsReaders(ctx.registry).edge),
+        ),
+        compositionWindows,
+      };
     },
   );
 }
@@ -3181,7 +3220,7 @@ async function writePreparedEdgeUpdate<G extends GraphDef>(
     () => session.reviseEdge(work, fences),
   );
 
-  return rowToEdge(row);
+  return rowToEdge(row, storedPropsReaders(ctx.registry).edge);
 }
 
 /**
@@ -3740,7 +3779,10 @@ async function executeEdgeUpsertUpdateWithOutcome<G extends GraphDef>(
             assertEdgeMatchKey(existing, options.matchOn, options.matchProps);
           }
           if (edgeUpsertCoalesces(ctx, existing, input)) {
-            return { edge: rowToEdge(existing), wrote: false };
+            return {
+              edge: rowToEdge(existing, storedPropsReaders(ctx.registry).edge),
+              wrote: false,
+            };
           }
         }
       }
@@ -3933,10 +3975,16 @@ export async function executeEdgeResolvedMutationSet<G extends GraphDef>(
   const updatedById = new Map(result.updated.map((row) => [row.id, row]));
   return appliedResolvedMutationSet({
     created: creates.map((input) =>
-      rowToEdge(requireDefined(createdById.get(requireDefined(input.id)))),
+      rowToEdge(
+        requireDefined(createdById.get(requireDefined(input.id))),
+        storedPropsReaders(ctx.registry).edge,
+      ),
     ),
     updated: updates.map((entry) =>
-      rowToEdge(requireDefined(updatedById.get(entry.input.id))),
+      rowToEdge(
+        requireDefined(updatedById.get(entry.input.id)),
+        storedPropsReaders(ctx.registry).edge,
+      ),
     ),
   });
 }
@@ -4080,7 +4128,10 @@ async function executeAtomicEdgeResolvedUpdates<G extends GraphDef>(
       memoizeLeasedSchemaFence(ctx, entry);
       const returned = new Map(rows.map((row) => [row.id, row]));
       return entries.map((entry) =>
-        rowToEdge(requireDefined(returned.get(entry.input.id))),
+        rowToEdge(
+          requireDefined(returned.get(entry.input.id)),
+          storedPropsReaders(ctx.registry).edge,
+        ),
       );
     }
     if (rows.length > 0) {
@@ -4685,10 +4736,16 @@ export async function executeEdgeFindByEndpoints<G extends GraphDef>(
 
   if (candidateRows.length === 0) return undefined;
 
-  if (matchOn.length === 0) return rowToEdge(requireDefined(candidateRows[0]));
+  if (matchOn.length === 0)
+    return rowToEdge(
+      requireDefined(candidateRows[0]),
+      storedPropsReaders(ctx.registry).edge,
+    );
 
   const { liveRow } = findMatchingEdge(candidateRows, matchOn, matchProps);
-  return liveRow === undefined ? undefined : rowToEdge(liveRow);
+  return liveRow === undefined ? undefined : (
+      rowToEdge(liveRow, storedPropsReaders(ctx.registry).edge)
+    );
 }
 
 function defersEndpointWindowOrdering(
@@ -4833,7 +4890,13 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       );
       if (currentLiveRow !== undefined) {
         assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
-        return { edge: rowToEdge(currentLiveRow), action: "found" };
+        return {
+          edge: rowToEdge(
+            currentLiveRow,
+            storedPropsReaders(ctx.registry).edge,
+          ),
+          action: "found",
+        };
       }
       initialCandidateRead = {
         rows: currentRows,
@@ -4869,7 +4932,10 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
     if (!isDeleted) {
       if (ifExists === "return") {
         assertEndpointClearCanApply(ifExists, options?.clearValidTo, kind);
-        return { edge: rowToEdge(matchedRow), action: "found" };
+        return {
+          edge: rowToEdge(matchedRow, storedPropsReaders(ctx.registry).edge),
+          action: "found",
+        };
       }
       const outcome = await executeEdgeUpsertUpdateWithOutcome(
         ctx,
@@ -5340,7 +5406,10 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       for (const [nativeIndex, nativeResult] of nativeResults.entries()) {
         const nativeEntry = requireDefined(nativeEntries[nativeIndex]);
         const result = {
-          edge: rowToEdge(nativeResult.row),
+          edge: rowToEdge(
+            nativeResult.row,
+            storedPropsReaders(ctx.registry).edge,
+          ),
           action: nativeResult.outcome,
         } satisfies Result;
         results[nativeEntry.index] = result;
@@ -5585,7 +5654,10 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     const found: Result[] = Array.from({ length: items.length });
     for (const entry of partition.toFetch) {
       assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
-      found[entry.index] = { edge: rowToEdge(entry.row), action: "found" };
+      found[entry.index] = {
+        edge: rowToEdge(entry.row, storedPropsReaders(ctx.registry).edge),
+        action: "found",
+      };
     }
     for (const { index, sourceIndex } of partition.duplicateOf) {
       found[index] = {
@@ -5786,7 +5858,10 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
               if (entry.isDeleted) continue;
               assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
               results[entry.index] = {
-                edge: rowToEdge(entry.row),
+                edge: rowToEdge(
+                  entry.row,
+                  storedPropsReaders(ctx.registry).edge,
+                ),
                 action: "found",
               };
             }
@@ -5860,7 +5935,10 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             } else {
               assertEndpointClearCanApply(ifExists, entry.clearValidTo, kind);
               results[entry.index] = {
-                edge: rowToEdge(entry.row),
+                edge: rowToEdge(
+                  entry.row,
+                  storedPropsReaders(ctx.registry).edge,
+                ),
                 action: "found",
               };
             }

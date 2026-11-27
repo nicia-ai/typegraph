@@ -174,6 +174,7 @@ function buildContext<Fields extends RelationProjection>(
           outputField(column.outputName, column.valueType),
           scopeIdentity,
           column.nullable,
+          column.readPlan,
         ),
         ...(column.elementValueType === undefined ?
           {}
@@ -203,6 +204,9 @@ function relationColumns(
       ...(expression.elementFields === undefined ?
         {}
       : { elementFields: expression.elementFields }),
+      ...(expression.readPlan === undefined ?
+        {}
+      : { readPlan: expression.readPlan }),
       nullable: expression.nullable,
     };
     if (

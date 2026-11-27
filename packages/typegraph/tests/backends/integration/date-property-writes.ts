@@ -178,7 +178,7 @@ function fullDocument(title: string, publishedAt: Date) {
   };
 }
 
-/** What a read returns for the date properties: the stored ISO text. */
+/** What a read returns for the date properties. */
 function documentDates(node: Readonly<Record<string, unknown>> | undefined) {
   const read = requireDefined(node);
   return {
@@ -189,12 +189,12 @@ function documentDates(node: Readonly<Record<string, unknown>> | undefined) {
   };
 }
 
-/** The stored text a patch of {@link LATER} everywhere writes. */
+/** A patch of {@link LATER} everywhere, as a read returns it. */
 const STORED_LATER_DATES = {
-  publishedAt: LATER.toISOString(),
-  reviewedAt: LATER.toISOString(),
-  review: { at: LATER.toISOString(), by: "editor" },
-  revisions: [LATER.toISOString(), PUBLISHED.toISOString()],
+  publishedAt: LATER,
+  reviewedAt: LATER,
+  review: { at: LATER, by: "editor" },
+  revisions: [LATER, PUBLISHED],
 } as const;
 
 const LATER_PATCH = {
@@ -778,7 +778,7 @@ export function registerDatePropertyWriteIntegrationTests(
       const shiftedAgain = new Date(
         PUBLISHED.getTime() + 2 * DAY_MS,
       ).toISOString();
-      expect(document.at).toBe(stored);
+      expect(document.at).toEqual(new Date(stored));
       const exported = await exportGraph(source);
       const lane = { dialect: source.backend.dialect };
 
@@ -793,7 +793,7 @@ export function registerDatePropertyWriteIntegrationTests(
         lane,
         observed: {
           title: updated.title,
-          at: updated.at as unknown as string,
+          at: updated.at?.toISOString(),
         },
         correct: { title: "a2", at: stored },
         defects: [
@@ -820,7 +820,7 @@ export function registerDatePropertyWriteIntegrationTests(
         lane,
         observed: {
           errors: result.errors.length,
-          at: imported?.at as unknown as string | undefined,
+          at: imported?.at?.toISOString(),
         },
         correct: { errors: 0, at: stored },
         defects: [

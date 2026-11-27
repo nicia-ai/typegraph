@@ -361,17 +361,8 @@ export function createSchemaIntrospector(
       return undefined;
     }
 
-    const schema = kind.schema;
-    const shape = objectSchemaShape(schema);
-    if (shape === undefined) {
-      return undefined;
-    }
-
-    const entries = Object.entries(shape).map(
-      ([key, value]) => [key, resolveFieldTypeInfo(value)] as const,
-    );
-    const resolved = Object.freeze(Object.fromEntries(entries));
-    nodeShapeCache.set(kindName, resolved);
+    const resolved = kindShapeTypeInfo(kind.schema);
+    if (resolved !== undefined) nodeShapeCache.set(kindName, resolved);
     return resolved;
   }
 
@@ -392,17 +383,8 @@ export function createSchemaIntrospector(
       return undefined;
     }
 
-    const schema = kind.schema;
-    const shape = objectSchemaShape(schema);
-    if (shape === undefined) {
-      return undefined;
-    }
-
-    const entries = Object.entries(shape).map(
-      ([key, value]) => [key, resolveFieldTypeInfo(value)] as const,
-    );
-    const resolved = Object.freeze(Object.fromEntries(entries));
-    edgeShapeCache.set(edgeKindName, resolved);
+    const resolved = kindShapeTypeInfo(kind.schema);
+    if (resolved !== undefined) edgeShapeCache.set(edgeKindName, resolved);
     return resolved;
   }
 
@@ -511,6 +493,23 @@ export function createSchemaIntrospector(
     kindsWithoutSearchableField,
     kindsDivergingFromSubsumingDeclaration,
   };
+}
+
+/**
+ * The field type of every property a kind's schema declares, or `undefined`
+ * when the schema has no readable object shape. The one owner of a kind's
+ * property typing: the introspector's per-kind accessors and the stored-props
+ * read plan (`src/store/stored-date-revival.ts`) both read it.
+ */
+export function kindShapeTypeInfo(
+  schema: z.ZodType,
+): Readonly<Record<string, FieldTypeInfo>> | undefined {
+  const shape = objectSchemaShape(schema);
+  if (shape === undefined) return undefined;
+  const entries = Object.entries(shape).map(
+    ([key, value]) => [key, resolveFieldTypeInfo(value)] as const,
+  );
+  return Object.freeze(Object.fromEntries(entries));
 }
 
 /**

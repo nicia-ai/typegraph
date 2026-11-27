@@ -7,6 +7,10 @@ import {
   type StatementBackend,
   type StoreTransactionBackend,
 } from "../../store/operation-scope";
+import {
+  decodeStoredDate,
+  decodeStoredValue,
+} from "../../store/stored-date-revival";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import type { QueryAst, SortDirection, ValueType } from "../ast";
 import { compileNameCheckedQuery } from "../compiler";
@@ -553,13 +557,16 @@ export function decodeExpressionValue(
     }
     case "object":
     case "embedding": {
-      return typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+      return decodeStoredValue(
+        expression.readPlan,
+        typeof value === "string" ? (JSON.parse(value) as unknown) : value,
+      );
     }
     case "array": {
       const parsed =
         typeof value === "string" ? (JSON.parse(value) as unknown) : value;
       if (!Array.isArray(parsed) || expression.elementValueType === undefined)
-        return parsed;
+        return decodeStoredValue(expression.readPlan, parsed);
       const elementValueType = expression.elementValueType;
       const elementFields = expression.elementFields;
       return parsed.map((element) => {
@@ -610,12 +617,7 @@ function decodeScalarExpressionValue(
       return Number(value);
     }
     case "date": {
-      return (
-        value instanceof Date ? value
-        : typeof value === "string" || typeof value === "number" ?
-          new Date(value)
-        : value
-      );
+      return decodeStoredDate(value);
     }
     case "string": {
       return value;

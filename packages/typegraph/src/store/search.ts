@@ -51,6 +51,10 @@ import { compareCodePoints } from "../utils/compare";
 import { requireDefined } from "../utils/presence";
 import { getEmbeddingFields } from "./embedding-sync";
 import { rowToNode } from "./row-mappers";
+import {
+  type StoredPropsReader,
+  storedPropsReaders,
+} from "./stored-date-revival";
 import { type Node } from "./types";
 
 /**
@@ -452,6 +456,7 @@ function scoreDescending(metric: VectorMetric): boolean {
 async function fetchNodesForRows(
   backend: GraphBackend,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
+  reader: StoredPropsReader,
   graphId: string,
   rows: readonly RankedSourceRow[],
 ): Promise<Map<string, Node>> {
@@ -467,6 +472,7 @@ async function fetchNodesForRows(
       const kindMap = await fetchNodesByIds(
         backend,
         batchPointRead,
+        reader,
         graphId,
         kind,
         [...ids],
@@ -606,6 +612,7 @@ export async function executeFulltextSearch<N = Node>(
   const nodeMap = await fetchNodesForRows(
     backend,
     requireDefined(ctx.batchPointRead),
+    storedPropsReaders(ctx.registry).node,
     graphId,
     merged,
   );
@@ -719,6 +726,7 @@ export async function executeVectorSearch<N = Node>(
   const nodeMap = await fetchNodesForRows(
     backend,
     requireDefined(ctx.batchPointRead),
+    storedPropsReaders(ctx.registry).node,
     graphId,
     merged,
   );
@@ -1000,8 +1008,9 @@ export async function executeHybridSearch<N = Node>(
       ...(offset === 0 ? {} : { offset }),
       ...(candidates === undefined ? {} : { candidates }),
     });
+    const reader = storedPropsReaders(ctx.registry).node;
     return rows.map((row, index) => {
-      const typedNode = rowToNode(row.node) as N;
+      const typedNode = rowToNode(row.node, reader) as N;
       return {
         node: typedNode,
         score: row.fusedScore,
@@ -1161,6 +1170,7 @@ export async function executeHybridSearch<N = Node>(
   const nodeMap = await fetchNodesForRows(
     backend,
     requireDefined(ctx.batchPointRead),
+    storedPropsReaders(ctx.registry).node,
     graphId,
     ranked.map((entry) => ({
       kind: entry.kind,
@@ -1431,6 +1441,7 @@ function warnIfLanguageNotAdvertised(
 async function fetchNodesByIds(
   backend: GraphBackend,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
+  reader: StoredPropsReader,
   graphId: string,
   nodeKind: string,
   ids: readonly string[],
@@ -1451,7 +1462,7 @@ async function fetchNodesByIds(
       // this hydration read (they are separate transactions, so a
       // concurrent delete can land in between).
       if (row.deleted_at !== undefined) continue;
-      map.set(row.id, rowToNode(row));
+      map.set(row.id, rowToNode(row, reader));
     }
     return map;
   }
@@ -1459,7 +1470,8 @@ async function fetchNodesByIds(
   // that haven't implemented the batched accessor.
   for (const id of ids) {
     const row = await backend.getNode(graphId, nodeKind, id);
-    if (row && row.deleted_at === undefined) map.set(row.id, rowToNode(row));
+    if (row && row.deleted_at === undefined)
+      map.set(row.id, rowToNode(row, reader));
   }
   return map;
 }

@@ -9,6 +9,7 @@ import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
 import { type StoreTransactionBackend } from "../../store/operation-scope";
+import { decodeStoredDate } from "../../store/stored-date-revival";
 import { createDataKeyedBag } from "../../utils/object";
 import {
   type AggregateExpr,
@@ -595,17 +596,9 @@ function normalizeAggregateValue(
   }
 
   if (expression.field.valueType === "date") {
-    return normalizeDateValue(value);
+    return decodeStoredDate(value);
   }
 
-  return value;
-}
-
-function normalizeDateValue(value: unknown): unknown {
-  if (value instanceof Date) return value;
-  if (typeof value === "string" || typeof value === "number") {
-    return new Date(value);
-  }
   return value;
 }
 
@@ -635,7 +628,7 @@ function normalizeFieldValue(field: FieldRef, value: unknown): unknown {
   }
 
   if (field.valueType === "date") {
-    return normalizeDateValue(value);
+    return decodeStoredDate(value);
   }
 
   return value;

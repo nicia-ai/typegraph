@@ -830,6 +830,7 @@ export type DatabaseExpression<out T = unknown, out Scope extends string = strin
     arrayElementType?: ValueType;
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
+    readPlan?: StoredReadPlan;
     nullable: boolean;
     scopeIdentity: symbol;
     __value?: T;
@@ -3601,6 +3602,7 @@ export type PreparedQueryConfig<R> = Readonly<{
     selectiveFields: readonly SelectiveField[] | undefined;
     selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
     schemaIntrospector: SchemaIntrospector;
+    registry: KindRegistry;
 }>;
 
 // @public (undocumented)
@@ -4050,6 +4052,7 @@ export type RelationColumn = Readonly<{
     valueType: ValueType;
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
+    readPlan?: StoredReadPlan;
     nullable: boolean;
     identity?: Readonly<{
         component: "id" | "kind";
@@ -4605,6 +4608,20 @@ export type SqlTableNames = Readonly<{
 type SqlTextChunk = Readonly<{
     kind: "text";
     value: string;
+}>;
+
+// @public
+type StoredReadPlan = Readonly<{
+    form: "date";
+}> | Readonly<{
+    form: "object";
+    keys: readonly (readonly [key: string, plan: StoredReadPlan])[];
+}> | Readonly<{
+    form: "array";
+    element: StoredReadPlan;
+}> | Readonly<{
+    form: "record";
+    value: StoredReadPlan;
 }>;
 
 // @public
