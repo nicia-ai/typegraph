@@ -2401,15 +2401,13 @@ error, before any statement, a write left floating after the callback settled in
 
 What guarantees the refusal is the backend, not the Store: every backend object over the transaction
 refuses each of its members that can write or run DDL, before any statement, whatever reached it.
-That is a backend built over `tx.sql`, every transaction backend over the same native transaction,
-and, on a SQLite driver that runs every transaction on the database's one connection
-(better-sqlite3 among them), a root backend over that connection, for each member whose statements
-would run inside the read-only transaction. Its refusal is the same error,
-with an `operation` that names the backend member (`backend.upsertFulltextBatch()`). So an entry
+That is the transaction's own backend and every backend derived from it, and every adoption of its
+native handle: a backend built over `tx.sql`, or adopted over it with
+`backend.adoptTransaction(tx.sql)` or `adoptSchemaWriteTransaction(tx.sql)`. Its refusal is the same
+error, with an `operation` that names the backend member (`backend.upsertFulltextBatch()`). So an entry
 point that takes a backend and knows nothing of the read-only transaction is refused as well:
-`createAdapterStoreWithSchema()`, `migrateSchema()` or `rollbackSchema()` over such a backend,
-`store.search.rebuildFulltext()` on a Store over it, or `store.refreshStatistics()` awaited inside
-the Store's own read-only callback on better-sqlite3. Which backend members write is one table typed
+`createAdapterStoreWithSchema()`, `migrateSchema()` or `rollbackSchema()` over such a backend, or
+`store.search.rebuildFulltext()` on a Store over it. Which backend members write is one table typed
 over every backend member name, so a new member does not compile until it is classified; a
 transaction opener is a write unless it opens a read-only transaction. Atomic mutation programs are
 refused when they dispatch, and the writes TypeGraph runs through a raw-SQL member (identity
@@ -2418,19 +2416,18 @@ relations, recorded history, retention pruning, removal cleanup,
 Reads run: `branch()` from such a Store reads it, and a revision origin the graph has not minted yet
 is refused rather than minted, since minting is a write.
 
-A root backend over such a connection admits most of its work through its serialized queue, which
-the read-only transaction holds until it ends, so that work is not refused: it waits and runs once
-the transaction has ended, as without a read-only transaction. That covers the root Store's writes
-from another flow, a read-write `store.transaction()` opened from another flow, and a second Store on
-another graph over the same backend. Root members that run their statements on the connection as
-they are called would run them inside the read-only transaction, and are refused, from another flow
-as from inside the callback: `refreshStatistics()`, `executeDdl()`, `bootstrapTables()`, the
-`ensure*` provisioning members, `createVectorIndex()`, `deleteVectorSlotContribution()`, the
-materialization and removal records, `registerGraphTemplate()`,
-`adoptBaseSchema()`, `adoptSchemaWriteTransaction()`, `rebuildContribution()` and
-`repairContributions()`. A queued root write awaited inside the read-only callback behaves as before:
-the queue refuses it as a reentrant submission (`SERIALIZED_QUEUE_REENTRANT_SUBMISSION`) where
-AsyncLocalStorage is available, and it waits for the transaction that awaits it where it is not.
+The root backend is not part of it. A call another flow makes on the root backend, or on a Store
+over it, while the read-only transaction is open runs as it does without a read-only transaction,
+whatever the root's connection is running meanwhile, and so does a root call awaited inside the
+callback. Over a PostgreSQL pool that call runs on a connection of its own. On a SQLite driver
+that runs every transaction on the database's one connection (better-sqlite3, `@libsql/client`
+before 0.18, sql.js, Durable Object storage), a root write admitted through the root's serialized
+queue waits for the read-only transaction to end, while a root member that runs its statements on
+the connection as it is called (`refreshStatistics()`, `executeDdl()`, the `ensure*` provisioning
+members, the materialization records, and a bulk write's statistics refresh among them) runs them
+inside the read-only transaction's span, as it always has. That interleaving is a known limit of
+one-connection SQLite drivers, not something the read-only scope changes; keep root maintenance out
+of the span of a read-only transaction on those drivers.
 
 A backend you write yourself gets the Store's refusals but no refusal of its own members: nothing
 ties its objects to a native transaction.
@@ -2453,7 +2450,11 @@ still refused when its statements would run on that connection: an adoption of `
 that cannot report whether a transaction is open (`@libsql/client` before 0.18, sql.js, Durable
 Object storage), a context you bound in an earlier transaction on the same better-sqlite3
 connection, or a savepoint you open yourself with `tx.sql.transaction(...)` on node-postgres, which
-keeps the pooled client.
+keeps the pooled client. A backend you build over `tx.sql` where `tx.sql` is the database handle
+itself is a root backend unless the driver proves the transaction: on better-sqlite3, which reports
+an open transaction, one built inside the callback is bound to the transaction until it ends; on
+`@libsql/client` before 0.18, sql.js and Durable Object storage nothing ties it to the transaction,
+so it runs as a root backend does.
 
 A savepoint you open yourself and hand to `withTransaction()` is refused the same way on
 better-sqlite3, libSQL and PGlite, whose drivers show which transaction it runs in. On postgres-js
