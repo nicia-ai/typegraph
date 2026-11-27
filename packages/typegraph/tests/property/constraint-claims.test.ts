@@ -77,7 +77,6 @@ import { compareStrings } from "../../src/utils/compare";
 import { requireDefined } from "../../src/utils/presence";
 import { encodeTupleKey } from "../../src/utils/tuple-key";
 import { readEdgeClaimRows } from "../edge-claim-rows";
-import { STRING_FIELD_KEY_FORMS } from "../string-field-key-forms";
 import { createTestBackend } from "../test-utils";
 import { propertyRuns } from "./run-budget";
 
@@ -257,16 +256,11 @@ const STAFF_AXIS = uniquenessClaimAxis(
 const DISJOINT_AXIS = disjointnessClaimAxis(...DISJOINT_PAIR, registry);
 
 function staffKey(email: string): string {
-  return computeUniqueKey(
-    { email },
-    ["email"],
-    "binary",
-    STRING_FIELD_KEY_FORMS,
-  );
+  return computeUniqueKey({ email }, ["email"], "binary");
 }
 
 function vendorKey(code: string): string {
-  return computeUniqueKey({ code }, ["code"], "binary", STRING_FIELD_KEY_FORMS);
+  return computeUniqueKey({ code }, ["code"], "binary");
 }
 
 // ============================================================

@@ -15,7 +15,6 @@ import {
 } from "../../src/graph-merge/blocking";
 import type { ResolveConfig } from "../../src/graph-merge/types";
 import { requireDefined } from "../../src/utils/presence";
-import { STRING_FIELD_KEY_FORMS } from "../string-field-key-forms";
 import { createSqliteMergeBackend } from "./test-utils";
 
 const Patient = defineNode("Patient", {
@@ -205,10 +204,11 @@ describe("blockNodes unique-constraint short-circuit", () => {
         mrn: "MRN-100",
       });
 
-      const buckets = blockNodes([shareMrnA, shareMrnB, distinctMrn], noBlock, {
-        constraints: harness.uniqueConstraints,
-        forms: STRING_FIELD_KEY_FORMS,
-      });
+      const buckets = blockNodes(
+        [shareMrnA, shareMrnB, distinctMrn],
+        noBlock,
+        harness.uniqueConstraints,
+      );
 
       // shareMrnA and shareMrnB co-bucket on MRN-100; distinctMrn is separate.
       const mrn100 = [...buckets.entries()].find(([key]) =>
@@ -254,10 +254,9 @@ describe("blockNodes unique-constraint short-circuit", () => {
       typeof Patient
     >;
 
-    const buckets = blockNodes([absent, presentX, presentX2], noBlock, {
-      constraints: [constraint],
-      forms: STRING_FIELD_KEY_FORMS,
-    });
+    const buckets = blockNodes([absent, presentX, presentX2], noBlock, [
+      constraint,
+    ]);
 
     // The absent-field node has NO unique signature — it must fall to the
     // unblocked bucket, not co-bucket on the inherited function.
@@ -292,10 +291,11 @@ describe("blockNodes unique-constraint short-circuit", () => {
         mrn: "A-2",
       });
 
-      const buckets = blockNodes([sameDate1, sameDate2], blockByBirthDate, {
-        constraints: harness.uniqueConstraints,
-        forms: STRING_FIELD_KEY_FORMS,
-      });
+      const buckets = blockNodes(
+        [sameDate1, sameDate2],
+        blockByBirthDate,
+        harness.uniqueConstraints,
+      );
 
       // The birthDate block bucket co-buckets BOTH (so candidate-gen compares them).
       const blockBucket = [...buckets.entries()].find(([key]) =>
@@ -334,10 +334,11 @@ describe("blockNodes unique-constraint short-circuit", () => {
         mrn: "MRN-100",
       });
 
-      const buckets = blockNodes([dupA, dupB], blockByBirthDate, {
-        constraints: harness.uniqueConstraints,
-        forms: STRING_FIELD_KEY_FORMS,
-      });
+      const buckets = blockNodes(
+        [dupA, dupB],
+        blockByBirthDate,
+        harness.uniqueConstraints,
+      );
 
       // Despite different birthDate buckets, they co-bucket on the shared mrn, so
       // candidate-gen WILL compare them — the duplicate is no longer missed.
@@ -403,11 +404,7 @@ describe("blockNodes caseInsensitive collation (F6)", () => {
         mrn: "mrn-100",
       });
 
-      const buckets = blockNodes(
-        [upper, lower],
-        {},
-        { constraints: constraints, forms: STRING_FIELD_KEY_FORMS },
-      );
+      const buckets = blockNodes([upper, lower], {}, constraints);
 
       expect(keyOrder(buckets)).toHaveLength(1);
       const [, members] = requireDefined([...buckets.entries()][0]);
@@ -477,11 +474,7 @@ describe("blockNodes unique key matches enforcement (#1)", () => {
         ref: "1",
       });
 
-      const buckets = blockNodes(
-        [numeric, stringy],
-        {},
-        { constraints: storeA.constraints, forms: STRING_FIELD_KEY_FORMS },
-      );
+      const buckets = blockNodes([numeric, stringy], {}, storeA.constraints);
 
       const unique = uniqueBucketKeys(buckets);
       expect(unique).toHaveLength(1);
@@ -513,11 +506,7 @@ describe("blockNodes unique key matches enforcement (#1)", () => {
         ref: null,
       });
 
-      const buckets = blockNodes(
-        [nullA, nullB],
-        {},
-        { constraints: storeA.constraints, forms: STRING_FIELD_KEY_FORMS },
-      );
+      const buckets = blockNodes([nullA, nullB], {}, storeA.constraints);
 
       expect(uniqueBucketKeys(buckets)).toEqual([]);
       expect(

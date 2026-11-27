@@ -37,7 +37,6 @@ import {
 } from "../../../src/store/claims/axis";
 import { createNodeBatchValidationSeams } from "../../../src/store/operations/node-operations";
 import { requireDefined } from "../../../src/utils/presence";
-import { STRING_FIELD_KEY_FORMS } from "../../string-field-key-forms";
 import { type IntegrationTestContext } from "./test-context";
 
 const STAFF_EMAIL_CONSTRAINT = "claim_owner_staff_email";
@@ -75,12 +74,7 @@ const registry = buildKindRegistry(ownerGraph);
 const AXIS = uniquenessClaimAxis("Employee", "kindWithSubClasses", registry);
 
 function emailKey(email: string): string {
-  return computeUniqueKey(
-    { email },
-    ["email"],
-    "binary",
-    STRING_FIELD_KEY_FORMS,
-  );
+  return computeUniqueKey({ email }, ["email"], "binary");
 }
 
 type OwnerCell = Readonly<{

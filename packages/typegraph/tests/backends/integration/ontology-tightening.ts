@@ -41,7 +41,6 @@ import {
 } from "../../../src/store/claims/axis";
 import { compareStrings } from "../../../src/utils/compare";
 import { requireDefined } from "../../../src/utils/presence";
-import { STRING_FIELD_KEY_FORMS } from "../../string-field-key-forms";
 import { matchingObject } from "../../test-utils";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -727,7 +726,6 @@ export function registerOntologyTighteningIntegrationTests(
               { email: "dup@example.com" },
               ["email"],
               "binary",
-              STRING_FIELD_KEY_FORMS,
             ),
           },
           owners: [
@@ -804,7 +802,6 @@ export function registerOntologyTighteningIntegrationTests(
               { email: "dup@example.com" },
               ["email"],
               "binary",
-              STRING_FIELD_KEY_FORMS,
             ),
           },
           owners: [

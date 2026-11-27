@@ -39,9 +39,6 @@ import { type KindRegistry } from "../registry/kind-registry";
 import { compareCodePoints } from "../utils/compare";
 import { hasOwnKey, readOwnProperty } from "../utils/object";
 import { isPresent } from "../utils/presence";
-import { type UniqueKeyForms } from "./unique-key-forms";
-
-export { type UniqueKeyForms, uniqueKeyFormsFor } from "./unique-key-forms";
 
 // ============================================================
 // Uniqueness Validation
@@ -61,28 +58,20 @@ export { type UniqueKeyForms, uniqueKeyFormsFor } from "./unique-key-forms";
  * function — `""` under `binary` (the function stringified and dropped by
  * `JSON.stringify`) and a `TypeError` under `caseInsensitive` — instead of the
  * null marker every other absent value gets.
- *
- * THE one owner of a key's bytes. `forms` ({@link uniqueKeyFormsFor}, for the
- * kind whose row the props belong to) makes a date field key as the JSON text
- * of its ISO timestamp whether it holds the validated `Date` or the stored
- * text, so a write keying its validated props and a release keying the row it
- * reads back name the same claim. Every other value keys as it always has.
  */
 export function computeUniqueKey(
   props: Record<string, unknown>,
   fields: readonly string[],
   collation: Collation,
-  forms: UniqueKeyForms,
 ): string {
   const values = fields.map((field) => {
     const value = readOwnProperty(props, field);
     if (value === undefined || value === null) {
       return UNIQUE_KEY_NULL_MARKER;
     }
-    // A date field's stored text keys as the JSON text a `Date` stringifies
-    // to, which is the form every claim has been written in.
+    // Convert to string, handling primitives safely
     const stringValue =
-      typeof value === "string" && !forms.isDateField(field) ? value
+      typeof value === "string" ? value
       : typeof value === "number" || typeof value === "boolean" ?
         value.toString()
       : JSON.stringify(value);
@@ -147,10 +136,9 @@ export function checkWherePredicate(
 export function uniqueConstraintKey(
   constraint: UniqueConstraint,
   props: Record<string, unknown>,
-  forms: UniqueKeyForms,
 ): string | undefined {
   return checkWherePredicate(constraint, props) ?
-      computeUniqueKey(props, constraint.fields, constraint.collation, forms)
+      computeUniqueKey(props, constraint.fields, constraint.collation)
     : undefined;
 }
 

@@ -96,12 +96,7 @@ import {
   type TombstonedNodeRow,
   type UniqueRow,
 } from "../../backend/types";
-import {
-  checkDisjointness,
-  uniqueConstraintKey,
-  type UniqueKeyForms,
-  uniqueKeyFormsFor,
-} from "../../constraints";
+import { checkDisjointness, uniqueConstraintKey } from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
 import { assertJsonValue } from "../../core/json-value";
 import {
@@ -3540,12 +3535,9 @@ function claimedNodeRow<G extends GraphDef>(
     candidate.axis,
   );
   if (ownerConstraint === undefined) return undefined;
-  // Keyed through the owner's own kind forms: the row's stored props key
-  // exactly as the validated props its claim was written from.
   const heldKey = uniqueConstraintKey(
     ownerConstraint,
     rowPropsToObject(node.props),
-    uniqueKeyFormsFor(ctx.registry, node.kind),
   );
   return heldKey === key ? node : undefined;
 }
@@ -8140,11 +8132,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
 
   const constraint = resolveConstraint(ctx.graph, kind, constraintName);
 
-  const key = uniqueConstraintKey(
-    constraint,
-    validatedProps,
-    uniqueKeyFormsFor(ctx.registry, kind),
-  );
+  const key = uniqueConstraintKey(constraint, validatedProps);
   if (key === undefined) {
     const node = await executeNodeCreate(
       ctx,
@@ -8235,11 +8223,7 @@ export async function executeNodeFindByConstraint<G extends GraphDef>(
   });
 
   const constraint = resolveConstraint(ctx.graph, kind, constraintName);
-  const key = uniqueConstraintKey(
-    constraint,
-    validatedProps,
-    uniqueKeyFormsFor(ctx.registry, kind),
-  );
+  const key = uniqueConstraintKey(constraint, validatedProps);
   if (key === undefined) return undefined;
 
   const kindsToCheck = uniquenessProbeKinds(
@@ -8283,7 +8267,6 @@ function validateAndComputeKeys(
   kind: string,
   constraint: UniqueConstraint,
   items: readonly Readonly<{ props: Record<string, unknown> }>[],
-  forms: UniqueKeyForms,
 ): { validatedProps: Record<string, unknown>; key: string | undefined }[] {
   const validated: {
     validatedProps: Record<string, unknown>;
@@ -8295,7 +8278,7 @@ function validateAndComputeKeys(
       kind,
       operation: "create",
     });
-    const key = uniqueConstraintKey(constraint, validatedProps, forms);
+    const key = uniqueConstraintKey(constraint, validatedProps);
     validated.push({ validatedProps, key });
   }
 
@@ -8327,13 +8310,7 @@ export async function executeNodeBulkFindByConstraint<G extends GraphDef>(
   const nodeKind = registration.type;
   const constraint = resolveConstraint(ctx.graph, kind, constraintName);
 
-  const validated = validateAndComputeKeys(
-    nodeKind,
-    kind,
-    constraint,
-    items,
-    uniqueKeyFormsFor(ctx.registry, kind),
-  );
+  const validated = validateAndComputeKeys(nodeKind, kind, constraint, items);
   const uniqueKeys = collectUniqueKeys(validated);
 
   const kindsToCheck = uniquenessProbeKinds(
@@ -8806,13 +8783,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
   const constraint = resolveConstraint(ctx.graph, kind, constraintName);
 
   // Step 1: Validate all props and compute keys
-  const validated = validateAndComputeKeys(
-    nodeKind,
-    kind,
-    constraint,
-    items,
-    uniqueKeyFormsFor(ctx.registry, kind),
-  );
+  const validated = validateAndComputeKeys(nodeKind, kind, constraint, items);
   const uniqueKeys = collectUniqueKeys(validated);
   assertDuplicateKeysStateOneAttachment(kind, validated, items);
 

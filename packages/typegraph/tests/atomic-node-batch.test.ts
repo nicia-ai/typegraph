@@ -43,7 +43,6 @@ import {
   createStoreWithSchema,
   createVerifiedStore,
 } from "../src/store";
-import { STRING_FIELD_KEY_FORMS } from "./string-field-key-forms";
 
 const Person = defineNode("Person", {
   schema: z.object({ name: z.string() }),
@@ -1070,7 +1069,6 @@ describe("plain node batch store contract", () => {
         { email: "legacy@example.com" },
         ["email"],
         "binary",
-        STRING_FIELD_KEY_FORMS,
       );
       await fixture.backend.insertNode({
         graphId: scopedClaimGraph.id,
@@ -1671,12 +1669,7 @@ describe("constrained node batch store contract", () => {
         graphId: fallbackGraph.id,
         nodeKind: "UniquePerson",
         constraintName: "unique_person_name",
-        key: computeUniqueKey(
-          { name: "Bob" },
-          ["name"],
-          "binary",
-          STRING_FIELD_KEY_FORMS,
-        ),
+        key: computeUniqueKey({ name: "Bob" }, ["name"], "binary"),
       });
       expect(claim).toBeUndefined();
     } finally {
@@ -1776,12 +1769,7 @@ describe("constrained node batch store contract", () => {
         graphId: fallbackGraph.id,
         nodeKind: "UniquePerson",
         constraintName: "unique_person_name",
-        key: computeUniqueKey(
-          { name: "Stale" },
-          ["name"],
-          "binary",
-          STRING_FIELD_KEY_FORMS,
-        ),
+        key: computeUniqueKey({ name: "Stale" }, ["name"], "binary"),
       });
       expect(claim).toBeUndefined();
     } finally {

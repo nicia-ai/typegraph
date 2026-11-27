@@ -17,7 +17,6 @@ import { z } from "zod";
 import { defineGraph, defineNode, subClassOf } from "../../../src";
 import { computeUniqueKey } from "../../../src/constraints";
 import { requireDefined } from "../../../src/utils/presence";
-import { STRING_FIELD_KEY_FORMS } from "../../string-field-key-forms";
 import {
   type InspectableStore,
   type IntegrationTestContext,
@@ -363,12 +362,7 @@ export function registerReleasedClaimLookupIntegrationTests(
         const store = await context.createStore(scopeChangeGraph);
         const backend = store.backend;
         const email = `scoped-${mode}@released-lookup.example`;
-        const key = computeUniqueKey(
-          { email },
-          ["email"],
-          "binary",
-          STRING_FIELD_KEY_FORMS,
-        );
+        const key = computeUniqueKey({ email }, ["email"], "binary");
         const child = await store.nodes.ScopeZChild.create(
           { email },
           { id: `scoped-child-${mode}` },

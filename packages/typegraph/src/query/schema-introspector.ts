@@ -593,13 +593,7 @@ function schemaAllowsAbsence(schema: z.ZodType): boolean {
   return false;
 }
 
-/**
- * The field typing of ONE property schema, exactly as a kind's introspector
- * types that property, without resolving the kind's other properties. For a
- * caller that needs one field's answer and must not traverse the rest of a
- * kind (a recursive sibling property would never finish).
- */
-export function resolveFieldTypeInfo(schema: z.ZodType): FieldTypeInfo {
+function resolveFieldTypeInfo(schema: z.ZodType): FieldTypeInfo {
   const info = resolveFieldTypeInfoValue(schema);
   return schemaAllowsAbsence(schema) ? { ...info, nullable: true } : info;
 }

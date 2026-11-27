@@ -320,7 +320,6 @@ import {
   transactionDeleteNodeWithPolicy,
   TypeGraphError,
   uncapturedGraphWriteLock,
-  uniqueKeyFormsFor,
   withDecidedCompositionWindows,
   withDeferredCompositionExistence,
   withRecordedIdentityDecision,
@@ -797,10 +796,7 @@ async function generateAllCandidates<G extends GraphDef>(
           introspectionKinds,
           kind,
         );
-        const blocks = blockNodes(nodes, resolveConfig, {
-          constraints: uniqueConstraints,
-          forms: uniqueKeyFormsFor(target.registry, kind),
-        });
+        const blocks = blockNodes(nodes, resolveConfig, uniqueConstraints);
         const keylessConfig = keylessConfigFor(resolveConfig);
         const scope: SourceScope = {
           kind,

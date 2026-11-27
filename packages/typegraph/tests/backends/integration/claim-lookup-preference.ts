@@ -48,7 +48,6 @@ import { computeUniqueKey } from "../../../src/constraints";
 import { buildKindRegistry } from "../../../src/registry";
 import { uniquenessClaimAxis } from "../../../src/store/claims/axis";
 import { requireDefined } from "../../../src/utils/presence";
-import { STRING_FIELD_KEY_FORMS } from "../../string-field-key-forms";
 import {
   type InspectableStore,
   type IntegrationTestContext,
@@ -98,12 +97,7 @@ const AXIS = uniquenessClaimAxis(
 const LEGACY_KIND = "LookupEmployee";
 
 function emailKey(email: string): string {
-  return computeUniqueKey(
-    { email },
-    ["email"],
-    "binary",
-    STRING_FIELD_KEY_FORMS,
-  );
+  return computeUniqueKey({ email }, ["email"], "binary");
 }
 
 /**
@@ -309,12 +303,7 @@ async function seedGhostOverTombstone(
     graphId: ghostGraph.id,
     nodeKind: "GhostAxis",
     constraintName: GHOST_KEY_CONSTRAINT,
-    key: computeUniqueKey(
-      { key: value },
-      ["key"],
-      "binary",
-      STRING_FIELD_KEY_FORMS,
-    ),
+    key: computeUniqueKey({ key: value }, ["key"], "binary"),
     nodeId: `${value}-ghost`,
     concreteKind: "GhostAxis",
   });
@@ -330,12 +319,7 @@ async function seedLegacyHolderBehindGhost(
   value: string,
 ): Promise<string> {
   const backend = store.backend;
-  const key = computeUniqueKey(
-    { key: value },
-    ["key"],
-    "binary",
-    STRING_FIELD_KEY_FORMS,
-  );
+  const key = computeUniqueKey({ key: value }, ["key"], "binary");
   const holderId = `${value}-cat`;
   await backend.insertNode({
     graphId: ghostGraph.id,
