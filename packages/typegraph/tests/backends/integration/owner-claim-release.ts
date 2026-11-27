@@ -80,10 +80,14 @@ const OcrPipedEvent = defineNode("OcrPipedEvent", {
   }),
 });
 
-type OcrCode = string | readonly OcrCode[];
+type OcrCode = string | Readonly<{ next: OcrCode }>;
 const OcrCodeSchema: z.ZodType<OcrCode> = z.union([
   z.string(),
-  z.array(z.lazy(() => OcrCodeSchema)),
+  z.object({
+    get next() {
+      return OcrCodeSchema;
+    },
+  }),
 ]);
 
 /** A constrained field whose type is a recursive union. */
@@ -769,7 +773,9 @@ export function registerOwnerClaimReleaseIntegrationTests(
       await expect(
         store.nodes.OcrRecursive.create({ code: "root" }),
       ).rejects.toBeInstanceOf(UniquenessError);
-      await store.nodes.OcrRecursive.create({ code: ["root", ["leaf"]] });
+      await store.nodes.OcrRecursive.create({
+        code: { next: { next: "root" } },
+      });
     });
   });
 
