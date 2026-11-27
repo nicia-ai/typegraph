@@ -710,7 +710,7 @@ export function registerSearchPaginationIntegrationTests(
       expect([...first.data, ...second.data]).toEqual(plainRows);
     });
 
-    it("refuses a cursor whose text its database cannot hold (a NUL on PostgreSQL) before it reaches the database, and pages it where the text can hold it", async () => {
+    it("refuses a cursor whose text its database cannot hold (a NUL on PostgreSQL, a lone surrogate anywhere) before it reaches the database, and pages a NUL where the text can hold it", async () => {
       const store = context.getStore();
       await seedRanked(store);
       const kinds = SEARCH_KINDS.filter((kind) =>
@@ -743,8 +743,16 @@ export function registerSearchPaginationIntegrationTests(
         const json = decodeCursorJson(requireCursor(first.nextCursor));
         const vals = json["vals"] as readonly unknown[];
         // Every text key (the category, the hybrid node-id tiebreak, the
-        // row's id) in turn carries a NUL.
-        for (const [index, value] of vals.entries()) {
+        // row's id) in turn carries a NUL, then a lone surrogate, which no
+        // database stores or returns.
+        const forgeries = [...vals.entries()].flatMap(
+          (entry) =>
+            [
+              [entry, "nul"],
+              [entry, "lone surrogate"],
+            ] as const,
+        );
+        for (const [[index, value], forgedText] of forgeries) {
           const column = (json["cols"] as readonly string[])[index];
           if (
             typeof value !== "string" ||
@@ -755,7 +763,9 @@ export function registerSearchPaginationIntegrationTests(
           const forged = encodeCursorJson({
             ...json,
             vals: vals.map((entry, position) =>
-              position === index ? `${value}\u0000x` : entry,
+              position === index ?
+                `${value}${forgedText === "nul" ? "\u0000" : "\uD800"}x`
+              : entry,
             ),
           });
           const outcomes = [
@@ -780,10 +790,14 @@ export function registerSearchPaginationIntegrationTests(
               "refused"
             : outcome,
           );
-          expect({ name, column, outcomes }).toEqual({
+          expect({ name, column, forgedText, outcomes }).toEqual({
             name,
             column,
-            outcomes: textAdmitsNul ? ["page", "page"] : ["refused", "refused"],
+            forgedText,
+            outcomes:
+              forgedText === "nul" && textAdmitsNul ?
+                ["page", "page"]
+              : ["refused", "refused"],
           });
         }
       }

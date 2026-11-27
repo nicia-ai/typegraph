@@ -344,17 +344,27 @@ export function validateCursorColumns(
  */
 export type CursorTextBinding = Readonly<{ textAdmitsNul: boolean }>;
 
+/** A UTF-16 surrogate without its pair: text no database stores or returns. */
+const LONE_SURROGATE =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
 /**
  * Whether every string in `value` (itself, or one inside an array or object
- * a key of unknown type carries) is text the database binds unchanged. The
- * one owner of a cursor's text bindability, for field and relevance keys.
+ * a key of unknown type carries) is text the database binds unchanged: no
+ * lone surrogate on any dialect (a driver re-encodes it, or sends bytes
+ * PostgreSQL refuses as invalid UTF-8, and no database returns one, so no
+ * terminal issued it), and no NUL where the dialect's text cannot hold one.
+ * The one owner of a cursor's text bindability, for field and relevance keys.
  */
 function isBindableCursorText(
   value: unknown,
   text: CursorTextBinding,
 ): boolean {
   if (typeof value === "string")
-    return text.textAdmitsNul || !value.includes("\u0000");
+    return (
+      !LONE_SURROGATE.test(value) &&
+      (text.textAdmitsNul || !value.includes("\u0000"))
+    );
   if (Array.isArray(value))
     return value.every((entry: unknown) => isBindableCursorText(entry, text));
   if (typeof value === "object" && value !== null)

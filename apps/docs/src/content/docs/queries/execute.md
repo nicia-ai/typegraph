@@ -337,7 +337,8 @@ database. Every form a terminal has issued is a value: a Boolean key accepts `tr
 the `0`/`1` that SQLite's and libSQL's `store.batchOnce()` issue it as. On PostgreSQL, whose text
 cannot hold a NUL character, a cursor whose text holds one (in an `orderBy()` value, an id or a
 hybrid search's node-id tiebreak) is refused the same way; SQLite's text can hold one, so it pages
-there.
+there. A cursor whose text holds a lone UTF-16 surrogate, which no database stores or returns, is
+refused on every dialect.
 
 ### Recursive traversals are not paginated
 
