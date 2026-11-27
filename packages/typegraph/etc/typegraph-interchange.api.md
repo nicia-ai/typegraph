@@ -3474,11 +3474,11 @@ export const GraphDataHeaderSchema: z.ZodObject<{
             state: "state";
             archival: "archival";
         }>;
+        profile: z.ZodLiteral<"typegraph-identity-v1">;
         retention: z.ZodOptional<z.ZodObject<{
             prunedBeforeRevision: z.ZodNumber;
             prunedBeforeRecordedAt: z.ZodISODateTime;
         }, z.core.$strip>>;
-        profile: z.ZodLiteral<"typegraph-identity-v1">;
         hasTransitions: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
@@ -3688,11 +3688,11 @@ export const GraphInterchangeChunkSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
                 state: "state";
                 archival: "archival";
             }>;
+            profile: z.ZodLiteral<"typegraph-identity-v1">;
             retention: z.ZodOptional<z.ZodObject<{
                 prunedBeforeRevision: z.ZodNumber;
                 prunedBeforeRecordedAt: z.ZodISODateTime;
             }, z.core.$strip>>;
-            profile: z.ZodLiteral<"typegraph-identity-v1">;
             hasTransitions: z.ZodOptional<z.ZodBoolean>;
         }, z.core.$strip>>;
     }, z.core.$strip>;
@@ -5183,7 +5183,7 @@ const NATIVE_TRANSACTION_STATE: unique symbol;
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
 }> & {
-    [READ_ONLY_SCOPES]: number;
+    [READ_ONLY_SCOPES]: readonly string[];
     [CONNECTION]: object | undefined;
 };
 

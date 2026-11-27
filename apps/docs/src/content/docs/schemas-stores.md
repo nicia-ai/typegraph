@@ -2397,22 +2397,39 @@ error, before any statement, a write left floating after the callback settled in
 | `store.withRecordedTransaction(tx.sql, fn)` | the same writes inside `fn`, and `applyMergePlanInTransaction()` with that context |
 | `store.withRecordedTransaction(tx.sql, fn)` on a history store | `store.withRecordedTransaction()`, before `fn` runs (it fences its writes first) |
 | `store.withEvolvedTransaction(tx.sql, plan, fn)` | `store.withEvolvedTransaction()`, before `fn` runs, for every plan |
-| a Store over `createPostgresTransactionBackend(tx.sql)`, or over `createSqliteBackend(tx.sql)` on a libSQL transaction | every member of that Store that can write, before anything else, whatever its arguments: its `store.nodes`, `store.edges` and `store.identity` writes (`store.nodes.Person.create()`), `clear()`, `evolve()`, `deprecateKinds()`, `undeprecateKinds()`, `removeKinds()`, `materializeRemovals()`, `materializeIndexes()`, `materializeSystemIndexes()`, `refreshStatistics()`, `reembedVectorField()`, `repairContributions()`, `rebuildContribution()`, `pruneRecordedInstants()`, `rotateAllocationOwner()`, `rebuildIdentityClosure(store)`, `importGraph()`, `importGraphStream()`, `trustedImportGraphStream()`, and a read-write `store.transaction()` or `transactionWithReceipt()` as it opens, before its fences or a history store's isolation check, so `merge()`, `applyMergePlan()` and the other graph-merge writes are refused at the unit they open |
+| a Store over `createPostgresTransactionBackend(tx.sql)`, or over `createSqliteBackend(tx.sql)` on a libSQL transaction | the Store's own members that write, named by the member and before they read their arguments: its `store.nodes`, `store.edges` and `store.identity` writes (`store.nodes.Person.create()`), `clear()`, `evolve()`, `deprecateKinds()`, `undeprecateKinds()`, `removeKinds()`, `materializeRemovals()`, `materializeIndexes()`, `materializeSystemIndexes()`, `refreshStatistics()`, `reembedVectorField()`, `repairContributions()`, `rebuildContribution()`, `pruneRecordedInstants()`, `rotateAllocationOwner()`, `rebuildIdentityClosure(store)`, `importGraph()`, `importGraphStream()`, `trustedImportGraphStream()`, and a read-write `store.transaction()` or `transactionWithReceipt()` as it opens, before its fences or a history store's isolation check, so `merge()`, `applyMergePlan()` and the other graph-merge writes are refused at the unit they open |
 
-Every member of a Store is declared as one that can write, one that hands out a surface whose
-writes are refused this way, or a read, and a test calls every write member inside a read-only
-scope. Reads run: `branch()` from such a Store reads it, and a revision origin the graph has not
-minted yet is refused rather than minted, since minting is a write.
+What guarantees the refusal is the backend, not the Store: every backend object over the transaction
+refuses each of its members that can write or run DDL, before any statement, whatever reached it.
+That is a backend built over `tx.sql`, every transaction backend over the same native transaction,
+and, on a SQLite driver that runs every transaction on the database's one connection
+(better-sqlite3 among them), a root backend over that connection. Its refusal is the same error,
+with an `operation` that names the backend member (`backend.upsertFulltextBatch()`). So an entry
+point that takes a backend and knows nothing of the read-only transaction is refused as well:
+`createAdapterStoreWithSchema()`, `migrateSchema()` or `rollbackSchema()` over such a backend,
+`store.search.rebuildFulltext()` on a Store over it, or `store.refreshStatistics()` awaited inside
+the Store's own read-only callback on better-sqlite3. Which backend members write is one table typed
+over every backend member name, so a new member does not compile until it is classified; a
+transaction opener is a write unless it opens a read-only transaction. Atomic mutation programs are
+refused when they dispatch, and the writes TypeGraph runs through a raw-SQL member (identity
+relations, recorded history, retention pruning, removal cleanup) are marked as writes and refused
+the same way. Reads run: `branch()` from such a Store reads it, and a revision origin the graph has
+not minted yet is refused rather than minted, since minting is a write.
+
+A backend you write yourself gets the Store's refusals but no refusal of its own members: nothing
+ties its objects to a native transaction.
 
 A read-only `store.transaction()` on a Store over a caller's read-write transaction runs as a
-savepoint of that transaction. On PostgreSQL that savepoint is read-only at the engine: TypeGraph
-issues `SET TRANSACTION READ ONLY` as its first statement, which PostgreSQL applies to the savepoint
-and every savepoint opened inside it, and restores the caller's access mode when the savepoint
-ends. The caller's transaction refuses TypeGraph writes until the savepoint ends and accepts them
-again afterwards. A native read-only transaction the Store did not open (your own
-`db.transaction(fn, { accessMode: "read only" })`) carries no read-only fact: TypeGraph writes
-through it as before, so PostgreSQL rejects the write and aborts the transaction, and SQLite has no
-read-only transaction to refuse it.
+savepoint of that transaction. On PostgreSQL that savepoint is read-only at the engine: its first
+statement sets `transaction_read_only`, which PostgreSQL applies to the savepoint and every savepoint
+opened inside it, and reads the mode back in the same statement. A session that did not take the
+mode (a proxy that runs the statement on another server session, say) is refused with
+`ConfigurationError` (`POSTGRES_READ_ONLY_MODE_NOT_TAKEN`) before the callback runs. PostgreSQL
+restores the caller's access mode when the savepoint ends. The caller's transaction refuses
+TypeGraph writes until the savepoint ends and accepts them again afterwards. A native read-only
+transaction the Store did not open (your own `db.transaction(fn, { accessMode: "read only" })`)
+carries no read-only fact: TypeGraph writes through it as before, so PostgreSQL rejects the write
+and aborts the transaction, and SQLite has no read-only transaction to refuse it.
 
 Until the transaction ends, the driver connection it runs on holds the read-only fact too. A
 connection runs one transaction at a time, so a context TypeGraph cannot tie to the transaction is

@@ -4695,7 +4695,7 @@ const NATIVE_TRANSACTION_STATE: unique symbol;
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
 }> & {
-    [READ_ONLY_SCOPES]: number;
+    [READ_ONLY_SCOPES]: readonly string[];
     [CONNECTION]: object | undefined;
 };
 
