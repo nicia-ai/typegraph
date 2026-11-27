@@ -366,32 +366,32 @@ export function wrapTransactionIdentity<G extends GraphDef>(
     explainSame: (a, b) => identity.explainSame(a, b),
     transitionsOf: (ref, options) => identity.transitionsOf(ref, options),
     replay: (ref, options) => identity.replay(ref, options),
-    async assertSame(a, b) {
+    async assertSame(a, b, window) {
       recorder.assertWritable(`${owner}.identity.assertSame()`);
-      const result = await identity.assertSame(a, b);
+      const result = await identity.assertSame(a, b, window);
       recorder.recordIdentity("sameAssertions", 1);
       return result;
     },
-    async assertDifferent(a, b) {
+    async assertDifferent(a, b, window) {
       recorder.assertWritable(`${owner}.identity.assertDifferent()`);
-      const result = await identity.assertDifferent(a, b);
+      const result = await identity.assertDifferent(a, b, window);
       recorder.recordIdentity("differentAssertions", 1);
       return result;
     },
     async bulkAssertSame(pairs) {
       recorder.assertWritable(`${owner}.identity.bulkAssertSame()`);
-      // Pin the intent count before awaiting: the caller may mutate the input
-      // array while the write is in flight (matches the node/edge wrappers).
-      const count = pairs.length;
+      // Count the pairs the facade snapshotted (one result per pair), never a
+      // separate read of the caller's array: a second read can disagree with
+      // the snapshot, and the caller may mutate the array while the write is
+      // in flight.
       const result = await identity.bulkAssertSame(pairs);
-      recorder.recordIdentity("sameAssertions", count);
+      recorder.recordIdentity("sameAssertions", result.length);
       return result;
     },
     async bulkAssertDifferent(pairs) {
       recorder.assertWritable(`${owner}.identity.bulkAssertDifferent()`);
-      const count = pairs.length;
       const result = await identity.bulkAssertDifferent(pairs);
-      recorder.recordIdentity("differentAssertions", count);
+      recorder.recordIdentity("differentAssertions", result.length);
       return result;
     },
     async retractAssertion(id) {

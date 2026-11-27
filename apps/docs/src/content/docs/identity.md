@@ -131,6 +131,19 @@ current semantic pair is refused rather than silently collapsed onto a
 different `validFrom`. Empty objects retain the ordinary unwindowed semantics,
 including inside a mixed bulk call.
 
+A mutation refuses what its arguments alone decide (an unregistered kind, a
+self-assertion, a window bound that is not a canonical ISO 8601 instant, and for
+a bulk call a `pairs` value that is not an array or a hole or non-object entry
+in it) before it opens a transaction or takes the identity lock, so such a call
+issues no statement, writes no row, and never waits behind another writer. A
+bulk call reads its array once, and checks its pairs in index order, reporting
+the first defect it finds; within a pair it checks the kinds, then the
+self-assertion, then the window bounds, so `{ a: alice, b: alice, validFrom:
+"yesterday" }` is refused as a self-assertion. Refusals that depend on stored
+rows or on the operation's own clock (a missing endpoint, a contradiction, a
+window that starts or ends in the future, or is inverted) are decided under the
+lock, after every pair has passed the checks above.
+
 Runtime-evolved nodes carry a nominal dynamic-node type, so they flow through
 the same identity surface without a cast:
 

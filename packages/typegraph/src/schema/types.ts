@@ -32,6 +32,7 @@ import {
 import { type GraphExtension } from "../graph-extension/extension-types";
 import {
   validateEdgeIndexKeysPresence,
+  validateIndexFieldValueTypes,
   validateNodeIndexKeyContract,
 } from "../indexes/node-key-contract";
 import {
@@ -245,6 +246,10 @@ const nodeIndexDeclarationZod = z
   })
   .loose()
   .superRefine((index, ctx) => {
+    const valueTypeMismatch = validateIndexFieldValueTypes(index);
+    if (valueTypeMismatch !== undefined) {
+      ctx.addIssue({ code: "custom", message: valueTypeMismatch });
+    }
     if (index.keys === undefined) return;
     for (const message of validateNodeIndexKeyContract({
       keys: index.keys.map((key) =>
@@ -270,6 +275,10 @@ const edgeIndexDeclarationZod = z
   })
   .loose()
   .superRefine((index, ctx) => {
+    const valueTypeMismatch = validateIndexFieldValueTypes(index);
+    if (valueTypeMismatch !== undefined) {
+      ctx.addIssue({ code: "custom", message: valueTypeMismatch });
+    }
     const message = validateEdgeIndexKeysPresence(index);
     if (message !== undefined) ctx.addIssue({ code: "custom", message });
   });

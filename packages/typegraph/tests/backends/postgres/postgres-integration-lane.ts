@@ -19,6 +19,7 @@ import { createPostgresTables } from "../../../src/backend/drizzle/schema/postgr
 import { createPostgresBackend } from "../../../src/backend/postgres";
 import { createLocalPgliteBackend } from "../../../src/backend/postgres/pglite";
 import { requireDefined } from "../../../src/utils/presence";
+import { openReopenableNodePostgresStorage } from "../../helpers/reopenable-storage";
 import { openTracedNodePostgresConnection } from "../../helpers/traced-connection";
 import type { IntegrationSuiteSlice } from "../integration-registrations";
 import { createIntegrationTestSuite } from "../integration-test-suite";
@@ -97,6 +98,8 @@ export function registerPostgresIntegrationLane(
           driver: "node-postgres",
           openTracedConnection: (tableNameSets) =>
             openTracedNodePostgresConnection(databaseUrl, tableNameSets),
+          openReopenableStorage: () =>
+            openReopenableNodePostgresStorage(databaseUrl),
           createIsolatedBackend: async () => {
             const { backend } = await createLocalPgliteBackend();
             return { backend, cleanup: () => backend.close() };

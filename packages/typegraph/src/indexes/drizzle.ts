@@ -12,6 +12,7 @@ import {
   uniqueIndex as sqliteUniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
+import { assertBundledDialectDateIndexExpressionsSupported } from "../backend/capabilities/date-index-expressions";
 import { toDrizzleSql } from "../backend/drizzle/execution/types";
 import { type SqlDialect } from "../query/dialect";
 import { sql as portableSql, type SqlFragment } from "../query/sql-fragment";
@@ -51,6 +52,11 @@ export function buildPostgresNodeIndexBuilders(
   const nodeIndexes = indexes.filter(
     (index): index is NodeIndexDeclaration =>
       index.entity === "node" && index.method === undefined,
+  );
+  assertBundledDialectDateIndexExpressionsSupported(
+    "postgres",
+    nodeIndexes,
+    "buildPostgresNodeIndexBuilders()",
   );
 
   return nodeIndexes.map((index) => {
@@ -97,6 +103,11 @@ export function buildPostgresEdgeIndexBuilders(
   const edgeIndexes = indexes.filter(
     (index): index is EdgeIndexDeclaration =>
       index.entity === "edge" && index.method === undefined,
+  );
+  assertBundledDialectDateIndexExpressionsSupported(
+    "postgres",
+    edgeIndexes,
+    "buildPostgresEdgeIndexBuilders()",
   );
 
   return edgeIndexes.map((index) => {
