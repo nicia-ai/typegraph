@@ -1066,7 +1066,7 @@ function createRecordedTransactionBackend(
   // the binding's, so a lock path taken through any operation of the bound
   // session dedupes against the same single-flight promises — including
   // concurrent same-transaction writers.
-  const graphLocks = createRecordedGraphLockMemo();
+  const graphLocks = createRecordedGraphLockMemo(target.commands);
 
   async function lockGraph(graphId: string): Promise<void> {
     await lockRecordedGraphWrite(target, graphId, graphLocks);

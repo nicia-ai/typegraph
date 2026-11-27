@@ -431,8 +431,8 @@ describe("T15 — J1 a lock-only decision reads the memo of the session its lock
       await logged.backend.transaction(async (target) => {
         // Two sessions' single-flight memos over one transaction, as two
         // capture scopes bind them.
-        const sessionMemo = createRecordedGraphLockMemo();
-        const otherSessionMemo = createRecordedGraphLockMemo();
+        const sessionMemo = createRecordedGraphLockMemo(target.commands);
+        const otherSessionMemo = createRecordedGraphLockMemo(target.commands);
         const held = await lockRecordedGraphWrite(
           target,
           "graph-a",
@@ -472,7 +472,7 @@ describe("T15 — J1 a lock-only decision never takes a memo from another transa
     try {
       await first.backend.transaction(async (firstTarget) => {
         // An advanced fence in the first transaction's memo.
-        const firstMemo = createRecordedGraphLockMemo();
+        const firstMemo = createRecordedGraphLockMemo(firstTarget.commands);
         const firstLock = await lockRecordedGraphDecision(
           firstTarget,
           "graph-a",
@@ -484,6 +484,54 @@ describe("T15 — J1 a lock-only decision never takes a memo from another transa
           second.reset();
           await expect(
             lockRecordedGraphDecision(secondTarget, "graph-a", firstLock),
+          ).rejects.toBeInstanceOf(CompilerInvariantError);
+          expect(second.statements).toHaveLength(0);
+        });
+      });
+    } finally {
+      await first.close();
+      await second.close();
+    }
+  });
+});
+
+describe("T15 — J1 a graph-lock memo serves only the transaction that filled it", () => {
+  it("refuses another transaction's memo on every entry path, before any statement on the deciding one", async () => {
+    const first = await createLoggedPostgresBackend();
+    const second = await createLoggedPostgresBackend();
+    try {
+      await first.backend.transaction(async (firstTarget) => {
+        // An advanced fence in the first transaction's memo.
+        const firstMemo = createRecordedGraphLockMemo(firstTarget.commands);
+        const firstLock = await lockRecordedGraphDecision(
+          firstTarget,
+          "graph-a",
+          undefined,
+          firstMemo,
+        );
+        await second.backend.transaction(async (secondTarget) => {
+          second.reset();
+          // The memo named on its own, with no held lock.
+          await expect(
+            lockRecordedGraphDecision(
+              secondTarget,
+              "graph-a",
+              undefined,
+              firstMemo,
+            ),
+          ).rejects.toBeInstanceOf(CompilerInvariantError);
+          // The memo and the lock it came with, together.
+          await expect(
+            lockRecordedGraphDecision(
+              secondTarget,
+              "graph-a",
+              firstLock,
+              firstMemo,
+            ),
+          ).rejects.toBeInstanceOf(CompilerInvariantError);
+          // The plain write lock reads the same memo.
+          await expect(
+            lockRecordedGraphWrite(secondTarget, "graph-a", firstMemo),
           ).rejects.toBeInstanceOf(CompilerInvariantError);
           expect(second.statements).toHaveLength(0);
         });
