@@ -232,6 +232,7 @@ import {
 } from "../resolved-mutation-set";
 import {
   revalidatingWriteParts,
+  storedPropsEqual,
   validateCreateProps,
   validateRevalidatingWrite,
 } from "../revalidating-write";
@@ -1825,7 +1826,7 @@ function computeNodeUpdate<G extends GraphDef>(
   inputProps: Partial<Record<string, unknown>>,
 ) {
   const registration = getNodeRegistration(ctx.graph, kind);
-  const { retained, stated } = revalidatingWriteParts(
+  const { retained, stated, form } = revalidatingWriteParts(
     existingProps,
     inputProps,
   );
@@ -1834,6 +1835,7 @@ function computeNodeUpdate<G extends GraphDef>(
     retained,
     stated,
     { entityType: "node", kind, operation: "update", id },
+    form,
   );
   return { registration, validatedProps };
 }
@@ -1883,7 +1885,7 @@ export function nodeUpsertDirtyCheck<G extends GraphDef>(
   );
   return {
     validatedProps,
-    unchanged: canonicalEqual(validatedProps, existingProps),
+    unchanged: storedPropsEqual(validatedProps, existingProps),
   };
 }
 

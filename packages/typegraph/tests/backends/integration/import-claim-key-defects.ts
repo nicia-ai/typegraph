@@ -1,24 +1,22 @@
 /**
- * Two uniqueness-key defects an import exposes, pinned as known defects.
+ * Uniqueness keys an import takes: one fixed case and one known defect.
  *
- * A uniqueness claim is keyed by the value a write states. Both defects are a
- * claim keyed from one form of a value and looked up or released from
- * another, and both are owned by the change that gives the uniqueness key one
- * owner; it flips these markers.
+ * A uniqueness claim is keyed by the value a write states.
  *
  *  - An object-valued unique property imported under
- *    `onUnknownProperty: "allow"` persists the document's object verbatim.
- *    PostgreSQL's JSONB returns an object's keys sorted (shorter first), not
- *    in schema order, so the exported object's key order differs from the
- *    order a create states, and the imported claim does not collide with a
- *    create of the same value: two rows hold one unique value. No date is
- *    involved, and it reproduces on main.
- *  - A claim over a date is taken from the `Date` a write states but released
+ *    `onUnknownProperty: "allow"`: PostgreSQL's JSONB returns an object's
+ *    keys sorted (shorter first), not in schema order, and main persisted the
+ *    document's object verbatim, so the imported claim did not collide with a
+ *    create of the same value. The import now stores an unchanged value in
+ *    the schema's key order (`revalidateWrite`), and the claim collides.
+ *  - Known defect, owned by the change that gives the uniqueness key one
+ *    owner, which flips its marker: a claim over a date is taken from the
+ *    `Date` a write states but released
  *    from the row's stored text, so a write that replaces a unique date
  *    (an import under `onConflict: "update"`, `update()`) or deletes the row
  *    leaves the old date reserved.
  */
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { asNodeId, defineGraph, defineNode } from "../../../src";
@@ -116,20 +114,12 @@ export function registerImportClaimKeyDefectIntegrationTests(
       const duplicate = await outcome(() =>
         target.nodes.ClaimKeyBadge.create({ code: { zeta: "z", a: "a" } }),
       );
-      expectObservation({
-        lane: { dialect: target.backend.dialect },
-        observed: {
-          importErrors: imported.errors.length,
-          duplicate,
-        },
-        correct: { importErrors: 0, duplicate: "UniquenessError" },
-        defects: [
-          {
-            label: "import claim key: JSONB key order",
-            on: { dialect: ["postgres"] },
-            today: { importErrors: 0, duplicate: "written" },
-          },
-        ],
+      // The import stores an untouched value that equals its parse in the
+      // schema's key order (`revalidateWrite`), so the claim is keyed as a
+      // create keys it whatever order PostgreSQL's JSONB returned.
+      expect({ importErrors: imported.errors.length, duplicate }).toEqual({
+        importErrors: 0,
+        duplicate: "UniquenessError",
       });
     });
 

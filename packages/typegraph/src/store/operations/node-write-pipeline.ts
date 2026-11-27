@@ -48,7 +48,7 @@ import {
 import type { CompiledSelectSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
-import { assertsStoredLowerBound, storedJsonText } from "../../utils/date";
+import { assertsStoredLowerBound } from "../../utils/date";
 import { claimSupport } from "../claims/backing";
 import { purgeEdgeClaims } from "../claims/edge-claims";
 import {
@@ -85,7 +85,10 @@ import {
 } from "../fulltext-sync";
 import type { OperationEntry, StatementBackend } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
-import { validateRevalidatingWrite } from "../revalidating-write";
+import {
+  storedPropsEqual,
+  validateRevalidatingWrite,
+} from "../revalidating-write";
 import { reviveStoredDateProps } from "../stored-date-revival";
 import { type NodeDeletePlan } from "../types";
 import { hardDeleteEdgeRows, softDeleteEdgeRows } from "./edge-write-pipeline";
@@ -1224,15 +1227,16 @@ export async function applyNodeSetUpdate(
     // The statement wrote the patch as its per-property parse made it, so a
     // stated property the whole-object parse makes differently (an
     // object-level `.overwrite()`) is refused rather than left unnormalized.
-    // Compared as the text the backends store (`storedJsonText`), so a stated
-    // `Date` is compared by the instant it holds, as the statement wrote it.
+    // Compared as the text the backends store (`storedPropsEqual`), so a
+    // stated `Date` is compared by the instant it holds, as the statement
+    // wrote it.
     const persisted = validateRevalidatingWrite(
       schema,
       props,
       args.statedPatch,
       { entityType: "node", kind, operation: "update", id: row.id },
     );
-    if (!canonicalEqual(JSON.parse(storedJsonText(persisted)), props)) {
+    if (!storedPropsEqual(persisted, props)) {
       throw new ValidationError(
         `Set update would persist a non-canonical ${kind} row`,
         {

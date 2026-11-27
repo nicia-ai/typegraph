@@ -6763,7 +6763,7 @@ function analyzeRevalidatingWrite(
     };
   }
   const currentWrite = revalidateWrite(schema, current, {});
-  const mergedWrite = revalidateWrite(schema, merged, {});
+  const mergedWrite = revalidateWrite(schema, merged, {}, "document");
   if (!currentWrite.success || !mergedWrite.success) {
     return { status: "invalid" };
   }

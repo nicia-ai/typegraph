@@ -188,7 +188,10 @@ import {
 } from "../store/operations/write-transaction";
 import { runRecordedTransactionSavepoint } from "../store/recorded-capture";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
-import { revalidateWrite } from "../store/revalidating-write";
+import {
+  describeRevalidationFailure,
+  revalidateWrite,
+} from "../store/revalidating-write";
 import {
   storeBackend,
   storeCaptureEnabled,
@@ -6199,9 +6202,14 @@ export function validateImportProperties(
     // (a `.default()`) under every strategy. A revived date stays the `Date`: it persists as the
     // same text, and a uniqueness claim keyed off the text instead of the
     // `Date` would not match the claim the store's own writes take.
-    const outcome = revalidateWrite(schema, retained, {});
+    const outcome = revalidateWrite(schema, retained, {}, "document");
     if (!outcome.success) {
-      return { success: false, error: formatZodError(outcome.error) };
+      return {
+        success: false,
+        error: describeRevalidationFailure(outcome, (error) =>
+          formatZodError(error),
+        ),
+      };
     }
     return storableImportProperties(outcome.persisted, outcome.parsed);
   } catch (error) {

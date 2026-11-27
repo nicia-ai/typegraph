@@ -124,7 +124,6 @@ import {
 import { validateEdgeProps } from "../../errors/validation";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { type KindRegistry } from "../../registry/kind-registry";
-import { canonicalEqual } from "../../schema/canonical";
 import { chunk } from "../../utils/array";
 import { compareCodePoints } from "../../utils/compare";
 import {
@@ -219,6 +218,8 @@ import {
 } from "../resolved-mutation-set";
 import {
   revalidatingWriteParts,
+  storedFormProps,
+  storedPropsEqual,
   validateCreateProps,
   validateRevalidatingWrite,
 } from "../revalidating-write";
@@ -2661,7 +2662,7 @@ function computeEdgeUpdate<G extends GraphDef>(
   inputProps: Partial<Record<string, unknown>>,
 ): Record<string, unknown> {
   const registration = getEdgeRegistration(ctx.graph, kind);
-  const { retained, stated } = revalidatingWriteParts(
+  const { retained, stated, form } = revalidatingWriteParts(
     existingProps,
     inputProps,
   );
@@ -2670,6 +2671,7 @@ function computeEdgeUpdate<G extends GraphDef>(
     retained,
     stated,
     { entityType: "edge", kind, operation: "update", id },
+    form,
   );
   const identityRefusal = edgeMatchIdentityUpdateRefusal({
     identity: registration.matchIdentity,
@@ -2725,7 +2727,7 @@ export function edgeUpsertDirtyCheck<G extends GraphDef>(
   );
   return {
     validatedProps,
-    unchanged: canonicalEqual(validatedProps, existingProps),
+    unchanged: storedPropsEqual(validatedProps, existingProps),
   };
 }
 
@@ -4951,7 +4953,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
           fromId,
           toKind,
           toId,
-          props,
+          props: storedFormProps(validatedProps),
           ...(validFrom !== undefined && { validFrom }),
           ...(validTo !== undefined && { validTo }),
         },
@@ -5019,7 +5021,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         fromId,
         toKind,
         toId,
-        props,
+        props: storedFormProps(validatedProps),
         ...(validFrom !== undefined && { validFrom }),
         ...(validTo !== undefined && { validTo }),
       };
@@ -5549,7 +5551,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             fromId: entry.fromId,
             toKind: entry.toKind,
             toId: entry.toId,
-            props: entry.statedProps,
+            props: storedFormProps(entry.validatedProps),
             ...(entry.validFrom !== undefined && {
               validFrom: entry.validFrom,
             }),

@@ -159,6 +159,7 @@ export { registerTraversalLimitPushdownIntegrationTests } from "./traversal-limi
 export { registerTraversalIntegrationTests } from "./traversals";
 export { registerTrustedImportIntegrationTests } from "./trusted-import";
 export { registerUniquenessClaimGateIntegrationTests } from "./uniqueness-claim-gate";
+export { registerUntouchedPropertyBoundaryIntegrationTests } from "./untouched-property-boundaries";
 export { registerUntouchedPropertyPropertyTests } from "./untouched-property-property";
 export { registerUntouchedPropertyWriteIntegrationTests } from "./untouched-property-writes";
 export { registerValidityEndClearingIntegrationTests } from "./validity-end-clearing";

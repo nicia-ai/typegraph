@@ -122,9 +122,14 @@ refused with a `ValidationError` whose issue carries the code
 transform that changes the type (`z.string().transform((v) => v.length)` stores
 a number, which is not a string), a constraint tightened since the row was
 written, or an undeclared key under a `.strict()` schema. State a valid value
-for the property, or repair the rows `validateStore()` reports. A cross-field
+for the property, or repair the rows `validateStore()` reports. The same code
+refuses a write when the schema rewrites a property you did not state and the
+object has its own `.refine()` or `.superRefine()`: the refinement would check
+the rewritten value, while the row keeps the stored one. A cross-field
 refinement that fails because of a property you did state is reported as Zod
-reports it.
+reports it. An `updateWhere()` or `compareAndSet()` over a row that lacks a
+property with a newly added `.default()` is refused, because the statement
+writes only the patch; `update()` fills the default.
 
 This holds for node and edge properties and for every write over an existing
 row: `update()`, `upsertById()`, `getOrCreateByConstraint()` and

@@ -165,7 +165,9 @@ is not idempotent re-imports byte for byte. A property the document lacks is
 filled as the schema makes it, such as a `.default()`, under every
 `onUnknownProperty` strategy. This holds for a new row
 and for `onConflict: "update"`, which replaces the existing row's properties
-with the document's. A row whose stored value is not valid input to its own
+with the document's. A value whose JSON type the schema changes, such as the text `"7"` for a
+`z.coerce.number()` property, is not one a store wrote, so it is stored as
+parsed. A row whose stored value is not valid input to its own
 schema, such as the number a type-changing transform produced, is refused and
 reported in `errors`. See
 [What an update stores](/core-concepts#what-an-update-stores) for the same
