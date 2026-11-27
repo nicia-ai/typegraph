@@ -25,6 +25,7 @@ import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
 import type { GraphBackend } from "../../../src/backend/types";
 import { TypeGraphError } from "../../../src/errors";
 import { requireDefined } from "../../../src/utils/presence";
+import { expectObservation } from "../../helpers/known-defect";
 import {
   cleanupTemporaryFiles,
   createTemporaryDbPath,
@@ -105,6 +106,48 @@ describe("a libSQL transaction's contribution-marker check", () => {
       await provisioner.close();
       client.close();
       provisionerClient.close();
+    }
+  });
+
+  // A transaction TypeGraph opens asking for the writer slot on a local
+  // client shares the root's marker cache, and a cold check reads on the
+  // root client. A single-connection client (`file::memory:`, an embedded
+  // replica) lends that one connection to the open transaction, so the read
+  // fails. Main reads the same way and fails the same way; the trace-parity
+  // fixture records it.
+  it("reads a cold marker on the root client, which a single-connection client lends to the transaction (known limit)", async () => {
+    const client = createClient({ url: "file::memory:" });
+    try {
+      const { backend: provisioner } = await createLibsqlBackend(client);
+      const params = slotParams(provisioner);
+      await requireDefined(provisioner.createVectorIndex)(params);
+      // A fresh backend: no marker confirmation is cached.
+      const { backend: fresh } = await createLibsqlBackend(client);
+      const outcome = await fresh
+        .transaction(async (tx) => {
+          await requireDefined(tx.deleteEmbedding)({ ...params, nodeId: "d1" });
+        })
+        .then(
+          () => "fulfilled",
+          (error: unknown) =>
+            String((error as Readonly<{ cause?: unknown }>).cause ?? error)
+              .split(":")[1]
+              ?.trim(),
+        );
+      expectObservation({
+        lane: { driver: "libsql" },
+        observed: outcome,
+        correct: "fulfilled",
+        defects: [
+          {
+            label: "single-connection cold marker read",
+            on: { driver: ["libsql"] },
+            today: "TRANSACTION_ACTIVE",
+          },
+        ],
+      });
+    } finally {
+      client.close();
     }
   });
 });

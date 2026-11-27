@@ -25,10 +25,9 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { isDeepStrictEqual } from "node:util";
 
 import { PGlite } from "@electric-sql/pglite";
-import { createClient } from "@libsql/client";
+import { type Client, createClient } from "@libsql/client";
 import Database from "better-sqlite3";
 import { drizzle as drizzleBetterSqlite } from "drizzle-orm/better-sqlite3";
 import { drizzle as drizzleLibsql } from "drizzle-orm/libsql";
@@ -43,6 +42,7 @@ import type {
   InsertNodeParams,
   TransactionBackend,
   TrustedImportSession,
+  VectorIndexType,
 } from "../src/backend/types";
 import { TypeGraphError } from "../src/errors";
 import { sql } from "../src/query/sql-fragment";
@@ -91,6 +91,12 @@ type Harness = Readonly<{
     ((fn: (adopted: TransactionBackend) => void) => void) | undefined;
   /** Every statement the driver ran since the harness opened, normalized. */
   trace: () => readonly string[];
+  /**
+   * libSQL only: a client of its own over `file::memory:`, whose one
+   * connection a transaction holds while it is open, recorded into this
+   * harness's trace.
+   */
+  openSingleConnectionClient: (() => Client) | undefined;
   close: () => Promise<void>;
 }>;
 
@@ -159,6 +165,7 @@ async function openHarness(lane: Lane): Promise<Harness> {
           log.mark("COMMIT");
           client.exec("COMMIT");
         },
+        openSingleConnectionClient: undefined,
         inSynchronousCallerTransaction(fn) {
           db.transaction((tx) => {
             log.mark("transaction callback starts");
@@ -185,6 +192,7 @@ async function openHarness(lane: Lane): Promise<Harness> {
       await requireDefined(backend.bootstrapTables)();
       recordLibsqlClient(client, log.sink, noFault);
       const db = drizzleLibsql(client);
+      const singleConnectionClients: Client[] = [];
       return {
         lane,
         backend: backend as AdapterBackend<unknown>,
@@ -197,9 +205,16 @@ async function openHarness(lane: Lane): Promise<Harness> {
           });
         },
         inSynchronousCallerTransaction: undefined,
+        openSingleConnectionClient() {
+          const single = createClient({ url: "file::memory:" });
+          singleConnectionClients.push(single);
+          recordLibsqlClient(single, log.sink, noFault);
+          return single;
+        },
         trace: log.trace,
         close: () => {
           client.close();
+          for (const single of singleConnectionClients) single.close();
           rmSync(directory, { recursive: true, force: true });
           return Promise.resolve();
         },
@@ -223,12 +238,32 @@ async function openHarness(lane: Lane): Promise<Harness> {
           });
         },
         inSynchronousCallerTransaction: undefined,
+        openSingleConnectionClient: undefined,
         trace: log.trace,
         close: () => client.close(),
       };
     }
   }
 }
+
+/** A vector slot no schema declares, so only `createVectorIndex` provisions it. */
+function vectorSlot(indexType: VectorIndexType) {
+  return {
+    graphId: GRAPH_ID,
+    nodeKind: "Item",
+    fieldPath: "embedding",
+    dimensions: 3,
+    metric: "cosine",
+    indexType,
+  } as const;
+}
+
+/** The internal member a schema removal deletes a slot's marker through. */
+type VectorSlotContributionDeleter = Readonly<{
+  deleteSchemaVectorSlotContribution: (
+    slot: ReturnType<typeof vectorSlot>,
+  ) => Promise<void>;
+}>;
 
 function node(id: string): InsertNodeParams {
   return { graphId: GRAPH_ID, kind: "Item", id, props: { label: id } };
@@ -502,6 +537,76 @@ const CELLS: Readonly<Record<string, Cell>> = {
     })();
   },
 
+  "owned: an adoption of the native handle is kept, and writes after the callback rejects":
+    async ({ harness, track }) => {
+      let adopted: TransactionBackend | undefined;
+      await track(
+        "transaction",
+        harness.backend.transactionWithNative(async (_tx, native) => {
+          adopted = harness.backend.adoptTransaction(native);
+          await track("a1", adopted.insertNode(node("a1")));
+          throw new Error(ABORT);
+        }),
+      );
+      await track("late", requireDefined(adopted).insertNode(node("late")));
+    },
+
+  "owned: an adoption of the native handle deletes a vector slot's marker, then the root uses the slot":
+    ({ harness, track }) => {
+      const { backend } = harness;
+      const createVectorIndex = backend.createVectorIndex;
+      const vector = backend.capabilities.vector;
+      if (createVectorIndex === undefined || vector === undefined) return;
+      return (async () => {
+        const slot = vectorSlot(vector.indexTypes[0] ?? "none");
+        await track("provision", createVectorIndex(slot));
+        const deleteEmbedding = requireDefined(backend.deleteEmbedding);
+        await track(
+          "before delete",
+          deleteEmbedding({ ...slot, nodeId: "v1" }),
+        );
+        await track(
+          "transaction",
+          backend.transactionWithNative(async (_tx, native) => {
+            const adopted = backend.adoptTransaction(
+              native,
+            ) as unknown as VectorSlotContributionDeleter;
+            await adopted.deleteSchemaVectorSlotContribution(slot);
+          }),
+        );
+        await track("after commit", deleteEmbedding({ ...slot, nodeId: "v1" }));
+      })();
+    },
+
+  "owned on a single-connection libSQL client: a cold vector-slot marker read":
+    ({ harness, track }) => {
+      const open = harness.openSingleConnectionClient;
+      if (open === undefined) return;
+      return (async () => {
+        const client = open();
+        const { backend: provisioner } = await createLibsqlBackend(client);
+        const slot = vectorSlot(
+          requireDefined(provisioner.capabilities.vector).indexTypes[0] ??
+            "none",
+        );
+        await track(
+          "provision",
+          requireDefined(provisioner.createVectorIndex)(slot),
+        );
+        // A fresh backend: no marker confirmation is cached.
+        const { backend: fresh } = await createLibsqlBackend(client);
+        await track(
+          "transaction",
+          fresh.transaction(async (tx) => {
+            await track(
+              "vector write",
+              requireDefined(tx.deleteEmbedding)({ ...slot, nodeId: "v1" }),
+            );
+          }),
+        );
+      })();
+    },
+
   "engine: a statement's trigger ends the transaction, the callback writes on":
     ({ harness, track }) => {
       if (harness.lane === "pglite") return;
@@ -525,9 +630,13 @@ const CELLS: Readonly<Record<string, Cell>> = {
 };
 
 /**
- * The cells that differ from main, each by one of the view's own rules. For
- * each, `branch` states the outcomes this branch produces; main's are in the
- * fixture. Every other cell equals main's record exactly.
+ * The cells that differ from main, each by one of the view's own rules. In
+ * every one the difference is the same: a write the view refused never
+ * reaches the driver. For each, `branch` states the outcomes and the rows
+ * this branch leaves, and which statement of main's trace the refused write
+ * was (`refusedFromEnd`: 1 is main's last statement); the branch's trace
+ * must be main's without exactly that statement. Every other cell equals
+ * main's record exactly.
  */
 const DIVERGENT_CELLS: Readonly<
   Record<
@@ -535,7 +644,11 @@ const DIVERGENT_CELLS: Readonly<
     Readonly<{
       rule: string;
       lanes: readonly Lane[];
-      branch: Readonly<Record<string, string>>;
+      branch: Readonly<{
+        outcomes: Readonly<Record<string, string>>;
+        rows: readonly string[];
+        refusedFromEnd: number;
+      }>;
     }>
   >
 > = {
@@ -543,36 +656,87 @@ const DIVERGENT_CELLS: Readonly<
     rule: "(1a) a statement after TypeGraph committed is refused and never reaches the connection",
     // PostgreSQL's statement queue already refused it on main.
     lanes: ["better-sqlite3", "libsql"],
-    branch: { late: "TransactionClosedError", transaction: "fulfilled" },
+    branch: {
+      outcomes: { late: "TransactionClosedError", transaction: "fulfilled" },
+      rows: [],
+      refusedFromEnd: 1,
+    },
   },
   "owned: a kept backend writes inside the next transaction": {
     rule: "(1a) a statement after TypeGraph committed is refused, also while the next transaction is open",
     // PostgreSQL's statement queue already refused it on main.
     lanes: ["better-sqlite3", "libsql"],
     branch: {
-      b1: "fulfilled",
-      first: "fulfilled",
-      late: "TransactionClosedError",
-      second: "Error",
+      outcomes: {
+        b1: "fulfilled",
+        first: "fulfilled",
+        late: "TransactionClosedError",
+        second: "Error",
+      },
+      rows: [],
+      // The late write, then b1 and the second transaction's ROLLBACK.
+      refusedFromEnd: 3,
     },
   },
   "owned: the callback keeps its backend and throws synchronously": {
     rule: "(1c) a synchronous throw closes the view like a rejection; (1a) the later write is refused",
     // PostgreSQL's statement queue already refused it on main.
     lanes: ["better-sqlite3", "libsql"],
-    branch: { late: "TransactionClosedError", transaction: "Error" },
+    branch: {
+      outcomes: { late: "TransactionClosedError", transaction: "Error" },
+      rows: [],
+      refusedFromEnd: 1,
+    },
   },
+  "owned: an adoption of the native handle is kept, and writes after the callback rejects":
+    {
+      rule: "(1e) an adoption proven to run on the transaction shares its view, so its write after TypeGraph's ROLLBACK is refused",
+      lanes: ["better-sqlite3", "libsql", "pglite"],
+      branch: {
+        outcomes: {
+          a1: "fulfilled",
+          late: "TransactionClosedError",
+          transaction: "Error",
+        },
+        rows: [],
+        refusedFromEnd: 1,
+      },
+    },
   "trusted import: a kept session's batches after the import committed": {
     rule: "(1d) trusted import runs through the view, empty batches included",
     lanes: ["better-sqlite3", "pglite"],
     branch: {
-      i1: "fulfilled",
-      import: "fulfilled",
-      "late batch": "TransactionClosedError",
-      "late empty batch": "TransactionClosedError",
+      outcomes: {
+        i1: "fulfilled",
+        import: "fulfilled",
+        "late batch": "TransactionClosedError",
+        "late empty batch": "TransactionClosedError",
+      },
+      rows: ["i1"],
+      // The late batch's INSERT; the empty batch issued none on main.
+      refusedFromEnd: 1,
     },
   },
 };
+
+/**
+ * Main's trace without the refused write `refusedFromEnd` statements from its
+ * end; throws unless that statement is a node insert.
+ */
+function withoutRefusedWrite(
+  trace: readonly string[],
+  refusedFromEnd: number,
+): readonly string[] {
+  const index = trace.length - refusedFromEnd;
+  const refused = trace[index];
+  // The statement a refused node write would have run, on every lane.
+  if (!refused?.startsWith('INSERT INTO "typegraph_nodes" ')) {
+    throw new Error(
+      `main's statement ${String(refusedFromEnd)} from the end is not a node insert: ${String(refused)}`,
+    );
+  }
+  return trace.toSpliced(index, 1);
+}
 
 /** A plain `Error` (the callback's own) as the outcome table records it. */
 function normalizeOutcome(outcome: string): string {
@@ -660,31 +824,26 @@ describe("transaction statement traces match main outside the view's own rules",
           .filter(([, divergence]) => divergence.lanes.includes(lane))
           .map(([name]) => name),
       );
-      // A divergent cell is observed as whether it differs from main and
-      // the outcomes it produced; every other cell as its whole record.
-      const observed = Object.fromEntries(
-        Object.entries(branch).map(([name, record]) => [
-          name,
-          divergent.has(name) ?
-            {
-              differsFromMain: !isDeepStrictEqual(record, main[name]),
-              outcomes: record.outcomes,
-            }
-          : record,
-        ]),
-      );
+      // A divergent cell must equal main's record with its own rule
+      // applied: the refused write gone from the trace, and the outcomes and
+      // rows it states. Every other cell must equal main's record.
       const expected = Object.fromEntries(
-        Object.entries(main).map(([name, record]) => [
-          name,
-          divergent.has(name) ?
+        Object.entries(main).map(([name, record]) => {
+          if (!divergent.has(name)) return [name, record];
+          const { outcomes, rows, refusedFromEnd } = requireDefined(
+            DIVERGENT_CELLS[name],
+          ).branch;
+          return [
+            name,
             {
-              differsFromMain: true,
-              outcomes: requireDefined(DIVERGENT_CELLS[name]).branch,
-            }
-          : record,
-        ]),
+              trace: withoutRefusedWrite(record.trace, refusedFromEnd),
+              outcomes,
+              rows,
+            },
+          ];
+        }),
       );
-      expect(observed).toEqual(expected);
+      expect(branch).toEqual(expected);
     },
     240_000,
   );
