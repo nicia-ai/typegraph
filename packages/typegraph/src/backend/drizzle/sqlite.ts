@@ -857,6 +857,15 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
    * session (`createTransactionBackend`).
    */
   rootConnection: object;
+  /**
+   * Whether the runner that opened this transaction closes this view at its
+   * boundary: TypeGraph owns the transaction, so before every statement the
+   * view asks the engine whether it is still open (where the driver's flag
+   * reflects the engine). `false` for an adopted transaction, whose caller
+   * ends it and may hand over a connection in autocommit: its view keeps
+   * only the after-failure probe.
+   */
+  closedByRunner: boolean;
 }>;
 
 /** What a runner knows about an owned transaction when it binds it. */
@@ -2114,6 +2123,7 @@ export function buildSqliteEngineProfile(
             vectorStrategy,
             contributionMaterializer: ctx.contributionMaterializer,
             rootConnection,
+            closedByRunner: true,
             fenceTarget,
             lineage: provisioning.lineage,
             recordedTime: provisioning.recordedTime,
@@ -2160,6 +2170,7 @@ export function buildSqliteEngineProfile(
               vectorStrategy,
               contributionMaterializer: ctx.contributionMaterializer,
               rootConnection,
+              closedByRunner: true,
               fenceTarget,
               lineage: provisioning.lineage,
               recordedTime: provisioning.recordedTime,
@@ -2179,28 +2190,31 @@ export function buildSqliteEngineProfile(
         runDriverOwnedTransaction(
           (recordEngineEnd) =>
             db.transaction(
-              async (tx) => {
+              (tx) => {
                 recordSqliteEngineSavepoint(db, tx);
-                return runInTransactionView(
-                  createTransactionBackend({
-                    capabilities,
-                    db: tx,
-                    operationStrategy,
-                    profileHints: { isSync },
-                    tableNames,
-                    fulltextStrategy,
-                    vectorStrategy,
-                    contributionMaterializer: ctx.contributionMaterializer,
-                    rootConnection,
-                    fenceTarget,
-                    lineage: provisioning.lineage,
-                    recordedTime: provisioning.recordedTime,
-                    isFirstParty,
-                    // BEGIN IMMEDIATE, below.
-                    requestedWriterSlot: true,
-                  }),
-                  fn,
-                  recordEngineEnd,
+                return handedToDriver(
+                  runInTransactionView(
+                    createTransactionBackend({
+                      capabilities,
+                      db: tx,
+                      operationStrategy,
+                      profileHints: { isSync },
+                      tableNames,
+                      fulltextStrategy,
+                      vectorStrategy,
+                      contributionMaterializer: ctx.contributionMaterializer,
+                      rootConnection,
+                      closedByRunner: true,
+                      fenceTarget,
+                      lineage: provisioning.lineage,
+                      recordedTime: provisioning.recordedTime,
+                      isFirstParty,
+                      // BEGIN IMMEDIATE, below.
+                      requestedWriterSlot: true,
+                    }),
+                    fn,
+                    recordEngineEnd,
+                  ),
                 );
               },
               { behavior: "immediate" },
@@ -2222,6 +2236,7 @@ export function buildSqliteEngineProfile(
       tx: AnySqliteDatabase,
       txIsFirstParty: boolean,
       binding: OwnedTransactionBinding = {},
+      closedByRunner = false,
     ): Readonly<{
       backend: TransactionBackend;
       route: TransactionStatementRoute;
@@ -2246,6 +2261,7 @@ export function buildSqliteEngineProfile(
         lineage: provisioning.lineage,
         recordedTime: provisioning.recordedTime,
         isFirstParty: txIsFirstParty,
+        closedByRunner,
         ...binding,
       });
       return {
@@ -2277,6 +2293,7 @@ export function buildSqliteEngineProfile(
         tx,
         isFirstParty,
         binding,
+        true,
       );
       return runThenCloseView(
         drainAndClose,
@@ -2303,6 +2320,7 @@ export function buildSqliteEngineProfile(
         vectorStrategy,
         contributionMaterializer: ctx.contributionMaterializer,
         rootConnection,
+        closedByRunner: false,
         fenceTarget,
         lineage: provisioning.lineage,
         recordedTime: provisioning.recordedTime,
@@ -2373,6 +2391,7 @@ export function buildSqliteEngineProfile(
             vectorStrategy,
             contributionMaterializer: ctx.contributionMaterializer,
             rootConnection,
+            closedByRunner: true,
             fenceTarget,
             lineage: provisioning.lineage,
             recordedTime: provisioning.recordedTime,
@@ -2446,13 +2465,15 @@ export function buildSqliteEngineProfile(
         runDriverOwnedTransaction(
           (recordEngineEnd) =>
             db.transaction(
-              async (tx) => {
+              (tx) => {
                 recordSqliteEngineSavepoint(db, tx);
-                return runOnOwnedTransaction(
-                  tx,
-                  (txBackend, route) => fn(txBackend, tx, route),
-                  { requestedWriterSlot: behavior === "immediate" },
-                  recordEngineEnd,
+                return handedToDriver(
+                  runOnOwnedTransaction(
+                    tx,
+                    (txBackend, route) => fn(txBackend, tx, route),
+                    { requestedWriterSlot: behavior === "immediate" },
+                    recordEngineEnd,
+                  ),
                 );
               },
               { behavior },
@@ -2917,6 +2938,27 @@ function runInTransactionView<T>(
  * layer settled on ({@link runThenCloseView}); this rejects with that
  * outcome instead.
  */
+/**
+ * `attempt`, the promise a transaction callback hands to the driver whose
+ * `transaction()` runs it, marked handled where it is created. The driver
+ * awaits it, and its outcome reaches the caller through the driver; but a
+ * driver that cannot await an asynchronous callback (better-sqlite3's
+ * synchronous `transaction()`, which commits as the callback returns and
+ * then throws because it returned a promise) drops it, and the attempt's
+ * rejection — the view's ended outcome at its boundary, for one — would
+ * otherwise surface as an unhandled rejection after the caller already got
+ * the driver's error.
+ */
+function handedToDriver<T>(attempt: Promise<T>): Promise<T> {
+  attempt.catch(ignoreDroppedAttempt);
+  return attempt;
+}
+
+/** Swallows a dropped attempt's rejection: see {@link handedToDriver}. */
+function ignoreDroppedAttempt(): void {
+  // Intentionally empty: the caller's outcome is the driver's.
+}
+
 async function runDriverOwnedTransaction<T>(
   open: (recordEngineEnd: RecordEngineEnd) => Promise<T>,
 ): Promise<T> {
@@ -2951,7 +2993,9 @@ function createTransactionBackend(
   const view = createSqliteTransactionExecutionView(sessionAdapter, {
     queue: connectionStatementQueue(sqliteConnectionIdentity(options.db)),
     engineState:
-      driverState?.reflectsEngine === true ? driverState.read : undefined,
+      options.closedByRunner && driverState?.reflectsEngine === true ?
+        driverState.read
+      : undefined,
     stateAfterFailure: () =>
       sqliteTransactionStateAfterFailure(driverState, sessionAdapter),
   });

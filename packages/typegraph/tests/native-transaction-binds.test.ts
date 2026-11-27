@@ -221,7 +221,9 @@ describe("engine binds on better-sqlite3", () => {
     const database = drizzle(client);
     const backend = createSqliteBackend(database);
     const rival = createSqliteBackend(database);
-    // The engine's COMMIT finds no transaction: the trigger ended it.
+    // The trigger ended the transaction through the native handle, which the
+    // transaction's view never saw: at its boundary the engine reports it
+    // ended, so TypeGraph sends no COMMIT and the outcome is unknown.
     const attempt = backend.transactionWithNative(async (target, native) => {
       const opener = stateOf(target);
       expect(stateOfAdoption(backend, native)).toBe(opener);
@@ -246,7 +248,10 @@ describe("engine binds on better-sqlite3", () => {
         client.exec("ROLLBACK");
       }
     });
-    await expect(attempt).rejects.toThrow("no transaction is active");
+    await expect(attempt).rejects.toMatchObject({
+      name: "TransactionOutcomeUnknownError",
+      details: { reason: "transaction-ended" },
+    });
   });
 
   it("ends a transaction's identity when another engine transaction is published on the connection, even if the trigger's end was never observed", async () => {
@@ -268,7 +273,10 @@ describe("engine binds on better-sqlite3", () => {
         client.exec("ROLLBACK");
       }
     });
-    await expect(attempt).rejects.toThrow("no transaction is active");
+    await expect(attempt).rejects.toMatchObject({
+      name: "TransactionOutcomeUnknownError",
+      details: { reason: "transaction-ended" },
+    });
   });
 
   it("gives each binding of a caller-opened transaction, and of its savepoint, a state of its own: a better-sqlite3 transaction object runs on whatever transaction the connection has", () => {
