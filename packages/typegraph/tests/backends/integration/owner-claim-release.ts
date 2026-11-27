@@ -18,9 +18,11 @@
  *
  * REVERT CHECK: restoring main's `src` fails the date move and remove cases on
  * the lanes whose release is keyed (every move path; the per-row soft delete),
- * the lazy and nullable-union date kinds, the object claim stored in another
- * key order, the import cases, the piped get-or-create resurrection and the
- * provenance reopen. The legacy raw-form claim and recursive-union cases pass
+ * the lazy and nullable-union date kinds, the import cases, the piped
+ * get-or-create resurrection and the provenance reopen; on PostgreSQL it also
+ * fails every object-valued case (update, soft-delete resurrection, provenance
+ * reopen, verbatim import). The revision before the stored-row key walk
+ * ordered object keys by shape (e049992a) fails the last three on PostgreSQL. The legacy raw-form claim and recursive-union cases pass
  * on main and fail on the previous head of this change (aa064e84), which
  * keyed date fields from schema introspection; they guard against that shape
  * coming back.
@@ -208,7 +210,7 @@ function buildGraph(id: string) {
       ocrDerives: {
         type: ocrDerives,
         from: [OcrJustification],
-        to: [OcrEvent],
+        to: [OcrEvent, OcrBadge],
       },
     },
   });
@@ -671,18 +673,15 @@ function registerOwnerClaimReleaseCases(
       await expectNoViolations(store);
     });
 
-    it("an object claim stored in another key order is released by the owner's update", async () => {
+    // PostgreSQL's JSONB returns `{ zeta, a }` as `{ a, zeta }`. A create keys
+    // the object in its shape's order, so every path keying the stored row
+    // must reproduce that order, or it names a claim the create never took.
+    it("an object-valued claim is released by the owner's update on every backend", async () => {
       const { graphId, store, backend } = await createGraphStore(context, port);
       await store.nodes.OcrBadge.create(
         { code: { zeta: "z", a: "a" } },
         { id: "badge" },
       );
-      // The key order PostgreSQL's JSONB returns, which an earlier release
-      // computed from the stored row and so never matched.
-      await plantClaim(backend, graphId, "OcrBadge", "badge", "OcrBadge_code", {
-        taken: keyOf("code", { zeta: "z", a: "a" }),
-        planted: JSON.stringify({ a: "a", zeta: "z" }),
-      });
 
       await store.nodes.OcrBadge.update("badge" as NodeId<typeof OcrBadge>, {
         code: { zeta: "y", a: "b" },
@@ -691,6 +690,79 @@ function registerOwnerClaimReleaseCases(
       expect(await liveClaims(backend, graphId, "OcrBadge_code")).toEqual([
         claim("OcrBadge_code", keyOf("code", { zeta: "y", a: "b" }), "badge"),
       ]);
+      await store.nodes.OcrBadge.create({ code: { zeta: "z", a: "a" } });
+      await expectNoViolations(store);
+    });
+
+    it("a soft-deleted object-valued row is resurrected by get-or-create under its own id", async () => {
+      const { graphId, store, backend } = await createGraphStore(context, port);
+      await store.nodes.OcrBadge.create(
+        { code: { zeta: "z", a: "a" } },
+        { id: "badge" },
+      );
+      await store.nodes.OcrBadge.delete("badge" as NodeId<typeof OcrBadge>);
+
+      const result = await store.nodes.OcrBadge.getOrCreateByConstraint(
+        "OcrBadge_code",
+        { code: { zeta: "z", a: "a" } },
+      );
+
+      expect({
+        action: result.action,
+        id: result.node.id,
+        claims: await liveClaims(backend, graphId, "OcrBadge_code"),
+        duplicate: await outcome(() =>
+          store.nodes.OcrBadge.create({ code: { zeta: "z", a: "a" } }),
+        ),
+      }).toEqual({
+        action: "resurrected",
+        id: "badge",
+        claims: [
+          claim("OcrBadge_code", keyOf("code", { zeta: "z", a: "a" }), "badge"),
+        ],
+        duplicate: "UniquenessError",
+      });
+      await expectNoViolations(store);
+    });
+
+    it("an object-valued fact reopened by provenance reclaims the key a create claims", async () => {
+      const store = await context.createHistoryStore(buildGraph(nextGraphId()));
+      const source = await store.nodes.OcrSource.create(
+        { label: "source", retracted: false },
+        { id: "source" },
+      );
+      const fact = await store.nodes.OcrBadge.create(
+        { code: { zeta: "z", a: "a" } },
+        { id: "fact" },
+      );
+      const justification = await store.nodes.OcrJustification.create(
+        { label: "justification" },
+        { id: "justification" },
+      );
+      await store.edges.ocrPremiseOf.create(source, justification, {});
+      await store.edges.ocrDerives.create(justification, fact, {});
+      const provenance = createRetractionCapability(store, {
+        source: { kind: "OcrSource" },
+        justification: { kind: "OcrJustification" },
+        fact: { kinds: ["OcrBadge"] },
+        premiseOf: { kind: "ocrPremiseOf" },
+        derives: { kind: "ocrDerives" },
+      });
+
+      await provenance.retract(source);
+      await provenance.unRetract(source);
+
+      expect({
+        claims: await liveClaims(store.backend, store.graphId, "OcrBadge_code"),
+        duplicate: await outcome(() =>
+          store.nodes.OcrBadge.create({ code: { zeta: "z", a: "a" } }),
+        ),
+      }).toEqual({
+        claims: [
+          claim("OcrBadge_code", keyOf("code", { zeta: "z", a: "a" }), "fact"),
+        ],
+        duplicate: "UniquenessError",
+      });
     });
 
     // A piped date's input is text and its output a `Date`, and stored-date
@@ -877,10 +949,11 @@ function registerOwnerClaimReleaseCases(
       await expectNoViolations(store);
     });
 
-    // An import under "allow" keys an object value from the document's text,
-    // which a PostgreSQL export returns in JSONB's key order rather than the
-    // shape's — PR #1005's "import claim key: JSONB key order", the same on
-    // main.
+    // An import under "allow" keys the object value it writes verbatim, which
+    // a PostgreSQL export hands back in JSONB's key order. The stored-props
+    // key path puts it back in the shape's order, so it collides with a create
+    // of the same value (PR #1005's "import claim key: JSONB key order", which
+    // main still has).
     it("an object-valued unique property imported under allow collides with a create of the same value", async () => {
       const source = await context.createStore(buildGraph(nextGraphId()));
       await source.nodes.OcrBadge.create(
@@ -888,7 +961,7 @@ function registerOwnerClaimReleaseCases(
         { id: "badge" },
       );
       const exported = await exportGraph(source);
-      const { store, backend } = await createGraphStore(context, port);
+      const { store } = await createGraphStore(context, port);
       const imported = await importGraph(
         store,
         {
@@ -901,20 +974,11 @@ function registerOwnerClaimReleaseCases(
         { onConflict: "error", onUnknownProperty: "allow" },
       );
       expect(imported.errors).toEqual([]);
-      expectObservation({
-        lane: { dialect: backend.dialect },
-        observed: await outcome(() =>
+      expect(
+        await outcome(() =>
           store.nodes.OcrBadge.create({ code: { zeta: "z", a: "a" } }),
         ),
-        correct: "UniquenessError",
-        defects: [
-          {
-            label: "import claim key: JSONB key order",
-            on: { dialect: ["postgres"] },
-            today: "written",
-          },
-        ],
-      });
+      ).toBe("UniquenessError");
     });
 
     // PR #1005 pinned this as "date claim release" (and, on better-sqlite3,

@@ -80,35 +80,74 @@ function unwrapTransparentWrappers(schema: z.ZodType): z.ZodType {
     : schema;
 }
 
-function reviveObject(
+/**
+ * What a walk over a stored value does at each position its schema reaches:
+ * revive stored date text (always), and — for a claim key only — also put a
+ * declared object's keys back in the order its schema's parse emits them.
+ */
+type StoredValueWalk = Readonly<{ ordersObjectKeys: boolean }>;
+
+const REVIVE_ONLY: StoredValueWalk = { ordersObjectKeys: false };
+const CLAIM_KEY: StoredValueWalk = { ordersObjectKeys: true };
+
+/**
+ * The entries of a stored object in the order a parse through `shape` emits
+ * them: the declared keys in the shape's order, then every undeclared key in
+ * its stored order (a Zod object's parse writes its shape first and then the
+ * extras a loose object or catchall keeps, in their input order).
+ */
+function shapeOrderedEntries(
   shape: Readonly<Record<string, z.ZodType>>,
   value: Record<string, unknown>,
+): readonly (readonly [string, unknown])[] {
+  const declared = Object.keys(shape).filter((key) =>
+    Object.hasOwn(value, key),
+  );
+  const undeclared = Object.keys(value).filter(
+    (key) => !Object.hasOwn(shape, key),
+  );
+  return [...declared, ...undeclared].map((key) => [key, value[key]] as const);
+}
+
+function walkObject(
+  shape: Readonly<Record<string, z.ZodType>>,
+  value: Record<string, unknown>,
+  walk: StoredValueWalk,
 ): Record<string, unknown> {
-  const entries = Object.entries(value).map(([key, element]) => {
+  const source =
+    walk.ordersObjectKeys ?
+      shapeOrderedEntries(shape, value)
+    : Object.entries(value);
+  const entries = source.map(([key, element]) => {
     const propertySchema = Object.hasOwn(shape, key) ? shape[key] : undefined;
     return [
       key,
       propertySchema === undefined ? element : (
-        reviveStoredDates(propertySchema, element)
+        walkStoredValue(propertySchema, element, walk)
       ),
     ] as const;
   });
-  const changed = entries.some(([key, element]) => element !== value[key]);
+  const storedKeys = Object.keys(value);
+  const changed = entries.some(
+    ([key, element], index) =>
+      element !== value[key] || key !== storedKeys[index],
+  );
   // `Object.fromEntries` defines own data properties, so a stored
   // `__proto__` key stays a property rather than reaching the setter.
   return changed ? Object.fromEntries(entries) : value;
 }
 
-/**
- * `value`, as stored for a position whose schema is `schema`, with every
- * stored date text that position's schema accepts only as a `Date` revived
- * to that `Date`. Returns `value` itself when nothing is revived.
- */
-export function reviveStoredDates(schema: z.ZodType, value: unknown): unknown {
+function walkStoredValue(
+  schema: z.ZodType,
+  value: unknown,
+  walk: StoredValueWalk,
+): unknown {
   const unwrapped = unwrapTransparentWrappers(schema);
   // A schema that rewrites its value on every parse — on the date itself or on
   // an object or array holding it — would rewrite a revived stored value, so
-  // nothing at or below it is revived and the re-parse refuses as before.
+  // nothing at or below it is revived and the re-parse refuses as before. Its
+  // output's key order is the rewrite's own, which no shape states, so nothing
+  // below it is reordered either: the stored order is the best evidence.
   if (hasOverwriteCheck(unwrapped)) return value;
   const def = unwrapped.def as SchemaDef;
   if (unwrapped.type === "date") {
@@ -118,18 +157,25 @@ export function reviveStoredDates(schema: z.ZodType, value: unknown): unknown {
   }
   const shape = objectSchemaShape(unwrapped);
   if (shape !== undefined) {
-    return isPlainObject(value) ? reviveObject(shape, value) : value;
+    return isPlainObject(value) ? walkObject(shape, value, walk) : value;
   }
   if (unwrapped.type === "array") {
     const element = def.element;
     if (element === undefined || !Array.isArray(value)) return value;
     const items = value as readonly unknown[];
-    const revived = items.map((item) => reviveStoredDates(element, item));
-    return revived.some((item, index) => item !== items[index]) ? revived : (
-        value
-      );
+    const walked = items.map((item) => walkStoredValue(element, item, walk));
+    return walked.some((item, index) => item !== items[index]) ? walked : value;
   }
   return value;
+}
+
+/**
+ * `value`, as stored for a position whose schema is `schema`, with every
+ * stored date text that position's schema accepts only as a `Date` revived
+ * to that `Date`. Returns `value` itself when nothing is revived.
+ */
+export function reviveStoredDates(schema: z.ZodType, value: unknown): unknown {
+  return walkStoredValue(schema, value, REVIVE_ONLY);
 }
 
 /**
@@ -150,20 +196,34 @@ export function reviveStoredDateProps(
  * revival reads, the row an update replaces, a verbatim import's document
  * value, a merge's after-image.
  *
- * A claim is keyed from the value the row stores. The one place the stored
- * rendering of a value differs from the rendering a write validated is a
- * date — a `Date` is stored as its ISO text — so the stored props are
- * returned with that text revived ({@link reviveStoredDateProps}) and nothing
- * else. They are deliberately NOT parsed through the kind's schema again: a
+ * A claim is keyed from the value the row stores, in the rendering a create
+ * of that value keys. Two things about a stored rendering differ from the
+ * props a write validated, and this walk restores both, by the schema's
+ * structure alone:
+ *
+ *  - a date: a `Date` is stored as its ISO text, which is revived
+ *    ({@link reviveStoredDates});
+ *  - an object's key order: a parse through a `z.object()` emits its declared
+ *    keys in the shape's order, and the key of an object value is its JSON
+ *    text, but PostgreSQL's `jsonb` hands an object back in its own key order.
+ *    Each object the walk reaches (through the wrappers, nested shapes and
+ *    array elements revival follows) is rebuilt in the shape's order, its
+ *    undeclared keys after, so the key derived here is the key a create of
+ *    the same value derived, on every backend.
+ *
+ * Nothing is parsed: no transform, refinement or coercion runs, because a
  * schema whose parse does not reproduce its own output (a transform that
  * appends to its input, a coercion of a value it already produced) would key
- * a value the row does not hold, and a date the revival cannot reach (under
+ * a value the row does not hold, and a date the walk cannot reach (under
  * `z.lazy()` or `z.union()`) would fail the parse rather than key as its
- * stored text.
+ * stored text. What the walk does not reach keeps its stored rendering: an
+ * object under a union, lazy schema, pipe, record or `.overwrite()`, the
+ * undeclared keys of a loose object (whose relative order `jsonb` loses), and
+ * a `z.record()` value, whose parse keeps its input order.
  */
 export function storedNodeClaimProps(
   schema: z.ZodType,
   props: Record<string, unknown>,
 ): Record<string, unknown> {
-  return reviveStoredDateProps(schema, props);
+  return walkStoredValue(schema, props, CLAIM_KEY) as Record<string, unknown>;
 }
