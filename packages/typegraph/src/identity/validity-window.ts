@@ -17,6 +17,22 @@ export function hasExplicitIdentityValidityWindow(
 }
 
 /**
+ * The clock-free half of {@link resolveIdentityValidityWindow}: each bound the
+ * caller stated is a canonical instant, checked in the order the resolution
+ * checks them. A mutation calls it before it enters its operation, so a
+ * malformed bound is refused without a statement; every other window refusal
+ * compares against the operation's own clock and stays with the resolution.
+ */
+export function validateIdentityValidityWindowBounds(
+  window: IdentityValidityWindow | undefined,
+): Readonly<{ validFrom: string | undefined; validTo: string | undefined }> {
+  return {
+    validFrom: validateOptionalCanonicalIsoDate(window?.validFrom, "validFrom"),
+    validTo: validateOptionalCanonicalIsoDate(window?.validTo, "validTo"),
+  };
+}
+
+/**
  * Validates, defaults, and classifies one identity assertion window against the
  * operation's single captured clock. Every writer and replay path shares this
  * owner so acceptance and current-state materialization cannot drift.
@@ -25,10 +41,9 @@ export function resolveIdentityValidityWindow(
   window: IdentityValidityWindow | undefined,
   operationInstant: string,
 ): ResolvedIdentityValidityWindow {
-  const validFrom =
-    validateOptionalCanonicalIsoDate(window?.validFrom, "validFrom") ??
-    operationInstant;
-  const validTo = validateOptionalCanonicalIsoDate(window?.validTo, "validTo");
+  const bounds = validateIdentityValidityWindowBounds(window);
+  const validFrom = bounds.validFrom ?? operationInstant;
+  const validTo = bounds.validTo;
   if (compareCodePoints(validFrom, operationInstant) > 0) {
     throw new IdentityValidityWindowError({
       reason: "future-valid-from",
