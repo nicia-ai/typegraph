@@ -509,7 +509,7 @@ function createClaimCallCounter(backend: GraphBackend): ClaimCallCounter {
         return original(...args);
       };
     }
-    return deriveBackend(target, overrides as Partial<B>);
+    return deriveBackend(target, overrides as never);
   }
   const counting = deriveBackend(counted(backend), {
     transaction: (fn, options) =>
