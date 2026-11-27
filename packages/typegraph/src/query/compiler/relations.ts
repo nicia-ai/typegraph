@@ -36,7 +36,9 @@ export type RelationColumn = Readonly<{
     component: "id" | "kind";
     alias: string;
   }>;
-}>;
+}> &
+  // Whether the column's dates are ones the caller stated.
+  Pick<DatabaseExpression, "dateOrigin" | "elementDateOrigins">;
 
 export type RelationOrder = Readonly<{
   expression: DatabaseExpression;

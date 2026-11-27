@@ -304,6 +304,23 @@ export function decodeStoredDate(value: unknown): unknown {
 }
 
 /**
+ * A date a query expression yields that the caller stated — a date literal or
+ * parameter — rather than stored property text, as a read returns it: a valid
+ * `Date` passes through, and text or a number the engine returns becomes the
+ * `Date` it names whenever that is a valid instant, so a stated date outside
+ * the portable years (`0000`, `+010000`) comes back as the `Date` stated.
+ * Anything else is returned as is — never an `Invalid Date`. Which leaf a
+ * query result uses is decided by the expression's origin
+ * (`decodeExpressionDate`), never by a terminal.
+ */
+export function decodeStatedDate(value: unknown): unknown {
+  if (value instanceof Date) return value;
+  if (typeof value !== "string" && typeof value !== "number") return value;
+  const decoded = new Date(value);
+  return Number.isNaN(decoded.getTime()) ? value : decoded;
+}
+
+/**
  * The positions under a value that lead to a date, compiled from its field
  * typing: the date itself, the declared keys of an object that lead to one,
  * the element of an array, or the value of a record. A value with no date

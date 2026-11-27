@@ -7,15 +7,13 @@ import {
   type StatementBackend,
   type StoreTransactionBackend,
 } from "../../store/operation-scope";
-import {
-  decodeStoredDate,
-  decodeStoredValue,
-} from "../../store/stored-date-revival";
+import { decodeStoredValue } from "../../store/stored-date-revival";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import type { QueryAst, SortDirection, ValueType } from "../ast";
 import { compileNameCheckedQuery } from "../compiler";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
-import type { DatabaseExpression } from "../expressions";
+import { decodeExpressionDate } from "../execution/value-decoder";
+import type { DatabaseExpression, DateOrigin } from "../expressions";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
@@ -553,7 +551,11 @@ export function decodeExpressionValue(
     case "date":
     case "number":
     case "string": {
-      return decodeScalarExpressionValue(value, expression.valueType);
+      return decodeScalarExpressionValue(
+        value,
+        expression.valueType,
+        expression.dateOrigin,
+      );
     }
     case "object":
     case "embedding": {
@@ -572,8 +574,16 @@ export function decodeExpressionValue(
       return parsed.map((element) => {
         if (element === null || element === undefined) return;
         return elementFields === undefined ?
-            decodeScalarExpressionValue(element, elementValueType)
-          : decodeRecordExpressionValue(element, elementFields);
+            decodeScalarExpressionValue(
+              element,
+              elementValueType,
+              expression.dateOrigin,
+            )
+          : decodeRecordExpressionValue(
+              element,
+              elementFields,
+              expression.elementDateOrigins,
+            );
       });
     }
     case "unknown": {
@@ -586,6 +596,7 @@ export function decodeExpressionValue(
 function decodeRecordExpressionValue(
   value: unknown,
   fields: Readonly<Record<string, ValueType>>,
+  dateOrigins: Readonly<Record<string, DateOrigin>> | undefined,
 ): Readonly<Record<string, unknown>> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw new ConfigurationError(
@@ -599,7 +610,7 @@ function decodeRecordExpressionValue(
         key,
         field === null || field === undefined ?
           undefined
-        : decodeScalarExpressionValue(field, valueType),
+        : decodeScalarExpressionValue(field, valueType, dateOrigins?.[key]),
       ];
     }),
   );
@@ -608,6 +619,7 @@ function decodeRecordExpressionValue(
 function decodeScalarExpressionValue(
   value: unknown,
   valueType: ValueType,
+  dateOrigin: DateOrigin | undefined,
 ): unknown {
   switch (valueType) {
     case "boolean": {
@@ -617,7 +629,7 @@ function decodeScalarExpressionValue(
       return Number(value);
     }
     case "date": {
-      return decodeStoredDate(value);
+      return decodeExpressionDate(value, dateOrigin);
     }
     case "string": {
       return value;

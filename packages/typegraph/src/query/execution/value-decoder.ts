@@ -8,11 +8,30 @@
  */
 
 import {
+  decodeStatedDate,
+  decodeStoredDate,
   decodeStoredValue,
   storedReadPlan,
 } from "../../store/stored-date-revival";
 import { type ValueType } from "../ast";
+import { type DateOrigin } from "../expressions";
 import { type FieldTypeInfo } from "../schema-introspector";
+
+/**
+ * A date a query expression yields, decoded by the leaf its origin names: a
+ * date the caller stated (`dateOrigin: "stated"` — a literal, a parameter, or
+ * a composition of only those) by {@link decodeStatedDate}, which returns the
+ * `Date` stated; every other date, which is stored property text, by the
+ * strict {@link decodeStoredDate}. The one choice every query terminal makes.
+ */
+export function decodeExpressionDate(
+  value: unknown,
+  origin: DateOrigin | undefined,
+): unknown {
+  return origin === "stated" ?
+      decodeStatedDate(value)
+    : decodeStoredDate(value);
+}
 
 export function nullToUndefined(value: unknown): unknown {
   return value === null ? undefined : value;

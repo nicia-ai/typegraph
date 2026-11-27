@@ -182,6 +182,12 @@ function buildContext<Fields extends RelationProjection>(
         ...(column.elementFields === undefined ?
           {}
         : { elementFields: column.elementFields }),
+        ...(column.dateOrigin === undefined ?
+          {}
+        : { dateOrigin: column.dateOrigin }),
+        ...(column.elementDateOrigins === undefined ?
+          {}
+        : { elementDateOrigins: column.elementDateOrigins }),
       },
     ]),
   ) as RelationColumnContext<Fields>;
@@ -207,6 +213,12 @@ function relationColumns(
       ...(expression.readPlan === undefined ?
         {}
       : { readPlan: expression.readPlan }),
+      ...(expression.dateOrigin === undefined ?
+        {}
+      : { dateOrigin: expression.dateOrigin }),
+      ...(expression.elementDateOrigins === undefined ?
+        {}
+      : { elementDateOrigins: expression.elementDateOrigins }),
       nullable: expression.nullable,
     };
     if (
