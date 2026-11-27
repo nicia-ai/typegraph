@@ -74,7 +74,7 @@ import {
 } from "./ddl";
 import {
   allocationSchemaOfBackend,
-  allocationSchemaPin,
+  allocationSearchPath,
   bindNamesToAllocationSchema,
 } from "./postgres-allocation-schema";
 import {
@@ -100,7 +100,13 @@ import {
   operationEvidenceTableName,
   type PostgresWorkingCopyOperations,
 } from "./postgres-working-copy-operations";
-import { type QuerySession, rows, sqlName } from "./postgres-working-copy-sql";
+import {
+  cleanupLockTimeout,
+  type QuerySession,
+  rows,
+  sqlName,
+  withUnitSettings,
+} from "./postgres-working-copy-sql";
 import {
   createPostgresTables,
   defaultPostgresTableNames,
@@ -1223,11 +1229,9 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
   }
 
   async function ensureLedger(): Promise<void> {
-    await control.transaction(async (transaction) => {
-      await rows(
-        transaction,
-        sql`SELECT set_config('lock_timeout', ${`${cleanupLockTimeoutMs}ms`}, true)`,
-      );
+    await control.transaction((transaction) =>
+      withUnitSettings(transaction, async (settings) => {
+      await settings.set(cleanupLockTimeout(cleanupLockTimeoutMs));
       await rows(
         transaction,
         sql.raw(`CREATE TABLE IF NOT EXISTS ${quoteDdlIdentifier(LEDGER)} (
@@ -1260,7 +1264,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           ),
         );
       }
-    });
+    }),
+    );
   }
 
   async function dropAllocation(
@@ -1268,11 +1273,9 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     expectedOrigin?: DurableBranchOrigin,
   ): Promise<void> {
     await ensureLedger();
-    await control.transaction(async (transaction) => {
-      await rows(
-        transaction,
-        sql`SELECT set_config('lock_timeout', ${`${cleanupLockTimeoutMs}ms`}, true)`,
-      );
+    await control.transaction((transaction) =>
+      withUnitSettings(transaction, async (settings) => {
+      await settings.set(cleanupLockTimeout(cleanupLockTimeoutMs));
       // Waits behind an in-flight operate or delivery mark on this allocation,
       // bounded by the lock timeout above, and refuses a session that is not
       // READ COMMITTED before any fence read can rely on it. Everything below
@@ -1375,7 +1378,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         transaction,
         sql`DELETE FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
       );
-    }, ALLOCATION_LOCK_TRANSACTION_OPTIONS);
+    }), ALLOCATION_LOCK_TRANSACTION_OPTIONS);
   }
 
   type AllocationProvision = Readonly<{
@@ -1418,8 +1421,9 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     const evidenceTable = operationEvidenceTableName(physicalPrefix);
     await ensureLedger();
     const ownershipToken = globalThis.crypto.randomUUID();
-    const controlRole = await control.transaction(async (transaction) => {
-      await rows(transaction, allocationSchemaPin(schema));
+    const controlRole = await control.transaction((transaction) =>
+      withUnitSettings(transaction, async (settings) => {
+      await settings.set(allocationSearchPath(schema));
       // The unique ledger prefix is the ownership claim for both bundled
       // tables and vector sidecars. Hold it through all provisioning DDL.
       const claimed = await rows<
@@ -1478,7 +1482,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         sql.raw(generatePostgresBaseSchemaMarkerSQL(targetTables)),
       );
       return claim.role;
-    });
+    }),
+    );
     return { ownershipToken, controlRole };
   }
 

@@ -189,6 +189,10 @@ import {
   type SavepointGuard,
 } from "../session-savepoint";
 import {
+  recordTypeGraphOwnedTransaction,
+  withTransactionLocalSettings,
+} from "../transaction-local-settings";
+import {
   resolveDeclaredBackendResource,
   type SerializedResourceDeclaration,
 } from "../transaction-resource";
@@ -322,7 +326,7 @@ import {
 } from "./operations/strategy";
 import {
   allocationSchemaOfTables,
-  allocationSchemaPin,
+  allocationSearchPath,
   backendRelationSchema,
   markAllocationSchemaBackend,
   relationInBackendSchema,
@@ -1264,10 +1268,6 @@ function buildPostgresEngineProfileInternal(
   // Set only for tables built from a working-copy allocation's names: every
   // DDL this backend issues then runs where the allocation lives.
   const allocationSchema = allocationSchemaOfTables(tables);
-  const allocationPin =
-    allocationSchema === undefined ? undefined : (
-      toDrizzleSql(allocationSchemaPin(allocationSchema), "postgres")
-    );
   // `fulltext: false` disables fulltext entirely — mirroring `vector`
   // below, required for an engine or role with no fulltext implementation
   // of its own to build a TypeGraph backend without a stub strategy.
@@ -1577,7 +1577,7 @@ function buildPostgresEngineProfileInternal(
   async function runDdlStatement(
     statement: ReturnType<typeof sql.raw>,
   ): Promise<void> {
-    if (allocationPin === undefined || allocationSchema === undefined) {
+    if (allocationSchema === undefined) {
       await db.execute(statement);
       return;
     }
@@ -1591,7 +1591,7 @@ function buildPostgresEngineProfileInternal(
       return;
     }
     await db.transaction(async (transaction) => {
-      await transaction.execute(allocationPin);
+      await pinAllocationSearchPath(transaction, allocationSchema);
       await transaction.execute(statement);
     });
   }
@@ -1605,7 +1605,7 @@ function buildPostgresEngineProfileInternal(
   async function bindSchemaWriteSessionToAllocation(
     tx: AnyPgTransaction,
   ): Promise<void> {
-    if (allocationPin === undefined || allocationSchema === undefined) return;
+    if (allocationSchema === undefined) return;
     if (isPostgresTransactionHandle(db)) {
       await assertCallerSessionInAllocationSchema(
         createPostgresExecutionAdapter(tx, adapterOptions),
@@ -1614,7 +1614,23 @@ function buildPostgresEngineProfileInternal(
       );
       return;
     }
-    await tx.execute(allocationPin);
+    await pinAllocationSearchPath(tx, allocationSchema);
+  }
+
+  /**
+   * Leads the search path of `transaction`, one this backend opened, with the
+   * allocation schema for the rest of that transaction, whose end ends it.
+   */
+  async function pinAllocationSearchPath(
+    transaction: AnyPgTransaction,
+    schema: string,
+  ): Promise<void> {
+    const pinned = createPostgresExecutionAdapter(transaction, adapterOptions);
+    await withTransactionLocalSettings(
+      { execute: (query) => pinned.execute(query) },
+      "transaction",
+      (settings) => settings.set(allocationSearchPath(schema)),
+    );
   }
 
   function executeUnpinnedDdl(ddl: string): Promise<void> {
@@ -1623,7 +1639,7 @@ function buildPostgresEngineProfileInternal(
 
   /** The `executeDdl` primitive: one statement, no concurrency handling. */
   function executeSingleDdl(ddl: string): Promise<void> {
-    return allocationPin === undefined || isTransactionRefusedDdl(ddl) ?
+    return allocationSchema === undefined || isTransactionRefusedDdl(ddl) ?
         executeUnpinnedDdl(ddl)
       : runDdlStatement(sql.raw(ddl));
   }
@@ -2745,6 +2761,14 @@ function buildPostgresEngineProfileInternal(
                   isFirstParty,
                   nestedTransactionConnection,
                 );
+              // Over a pool or client this backend issued the BEGIN and will
+              // end the transaction, so a transaction-local setting a unit on
+              // it changes ends with it. Over a caller transaction `tx` is a
+              // savepoint whose RELEASE keeps such a setting, so it records
+              // nothing and the unit restores what it changes.
+              if (!isPostgresTransactionHandle(db)) {
+                recordTypeGraphOwnedTransaction(txBackend);
+              }
               try {
                 return await fn(
                   markSchemaFencedInsertEligibleUnderFence(
@@ -2951,88 +2975,81 @@ function buildPostgresEngineProfileInternal(
 
                 const deadline = performance.now() + options.waitBudgetMs;
                 let phase: "schema-advisory" | "schema-row" = "schema-advisory";
-                const restoreCallerLockTimeout = () =>
-                  externalTx.execute(
-                    sql`SELECT set_config('lock_timeout', ${previousTimeout}, true)`,
-                  );
-                // The refusals this fence's own deadline checks raise. Each is
-                // thrown between statements, with none in flight on the
-                // session and the transaction not aborted, so only these leave
-                // a session that can take a restore.
-                const deadlineRefusals = new WeakSet<SchemaFenceTimeoutError>();
-                const deadlineRefusal = (
-                  refusedPhase: "schema-advisory" | "schema-row",
-                ): SchemaFenceTimeoutError => {
-                  const refusal = new SchemaFenceTimeoutError(
-                    graphId,
-                    refusedPhase,
-                    options.waitBudgetMs,
-                  );
-                  deadlineRefusals.add(refusal);
-                  return refusal;
-                };
-                try {
-                  await acquireSchemaWriteFence(
-                    externalTx,
-                    graphId,
-                    schemaFencePlan,
-                    {
-                      kind: "observed",
-                      acquisition: readGraphWriteFenceAcquisition(setting),
-                    },
-                    async (acquisitionPhase) => {
-                      phase = acquisitionPhase;
-                      const remainingMs = deadline - performance.now();
-                      if (remainingMs <= 0) {
-                        throw deadlineRefusal(acquisitionPhase);
-                      }
-                      const effectiveMs =
-                        callerTimeout === 0 ? remainingMs : (
-                          Math.min(callerTimeout, remainingMs)
-                        );
-                      await externalTx.execute(
-                        sql`SELECT set_config('lock_timeout', ${`${Math.max(1, Math.floor(effectiveMs))}ms`}, true)`,
-                      );
-                    },
-                  );
-                  // A lock_timeout is per acquisition, so confirm that the entire
-                  // ordered advisory/row sequence respected the caller's deadline.
-                  if (performance.now() >= deadline) {
-                    throw deadlineRefusal(phase);
-                  }
-                  await restoreCallerLockTimeout();
-                } catch (error) {
-                  // A database lock timeout aborts the native transaction. Do not
-                  // issue a restore or diagnostic statement on that failed session.
-                  if (isPostgresLockTimeout(error)) {
-                    throw new SchemaFenceTimeoutError(
-                      graphId,
-                      phase,
-                      options.waitBudgetMs,
-                      error,
-                    );
-                  }
-                  // A deadline refusal leaves the caller's transaction usable, and
-                  // the caller may go on with it, so it gets its own lock_timeout
-                  // back rather than the shortened one of the last acquisition.
-                  // Any other failure takes no restore: an engine error has
-                  // aborted the session, and a driver-side failure (a client
-                  // query timeout) can leave the fence statement still running
-                  // on it. The refusal stays the error reported even when the
-                  // restore fails; the documented response to it is to roll the
-                  // transaction back.
-                  if (
-                    error instanceof SchemaFenceTimeoutError &&
-                    deadlineRefusals.has(error)
-                  ) {
+                // The caller's lock_timeout, read above in the isolation
+                // statement, is restored when the fence is taken and when one
+                // of the fence's own deadline checks refuses it: each refusal
+                // is thrown between statements, with none in flight and the
+                // transaction not aborted, so the caller may go on with it.
+                // Any other failure takes no restore: an engine error has
+                // aborted the session, and a driver-side failure (a client
+                // query timeout) can leave the fence statement still running
+                // on it. The refusal stays the error reported even when the
+                // restore fails; the documented response to it is to roll
+                // the transaction back.
+                await withTransactionLocalSettings(
+                  { execute: (query) => settingAdapter.execute(query) },
+                  "unit",
+                  async (settings) => {
                     try {
-                      await restoreCallerLockTimeout();
-                    } catch {
-                      /* Preserve the refusal. */
+                      await acquireSchemaWriteFence(
+                        externalTx,
+                        graphId,
+                        schemaFencePlan,
+                        {
+                          kind: "observed",
+                          acquisition: readGraphWriteFenceAcquisition(setting),
+                        },
+                        async (acquisitionPhase) => {
+                          phase = acquisitionPhase;
+                          const remainingMs = deadline - performance.now();
+                          if (remainingMs <= 0) {
+                            throw settings.refusal(
+                              new SchemaFenceTimeoutError(
+                                graphId,
+                                acquisitionPhase,
+                                options.waitBudgetMs,
+                              ),
+                            );
+                          }
+                          const effectiveMs =
+                            callerTimeout === 0 ? remainingMs : (
+                              Math.min(callerTimeout, remainingMs)
+                            );
+                          await settings.set({
+                            name: "lock_timeout",
+                            value: `${Math.max(1, Math.floor(effectiveMs))}ms`,
+                          });
+                        },
+                      );
+                    } catch (error) {
+                      // A database lock timeout aborts the native transaction.
+                      // Do not issue a restore or diagnostic statement on that
+                      // failed session.
+                      if (isPostgresLockTimeout(error)) {
+                        throw new SchemaFenceTimeoutError(
+                          graphId,
+                          phase,
+                          options.waitBudgetMs,
+                          error,
+                        );
+                      }
+                      throw error;
                     }
-                  }
-                  throw error;
-                }
+                    // A lock_timeout is per acquisition, so confirm that the
+                    // entire ordered advisory/row sequence respected the
+                    // caller's deadline.
+                    if (performance.now() >= deadline) {
+                      throw settings.refusal(
+                        new SchemaFenceTimeoutError(
+                          graphId,
+                          phase,
+                          options.waitBudgetMs,
+                        ),
+                      );
+                    }
+                  },
+                  [{ name: "lock_timeout", previous: previousTimeout }],
+                );
 
                 const activeSchema =
                   await privilegedBackend.getActiveSchema(graphId);
@@ -3699,14 +3716,6 @@ function createPostgresOperationBackend(
 
   /** One transaction-local GUC override applied around a vector SELECT. */
   type SearchGucOverride = Readonly<{ name: string; value: string }>;
-  /**
-   * A parameter's value before a search overrode it. `previous` is undefined
-   * when the parameter was not defined on the session yet.
-   */
-  type SearchGucSnapshot = Readonly<{
-    name: string;
-    previous: string | undefined;
-  }>;
 
   // `hnsw.iterative_scan` exists on pgvector >= 0.8. The probe + "warn once"
   // state lives on the top-level backend and is SHARED with every
@@ -3804,52 +3813,32 @@ function createPostgresOperationBackend(
           "its execution adapter was not wrapped by createSerialExecutionAdapter.",
       );
     }
-    return runExclusive(async (connection) => {
-      const snapshots: SearchGucSnapshot[] = [];
-      for (const override of overrides) {
-        // `missing_ok => true`: pgvector defines its parameters only when its
-        // library loads in the backend process, and a session that has not
-        // used a vector value yet has not loaded it. Without the flag the read
-        // raises 42704 and aborts the caller's transaction. With it an
-        // undefined parameter reads as NULL, and the `set_config` below plants
-        // a placeholder that the library adopts when the SELECT loads it.
-        //
-        // A placeholder can also read as the empty string: a `SET LOCAL` that
-        // rolled back before the library loaded leaves one with no value.
-        // The parameters overridden here, an ANN frontier size and
-        // iterative-scan modes, never read as empty once defined, so an empty
-        // value is that unset placeholder. Restoring it would assign "" to the parameter the
-        // SELECT has just defined, which it rejects with 22023, so it is
-        // treated as undefined and reset to the default instead.
-        const [setting] = await connection.execute<{ v: unknown }>(
-          sql`SELECT current_setting(${override.name}, true) AS v`,
-        );
-        snapshots.push({
-          name: override.name,
-          previous:
-            typeof setting?.v === "string" && setting.v !== "" ?
-              setting.v
-            : undefined,
-        });
-        await connection.execute(
-          sql`SELECT set_config(${override.name}, ${override.value}, true)`,
-        );
-      }
-      const rows = await connection.execute<Row>(query);
-      // Restore only on success: a failed SELECT aborts the caller's
-      // transaction, so its rollback discards the overrides anyway and a
-      // restore here would just fail against the aborted tx, masking the
-      // real error. A parameter that was undefined before the search is
-      // restored with a NULL value, which resets it to its default.
-      for (const snapshot of snapshots) {
-        const previous =
-          snapshot.previous === undefined ? sql`NULL` : sql`${snapshot.previous}`;
-        await connection.execute(
-          sql`SELECT set_config(${snapshot.name}, ${previous}, true)`,
-        );
-      }
-      return rows;
-    });
+    return runExclusive((connection) =>
+      // A failed SELECT takes no restore: it aborts the caller's
+      // transaction, whose rollback discards the overrides anyway, and a
+      // restore would only fail against it and mask the real error.
+      withTransactionLocalSettings(
+        { execute: (statement) => connection.execute(statement) },
+        "unit",
+        async (settings) => {
+          for (const override of overrides) {
+            // pgvector defines its parameters only when its library loads in
+            // the backend process, and a session that has not used a vector
+            // value yet has not loaded it: the read of the prior value then
+            // reads NULL, and `set_config` plants a placeholder that the
+            // library adopts when the SELECT loads it. A placeholder can also
+            // read as the empty string, which a `SET LOCAL` that rolled back
+            // before the library loaded leaves. The parameters overridden
+            // here, an ANN frontier size and iterative-scan modes, never read
+            // as empty once defined, so an empty prior is that placeholder,
+            // reset to the default rather than assigned "" (which the SELECT's
+            // freshly defined parameter rejects with 22023).
+            await settings.set({ ...override, emptyMeansUnset: true });
+          }
+          return connection.execute<Row>(query);
+        },
+      ),
+    );
   }
 
   async function runVectorSearch<Row = VectorSearchRow>(
@@ -3885,12 +3874,16 @@ function createPostgresOperationBackend(
       // statement) — correct either way, and the statements below are
       // sequential, so they need no serializing wrapper.
       const txAdapter = createPostgresExecutionAdapter(tx, adapterOptions);
-      for (const override of overrides) {
-        await txAdapter.execute(
-          sql`SELECT set_config(${override.name}, ${override.value}, true)`,
-        );
-      }
-      return txAdapter.execute<Row>(query);
+      // The search is this transaction's only statement, so its end ends the
+      // overrides.
+      return withTransactionLocalSettings(
+        { execute: (statement) => txAdapter.execute(statement) },
+        "transaction",
+        async (settings) => {
+          for (const override of overrides) await settings.set(override);
+          return txAdapter.execute<Row>(query);
+        },
+      );
     });
   }
 

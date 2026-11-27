@@ -202,11 +202,8 @@ export const postgresDialect: BuiltinDialectAdapter = {
     return sql`ANALYZE ${table}`;
   },
 
-  setTransactionWorkingMemory(workingMemory) {
-    // The parameterizable form of `SET LOCAL work_mem`: is_local => true
-    // scopes the override to the current transaction, matching the pgvector
-    // iterative-scan GUC handling elsewhere in the backend.
-    return sql`SELECT set_config('work_mem', ${workingMemory}, true)`;
+  transactionWorkingMemory(workingMemory) {
+    return { name: "work_mem", value: workingMemory };
   },
 
   orderedRowsJsonArray(rowAlias, _columns, orderColumn) {
