@@ -2760,6 +2760,7 @@ function buildPostgresEngineProfileInternal(
           backend,
           contributionReadGate.assertInitialized,
           contributionReadGate.refuseUnavailableFulltext,
+          "beneath",
         ),
       );
       return {

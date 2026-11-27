@@ -157,14 +157,24 @@ function carryDerivedCommandPortMetadata(
   overrides: object,
 ): void {
   if (!Object.hasOwn(overrides, "commands")) return;
-  const baseCommands: unknown = Reflect.get(base, "commands");
-  const overrideCommands: unknown = Reflect.get(overrides, "commands");
+  carrySameSessionCommandPortMetadata(
+    Reflect.get(base, "commands"),
+    Reflect.get(overrides, "commands"),
+  );
+}
+
+/** Carries a command port's session metadata onto a same-session decoration of it. */
+function carrySameSessionCommandPortMetadata(
+  baseCommands: unknown,
+  derivedCommands: unknown,
+): void {
   if (
+    baseCommands !== derivedCommands &&
     isGraphCommandPort(baseCommands) &&
-    isGraphCommandPort(overrideCommands) &&
-    baseCommands.session === overrideCommands.session
+    isGraphCommandPort(derivedCommands) &&
+    baseCommands.session === derivedCommands.session
   ) {
-    carryGraphCommandPortSessionMetadata(baseCommands, overrideCommands);
+    carryGraphCommandPortSessionMetadata(baseCommands, derivedCommands);
   }
 }
 
@@ -187,10 +197,50 @@ function carryDerivedCommandPortMetadata(
  * declare, so the looser bound cannot smuggle a member onto a surface that
  * withholds it.
  */
+/**
+ * How a derived backend presents a member it reads off its source rather
+ * than its overlay: the value itself, or a decoration of it. Called at most
+ * once per member value: the derived object keeps what it returned for as
+ * long as the source carries the same value, so a member read twice is the
+ * same object, and a member nothing reads costs nothing.
+ */
+export type BackendMemberView = (member: string, value: unknown) => unknown;
+
+/**
+ * `view` over `base`'s members, each decorated once per source value
+ * (`BackendMemberView`). `undefined` when there is no view.
+ */
+function cachedMemberView(
+  view: BackendMemberView | undefined,
+): ((property: PropertyKey, value: unknown) => unknown) | undefined {
+  if (view === undefined) return undefined;
+  const decorated = new Map<
+    string,
+    Readonly<{ source: unknown; value: unknown }>
+  >();
+  return (property, value) => {
+    if (typeof property !== "string") return value;
+    const cached = decorated.get(property);
+    if (cached !== undefined && cached.source === value) return cached.value;
+    const presented = view(property, value);
+    if (property === "commands") {
+      carrySameSessionCommandPortMetadata(value, presented);
+    }
+    decorated.set(property, { source: value, value: presented });
+    return presented;
+  };
+}
+
 function deriveBackendInternal<
   T extends object,
   const O extends Partial<T> = Partial<T>,
->(base: T, overrides: ExactBackendOverlay<T, O>, carry: AtomicBatchCarry): T {
+>(
+  base: T,
+  overrides: ExactBackendOverlay<T, O>,
+  carry: AtomicBatchCarry,
+  memberView?: BackendMemberView,
+): T {
+  const present = cachedMemberView(memberView);
   const derivedCapabilities = deriveExecutionCapabilities(
     base,
     overrides,
@@ -216,7 +266,8 @@ function deriveBackendInternal<
       if (hasOverlayProperty(property)) {
         return Reflect.get(overrides, property, overrides);
       }
-      return Reflect.get(base, property, base);
+      const value: unknown = Reflect.get(base, property, base);
+      return present === undefined ? value : present(property, value);
     },
 
     has(_targetObject, property) {
@@ -251,9 +302,14 @@ function deriveBackendInternal<
         return { ...descriptor, configurable: true };
       }
       const descriptor = Reflect.getOwnPropertyDescriptor(base, property);
-      return descriptor === undefined ? undefined : (
+      if (descriptor === undefined) return;
+      return present === undefined || !("value" in descriptor) ?
           { ...descriptor, configurable: true }
-        );
+        : {
+            ...descriptor,
+            value: present(property, descriptor.value),
+            configurable: true,
+          };
     },
 
     set(_targetObject, property, value) {
@@ -325,13 +381,22 @@ export function deriveTransactionSessionBackend<
  * been. Only a factory that does exactly that may call this; every other
  * decoration goes through {@link deriveBackend}.
  *
+ * `memberView` presents each member the derived object reads off `base`
+ * (`BackendMemberView`): a decoration applied to every member by name, at
+ * the cost of the members actually read, instead of an overlay built for
+ * every member up front.
+ *
  * @internal
  */
 export function deriveBackendUnderConstruction<
   T extends object,
   const O extends Partial<T> = Partial<T>,
->(base: T, overrides: ExactBackendOverlay<T, O>): T {
-  return deriveBackendInternal(base, overrides, "declaration");
+>(
+  base: T,
+  overrides: ExactBackendOverlay<T, O>,
+  memberView?: BackendMemberView,
+): T {
+  return deriveBackendInternal(base, overrides, "declaration", memberView);
 }
 
 /** Public name for the audited, decoration-only backend derivation seam. */

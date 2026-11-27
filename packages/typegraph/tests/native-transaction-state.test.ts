@@ -369,7 +369,7 @@ describe("native transaction state", () => {
     expect(resolveNativeTransactionState(second)).toBe(state);
     // A session on the same connection whose state nothing ties to `state`.
     const unproven = boundBackend();
-    recordBackendConnection(unproven, connection);
+    recordBackendConnection(unproven, connection, undefined);
     const release = openReadOnlyScope(state, "graph");
     expect(
       isNativeTransactionReadOnly(resolveNativeTransactionState(unproven)),

@@ -42,7 +42,10 @@ import type {
   SqlTableNames,
 } from "../query/compiler/schema";
 import { sql, type SqlFragment } from "../query/sql-fragment";
-import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+import {
+  asCompiledRowsSql,
+  asCompiledWriteStatementSql,
+} from "../query/sql-intent";
 import { statementExecutionMembers } from "./capabilities/bind";
 import type { STATEMENT_EXECUTION } from "./capabilities/bundle-registry";
 import {
@@ -339,8 +342,10 @@ async function repairRelation(
     throw statementExecutionRequiredError(target.dialect);
   }
   try {
+    // A write through a raw-SQL member: marked, so a read-only scope refuses
+    // it before the statement (`read-only-write-gate.ts`).
     await statementExecutionMembers(target, verdict).executeStatement(
-      asCompiledStatementSql(sql`
+      asCompiledWriteStatementSql(sql`
         UPDATE ${sql.identifier(table)}
         SET valid_from = NULL
         WHERE ${predicate}

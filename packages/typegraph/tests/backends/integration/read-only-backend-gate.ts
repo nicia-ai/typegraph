@@ -25,12 +25,17 @@ import { createPostgresTables } from "../../../src/backend/drizzle/schema/postgr
 import { createSqliteTables } from "../../../src/backend/drizzle/schema/sqlite";
 import { backendMembersWithAccess } from "../../../src/backend/member-access";
 import { createPostgresTransactionBackend } from "../../../src/backend/postgres";
+import { repairInvertedValidityWindows } from "../../../src/backend/repair-validity-windows";
 import { createSqliteBackend } from "../../../src/backend/sqlite";
-import { type AdapterBackend } from "../../../src/backend/types";
+import {
+  type AdapterBackend,
+  type GraphBackend,
+} from "../../../src/backend/types";
 import type { UnsupportedBackendCapabilityError } from "../../../src/errors-entry";
 import { sql as portableSql } from "../../../src/query/sql-fragment";
 import {
   asCompiledStatementSql,
+  asCompiledWriteRowsSql,
   asCompiledWriteStatementSql,
 } from "../../../src/query/sql-intent";
 import {
@@ -116,6 +121,61 @@ async function activeVersion(
   return active?.version;
 }
 
+/** Stands in for a resolver until the promise's executor has run. */
+function notYetResolvable(): void {
+  // The executor replaces it synchronously.
+}
+
+/** A promise and the function that resolves it. */
+function signal(): Readonly<{ promise: Promise<void>; resolve: () => void }> {
+  const handle: { resolve: () => void } = { resolve: notYetResolvable };
+  const promise = new Promise<void>((resolve) => {
+    handle.resolve = resolve;
+  });
+  return {
+    promise,
+    resolve: () => {
+      handle.resolve();
+    },
+  };
+}
+
+/**
+ * Opens `store.transaction(fn, { accessMode: "read_only" })` and keeps it
+ * open, its callback awaiting, until `release()` is called: resolves once
+ * the callback has begun. `settled` is the transaction's outcome.
+ */
+async function holdReadOnlyTransaction(
+  store: Readonly<{
+    transaction: (
+      fn: (tx: unknown) => Promise<unknown>,
+      options: Readonly<{ accessMode: "read_only" }>,
+    ) => Promise<unknown>;
+  }>,
+): Promise<Readonly<{ release: () => void; settled: Promise<unknown> }>> {
+  const released = signal();
+  const begun = signal();
+  const settled = store.transaction(
+    async () => {
+      begun.resolve();
+      await released.promise;
+    },
+    { accessMode: "read_only" },
+  );
+  await begun.promise;
+  return {
+    release: () => {
+      released.resolve();
+    },
+    settled,
+  };
+}
+
+/** Lets other work run for a few event-loop turns. */
+async function otherWorkRuns(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+
 /** An `INSERT` of `value` into the one-column `table`. */
 function insertInto(table: string, value: number) {
   return portableSql.raw(`INSERT INTO ${table} (x) VALUES (${value})`);
@@ -144,6 +204,91 @@ export function registerReadOnlyBackendGateIntegrationTests(
       handle as never,
     ) as AdapterBackend<unknown>;
   }
+
+  describe("work from other flows while a read-only transaction is open", () => {
+    it("queues root writes, a read-write transaction and a second Store's write behind it, and runs them once it has ended, as without the scope", async () => {
+      const graph = buildGraph(nextGraphId());
+      const other = buildGraph(nextGraphId());
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(graph, backend);
+      const [otherStore] = await createAdapterStoreWithSchema(other, backend);
+      const held = await holdReadOnlyTransaction(store);
+      const order: string[] = [];
+      const outcomes: Record<string, string> = {};
+      const track = (name: string, pending: Promise<unknown>) =>
+        pending.then(
+          () => {
+            order.push(name);
+            outcomes[name] = "fulfilled";
+          },
+          (error: unknown) => {
+            order.push(name);
+            outcomes[name] = writeOutcome(error);
+          },
+        );
+      const pending = [
+        track(
+          "root create",
+          store.nodes.RotTeam.create({ name: "queued" }, { id: "queued" }),
+        ),
+        track(
+          "root read-write transaction",
+          store.transaction(async (tx) => {
+            await tx.nodes.RotTeam.create({ name: "in-tx" }, { id: "in-tx" });
+          }),
+        ),
+        track(
+          "second store create",
+          otherStore.nodes.RotTeam.create({ name: "other" }, { id: "other" }),
+        ),
+      ];
+      await otherWorkRuns();
+      order.push("read-only transaction released");
+      held.release();
+      await held.settled;
+      await Promise.all(pending);
+      expect(outcomes).toEqual({
+        "root create": "fulfilled",
+        "root read-write transaction": "fulfilled",
+        "second store create": "fulfilled",
+      });
+      // A SQLite backend serializes its transactions: every write waited
+      // for the read-only transaction to end. Elsewhere they may run beside it.
+      const serializes =
+        context.driver === "better-sqlite3" || context.driver === "libsql";
+      expect(serializes ? order[0] : "not ordered").toBe(
+        serializes ? "read-only transaction released" : "not ordered",
+      );
+      const teams = await store.nodes.RotTeam.find();
+      expect(teams.map((team) => team.id).toSorted()).toEqual([
+        "in-tx",
+        "queued",
+      ]);
+      const otherTeams = await otherStore.nodes.RotTeam.find();
+      expect(otherTeams.map((team) => team.id)).toEqual(["other"]);
+    });
+
+    it("refuses root refreshStatistics() from another flow only where it would run inside the read-only transaction", async () => {
+      const graph = buildGraph(nextGraphId());
+      const [store] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+      );
+      const held = await holdReadOnlyTransaction(store);
+      const refresh = rejectionOf(store.refreshStatistics());
+      await otherWorkRuns();
+      held.release();
+      await held.settled;
+      const refusal = await refresh;
+      // better-sqlite3 runs ANALYZE on the connection as it is called, inside
+      // the read-only transaction the connection has open. Every other driver
+      // runs it beside the transaction or after it, where the engine decides
+      // (libSQL reports the read-only transaction's lock as SQLITE_BUSY).
+      const runsInside = context.driver === "better-sqlite3";
+      expect(writeOutcome(refusal) === "refused as read-only").toBe(runsInside);
+      if (runsInside) expectBackendReadOnlyRefusal(refusal, graph.id);
+    });
+  });
 
   describe("a backend's own write members inside a read-only scope", () => {
     it("refuses store.search.rebuildFulltext() on a Store over the transaction, and the transaction stays usable", async () => {
@@ -204,6 +349,37 @@ export function registerReadOnlyBackendGateIntegrationTests(
       expect(await getActiveSchema(backend, fresh.id)).toBeUndefined();
       expect(await activeVersion(backend, graph.id)).toBe(1);
       expect(await graphState(store)).toEqual(before);
+    });
+
+    it('refuses repairInvertedValidityWindows({ mode: "apply" }) through a backend adopted over the transaction, and the transaction stays usable', async () => {
+      const graph = buildGraph(nextGraphId());
+      const backend = context.getBackend();
+      const [store] = await createAdapterStoreWithSchema(graph, backend);
+      await seed(store);
+      let refusal: unknown;
+      const committed = await store.transaction(
+        async (tx) => {
+          refusal = await rejectionOf(
+            repairInvertedValidityWindows({
+              // A transaction backend carries every member the repair
+              // reaches; it has no `transaction` member, so the repair runs
+              // on it directly.
+              backend: backend.adoptTransaction(
+                nativeHandle(tx),
+              ) as unknown as GraphBackend,
+              graphId: graph.id,
+              relations: "live-and-recorded",
+              mode: "apply",
+            }),
+          );
+          return tx.nodes.RotPerson.getById(asNodeId("p1"));
+        },
+        { accessMode: "read_only" },
+      );
+      expectBackendReadOnlyRefusal(refusal, graph.id);
+      // On PostgreSQL a write statement would have aborted the transaction
+      // before this read.
+      expect(committed?.id).toBe("p1");
     });
 
     it("refuses rollbackSchema() over the transaction, and the active version stays", async () => {
@@ -353,6 +529,22 @@ export function registerReadOnlyBackendGateIntegrationTests(
       },
     );
   });
+}
+
+/**
+ * A write statement marked as library code's on the nodes table `nodes`,
+ * for each raw-SQL member that takes a compiled statement.
+ */
+function rawWriteArguments(
+  nodes: string,
+): Readonly<Record<string, readonly unknown[]>> {
+  const update = `UPDATE "${nodes}" SET kind = kind WHERE 0`;
+  return {
+    execute: [
+      asCompiledWriteRowsSql(portableSql.raw(`${update} RETURNING id`)),
+    ],
+    executeStatement: [asCompiledWriteStatementSql(portableSql.raw(update))],
+  };
 }
 
 /** A statement that writes or runs DDL, as the driver was asked to run it. */
@@ -583,6 +775,90 @@ export function registerReadOnlyBackendMemberIntegrationTests(
         expect((committed as { id?: unknown } | undefined)?.id).toBe("p1");
       });
     });
+
+    // On better-sqlite3 the root backend runs on the one connection the
+    // read-only transaction holds: what matters is where each member's work
+    // is admitted. Elsewhere the root runs beside the transaction, or waits
+    // for it inside the driver, and the Store-level case above covers it.
+    it.runIf(context.driver === "better-sqlite3")(
+      "lets no root write member called from another flow write inside the read-only transaction: each waits behind it, or is refused before any statement",
+      async () => {
+        await withTracedGraph(async (traced) => {
+          const graphFixture = await graphFixtureOf(traced);
+          const violations: Record<string, string> = {};
+          const refused: string[] = [];
+          const queued: string[] = [];
+          for (const member of [
+            ...backendMembersWithAccess("write"),
+            ...backendMembersWithAccess("raw"),
+          ]) {
+            if (!memberIsPresent(traced.root, member)) continue;
+            let handle: unknown;
+            const held = await holdReadOnlyTransaction({
+              transaction: (fn, options) =>
+                traced.store.transaction(async (tx) => {
+                  handle = nativeHandle(tx);
+                  await fn(tx);
+                }, options),
+            });
+            const fixture = {
+              ...fixtureOf(graphFixture, handle, "over"),
+              commandSession: "root" as const,
+            };
+            const writeArguments = WRITE_MEMBER_ARGUMENTS[
+              member as keyof typeof WRITE_MEMBER_ARGUMENTS
+            ] as ((f: BackendMemberFixture) => unknown) | undefined;
+            const args =
+              rawWriteArguments(traced.names.nodes)[member] ??
+              writeArguments?.(fixture);
+            if (!Array.isArray(args)) {
+              held.release();
+              await held.settled;
+              continue;
+            }
+            traced.reset();
+            const outcome = rejectionOf(callMember(traced.root, member, args));
+            await otherWorkRuns();
+            const inside = traced
+              .statements()
+              .map((statement) => statement.text);
+            held.release();
+            await rejectionOf(held.settled);
+            const error = await outcome;
+            if (writeOutcome(error) === "refused as read-only") {
+              expectBackendReadOnlyRefusal(error, traced.graphId);
+              refused.push(member);
+              if (inside.length > 0) {
+                violations[member] =
+                  `refused after ${inside.length} statements`;
+              }
+            } else {
+              queued.push(member);
+              const written = inside.filter((text) =>
+                WRITE_STATEMENT.test(text),
+              );
+              if (written.length > 0) {
+                violations[member] =
+                  `wrote inside: ${written.join(" | ").slice(0, 300)}`;
+              }
+            }
+          }
+          expect(violations).toEqual({});
+          expect(queued).toEqual(
+            expect.arrayContaining([
+              "transaction",
+              "insertNode",
+              "commands",
+              "clearGraph",
+              "executeStatement",
+            ]),
+          );
+          expect(refused).toEqual(
+            expect.arrayContaining(["refreshStatistics", "executeDdl"]),
+          );
+        });
+      },
+    );
 
     it("runs every read member of every backend object over the transaction without a write statement or a changed row", async () => {
       await withTracedGraph(async (traced) => {

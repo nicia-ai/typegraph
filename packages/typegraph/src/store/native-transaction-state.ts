@@ -33,8 +33,10 @@
  * the same connection whose state nothing proved to be this one.
  */
 import {
+  backendSerializingQueue,
   connectionReadOnlyScopeGraph,
   holdConnectionReadOnlyScope,
+  nativeTransactionSerializingQueue,
   resolveNativeTransactionConnection,
   resolveNativeTransactionHandle,
 } from "../backend/native-transaction-handle";
@@ -58,6 +60,12 @@ const CONNECTION: unique symbol = Symbol(
   "typegraph.nativeTransactionConnection",
 );
 
+// Module-private: only `createNativeTransactionState` writes it, and only
+// `openReadOnlyScope` and `nativeTransactionReadOnlyScopeGraph` read it.
+const SERIALIZED_BY: unique symbol = Symbol(
+  "typegraph.nativeTransactionSerializedBy",
+);
+
 /** State every session of one native transaction shares. */
 export type NativeTransactionState = Readonly<{
   [NATIVE_TRANSACTION_STATE]: true;
@@ -72,15 +80,22 @@ export type NativeTransactionState = Readonly<{
    * that names one resolves the state. Written only by this module.
    */
   [CONNECTION]: object | undefined;
+  /**
+   * The serialized queue the transaction holds from BEGIN to its end, when
+   * the engine opened it inside one (`nativeTransactionSerializingQueue`).
+   */
+  readonly [SERIALIZED_BY]: object | undefined;
 };
 
 function createNativeTransactionState(
   connection: object | undefined,
+  serializedBy: object | undefined,
 ): NativeTransactionState {
   return {
     [NATIVE_TRANSACTION_STATE]: true,
     [READ_ONLY_SCOPES]: [],
     [CONNECTION]: connection,
+    [SERIALIZED_BY]: serializedBy,
   };
 }
 
@@ -109,7 +124,10 @@ function stateOfNativeTransaction(
     existing[CONNECTION] ??= connection;
     return existing;
   }
-  const created = createNativeTransactionState(connection);
+  const created = createNativeTransactionState(
+    connection,
+    nativeTransactionSerializingQueue(nativeTransaction),
+  );
   nativeTransactionStates.set(nativeTransaction, created);
   return created;
 }
@@ -127,7 +145,7 @@ export function resolveNativeTransactionState(
   const nativeTransaction = resolveNativeTransactionHandle(transaction);
   const connection = resolveNativeTransactionConnection(transaction);
   return nativeTransaction === undefined ?
-      createNativeTransactionState(connection)
+      createNativeTransactionState(connection, undefined)
     : stateOfNativeTransaction(nativeTransaction, connection);
 }
 
@@ -157,16 +175,27 @@ export function resolveBackendNativeTransactionState(
  * engine recorded for `backend` (a transaction backend, or a backend built
  * over a caller's transaction handle), and otherwise the driver connection
  * it runs on (a root backend over a one-connection SQLite driver), since a
- * connection runs one transaction at a time. A backend over a pool names
- * neither and is never read-only here.
+ * connection runs one transaction at a time. There `member` is the backend
+ * member whose work is asked about (none for a transaction the backend
+ * opens): a scope whose transaction holds the serialized queue that work goes
+ * through does not apply, as it is admitted to the connection only after the
+ * transaction ended, while work the member issues directly is admitted inside
+ * it (`connectionReadOnlyScopeGraph`). A backend over a pool names neither and
+ * is never read-only here.
  */
-export function backendReadOnlyScopeGraph(backend: object): string | undefined {
+export function backendReadOnlyScopeGraph(
+  backend: object,
+  member?: string,
+): string | undefined {
   if (openScopes.count === 0) return undefined;
   const native = resolveBackendNativeTransactionState(backend);
   if (native !== undefined) return nativeTransactionReadOnlyScopeGraph(native);
   const connection = resolveNativeTransactionConnection(backend);
   return connection === undefined ? undefined : (
-      connectionReadOnlyScopeGraph(connection)
+      connectionReadOnlyScopeGraph(
+        connection,
+        backendSerializingQueue(backend, member),
+      )
     );
 }
 
@@ -209,7 +238,7 @@ export function openReadOnlyScope(
   openScopes.count += 1;
   const releaseConnection =
     connection === undefined ? undefined : (
-      holdConnectionReadOnlyScope(connection, graphId)
+      holdConnectionReadOnlyScope(connection, graphId, state[SERIALIZED_BY])
     );
   let released = false;
   return () => {
@@ -226,7 +255,9 @@ export function openReadOnlyScope(
 /**
  * The graph of the innermost read-only scope TypeGraph opened on the native
  * transaction `state` belongs to, or on the driver connection it runs on;
- * `undefined` when there is none.
+ * `undefined` when there is none. A scope another transaction opened through
+ * the serialized queue this one holds does not apply: the two never overlap
+ * on the connection (`connectionReadOnlyScopeGraph`).
  */
 function nativeTransactionReadOnlyScopeGraph(
   state: NativeTransactionState,
@@ -235,7 +266,7 @@ function nativeTransactionReadOnlyScopeGraph(
   return (
     state[READ_ONLY_SCOPES].at(-1) ??
     (connection === undefined ? undefined : (
-      connectionReadOnlyScopeGraph(connection)
+      connectionReadOnlyScopeGraph(connection, state[SERIALIZED_BY])
     ))
   );
 }

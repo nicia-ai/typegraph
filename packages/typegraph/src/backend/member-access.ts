@@ -228,6 +228,24 @@ export type BackendMembersWithAccess<Access extends BackendMemberAccess> = {
   ]: (typeof BACKEND_MEMBER_ACCESS)[Member] extends Access ? Member : never;
 }[keyof typeof BACKEND_MEMBER_ACCESS];
 
+/** {@link BACKEND_MEMBER_ACCESS}, as the lookup {@link backendMemberAccess} reads. */
+const BACKEND_MEMBER_ACCESS_BY_NAME: ReadonlyMap<
+  PropertyKey,
+  BackendMemberAccess
+> = new Map(Object.entries(BACKEND_MEMBER_ACCESS));
+
+/**
+ * THE classification lookup: what a read-only scope does with the backend
+ * member `member`, or `undefined` for a name that is not a backend member
+ * (a symbol, or a property only a hand-written backend carries). One map
+ * read, so a gate can ask it of every member it presents.
+ */
+export function backendMemberAccess(
+  member: PropertyKey,
+): BackendMemberAccess | undefined {
+  return BACKEND_MEMBER_ACCESS_BY_NAME.get(member);
+}
+
 /** Every member name {@link BACKEND_MEMBER_ACCESS} classifies as `access`. */
 export function backendMembersWithAccess<Access extends BackendMemberAccess>(
   access: Access,
