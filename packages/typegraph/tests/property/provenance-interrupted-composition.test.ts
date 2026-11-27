@@ -312,7 +312,7 @@ async function runScenario(
   scenario: Scenario,
   failAtWrite: number | undefined,
 ): Promise<Outcome> {
-  const armed = { on: false, failing: false, started: 0 };
+  const armed = { on: false, failing: false, started: 0, injected: 0 };
   const backend = createTestBackend();
   const [store] = await createStoreWithSchema(graph, backend, {
     history: true,
@@ -321,6 +321,7 @@ async function runScenario(
         if (!armed.on) return;
         armed.started += 1;
         if (armed.failing && armed.started === failAtWrite) {
+          armed.injected += 1;
           throw new Error(REJECTED_WRITE);
         }
       },
@@ -347,17 +348,25 @@ async function runScenario(
     : provenance.unRetract(source, tx);
 
   if (failAtWrite !== undefined) {
-    await store.transaction(async (tx) => {
+    const interrupted = await store.transaction(async (tx) => {
       armed.on = true;
       armed.failing = true;
       try {
         await run(tx);
+        return "completed";
       } catch (error) {
         if (!String(error).includes(REJECTED_WRITE)) throw error;
+        return "rejected at the injected write";
       } finally {
         armed.on = false;
         armed.failing = false;
       }
+    });
+    // The failure fired once, at the selected write, and the verb rejected
+    // with it: otherwise the re-run below tests no recovery at all.
+    expect({ interrupted, injected: armed.injected }).toEqual({
+      interrupted: "rejected at the injected write",
+      injected: 1,
     });
     expect(await store.verifyConstraintFences()).toEqual([]);
   }
