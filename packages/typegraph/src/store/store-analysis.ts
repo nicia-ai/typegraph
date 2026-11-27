@@ -502,11 +502,8 @@ function zodFailures(
 ): readonly StoreValidationFailure[] {
   const failures: StoreValidationFailure[] = [];
   for (const row of rows) {
-    // Whether the stored row parses, so a date under an `.overwrite()` that
-    // would rewrite it is parsed revived too: a write refuses that rewrite,
-    // but the stored value itself conforms.
     const parsed = schema.safeParse(
-      reviveStoredDateProps(schema, rowPropsToObject(row.props)).props,
+      reviveStoredDateProps(schema, rowPropsToObject(row.props)),
     );
     if (parsed.success) continue;
     for (const issue of parsed.error.issues) {

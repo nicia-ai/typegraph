@@ -463,12 +463,7 @@ async function executeMutation<G extends GraphDef>(
           Record<string, { type: { schema: z.ZodType } } | undefined>
         >
       )[operation.kind];
-  const props = revivedPlannedProps(
-    registration?.type.schema,
-    role,
-    operation,
-    stated,
-  );
+  const props = revivedPlannedProps(registration?.type.schema, stated);
   const writer =
     role === "node" ?
       nodeWriter(store, operation.kind)

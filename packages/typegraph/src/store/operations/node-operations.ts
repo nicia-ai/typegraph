@@ -230,7 +230,7 @@ import {
 import { type NodeRow, rowToEdge, rowToNode } from "../row-mappers";
 import {
   encodeStoredDatesFor,
-  revalidatedStoredProps,
+  reviveStoredDateProps,
 } from "../stored-date-revival";
 import {
   type BulkOperationHookContext,
@@ -1821,12 +1821,7 @@ function computeNodeUpdate<G extends GraphDef>(
   const schema = registration.type.schema;
   const validatedProps = validateNodeProps(
     schema,
-    revalidatedStoredProps(schema, existingProps, inputProps, {
-      entityType: "node",
-      kind,
-      operation: "update",
-      id,
-    }),
+    { ...reviveStoredDateProps(schema, existingProps), ...inputProps },
     { kind, operation: "update", id },
   );
   return { registration, validatedProps };

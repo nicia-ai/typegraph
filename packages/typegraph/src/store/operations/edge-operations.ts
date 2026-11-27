@@ -218,7 +218,7 @@ import {
   unsupportedResolvedMutationSet,
 } from "../resolved-mutation-set";
 import { type EdgeRow, rowToEdge } from "../row-mappers";
-import { revalidatedStoredProps } from "../stored-date-revival";
+import { reviveStoredDateProps } from "../stored-date-revival";
 import {
   type CompositionNodeRef,
   type CreateEdgeInput,
@@ -2657,12 +2657,7 @@ function computeEdgeUpdate<G extends GraphDef>(
   const schema = registration.type.schema;
   const validatedProps = validateEdgeProps(
     schema,
-    revalidatedStoredProps(schema, existingProps, inputProps, {
-      entityType: "edge",
-      kind,
-      operation: "update",
-      id,
-    }),
+    { ...reviveStoredDateProps(schema, existingProps), ...inputProps },
     { kind, operation: "update", id },
   );
   const identityRefusal = edgeMatchIdentityUpdateRefusal({

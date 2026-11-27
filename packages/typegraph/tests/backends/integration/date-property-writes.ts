@@ -23,6 +23,7 @@ import {
   trustedImportGraph,
 } from "../../../src/interchange";
 import { requireDefined } from "../../../src/utils/presence";
+import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
 
 const PUBLISHED = new Date("2024-01-02T03:04:05.678Z");
@@ -654,7 +655,7 @@ export function registerDatePropertyWriteIntegrationTests(
       );
     });
 
-    it("update and import refuse a date whose wrapper rewrites it, rather than rewriting it", async () => {
+    it("an update of another property and an import keep a date whose wrapper rewrites it", async () => {
       const source = await context.createStore(
         buildEdgeCaseGraph("date_property_shifted_source"),
       );
@@ -663,28 +664,62 @@ export function registerDatePropertyWriteIntegrationTests(
         at: PUBLISHED,
       });
       const stored = new Date(PUBLISHED.getTime() + DAY_MS).toISOString();
+      const shiftedAgain = new Date(
+        PUBLISHED.getTime() + 2 * DAY_MS,
+      ).toISOString();
       expect(document.at).toBe(stored);
-      await expect(
-        source.nodes.ShiftedDateDoc.update(document.id, { title: "a2" }),
-      ).rejects.toThrow(
-        /at: The stored date sits under an \.overwrite\(\) that rewrites it on every parse/u,
-      );
-      const unchanged = await source.nodes.ShiftedDateDoc.getById(document.id);
-      expect(unchanged?.at).toBe(stored);
+      const exported = await exportGraph(source);
+      const lane = { dialect: source.backend.dialect };
 
+      // An update re-parses the untouched stored date through the wrapper's
+      // `.overwrite()`, which shifts it again; main does the same. The
+      // update-validation change writes the stored value back for a key the
+      // patch does not state, and flips this marker.
+      const updated = await source.nodes.ShiftedDateDoc.update(document.id, {
+        title: "a2",
+      });
+      expectObservation({
+        lane,
+        observed: {
+          title: updated.title,
+          at: updated.at as unknown as string,
+        },
+        correct: { title: "a2", at: stored },
+        defects: [
+          {
+            label: "update re-parses an untouched stored value",
+            on: {},
+            today: { title: "a2", at: shiftedAgain },
+          },
+        ],
+      });
+
+      // Import parses the document's stored row as an update re-parses one,
+      // so the same `.overwrite()` shifts the exported date. Main refused the
+      // row instead (every exported date was refused).
       const target = await context.createStore(
         buildEdgeCaseGraph("date_property_shifted_target"),
       );
-      const result = await importGraph(target, await exportGraph(source), {
+      const result = await importGraph(target, exported, {
         onConflict: "error",
         onUnknownProperty: "error",
       });
-      expect(result.nodes.created).toBe(0);
-      expect(result.errors.map((error) => error.error)).toEqual([
-        expect.stringMatching(
-          /^at: The stored date sits under an \.overwrite\(\) that rewrites it/u,
-        ),
-      ]);
+      const [imported] = await target.nodes.ShiftedDateDoc.find();
+      expectObservation({
+        lane,
+        observed: {
+          errors: result.errors.length,
+          at: imported?.at as unknown as string | undefined,
+        },
+        correct: { errors: 0, at: stored },
+        defects: [
+          {
+            label: "import re-parses a stored value",
+            on: {},
+            today: { errors: 0, at: shiftedAgain },
+          },
+        ],
+      });
     });
   });
 }

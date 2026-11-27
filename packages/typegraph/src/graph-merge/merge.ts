@@ -20,10 +20,7 @@ import { lockStoreWriteFence } from "../store/operations/write-fence-prelude";
 import { storeWritersTakeGraphWriteFence } from "../store/operations/write-transaction";
 import { recordedAnchorOwner } from "../store/recorded-anchor-origin";
 import { resolveEvolvedTransactionStore } from "../store/runtime-port";
-import {
-  reviveStoredDateProps,
-  rewrittenStoredDateIssue,
-} from "../store/stored-date-revival";
+import { reviveStoredDateProps } from "../store/stored-date-revival";
 import type { TransactionContext } from "../store/types";
 import { groupBy } from "../utils/array";
 import { nowIso } from "../utils/date";
@@ -2437,7 +2434,7 @@ async function applyNodeRows<G extends GraphDef>(
       // a uniqueness claim over a date is keyed as that write keys it.
       afterImages.set(
         mergeKey(kind, item.id),
-        revivedPlannedProps(nodeSchemaFor(target, kind), "node", item, props),
+        revivedPlannedProps(nodeSchemaFor(target, kind), props),
       );
     }
   }
@@ -2692,8 +2689,6 @@ function revivedMergeGraphRows<G extends GraphDef>(
         ...upsert,
         props: revivedPlannedProps(
           nodeSchemaFor(target, upsert.kind),
-          "node",
-          upsert,
           upsert.props,
         ),
       })),
@@ -2707,8 +2702,6 @@ function revivedMergeGraphRows<G extends GraphDef>(
             ...upsert.item,
             props: revivedPlannedProps(
               edgeSchemaFor(target, upsert.kind),
-              "edge",
-              { kind: upsert.kind, id: upsert.item.id },
               upsert.item.props,
             ),
           },
@@ -4395,7 +4388,6 @@ async function resolvedMergeArtifact<G extends GraphDef>(
 ): Promise<MergePlanArtifactV3> {
   const { plan, options } = resolved;
   const writes = resolvedMergeWrites(plan);
-  await assertPlannedWritesValidate(target, writes);
   const input: MergePlanArtifactV3Input = {
     formatVersion: MERGE_PLAN_FORMAT_VERSION,
     mode,
@@ -5559,31 +5551,20 @@ type PlannedPropsWrite = Readonly<{
  * — revived for the target's schema the way the store revives a stored row
  * before it parses one (`reviveStoredDateProps`): merge wire props carry each
  * `Date` as the ISO text the store wrote for it, which `z.date()` refuses.
- * Refused, with the issue the store's own writes raise, when the schema would
- * rewrite a revived date: the merge would land a different date than the
- * branch holds. A kind without a schema keeps its props as stated.
+ * A kind without a schema keeps its props as stated.
  */
 export function revivedPlannedProps(
   schema: PropsSchema | undefined,
-  role: "node" | "edge",
-  write: Readonly<{ kind: string; id: string }>,
   props: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
-  if (schema === undefined) return { ...props };
-  const revival = reviveStoredDateProps(schema, { ...props });
-  if (revival.kind === "revived") return revival.props;
-  const issue = rewrittenStoredDateIssue(revival.path);
-  throw invalidPlanForTarget(
-    `The merge plan's ${role} write for "${write.id}" does not validate against the active schema: ${issue.path}: ${issue.message}`,
-    { kind: write.kind, id: write.id, role, path: issue.path },
-  );
+  return schema === undefined ?
+      { ...props }
+    : reviveStoredDateProps(schema, { ...props });
 }
 
 /**
- * The one props check a planned node or edge write passes, at plan time
- * ({@link assertPlannedWritesValidate}) and again at apply
- * ({@link preflightWireMergeWrites}), so a plan apply would refuse is refused
- * when it is made, with the same error: the after-image the write leaves over
+ * The props check apply's preflight ({@link preflightWireMergeWrites}) runs
+ * on a planned node or edge write: the after-image the write leaves over
  * `current` (the target's row, or `{}` for a new one), revived
  * ({@link revivedPlannedProps}), must parse through the target's schema.
  */
@@ -5595,8 +5576,6 @@ function assertPlannedWriteValidates(
 ): void {
   const props = revivedPlannedProps(
     schema,
-    role,
-    write,
     resolvedWireProps(current, write.setProps, write.unsetProps),
   );
   if (schema !== undefined && !schema.safeParse(props).success) {
@@ -5604,56 +5583,6 @@ function assertPlannedWriteValidates(
       `The merge plan's ${role} write for "${write.id}" does not validate against the active schema.`,
       { kind: write.kind, id: write.id, role },
     );
-  }
-}
-
-/**
- * Plan-time half of {@link assertPlannedWriteValidates}: every node and edge
- * write of a plan being built, checked against the rows `target` holds now.
- * `target` carries the schema apply will use (an evolution plan's resulting
- * schema included).
- */
-async function assertPlannedWritesValidate<G extends GraphDef>(
-  target: Store<G>,
-  writes: MergePlanWrites,
-): Promise<void> {
-  const nodesApi = target.nodes as unknown as TxNodes;
-  const edgesApi = target.edges as unknown as TxEdges;
-  for (const [kind, upserts] of groupBy(
-    writes.nodeUpserts,
-    (upsert) => upsert.kind,
-  )) {
-    const rows = await nodeCollection(nodesApi, kind).getByIds(
-      upserts.map((upsert) => upsert.id),
-      INCLUDE_TOMBSTONES,
-    );
-    for (const [index, upsert] of upserts.entries()) {
-      const row = rows[index];
-      assertPlannedWriteValidates(
-        nodeSchemaFor(target, kind),
-        "node",
-        upsert,
-        row === undefined ? {} : nodeProps(row),
-      );
-    }
-  }
-  for (const [kind, upserts] of groupBy(
-    writes.edgeUpserts,
-    (upsert) => upsert.kind,
-  )) {
-    const rows = await edgeCollection(edgesApi, kind).getByIds(
-      upserts.map((upsert) => upsert.id),
-      INCLUDE_TOMBSTONES,
-    );
-    for (const [index, upsert] of upserts.entries()) {
-      const row = rows[index];
-      assertPlannedWriteValidates(
-        edgeSchemaFor(target, kind),
-        "edge",
-        upsert,
-        row === undefined ? {} : edgeProps(row),
-      );
-    }
   }
 }
 
@@ -6858,14 +6787,12 @@ function analyzeRevalidatingWrite(
   }
 
   // Stored-form props: the store's write revives their date text before it
-  // parses, so the analysis does too. A date the schema would rewrite stays
-  // revived, so the analysis reports the change the write would make.
+  // parses, so the analysis does too, and reports the change a rewriting
+  // `.overwrite()` the revived date is parsed through would make.
   const currentParsed = schema.safeParse(
-    reviveStoredDateProps(schema, { ...current }).props,
+    reviveStoredDateProps(schema, { ...current }),
   );
-  const mergedParsed = schema.safeParse(
-    reviveStoredDateProps(schema, merged).props,
-  );
+  const mergedParsed = schema.safeParse(reviveStoredDateProps(schema, merged));
   if (!currentParsed.success || !mergedParsed.success) {
     return { status: "invalid" };
   }

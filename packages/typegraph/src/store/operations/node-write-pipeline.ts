@@ -86,7 +86,7 @@ import {
 } from "../fulltext-sync";
 import type { OperationEntry, StatementBackend } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
-import { revalidatedStoredProps } from "../stored-date-revival";
+import { reviveStoredDateProps } from "../stored-date-revival";
 import { type NodeDeletePlan } from "../types";
 import { hardDeleteEdgeRows, softDeleteEdgeRows } from "./edge-write-pipeline";
 
@@ -1215,12 +1215,7 @@ export async function applyNodeSetUpdate(
     const props = rowPropsToObject(row.props);
     const validatedProps = validateNodeProps(
       schema,
-      revalidatedStoredProps(
-        schema,
-        props,
-        {},
-        { entityType: "node", kind, operation: "update", id: row.id },
-      ),
+      reviveStoredDateProps(schema, props),
       {
         kind,
         operation: "update",

@@ -8,8 +8,7 @@
  * active schema; `merge()` failed while committing; candidate staging (which
  * stages through import) returned a plan apply refused. Merge revives the
  * stored text through the store's one revival decision before validating and
- * writing, as import does, and a planned write that its schema would rewrite
- * is refused at plan time with the error apply raises for it.
+ * writing, as import does.
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -28,12 +27,12 @@ import {
   type CandidateWriteSet,
   captureCandidateWriteSetTarget,
   createMutationPlanBuilder,
-  InvalidMergePlanError,
   merge,
   planCandidateWriteSet,
   planMerge,
 } from "../../../src/graph-merge";
 import { isErr, isOk, unwrap } from "../../../src/graph-merge/result";
+import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
 
 const PUBLISHED = new Date("2024-01-02T03:04:05.678Z");
@@ -272,7 +271,7 @@ export function registerDatePropertyMergeIntegrationTests(
       ]);
     });
 
-    it("refuses at plan time, as apply does, a dated write its schema would rewrite", async () => {
+    it("a merge keeps a date whose wrapper rewrites it", async () => {
       const base = await context.createStore(mergeGraph, {
         revisionTracking: true,
       });
@@ -281,22 +280,32 @@ export function registerDatePropertyMergeIntegrationTests(
           id: asBranchId("shifted"),
         }),
       );
-      await fork.store.nodes.MergedShiftedDoc.create(
+      const created = await fork.store.nodes.MergedShiftedDoc.create(
         { title: "shifted", at: PUBLISHED },
         { id: "shifted" },
       );
-      const planned = await planMerge(base, [fork]);
-      expect(isErr(planned) && planned.error).toBeInstanceOf(
-        InvalidMergePlanError,
-      );
-      expect(isErr(planned) ? planned.error.message : "planned").toMatch(
-        /node write for "shifted".*at: The stored date sits under an \.overwrite\(\)/u,
-      );
+      const stored = new Date(PUBLISHED.getTime() + DAY_MS).toISOString();
+      expect(created.at).toBe(stored);
       const merged = await merge(base, [fork]);
-      expect(isErr(merged) ? merged.error.message : "merged").toMatch(
-        /The stored date sits under an \.overwrite\(\)/u,
-      );
-      expect(await base.nodes.MergedShiftedDoc.find()).toEqual([]);
+      expect(isErr(merged) ? merged.error.message : "merged").toBe("merged");
+      const [row] = await base.nodes.MergedShiftedDoc.find();
+      // The merge writes the branch's stored row through the target's schema,
+      // so the wrapper's `.overwrite()` shifts the date again, as an update of
+      // another property does. Main refused the write instead (every dated
+      // row was refused).
+      expectObservation({
+        lane: { dialect: base.backend.dialect },
+        // Reads return the stored text, typed as the schema's `Date`.
+        observed: row?.at as unknown as string | undefined,
+        correct: stored,
+        defects: [
+          {
+            label: "merge re-parses a stored value",
+            on: {},
+            today: new Date(PUBLISHED.getTime() + 2 * DAY_MS).toISOString(),
+          },
+        ],
+      });
     });
   });
 }

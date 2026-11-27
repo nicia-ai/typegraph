@@ -194,10 +194,7 @@ import {
   storeRuntime,
 } from "../store/runtime-port";
 import { type Store } from "../store/store";
-import {
-  reviveStoredDateProps,
-  rewrittenStoredDateIssue,
-} from "../store/stored-date-revival";
+import { reviveStoredDateProps } from "../store/stored-date-revival";
 import { type CompositionNodeRef } from "../store/types";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
@@ -6169,15 +6166,7 @@ export function validateImportProperties(
     // value, including non-canonical date text, is parsed (and refused) as
     // stated. A revived `Date` serializes back to the same bytes, so every
     // strategy below persists the document's text unchanged.
-    const revival = reviveStoredDateProps(schema, documentProperties);
-    // A stored date under an `.overwrite()` that would rewrite it is refused,
-    // not parsed: the row would be imported holding a different date than the
-    // document states.
-    if (revival.kind === "rewritten") {
-      const issue = rewrittenStoredDateIssue(revival.path);
-      return { success: false, error: `${issue.path}: ${issue.message}` };
-    }
-    const properties = revival.props;
+    const properties = reviveStoredDateProps(schema, documentProperties);
 
     // Get the schema's known keys
     const knownKeys = new Set(Object.keys(schema.shape));

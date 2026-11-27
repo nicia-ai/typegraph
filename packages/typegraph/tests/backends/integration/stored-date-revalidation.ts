@@ -185,9 +185,7 @@ export function registerStoredDateRevalidationIntegrationTests(
       const stored = document.stampedAt;
       await expect(
         store.nodes.StampedDoc.update(document.id, { title: "a2" }),
-      ).rejects.toThrow(
-        /stampedAt: The stored date sits under an \.overwrite\(\) that rewrites it on every parse/u,
-      );
+      ).rejects.toThrow(/expected date, received string/u);
       const read = await store.nodes.StampedDoc.getById(document.id);
       expect(read?.title).toBe("a");
       expect(read?.stampedAt).toBe(stored);
