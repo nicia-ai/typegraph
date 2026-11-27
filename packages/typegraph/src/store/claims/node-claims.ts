@@ -967,7 +967,7 @@ export function alreadyAppliedRowWrite(): Promise<undefined> {
  * the order the claiming write stated, or any form a future key derivation
  * stops producing.
  */
-export type OwnerClaimRelease = Readonly<{
+type OwnerClaimRelease = Readonly<{
   constraintNames: readonly string[];
   keep: readonly KeptUniqueClaim[];
 }>;
