@@ -763,19 +763,21 @@
         "CREATE TABLE IF NOT EXISTS \"typegraph_contribution_materializations\" ( \"graph_id\" TEXT NOT NULL, \"logical_name\" TEXT NOT NULL, \"owner\" TEXT NOT NULL, \"table_name\" TEXT NOT NULL, \"signature\" TEXT NOT NULL, \"materialized_at\" TIMESTAMPTZ, \"last_attempted_at\" TIMESTAMPTZ NOT NULL, \"last_error\" TEXT, PRIMARY KEY (\"graph_id\", \"logical_name\", \"owner\", \"table_name\") );",
         "select \"graph_id\", \"logical_name\", \"owner\", \"table_name\", \"signature\", \"materialized_at\", \"last_attempted_at\", \"last_error\" from \"typegraph_contribution_materializations\" where \"typegraph_contribution_materializations\".\"graph_id\" = $1",
         "CREATE TABLE IF NOT EXISTS \"tg_vec_trace_parity_item_embedding_67072986\" ( \"graph_id\" TEXT NOT NULL, \"node_id\" TEXT NOT NULL, \"embedding\" vector(3) NOT NULL, \"created_at\" TIMESTAMPTZ NOT NULL, \"updated_at\" TIMESTAMPTZ NOT NULL, PRIMARY KEY (\"graph_id\", \"node_id\") );",
-        "insert into \"typegraph_contribution_materializations\" (\"graph_id\", \"logical_name\", \"owner\", \"table_name\", \"signature\", \"materialized_at\", \"last_attempted_at\", \"last_error\") values ($1, $2, $3, $4, $5, default, $6, $7) on conflict (\"graph_id\",\"logical_name\",\"owner\",\"table_name\") do update set \"signature\" = excluded.\"signature\", \"materialized_at\" = COALESCE(excluded.\"materialized_at\", \"typegraph_contribution_materializations\".\"materialized_at\"), \"last_attempted_at\" = excluded.\"last_attempted_at\", \"last_error\" = excluded.\"last_error\"",
-        "select \"graph_id\", \"logical_name\", \"owner\", \"table_name\", \"signature\", \"materialized_at\", \"last_attempted_at\", \"last_error\" from \"typegraph_contribution_materializations\" where \"typegraph_contribution_materializations\".\"graph_id\" = $1",
+        "insert into \"typegraph_contribution_materializations\" (\"graph_id\", \"logical_name\", \"owner\", \"table_name\", \"signature\", \"materialized_at\", \"last_attempted_at\", \"last_error\") values ($1, $2, $3, $4, $5, $6, $7, default) on conflict (\"graph_id\",\"logical_name\",\"owner\",\"table_name\") do update set \"signature\" = excluded.\"signature\", \"materialized_at\" = excluded.\"materialized_at\", \"last_attempted_at\" = excluded.\"last_attempted_at\", \"last_error\" = excluded.\"last_error\"",
+        "ALTER TABLE \"tg_vec_trace_parity_item_embedding_67072986\" RESET (parallel_workers)",
+        "CREATE INDEX IF NOT EXISTS \"tg_vecidx_trace_parity_item_embedding_67072986\" ON \"tg_vec_trace_parity_item_embedding_67072986\" USING hnsw (\"embedding\" vector_cosine_ops) WITH (m = 16, ef_construction = 64);",
+        "DELETE FROM \"tg_vec_trace_parity_item_embedding_67072986\" WHERE \"graph_id\" = $1 AND \"node_id\" = $2",
         "BEGIN",
         "SET LOCAL typegraph.transaction_marker = '<marker>'",
         "DELETE FROM \"typegraph_contribution_materializations\" WHERE graph_id = $1 AND logical_name = $2 AND owner = $3 AND table_name = $4",
         "SELECT current_setting('typegraph.transaction_marker', true) AS marker",
         "COMMIT",
-        "select \"graph_id\", \"logical_name\", \"owner\", \"table_name\", \"signature\", \"materialized_at\", \"last_attempted_at\", \"last_error\" from \"typegraph_contribution_materializations\" where \"typegraph_contribution_materializations\".\"graph_id\" = $1"
+        "DELETE FROM \"tg_vec_trace_parity_item_embedding_67072986\" WHERE \"graph_id\" = $1 AND \"node_id\" = $2"
       ],
       "outcomes": {
-        "after commit": "StoreNotInitializedError",
-        "before delete": "StoreNotInitializedError",
-        "provision": "untyped: Error: Failed query: CREATE TABLE IF NOT EXISTS \"tg_vec_trace_parity_item_embedding_67072986\" (",
+        "after commit": "fulfilled",
+        "before delete": "fulfilled",
+        "provision": "fulfilled",
         "transaction": "fulfilled"
       },
       "rows": []

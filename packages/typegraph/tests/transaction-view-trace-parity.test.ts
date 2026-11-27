@@ -221,7 +221,12 @@ async function openHarness(lane: Lane): Promise<Harness> {
       };
     }
     case "pglite": {
-      const client = await PGlite.create();
+      // pgvector loaded, as the backend's default vector strategy expects:
+      // the vector cells provision a slot and warm the marker cache before
+      // the statements they are about.
+      const { vector } = await import("@electric-sql/pglite-pgvector");
+      const client = await PGlite.create({ extensions: { vector } });
+      await client.exec("CREATE EXTENSION IF NOT EXISTS vector");
       const db = drizzlePglite(client);
       const backend = createPostgresBackend(db) as AdapterBackend<unknown>;
       await requireDefined(backend.bootstrapTables)();
@@ -631,12 +636,15 @@ const CELLS: Readonly<Record<string, Cell>> = {
 
 /**
  * The cells that differ from main, each by one of the view's own rules. In
- * every one the difference is the same: a write the view refused never
+ * every one the difference is the same: a write the branch refused never
  * reaches the driver. For each, `branch` states the outcomes and the rows
  * this branch leaves, and which statement of main's trace the refused write
- * was (`refusedFromEnd`: 1 is main's last statement); the branch's trace
- * must be main's without exactly that statement. Every other cell equals
- * main's record exactly.
+ * was (`refusedFromEnd`: 1 is main's last statement). A write the view
+ * refused is a node insert, and the branch's trace must be main's without
+ * exactly that statement. A write refused by a marker check
+ * (`refusedBy: "marker read"`) is an embedding write main authorised with a
+ * cached marker: the branch's trace has, in its place, the marker read that
+ * found the marker gone. Every other cell equals main's record exactly.
  */
 const DIVERGENT_CELLS: Readonly<
   Record<
@@ -648,6 +656,7 @@ const DIVERGENT_CELLS: Readonly<
         outcomes: Readonly<Record<string, string>>;
         rows: readonly string[];
         refusedFromEnd: number;
+        refusedBy?: "marker read";
       }>;
     }>
   >
@@ -702,6 +711,23 @@ const DIVERGENT_CELLS: Readonly<
         refusedFromEnd: 1,
       },
     },
+  "owned: an adoption of the native handle deletes a vector slot's marker, then the root uses the slot":
+    {
+      rule: "(2b) the adoption's eviction reaches the root cache, so the root re-reads the marker after the commit and refuses the slot",
+      // libSQL's adoption already evicted the root cache on main.
+      lanes: ["pglite"],
+      branch: {
+        outcomes: {
+          "after commit": "StoreNotInitializedError",
+          "before delete": "fulfilled",
+          provision: "fulfilled",
+          transaction: "fulfilled",
+        },
+        rows: [],
+        refusedFromEnd: 1,
+        refusedBy: "marker read",
+      },
+    },
   "trusted import: a kept session's batches after the import committed": {
     rule: "(1d) trusted import runs through the view, empty batches included",
     lanes: ["better-sqlite3", "pglite"],
@@ -720,15 +746,33 @@ const DIVERGENT_CELLS: Readonly<
 };
 
 /**
- * Main's trace without the refused write `refusedFromEnd` statements from its
- * end; throws unless that statement is a node insert.
+ * Main's trace with the refused write `refusedFromEnd` statements from its
+ * end removed, or, refused by a marker read, replaced by the marker read
+ * main's trace already ran earlier; throws unless that statement is the
+ * write the refusal names.
  */
 function withoutRefusedWrite(
   trace: readonly string[],
   refusedFromEnd: number,
+  refusedBy?: "marker read",
 ): readonly string[] {
   const index = trace.length - refusedFromEnd;
   const refused = trace[index];
+  if (refusedBy === "marker read") {
+    // The embedding write main authorised with its cached marker.
+    const markerRead = trace.find((statement) =>
+      statement.includes('from "typegraph_contribution_materializations"'),
+    );
+    if (
+      !refused?.startsWith('DELETE FROM "tg_vec_') ||
+      markerRead === undefined
+    ) {
+      throw new Error(
+        `main's statement ${String(refusedFromEnd)} from the end is not an embedding write after a marker read: ${String(refused)}`,
+      );
+    }
+    return trace.toSpliced(index, 1, markerRead);
+  }
   // The statement a refused node write would have run, on every lane.
   if (!refused?.startsWith('INSERT INTO "typegraph_nodes" ')) {
     throw new Error(
@@ -825,18 +869,23 @@ describe("transaction statement traces match main outside the view's own rules",
           .map(([name]) => name),
       );
       // A divergent cell must equal main's record with its own rule
-      // applied: the refused write gone from the trace, and the outcomes and
+      // applied: the refused write gone from the trace (or replaced by the
+      // marker read that refused it), and the outcomes and
       // rows it states. Every other cell must equal main's record.
       const expected = Object.fromEntries(
         Object.entries(main).map(([name, record]) => {
           if (!divergent.has(name)) return [name, record];
-          const { outcomes, rows, refusedFromEnd } = requireDefined(
+          const { outcomes, rows, refusedFromEnd, refusedBy } = requireDefined(
             DIVERGENT_CELLS[name],
           ).branch;
           return [
             name,
             {
-              trace: withoutRefusedWrite(record.trace, refusedFromEnd),
+              trace: withoutRefusedWrite(
+                record.trace,
+                refusedFromEnd,
+                refusedBy,
+              ),
               outcomes,
               rows,
             },

@@ -165,6 +165,15 @@ async function installRaiseRollback(
   };
 }
 
+/** A read that keeps the connection busy for a while, on either dialect. */
+function slowStatement(backend: GraphBackend) {
+  return backend.dialect === "postgres" ?
+      asCompiledRowsSql(sql`SELECT pg_sleep(0.2) IS NULL AS slept`)
+    : asCompiledRowsSql(
+        sql`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 300000) SELECT COUNT(*) AS n FROM c`,
+      );
+}
+
 function isSqliteLane(context: IntegrationTestContext): boolean {
   return context.driver === "better-sqlite3" || context.driver === "libsql";
 }
@@ -576,11 +585,18 @@ export function registerTransactionStatementAdmissionTests(
             const adoption = backend.adoptTransaction(native);
             adopted = adoption;
             await adoption.insertNode(node(graphId, "adopted-inside"));
-            // Started, not awaited: the owner's boundary waits for it.
+            await tx.insertNode(node(graphId, "owner"));
+            // A slow owner statement, then the adopted write behind it on the
+            // transaction's connection, neither awaited: the callback returns
+            // while the adopted write is still held, and it must settle
+            // inside the transaction. On every bundled driver the boundary's
+            // own statements also queue behind it, so this states the
+            // outcome; `tests/transaction-view.test.ts` pins the drain's
+            // order against a held statement directly.
+            void tx.execute(slowStatement(backend));
             inFlight = outcomeOf(
               adoption.insertNode(node(graphId, "adopted-in-flight")),
             );
-            await tx.insertNode(node(graphId, "owner"));
             if (end === "rolled back") throw new Error("callback failed");
           }),
         );
