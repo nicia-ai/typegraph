@@ -253,10 +253,13 @@ function referenceReleaseUniquesByOwner(
       params.constraintNames.map((name) => sql`${name}`),
       sql`, `,
     );
-    const kept = params.keep.map(
-      (held) =>
-        sql` AND NOT ("constraint_name" = ${held.constraintName} AND "key" = ${held.key})`,
-    );
+    const kept =
+      params.keep.length === 0 ?
+        sql``
+      : sql` AND ("constraint_name", "key") NOT IN (VALUES ${sql.join(
+          params.keep.map((held) => sql`(${held.constraintName}, ${held.key})`),
+          sql`, `,
+        )})`;
     await executeStatement(
       asCompiledStatementSql(sql`
         UPDATE ${sql.identifier(uniques)}
@@ -265,7 +268,7 @@ function referenceReleaseUniquesByOwner(
           AND "concrete_kind" = ${params.concreteKind}
           AND "node_id" = ${params.nodeId}
           AND "deleted_at" IS NULL
-          AND "constraint_name" IN (${constraints})${sql.join(kept, sql``)}
+          AND "constraint_name" IN (${constraints})${kept}
       `),
     );
   };
@@ -640,7 +643,7 @@ function registerOwnerClaimReleaseCases(
       expect(await liveClaims(backend, graphId, "OcrEvent_at")).toEqual([]);
     });
 
-    it("a claim left in the raw text form is released by the owner's next update of the field and delete", async () => {
+    it("a claim left in the raw text form is released by the owner's next move of the key and its delete", async () => {
       const { graphId, store, backend } = await createGraphStore(context, port);
       await store.nodes.OcrEvent.create({ name: "row", at: A }, { id: "row" });
       await store.nodes.OcrEvent.create(
@@ -656,13 +659,14 @@ function registerOwnerClaimReleaseCases(
         planted: B.toISOString(),
       });
 
-      // An update that states the field re-keys it, even to the same value;
-      // a delete releases it.
-      await store.nodes.OcrEvent.update("row" as EventId, { at: A });
+      // An update that moves the key gives back every claim its owner held
+      // under the constraint, the raw-form one included; a delete releases
+      // whatever form its claim is in.
       await store.nodes.OcrEvent.delete("other" as EventId);
+      await store.nodes.OcrEvent.update("row" as EventId, { at: B });
 
       expect(await liveClaims(backend, graphId, "OcrEvent_at")).toEqual([
-        claim("OcrEvent_at", keyOf("at", A), "row"),
+        claim("OcrEvent_at", keyOf("at", B), "row"),
       ]);
       await expectNoViolations(store);
     });
@@ -689,8 +693,14 @@ function registerOwnerClaimReleaseCases(
       ]);
     });
 
-    it("getOrCreateByConstraint resurrects a soft-deleted row holding a piped date", async () => {
-      const { graphId, store, backend } = await createGraphStore(context, port);
+    // A piped date's input is text and its output a `Date`, and stored-date
+    // revival does not reach through a pipe. The get-or-create update and
+    // resurrection legs hand the matched row the props the lookup validated,
+    // which the update re-validates as input, as on main; and the tombstone a
+    // resurrection looks for keys its stored text, which no create of the date
+    // claims. Pinned, not repaired here.
+    it("getOrCreateByConstraint does not resurrect a soft-deleted row holding a piped date", async () => {
+      const { store } = await createGraphStore(context, port);
       await store.nodes.OcrPipedEvent.create(
         { name: "row", at: A.toISOString() },
         { id: "row" },
@@ -704,76 +714,83 @@ function registerOwnerClaimReleaseCases(
         { name: "again", at: A.toISOString() },
       );
 
-      expect({ action: result.action, id: result.node.id }).toEqual({
-        action: "resurrected",
-        id: "row",
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: {
+          action: result.action,
+          revivedRow: result.node.id === "row",
+        },
+        correct: { action: "resurrected", revivedRow: true },
+        defects: [
+          {
+            label: "piped date tombstone keyed from stored text",
+            on: {},
+            today: { action: "created", revivedRow: false },
+          },
+        ],
       });
-      expect(await liveClaims(backend, graphId, "OcrPipedEvent_at")).toEqual([
-        claim("OcrPipedEvent_at", keyOf("at", A).toLowerCase(), "row"),
-      ]);
       await expectNoViolations(store);
     });
 
-    it("bulkGetOrCreateByConstraint resurrects and updates rows holding piped dates", async () => {
-      const { graphId, store, backend } = await createGraphStore(context, port);
-      await store.nodes.OcrPipedEvent.create(
-        { name: "deleted", at: A.toISOString() },
-        { id: "deleted" },
-      );
+    it("bulkGetOrCreateByConstraint refuses to update a row holding a piped date", async () => {
+      const { store } = await createGraphStore(context, port);
       await store.nodes.OcrPipedEvent.create(
         { name: "live", at: B.toISOString() },
         { id: "live" },
       );
-      await store.nodes.OcrPipedEvent.delete(
-        "deleted" as NodeId<typeof OcrPipedEvent>,
-      );
 
-      const results =
-        await store.nodes.OcrPipedEvent.bulkGetOrCreateByConstraint(
-          "OcrPipedEvent_at",
-          [
-            { props: { name: "again", at: A.toISOString() } },
-            { props: { name: "renamed", at: B.toISOString() } },
-          ],
-          { ifExists: "update" },
-        );
-
-      expect(
-        results.map((result) => ({
-          action: result.action,
-          id: result.node.id,
-        })),
-      ).toEqual([
-        { action: "resurrected", id: "deleted" },
-        { action: "updated", id: "live" },
-      ]);
-      expect(await liveClaims(backend, graphId, "OcrPipedEvent_at")).toEqual([
-        claim("OcrPipedEvent_at", keyOf("at", A).toLowerCase(), "deleted"),
-        claim("OcrPipedEvent_at", keyOf("at", B).toLowerCase(), "live"),
-      ]);
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: await outcome(() =>
+          store.nodes.OcrPipedEvent.bulkGetOrCreateByConstraint(
+            "OcrPipedEvent_at",
+            [{ props: { name: "renamed", at: B.toISOString() } }],
+            { ifExists: "update" },
+          ),
+        ),
+        correct: "written",
+        defects: [
+          {
+            label: "get-or-create update re-validates validated props",
+            on: {},
+            today: "ValidationError",
+          },
+        ],
+      });
     });
 
-    it("getOrCreateByConstraint updates a live row holding a piped date", async () => {
+    it("getOrCreateByConstraint refuses to update a live row holding a piped date", async () => {
       const { store } = await createGraphStore(context, port);
       await store.nodes.OcrPipedEvent.create(
         { name: "row", at: A.toISOString() },
         { id: "row" },
       );
 
-      const result = await store.nodes.OcrPipedEvent.getOrCreateByConstraint(
-        "OcrPipedEvent_at",
-        { name: "renamed", at: A.toISOString() },
-        { ifExists: "update" },
-      );
-
-      expect({
-        action: result.action,
-        id: result.node.id,
-        name: result.node.name,
-      }).toEqual({ action: "updated", id: "row", name: "renamed" });
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: await outcome(() =>
+          store.nodes.OcrPipedEvent.getOrCreateByConstraint(
+            "OcrPipedEvent_at",
+            { name: "renamed", at: A.toISOString() },
+            { ifExists: "update" },
+          ),
+        ),
+        correct: "written",
+        defects: [
+          {
+            label: "get-or-create update re-validates validated props",
+            on: {},
+            today: "ValidationError",
+          },
+        ],
+      });
     });
 
-    it("an import under onUnknownProperty allow claims the value its schema produced", async () => {
+    // An import under "allow" writes the document's value verbatim and keys
+    // its claim from that value through the stored-props key path, which
+    // revives a stored `z.date()` but not text under a pipe: the claim is the
+    // text's, not the `Date`'s a create claims. The same on main.
+    it("an import under onUnknownProperty allow keys a piped date from the text it writes", async () => {
       const { graphId, store, backend } = await createGraphStore(context, port);
       const imported = await importGraph(
         store,
@@ -792,12 +809,36 @@ function registerOwnerClaimReleaseCases(
       );
       expect(imported.errors).toEqual([]);
 
-      expect(await liveClaims(backend, graphId, "OcrPipedEvent_at")).toEqual([
-        claim("OcrPipedEvent_at", keyOf("at", A).toLowerCase(), "row"),
-      ]);
-      await expect(
-        store.nodes.OcrPipedEvent.create({ name: "dup", at: A.toISOString() }),
-      ).rejects.toBeInstanceOf(UniquenessError);
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: {
+          claims: await liveClaims(backend, graphId, "OcrPipedEvent_at"),
+          duplicate: await outcome(() =>
+            store.nodes.OcrPipedEvent.create({
+              name: "dup",
+              at: A.toISOString(),
+            }),
+          ),
+        },
+        correct: {
+          claims: [
+            claim("OcrPipedEvent_at", keyOf("at", A).toLowerCase(), "row"),
+          ],
+          duplicate: "UniquenessError",
+        },
+        defects: [
+          {
+            label: "verbatim piped date keyed from its text",
+            on: {},
+            today: {
+              claims: [
+                claim("OcrPipedEvent_at", A.toISOString().toLowerCase(), "row"),
+              ],
+              duplicate: "written",
+            },
+          },
+        ],
+      });
     });
 
     it("an import update under onUnknownProperty allow releases the date the row moves off", async () => {
@@ -824,8 +865,10 @@ function registerOwnerClaimReleaseCases(
       );
       expect(imported.errors).toEqual([]);
 
+      // The new claim is keyed from the written text (see above); the old
+      // one is released by owner whatever form it was in.
       expect(await liveClaims(backend, graphId, "OcrPipedEvent_at")).toEqual([
-        claim("OcrPipedEvent_at", keyOf("at", B).toLowerCase(), "row"),
+        claim("OcrPipedEvent_at", B.toISOString().toLowerCase(), "row"),
       ]);
       await store.nodes.OcrPipedEvent.create({
         name: "taker",
@@ -834,9 +877,10 @@ function registerOwnerClaimReleaseCases(
       await expectNoViolations(store);
     });
 
-    // PR #1005 pinned this as "import claim key: JSONB key order" on
-    // PostgreSQL. Keying the claim from the parsed props, which a `z.object`
-    // puts in its shape's order, closes it on every lane.
+    // An import under "allow" keys an object value from the document's text,
+    // which a PostgreSQL export returns in JSONB's key order rather than the
+    // shape's — PR #1005's "import claim key: JSONB key order", the same on
+    // main.
     it("an object-valued unique property imported under allow collides with a create of the same value", async () => {
       const source = await context.createStore(buildGraph(nextGraphId()));
       await source.nodes.OcrBadge.create(
@@ -844,7 +888,7 @@ function registerOwnerClaimReleaseCases(
         { id: "badge" },
       );
       const exported = await exportGraph(source);
-      const { store } = await createGraphStore(context, port);
+      const { store, backend } = await createGraphStore(context, port);
       const imported = await importGraph(
         store,
         {
@@ -857,11 +901,20 @@ function registerOwnerClaimReleaseCases(
         { onConflict: "error", onUnknownProperty: "allow" },
       );
       expect(imported.errors).toEqual([]);
-      expect(
-        await outcome(() =>
+      expectObservation({
+        lane: { dialect: backend.dialect },
+        observed: await outcome(() =>
           store.nodes.OcrBadge.create({ code: { zeta: "z", a: "a" } }),
         ),
-      ).toBe("UniquenessError");
+        correct: "UniquenessError",
+        defects: [
+          {
+            label: "import claim key: JSONB key order",
+            on: { dialect: ["postgres"] },
+            today: "written",
+          },
+        ],
+      });
     });
 
     // PR #1005 pinned this as "date claim release" (and, on better-sqlite3,
@@ -991,15 +1044,20 @@ function registerOwnerClaimReleaseCases(
         ],
       });
 
-      // A patch that states no constrained field leaves the claim alone.
+      // An update that leaves the key where it was leaves the claim alone,
+      // whether or not it restates the field.
       await store.nodes.OcrEvent.update("row" as EventId, { name: "renamed" });
+      await store.nodes.OcrEvent.update("row" as EventId, { at: A });
       const heldAfterRename = await liveClaims(backend, graphId, "OcrEvent_at");
       expect(heldAfterRename.filter((held) => held.node_id === "row")).toEqual([
         claim("OcrEvent_at", A.toISOString(), "row"),
       ]);
 
-      // The repair: restating the constrained field re-keys the owner's claim
-      // from validated props, and surfaces the duplicate the legacy key let in.
+      // The repair: moving the owner's key off the value gives back every
+      // claim it held under the constraint, and moving it back claims the
+      // value in the form a create claims — surfacing the duplicate the legacy
+      // key let in.
+      await store.nodes.OcrEvent.update("row" as EventId, { at: B });
       const rewriteWithDuplicate = await outcome(() =>
         store.nodes.OcrEvent.update("row" as EventId, { at: A }),
       );
@@ -1076,7 +1134,7 @@ async function createCountingStore(context: IntegrationTestContext) {
 }
 
 function registerPatchStatementCases(context: IntegrationTestContext): void {
-  describe("a patch that states no field a constraint reads issues no claim statement", () => {
+  describe("an update that moves no key issues no claim statement", () => {
     it("an update of an unconstrained field probes and releases nothing, root and in a transaction", async () => {
       const { graphId, store, counter, backend } =
         await createCountingStore(context);
@@ -1098,19 +1156,25 @@ function registerPatchStatementCases(context: IntegrationTestContext): void {
       ).rejects.toBeInstanceOf(UniquenessError);
     });
 
-    it("an update that states a constrained field, even unchanged, probes it and releases by owner once", async () => {
+    it("an update that restates a constrained field with its current value issues no claim statement", async () => {
       const { store, counter } = await createCountingStore(context);
       await store.nodes.OcrEvent.create({ name: "row", at: A }, { id: "row" });
 
       counter.reset();
       await store.nodes.OcrEvent.update("row" as EventId, { at: A });
-      expect(counter.calls()).toEqual({
-        checkUnique: 1,
-        releaseUniquesByOwner: 1,
-      });
+      expect(counter.calls()).toEqual({});
     });
 
-    it("only the constraints whose fields the patch states are probed and released", async () => {
+    it("a wholesale replacement that keeps every key issues no claim statement", async () => {
+      const { store, counter } = await createCountingStore(context);
+      await store.nodes.OcrEvent.create({ name: "row", at: A }, { id: "row" });
+
+      counter.reset();
+      await store.nodes.OcrEvent.upsertById("row", { name: "replaced", at: A });
+      expect(counter.calls()).toEqual({});
+    });
+
+    it("only the constraints whose key moves are probed and released", async () => {
       const { graphId, store, counter, backend } =
         await createCountingStore(context);
       const pairs = store.nodes.OcrPair;

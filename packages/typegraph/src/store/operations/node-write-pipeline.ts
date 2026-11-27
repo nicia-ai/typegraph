@@ -45,11 +45,11 @@ import {
   RestrictedDeleteError,
   ValidationError,
 } from "../../errors";
+import { validateNodeProps } from "../../errors/validation";
 import type { CompiledSelectSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
 import { assertsStoredLowerBound } from "../../utils/date";
-import { unwrap } from "../../utils/result";
 import { claimSupport } from "../claims/backing";
 import { purgeEdgeClaims } from "../claims/edge-claims";
 import {
@@ -85,7 +85,10 @@ import {
 } from "../fulltext-sync";
 import type { OperationEntry, StatementBackend } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
-import { parseStoredNodeProps } from "../stored-date-revival";
+import {
+  reviveStoredDateProps,
+  storedNodeClaimProps,
+} from "../stored-date-revival";
 import { type NodeDeletePlan } from "../types";
 import { hardDeleteEdgeRows, softDeleteEdgeRows } from "./edge-write-pipeline";
 
@@ -672,7 +675,7 @@ function planNodeUpdateUniqueness(
     existing: NodeRow;
     validatedProps: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
-    statedFields: readonly string[] | undefined;
+    schema: z.ZodType;
   }>,
   backend: Backend,
 ): Promise<UniquenessUpdatePlan> {
@@ -682,7 +685,7 @@ function planNodeUpdateUniqueness(
       args.existing,
       args.validatedProps,
       args.uniqueConstraints,
-      args.statedFields,
+      args.schema,
     ),
   );
 }
@@ -692,24 +695,27 @@ function planNodeUpdateUniqueness(
  * tombstone being restored owes a create's claims, a live row its uniqueness
  * claims. Shared by the update itself and by a batch that judges several
  * updates before writing any of them, so the two cannot read a row
- * differently. `props` are the VALIDATED props the row is about to hold —
- * the claim keys are derived from them alone. `statedFields` are the fields a
- * patch states over the stored props, `undefined` for a wholesale replacement
- * (see {@link NodeClaimTransition}).
+ * differently. `props` are the props the row is about to hold, which the
+ * claim keys are derived from. A live row's stored props are read through
+ * the stored-props key path ({@link storedNodeClaimProps}), so the transition
+ * compares the key the row holds with the key it is about to hold (see
+ * {@link NodeClaimTransition}).
  */
 export function nodeClaimTransition(
   existing: NodeRow,
   props: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
-  statedFields: readonly string[] | undefined,
+  schema: z.ZodType,
 ): NodeClaimTransition {
+  const target = { kind: existing.kind, id: existing.id, props, constraints };
+  if (existing.deleted_at !== undefined) return { ...target, restores: true };
   return {
-    kind: existing.kind,
-    id: existing.id,
-    restores: existing.deleted_at !== undefined,
-    props,
-    constraints,
-    ...(statedFields === undefined ? {} : { statedFields }),
+    ...target,
+    restores: false,
+    storedProps:
+      constraints.length === 0 ?
+        props
+      : storedNodeClaimProps(schema, parseRowProps(existing)),
   };
 }
 
@@ -739,19 +745,14 @@ export async function applyNodeUpdate(
     schema: z.ZodType;
     validatedProps: Record<string, unknown>;
     /**
-     * The validated props the claims are keyed from, when the props written
-     * are not them: an import under `onUnknownProperty: "allow"` persists the
-     * document's properties verbatim and claims the values its schema
-     * produced. Defaults to `validatedProps`.
+     * The props the claims are keyed from, when the props written are not
+     * already in the form a write validates: an import under
+     * `onUnknownProperty: "allow"` persists the document's properties
+     * verbatim, and claims them through the stored-props key path
+     * ({@link storedNodeClaimProps}). Defaults to `validatedProps`.
      */
     claimProps?: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
-    /**
-     * The fields a patch states over the stored props; absent for a write
-     * that replaces them wholesale. A constraint reading none of them keeps
-     * its claim with no statement ({@link NodeClaimTransition}).
-     */
-    statedFields?: readonly string[];
     validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
@@ -771,7 +772,7 @@ export async function applyNodeUpdate(
       existing: args.existing,
       validatedProps: args.claimProps ?? args.validatedProps,
       uniqueConstraints: args.uniqueConstraints,
-      statedFields: args.statedFields,
+      schema: args.schema,
     },
     backend,
   );
@@ -1006,15 +1007,12 @@ export async function applyNodeHardDelete(
  * Used by provenance to reinstate a fact whose currency is restored. Returns
  * the reopened row.
  *
- * The claims are keyed from the stored props as the schema validates them
- * ({@link parseStoredNodeProps}), never from the stored text: a create keyed
- * the same value from its validated props, and a revival keyed from text
- * would hold a claim no create of the value collides with.
+ * The claims are keyed from the value the row stores, through the
+ * stored-props key path ({@link storedNodeClaimProps}): its date text revived,
+ * as a create of the same date claims it, and nothing re-parsed.
  *
  * @throws {UniquenessError} when a unique key the node held was taken by
  *   another node while it was tombstoned.
- * @throws {ValidationError} when the stored props no longer validate, so the
- *   keys the node owes cannot be derived.
  */
 export async function applyNodeResurrect(
   ctx: NodeWriteContext,
@@ -1027,9 +1025,7 @@ export async function applyNodeResurrect(
 ): Promise<NodeRow> {
   const { kind, id } = args.existing;
   const props = parseRowProps(args.existing);
-  const claimProps = unwrap(
-    parseStoredNodeProps(args.schema, props, { kind, id }),
-  );
+  const claimProps = storedNodeClaimProps(args.schema, props);
   // One unit, exactly as `applyNodeUpdate`, and for the same reason: the
   // resurrecting UPDATE carries `deleted_at IS NOT NULL`, so a peer that revived
   // this tombstone first makes it match zero rows — and the reservations that
@@ -1215,8 +1211,14 @@ export async function applyNodeSetUpdate(
 
   const sidecarItems = result.rows.map((row) => {
     const props = rowPropsToObject(row.props);
-    const validatedProps = unwrap(
-      parseStoredNodeProps(schema, props, { kind, id: row.id }),
+    const validatedProps = validateNodeProps(
+      schema,
+      reviveStoredDateProps(schema, props),
+      {
+        kind,
+        operation: "update",
+        id: row.id,
+      },
     );
     if (!canonicalEqual(validatedProps, props)) {
       throw new ValidationError(

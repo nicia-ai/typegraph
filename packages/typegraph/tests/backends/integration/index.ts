@@ -100,6 +100,7 @@ export { registerOntologyTighteningIntegrationTests } from "./ontology-tightenin
 export { registerOntologyTypedSubsumptionIntegrationTests } from "./ontology-typed-subsumption";
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerOwnerClaimReleaseIntegrationTests } from "./owner-claim-release";
+export { registerStoredValueClaimIntegrationTests } from "./stored-value-claims";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-property";
 export { registerPaginationSystemColumnIntegrationTests } from "./pagination-system-columns";

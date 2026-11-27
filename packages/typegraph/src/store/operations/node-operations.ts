@@ -96,7 +96,11 @@ import {
   type TombstonedNodeRow,
   type UniqueRow,
 } from "../../backend/types";
-import { checkDisjointness, uniqueConstraintKey } from "../../constraints";
+import {
+  checkDisjointness,
+  uniqueConstraintKey,
+  uniqueConstraintKeyMoves,
+} from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
 import { assertJsonValue } from "../../core/json-value";
 import {
@@ -230,8 +234,8 @@ import {
 } from "../resolved-mutation-set";
 import { type NodeRow, rowToEdge, rowToNode } from "../row-mappers";
 import {
-  parseStoredNodeProps,
   reviveStoredDateProps,
+  storedNodeClaimProps,
 } from "../stored-date-revival";
 import {
   type BulkOperationHookContext,
@@ -1237,6 +1241,7 @@ export function createNodeBatchValidationSeams(
   registerAppliedNodeUpdate: (
     kind: string,
     id: string,
+    storedProps: Record<string, unknown>,
     newProps: Record<string, unknown>,
     constraints: readonly UniqueConstraint[],
   ) => void;
@@ -1377,16 +1382,20 @@ export function createNodeBatchValidationSeams(
   // create either (a) claims a value this update just freed yet gets rejected
   // against the stale reservation, or (b) passes the stale "free" cache for a
   // value this update just took and then violates the real constraint at
-  // flush, aborting the whole import. Mirrors the claim transition: the update
-  // gave back every other claim its owner held under each constraint — by
-  // owner, so the overlay frees them by owner too, never by a key recomputed
-  // from the row it replaced — and holds the new key AT ITS AXIS, the one row
-  // the transition wrote, while the remaining kinds the probe reads are
-  // recorded as vacant, which they are: the probe that let this update through
-  // visited every one of them.
+  // flush, aborting the whole import. Mirrors the claim transition: for each
+  // constraint whose key moved (`uniqueConstraintKeyMoves`, the decision the
+  // transition itself makes from the same stored and new props), the update
+  // gave back every other claim its owner held under it — by owner, so the
+  // overlay frees them by owner too, never by a key recomputed from the row it
+  // replaced — and holds the new key AT ITS AXIS, the one row the transition
+  // wrote, while the remaining kinds the probe reads are recorded as vacant,
+  // which they are: the probe that let this update through visited every one
+  // of them. A constraint whose key did not move was not touched, and neither
+  // is its overlay.
   function registerAppliedNodeUpdate(
     kind: string,
     id: string,
+    storedProps: Record<string, unknown>,
     newProps: Record<string, unknown>,
     constraints: readonly UniqueConstraint[],
   ): void {
@@ -1398,6 +1407,9 @@ export function createNodeBatchValidationSeams(
     );
 
     for (const constraint of constraints) {
+      if (!uniqueConstraintKeyMoves(constraint, storedProps, newProps)) {
+        continue;
+      }
       const newEntry = newEntries.get(constraint.name);
       releasedOwners.set(
         encodeTupleKey([constraint.name, kind, id]),
@@ -2010,18 +2022,10 @@ async function prepareNodeUpdate<G extends GraphDef>(
     validTo,
   );
 
-  // A patch states its own fields over the stored props; a replacement states
-  // every field. The claim transition skips a constraint a patch provably
-  // leaves alone (`NodeClaimTransition.statedFields`).
-  const statedFields =
-    options?.replacementProps === undefined ?
-      Object.keys(input.props)
-    : undefined;
   const shared = {
     schema: nodeKind.schema,
     validatedProps,
     uniqueConstraints: registration.unique ?? [],
-    ...(statedFields !== undefined && { statedFields }),
     ...(validTo !== undefined && { validTo }),
     ...(input.clearValidTo === true && { clearValidTo: true as const }),
   };
@@ -2044,7 +2048,7 @@ async function prepareNodeUpdate<G extends GraphDef>(
     existing,
     validatedProps,
     shared.uniqueConstraints,
-    statedFields,
+    nodeKind.schema,
   );
   const validToAfter =
     resurrectionInstant === undefined ?
@@ -3529,11 +3533,9 @@ function ownerClaimConstraint<G extends GraphDef>(
  * back, or rewriting, a node the key no longer belongs to. Read rather than
  * written away because databases already carry such rows.
  *
- * The node's key is derived from its stored props as its OWN kind's schema
- * validates them ({@link parseStoredNodeProps}) — the props a write claims
- * from — never from the stored text, which keys a date or a reordered JSONB
- * object differently. A row whose stored props no longer validate cannot be
- * shown to hold the key and is inert.
+ * The node's key is derived from the value it stores, through its OWN kind's
+ * stored-props key path ({@link storedNodeClaimProps}): its stored date text
+ * revived, never a re-parse, which would key a value the row does not hold.
  */
 function claimedNodeRow<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -3552,13 +3554,11 @@ function claimedNodeRow<G extends GraphDef>(
     candidate.axis,
   );
   if (ownerConstraint === undefined) return undefined;
-  const heldProps = parseStoredNodeProps(
+  const heldProps = storedNodeClaimProps(
     getNodeRegistration(ctx.graph, node.kind).type.schema,
     rowPropsToObject(node.props),
-    { kind: node.kind, id: node.id },
   );
-  if (!heldProps.success) return undefined;
-  return uniqueConstraintKey(ownerConstraint, heldProps.data) === key ? node : (
+  return uniqueConstraintKey(ownerConstraint, heldProps) === key ? node : (
       undefined
     );
 }
@@ -4703,13 +4703,7 @@ function resolveExistingGetOrCreateLeg<G extends GraphDef>(
 /** One constraint match on an existing row, with the leg it resolved to. */
 type ExistingGetOrCreateMatch = Readonly<{
   existing: BackendNodeRow;
-  /**
-   * The props the CALLER stated, which a revising leg merges over the row and
-   * validates as an update does. Never the already-validated props the lookup
-   * keyed: a schema whose input and output differ (`z.string().pipe(
-   * z.coerce.date())` takes text and yields a `Date`) refuses its own output.
-   */
-  inputProps: Record<string, unknown>;
+  validatedProps: Record<string, unknown>;
   leg: ExistingGetOrCreateLeg;
 }>;
 
@@ -4728,7 +4722,7 @@ async function writeOwedExistingGetOrCreateLeg<G extends GraphDef>(
   entry: OperationEntry,
   match: ExistingGetOrCreateMatch,
 ): Promise<GetOrCreateResult> {
-  const { existing, inputProps, leg } = match;
+  const { existing, validatedProps, leg } = match;
   if (leg.leg === "found") {
     await runCompositionAttachmentWritePlan(
       ctx,
@@ -4747,7 +4741,7 @@ async function writeOwedExistingGetOrCreateLeg<G extends GraphDef>(
     {
       kind: existing.kind,
       id: existing.id as UpdateNodeInput["id"],
-      props: inputProps,
+      props: validatedProps,
     },
     entry,
     {
@@ -4940,7 +4934,7 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
 
       const moves: DecidedAttachmentMove[] = [];
       const transitions: NodeClaimTransition[] = [];
-      for (const { existing, inputProps, leg } of owed) {
+      for (const { existing, validatedProps, leg } of owed) {
         const { kind, id } = existing;
         // Re-read under the lock: the row the leg was resolved from was read
         // lock-free.
@@ -4974,13 +4968,13 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
         }
         if (leg.leg === "revise") {
           const { registration, validatedProps: nextProps } =
-            resolveNodeUpdateProps(ctx, current, inputProps);
+            resolveNodeUpdateProps(ctx, current, validatedProps);
           transitions.push(
             nodeClaimTransition(
               current,
               nextProps,
               registration.unique ?? [],
-              Object.keys(inputProps),
+              registration.type.schema,
             ),
           );
         }
@@ -7067,26 +7061,20 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
               ctx.uniqueSidecarBatch,
             ),
           );
-        // The row's keys are read from its stored props as the schema
-        // validates them, the props its claims were keyed from; a row whose
-        // stored props no longer validate takes the per-row path.
+        // The row's keys are read from the value it stores, through the
+        // stored-props key path its claims were keyed from.
         const preservesClaimKeys = resolvedEntries.every((entry) => {
           const existing = requireDefined(resolvedRows.get(entry.id));
-          const previous = parseStoredNodeProps(
-            registration.type.schema,
-            rowPropsToObject(existing.props),
-            { kind: entry.kind, id: entry.id },
-          );
-          return (
-            previous.success &&
-            resolvedNodeUpdatePreservesClaimKeys(
-              ctx.registry,
-              entry.kind,
-              entry.id,
-              previous.data,
-              entry.props,
-              registration.unique ?? [],
-            )
+          return resolvedNodeUpdatePreservesClaimKeys(
+            ctx.registry,
+            entry.kind,
+            entry.id,
+            storedNodeClaimProps(
+              registration.type.schema,
+              rowPropsToObject(existing.props),
+            ),
+            entry.props,
+            registration.unique ?? [],
           );
         });
         if (uniqueSidecarsReachable && preservesClaimKeys) {
@@ -8231,7 +8219,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
 
     return applyExistingGetOrCreateLeg(ctx, entry, {
       existing: existingRow,
-      inputProps: props,
+      validatedProps,
       leg: resolveExistingGetOrCreateLeg(ctx, existingRow, {
         ifExists,
         partOf,
@@ -8941,7 +8929,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
       matches.push({
         index,
         existing,
-        inputProps: requireDefined(items[index]).props,
+        validatedProps,
         leg: resolveExistingGetOrCreateLeg(ctx, existing, {
           ifExists,
           partOf: partOfAt(index),

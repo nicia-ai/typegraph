@@ -99,7 +99,8 @@ export function uniqueConstraintNameForBucket(key: string): string | undefined {
 
 /**
  * Builds the exact-match signature for one unique constraint from a node's
- * VALIDATED props (see {@link blockNodes}'s `uniqueKeyProps`), or `undefined` when ANY of the constraint's fields is `null` /
+ * claim-key props (see {@link blockNodes}'s `uniqueKeyProps`), or `undefined`
+ * when ANY of the constraint's fields is `null` /
  * `undefined` (a partial key cannot establish exact-match equality, and — since
  * the introspection snapshot does not expose a constraint's `where` predicate —
  * skipping absent values keeps a partial unique constraint from silently
@@ -184,12 +185,10 @@ function bucketKeysFor(
  * @param uniqueConstraints The kind's `unique` constraints from
  *   `store.introspect().kinds[k].unique`. Pass an empty array when blocking
  *   should rely on `block()` alone.
- * @param uniqueKeyProps The props of the node at `index` in `newNodes` as its
- *   kind's schema validates them —
- *   the props the store keys a uniqueness claim from — or `undefined` when
- *   they do not validate, in which case the node gets no unique-constraint
- *   bucket. Defaults to the node's own fields, for nodes that already hold
- *   validated values.
+ * @param uniqueKeyProps The props the node at `index` in `newNodes` keys a
+ *   uniqueness claim from — for a staged (stored) node, its props through
+ *   the stored-props key path — or `undefined` for no unique-constraint
+ *   bucket. Defaults to the node's own fields.
  * @returns A map from bucket key → that bucket's nodes. Iteration order of the
  *   returned map is the lexicographic order of bucket keys, and each bucket's
  *   node list is sorted by `node.id`, so the result is a pure, order-independent

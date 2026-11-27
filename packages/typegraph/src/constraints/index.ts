@@ -143,24 +143,26 @@ export function uniqueConstraintKey(
 }
 
 /**
- * Whether a uniqueness constraint's key, or whether it applies at all, can
- * depend on any of `fields`: the constraint's own fields and the field its
- * `where` predicate tests.
+ * Whether a write moves a node's claim under a uniqueness constraint: the
+ * key it holds under `before` and the key it would hold under `after` differ,
+ * an absent key (the `where` predicate excludes the props) included.
  *
- * THE reading of "which props does a constraint consult": a write that states
- * none of them over a node's stored props provably leaves the constraint's
- * key and applicability as they were, so its claim needs no statement. A
- * `where` callback that names no predicate answers `true` — the evaluation
- * that refuses it ({@link checkWherePredicate}) must still be reached.
+ * THE decision of which constraints a write to a live row must touch. Both
+ * sides are keyed by {@link uniqueConstraintKey}, the one reading the claim
+ * writer uses, so a constraint this answers `false` for keeps exactly the key
+ * it held and its claim needs no statement — whatever fields the write named.
+ * A `where` callback that names no predicate is refused by the evaluation, as
+ * on every other path.
  */
-export function uniqueConstraintReadsAnyField(
+export function uniqueConstraintKeyMoves(
   constraint: UniqueConstraint,
-  fields: ReadonlySet<string>,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
 ): boolean {
-  if (constraint.fields.some((field) => fields.has(field))) return true;
-  if (!constraint.where) return false;
-  const predicate = captureWherePredicate(constraint.where);
-  return predicate === undefined || fields.has(predicate.field);
+  return (
+    uniqueConstraintKey(constraint, before) !==
+    uniqueConstraintKey(constraint, after)
+  );
 }
 
 /** The predicate a unique constraint's `where` builder returns. */

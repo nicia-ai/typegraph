@@ -28,7 +28,7 @@ import {
 } from "../../backend/types";
 import {
   uniqueConstraintKey,
-  uniqueConstraintReadsAnyField,
+  uniqueConstraintKeyMoves,
 } from "../../constraints";
 import { type UniqueConstraint } from "../../core/types";
 import {
@@ -1087,47 +1087,50 @@ export type UniquenessUpdatePlan = Readonly<{
 }>;
 
 /**
- * One existing node row's claim transition: the props it is about to hold,
- * already validated, and whether it is coming back into existence.
+ * One existing node row's claim transition: the props it is about to hold
+ * and what the row holds now.
  *
  * `restores` is `true` for a tombstone being revived and for a row that does
  * not exist yet: such a row owes the claims a create owes, disjointness
- * included. A live row being updated owes its uniqueness claims alone.
+ * included, and every one of them is probed and claimed afresh.
  *
- * There is deliberately no before-image: what the row held is read from the
- * claim relation by owner, never recomputed from the props it held.
+ * A live row (`restores: false`) owes its uniqueness claims alone, and
+ * carries `storedProps`: its props as stored before the write, read through
+ * the stored-props key path (`storedNodeClaimProps`). A constraint whose key
+ * — or whether it applies at all — is the same under `storedProps` and
+ * `props` ({@link uniqueConstraintKeyMoves}) keeps its claim as it stands,
+ * with no statement. The comparison is between keys, not between the fields a
+ * patch states: an update re-parses and rewrites the whole props object, so a
+ * field the patch never names can still change value under a schema whose
+ * parse does not reproduce its own output.
  *
- * `statedFields` names the fields a write states over the row's stored props
- * (an `update()` patch); it is absent when the write replaces the props
- * wholesale. A live row's constraint that reads none of them
- * ({@link uniqueConstraintReadsAnyField}) keeps its key and its applicability,
- * so its claim is left as it stands with no statement.
+ * What a moving constraint gave up is never recomputed from `storedProps`:
+ * the release names the owner's claims, so a claim keyed in any earlier form
+ * is given back.
  */
 export type NodeClaimTransition = Readonly<{
   kind: string;
   id: string;
-  restores: boolean;
   props: Record<string, unknown>;
   constraints: readonly UniqueConstraint[];
-  statedFields?: readonly string[];
-}>;
+}> &
+  (
+    | Readonly<{ restores: true }>
+    | Readonly<{ restores: false; storedProps: Record<string, unknown> }>
+  );
 
 /**
  * The constraints whose claims a transition moves: every one for a restored
- * row and for a wholesale replacement, and for a patch of a live row only
- * those that read a field it states. The props a patch leaves alone are the
- * stored ones, validated by the same schema, so a constraint reading none of
- * them keys and applies as it did, whatever form its claim was keyed in.
+ * row, and for a live row those whose key or applicability differs between
+ * the props it stores and the props it is about to hold.
  */
 function transitionConstraints(
   transition: NodeClaimTransition,
 ): readonly UniqueConstraint[] {
-  if (transition.restores || transition.statedFields === undefined) {
-    return transition.constraints;
-  }
-  const stated = new Set(transition.statedFields);
+  if (transition.restores) return transition.constraints;
+  const { storedProps, props } = transition;
   return transition.constraints.filter((constraint) =>
-    uniqueConstraintReadsAnyField(constraint, stated),
+    uniqueConstraintKeyMoves(constraint, storedProps, props),
   );
 }
 
@@ -1141,9 +1144,9 @@ function transitionConstraints(
  * row is not refused for it). The release then gives up every other claim the
  * owner holds under the constraints the transition moves — the key it moved
  * off, the claim of a constraint that stopped applying, and a claim an earlier
- * writer keyed in another form alike. A constraint a patch provably leaves
- * alone ({@link transitionConstraints}) is neither probed nor released, so a
- * patch that reads no constrained field issues no statement here.
+ * writer keyed in another form alike. A constraint whose key the write leaves
+ * alone ({@link transitionConstraints}) is neither probed nor released, so an
+ * update that moves no key issues no statement here.
  *
  * A restoring row additionally claims its disjointness entries fresh: its own
  * reservation was released when it was tombstoned, and nothing else could

@@ -41,11 +41,8 @@
 import { type z } from "zod";
 
 import { objectSchemaShape } from "../core/kind-schema";
-import { ValidationError } from "../errors";
-import { validateNodeProps } from "../errors/validation";
 import { isPortableTimestamp } from "../utils/date";
 import { isPlainObject } from "../utils/object";
-import { err, ok, type Result } from "../utils/result";
 
 /** The schema wrappers whose input is their inner schema's input. */
 const TRANSPARENT_WRAPPER_TYPES: ReadonlySet<string> = new Set([
@@ -148,36 +145,25 @@ export function reviveStoredDateProps(
 }
 
 /**
- * A node row's STORED props as the kind's schema validates them: stored date
- * text revived ({@link reviveStoredDateProps}), then parsed through the
- * complete kind schema.
+ * THE props a uniqueness key is derived from when a path holds a node's
+ * STORED props rather than props it validated: a tombstone a lookup or a
+ * revival reads, the row an update replaces, a verbatim import's document
+ * value, a merge's after-image.
  *
- * THE one reading of stored props that a path derives a uniqueness key from.
- * A claim's key is derived from validated props only, because the stored
- * form of a value is not the value a write claimed: a `Date` is stored as its
- * ISO text, and PostgreSQL's JSONB returns an object's keys in its own order.
- * A path that has only the stored row — a provenance revival, a lookup asking
- * whether a released claim's node still holds the key, a merge plan's probe —
- * keys what this returns, never the stored text.
- *
- * Returns the {@link ValidationError} rather than throwing it, so a caller
- * that can answer without the key (a lookup that treats the row as no longer
- * holding it) decides what an unreadable row means for it.
+ * A claim is keyed from the value the row stores. The one place the stored
+ * rendering of a value differs from the rendering a write validated is a
+ * date — a `Date` is stored as its ISO text — so the stored props are
+ * returned with that text revived ({@link reviveStoredDateProps}) and nothing
+ * else. They are deliberately NOT parsed through the kind's schema again: a
+ * schema whose parse does not reproduce its own output (a transform that
+ * appends to its input, a coercion of a value it already produced) would key
+ * a value the row does not hold, and a date the revival cannot reach (under
+ * `z.lazy()` or `z.union()`) would fail the parse rather than key as its
+ * stored text.
  */
-export function parseStoredNodeProps(
+export function storedNodeClaimProps(
   schema: z.ZodType,
   props: Record<string, unknown>,
-  context: Readonly<{ kind: string; id: string }>,
-): Result<Record<string, unknown>, ValidationError> {
-  try {
-    return ok(
-      validateNodeProps(schema, reviveStoredDateProps(schema, props), {
-        ...context,
-        operation: "update",
-      }) as Record<string, unknown>,
-    );
-  } catch (error) {
-    if (error instanceof ValidationError) return err(error);
-    throw error;
-  }
+): Record<string, unknown> {
+  return reviveStoredDateProps(schema, props);
 }

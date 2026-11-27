@@ -295,7 +295,6 @@ import { nowIso, validityWindowContainsInstant } from "../utils/date";
 import { generateId } from "../utils/id";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
-import { unwrap } from "../utils/result";
 import {
   createGraphAlgorithms,
   type GraphAlgorithms,
@@ -524,7 +523,7 @@ import {
   StoreView,
   type StoreViewCoordinate,
 } from "./store-view";
-import { parseStoredNodeProps } from "./stored-date-revival";
+import { storedNodeClaimProps } from "./stored-date-revival";
 import {
   createSubgraphRead,
   executeSessionSubgraph,
@@ -2007,10 +2006,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * kinds whose declarations produce a key another node could take.
    *
    * An upsert's after-image is the merge's reading of the rows it is built
-   * from — stored text, a date as its ISO string — so it is validated through
-   * the kind's schema ({@link parseStoredNodeProps}) before any claim is keyed
-   * from it: a claim's key is derived from validated props only, the props a
-   * create of the same value claims.
+   * from — stored text, a date as its ISO string — so its claims are keyed
+   * through the stored-props key path ({@link storedNodeClaimProps}): the
+   * value the row stores, its date text revived as a create of the same date
+   * claims it.
    */
   #resolvedNodeClaimWrites(
     writes: Readonly<{
@@ -2033,13 +2032,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         props:
           constraints.length === 0 ?
             upsert.props
-          : unwrap(
-              parseStoredNodeProps(
-                registration.type.schema,
-                { ...upsert.props },
-                { kind: upsert.kind, id: upsert.id },
-              ),
-            ),
+          : storedNodeClaimProps(registration.type.schema, {
+              ...upsert.props,
+            }),
         constraints,
       };
     });
