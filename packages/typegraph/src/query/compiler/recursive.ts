@@ -32,6 +32,7 @@ import { compileInverseTraversalDuplicateGuard } from "./inverse-traversal-guard
 import { compileLimitOffsetClauses } from "./limit-offset";
 import {
   createTemporalFilterPass,
+  refuseRelevancePredicatesInRecursiveStatement,
   runCompilerPass,
   runRecursiveTraversalSelectionPass,
   type TemporalFilterPass,
@@ -260,6 +261,11 @@ function runRecursiveQueryPassPipeline(
   state = temporalPass.state;
 
   assertRecordedQueryAstDoesNotUseCurrentIndexes(state.ast);
+  // Every recursive statement, whole query or chain stage, compiles here; a
+  // relevance predicate on one of its aliases cannot be applied by it. The
+  // recorded-time refusal above keeps precedence: it rejects the predicate
+  // for any traversal shape.
+  refuseRelevancePredicatesInRecursiveStatement(state.ast, ctx.callerAlias);
 
   const columnPruningPass = runCompilerPass(state, {
     name: "column_pruning",
@@ -340,6 +346,7 @@ export function assertRecursiveOutputSupported(ast: QueryAst): void {
     throw new UnsupportedPredicateError(
       "Aggregating recursive traversals is not yet supported; project nodes as a relation before aggregating.",
     );
+  refuseRecursiveFusion(ast);
   const materialized = new Set(
     [
       ast.start.alias,
@@ -363,6 +370,28 @@ export function assertRecursiveOutputSupported(ast: QueryAst): void {
       materialized.add(alias);
     }
   }
+}
+
+/**
+ * Refuses `.fuseWith()` on a query that compiles to a recursive statement or
+ * chain. Fusion options choose only how a hybrid search orders its matches
+ * (the RRF score); its candidate set is the union of both legs' top-k either
+ * way. A recursive statement never orders by relevance: a fixed stage chained
+ * with a recursive one filters to its candidates and the completed rows are
+ * ordered by `orderBy()` alone. The options would change nothing, so they are
+ * refused rather than ignored, wherever the hybrid predicates sit.
+ */
+function refuseRecursiveFusion(ast: QueryAst): void {
+  if (ast.fusion === undefined) return;
+  throw new UnsupportedPredicateError(
+    ".fuseWith() is not supported on a query with a recursive traversal: " +
+      "fusion only orders hybrid matches, and a recursive statement does not order its rows by relevance.",
+    { option: "fuseWith", reason: "recursive_traversal" },
+    {
+      suggestion:
+        "Remove .fuseWith(), or run the hybrid search in a separate query and constrain the recursive walk with its ids.",
+    },
+  );
 }
 
 type RecursiveQueryStrategyHandler = (

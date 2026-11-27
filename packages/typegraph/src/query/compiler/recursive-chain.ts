@@ -30,6 +30,8 @@ function stageAst(
   traversal: Traversal,
   index: number,
 ): QueryAst {
+  // `fusion` is dropped with the other statement-level options: a recursive
+  // query refuses it (`assertRecursiveOutputSupported`).
   const allowedPredicates = new Set([
     traversal.edgeAlias,
     traversal.nodeAlias,
@@ -62,7 +64,6 @@ function stageAst(
       allowedPredicates.has(predicate.targetAlias),
     ),
     projection: { fields: [] },
-    ...(index === 0 && ast.fusion !== undefined ? { fusion: ast.fusion } : {}),
   };
 }
 
@@ -76,6 +77,7 @@ function sourceAst(ast: QueryAst): QueryAst {
     orderBy: _orderBy,
     resultPredicate: _resultPredicate,
     selectiveFields: _selectiveFields,
+    fusion: _fusion,
     ...sourceBase
   } = ast;
   return {

@@ -238,6 +238,11 @@ const largeDepartments = await store
   .execute();
 ```
 
+`having()` refuses a predicate containing `$fulltext.matches()` or `.similarTo()` with
+`UnsupportedPredicateError` (`details.reason` is `"having"`) when it is called: a relevance
+predicate is applied only as a `whereNode()` match constraint, so search in `whereNode()` and
+filter the groups by their aggregates here.
+
 ### Available HAVING Helpers
 
 ```typescript

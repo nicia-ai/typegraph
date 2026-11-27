@@ -121,6 +121,7 @@ export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-bin
 export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";
 export { registerRecursiveDelimiterIdIntegrationTests } from "./recursive-delimiter-ids";
+export { registerRecursiveRelevancePredicateIntegrationTests } from "./recursive-relevance-predicates";
 export { registerRecursiveSharedIdIntegrationTests } from "./recursive-shared-ids";
 export { registerRecursiveStopExpansionIntegrationTests } from "./recursive-stop-expansion";
 export { registerRefusedCreateClaimIntegrationTests } from "./refused-create-claims";
