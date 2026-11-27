@@ -33,7 +33,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
-import { sql as portableSql,type SqlFragment } from "../../query/sql-fragment";
+import { sql as portableSql, type SqlFragment } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
@@ -170,9 +170,9 @@ export function createSessionMarkerBatchRead(
             last_attempted_at AS "lastAttemptedAt",
             last_error AS "lastError"
           FROM ${markerTable} WHERE graph_id IN (${portableSql.join(
-        graphIds.map((graphId) => portableSql`${graphId}`),
-        portableSql`, `,
-      )})
+            graphIds.map((graphId) => portableSql`${graphId}`),
+            portableSql`, `,
+          )})
         `);
     return rows.map((row) => mapContributionMaterializationRow(row, decode));
   };
@@ -724,7 +724,9 @@ export type ContributionMaterializer = Readonly<{
    * Bind marker reads to one pinned transaction session. The returned gate
    * owns a fresh positive cache: a root-session marker read cannot authorize
    * a transaction whose snapshot predates that marker, and a rolled-back
-   * transaction cannot populate the root backend's cache.
+   * transaction cannot populate the root backend's cache. Evicting a vector
+   * slot through it evicts this materializer's cache too: a marker the
+   * session deleted is trusted by no cache once the delete commits.
    */
   bindReadSession: (
     getMarkerBatch: NonNullable<ContributionMaterializerDeps["getMarkerBatch"]>,
@@ -2465,13 +2467,14 @@ export function createContributionMaterializer(
 
   return {
     bindReadSession(getMarkerBatch) {
-      return createContributionMaterializer({
+      const bound = createContributionMaterializer({
         ...deps,
         // This instance is for runtime assertions on the pinned session. Its
         // other methods must never fall through to the root session captured
         // by the source materializer, even if a transaction backend exposes
         // an administrative member.
-        execDdl: () => Promise.reject(transactionContributionAdministrationError()),
+        execDdl: () =>
+          Promise.reject(transactionContributionAdministrationError()),
         ensureMarkerTable: () =>
           Promise.reject(transactionContributionAdministrationError()),
         getMarkerBatch,
@@ -2480,10 +2483,23 @@ export function createContributionMaterializer(
           Promise.reject(transactionContributionAdministrationError()),
         deleteMarker: () =>
           Promise.reject(transactionContributionAdministrationError()),
-        tableExists: () => Promise.reject(transactionContributionAdministrationError()),
+        tableExists: () =>
+          Promise.reject(transactionContributionAdministrationError()),
         schemaWriteTransaction: () =>
           Promise.reject(transactionContributionAdministrationError()),
       });
+      return {
+        ...bound,
+        // A slot this session evicts (its marker was deleted on the session)
+        // leaves every cache that can hold the marker: the session's own and
+        // this materializer's, which a root backend's reads fill. Eviction
+        // makes the key read-through for good, so a root read before the
+        // delete commits re-reads the marker rather than caching it again.
+        evictVectorSlot(slot: VectorSlot): void {
+          bound.evictVectorSlot(slot);
+          evictVectorSlot(slot);
+        },
+      };
     },
     ensureRuntimeContributions,
     assertInitialized,
@@ -2566,7 +2582,9 @@ export function admitContributionReadsThroughView(
       return () => Promise.reject(transactionContributionAdministrationError());
     }
     return (...args: readonly unknown[]) =>
-      admit(() => Reflect.apply(member, materializer, args) as Promise<unknown>);
+      admit(
+        () => Reflect.apply(member, materializer, args) as Promise<unknown>,
+      );
   }
   return Object.fromEntries(
     Object.entries(TRANSACTION_MATERIALIZER_MEMBER_ROLES).map(([key, role]) => [

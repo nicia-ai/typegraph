@@ -608,6 +608,73 @@ export function registerTransactionStatementAdmissionTests(
     );
   });
 
+  describe("a vector slot's marker a transaction deletes", () => {
+    /** How the transaction reaches the deleting member. */
+    const ROUTES = [
+      "the transaction's backend",
+      "a backend adopted over its native handle",
+      "the transaction's backend, with a root read before the commit",
+    ] as const;
+
+    it.each(ROUTES)(
+      "is no longer trusted by the root backend once the transaction commits (%s)",
+      async (route) => {
+        const backend = context.getBackend();
+        const createVectorIndex = backend.createVectorIndex;
+        const vector = backend.capabilities.vector;
+        if (createVectorIndex === undefined || vector === undefined) return;
+        // The root reads on a connection of its own only on the pooled
+        // PostgreSQL lanes; elsewhere a root read inside the transaction
+        // waits for it.
+        if (
+          route === ROUTES[2] &&
+          context.driver !== "node-postgres" &&
+          context.driver !== "postgres-js"
+        ) {
+          return;
+        }
+        const graphId = nextGraphId();
+        const slot = {
+          graphId,
+          nodeKind: "EeDoc",
+          fieldPath: "embedding",
+          dimensions: 3,
+          metric: "cosine",
+          indexType: vector.indexTypes[0] ?? "none",
+        } as const;
+        await createVectorIndex(slot);
+        const deleteEmbedding = requireDefined(backend.deleteEmbedding);
+        const embedding = { ...slot, nodeId: "d1" };
+        // The root confirms the marker, and caches the confirmation.
+        const beforeDelete = await outcomeOf(deleteEmbedding(embedding));
+        let duringTransaction = "not read";
+        await backend.transactionWithNative(async (tx, native) => {
+          const deleting = (route === ROUTES[1] ?
+            backend.adoptTransaction(native)
+          : tx) as unknown as Readonly<{
+            deleteSchemaVectorSlotContribution: (
+              deleted: typeof slot,
+            ) => Promise<void>;
+          }>;
+          await deleting.deleteSchemaVectorSlotContribution(slot);
+          if (route === ROUTES[2]) {
+            // The root still sees the committed marker.
+            duringTransaction = await outcomeOf(deleteEmbedding(embedding));
+          }
+        });
+        expect({
+          beforeDelete,
+          duringTransaction,
+          afterCommit: await outcomeOf(deleteEmbedding(embedding)),
+        }).toEqual({
+          beforeDelete: "fulfilled",
+          duringTransaction: route === ROUTES[2] ? "fulfilled" : "not read",
+          afterCommit: "StoreNotInitializedError",
+        });
+      },
+    );
+  });
+
   describe("two views of one transaction's connection", () => {
     it("run their statements in the order they were submitted", async () => {
       const backend = context.getBackend();
