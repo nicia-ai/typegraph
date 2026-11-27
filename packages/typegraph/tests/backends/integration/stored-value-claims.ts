@@ -49,6 +49,17 @@ const SvcSuffixed = defineNode("SvcSuffixed", {
   }),
 });
 
+/**
+ * A unique `code` the schema derives from `label` on every parse. A re-parse
+ * of either complete row is idempotent, so an update naming only `label`
+ * moves the stored code and must move its claim with it.
+ */
+const SvcLabelled = defineNode("SvcLabelled", {
+  schema: z
+    .object({ label: z.string(), code: z.string().optional() })
+    .overwrite((value) => ({ ...value, code: value.label.toLowerCase() })),
+});
+
 /** A date behind `z.lazy`, which stored-date revival cannot see through. */
 const SvcLazyEvent = defineNode("SvcLazyEvent", {
   schema: z.object({ name: z.string(), at: z.lazy(() => z.date()) }),
@@ -74,6 +85,23 @@ const SvcJustification = defineNode("SvcJustification", {
 const svcPremiseOf = defineEdge("svcPremiseOf");
 const svcDerives = defineEdge("svcDerives");
 
+/**
+ * A scope parent and child whose claim axis (the code-point least kind of the
+ * hierarchy) is the CHILD, so a claim at the parent's kind is off the axis.
+ */
+const SvcVault = defineNode("SvcVault", {
+  schema: z.object({ code: z.string() }),
+});
+const SvcAgentVault = defineNode("SvcAgentVault", {
+  schema: z.object({ code: z.string() }),
+});
+const VAULT_CODE_UNIQUE = {
+  name: "SvcVault_code",
+  fields: ["code"],
+  scope: "kindWithSubClasses",
+  collation: "binary",
+} as const;
+
 const ACCOUNT_CODE_UNIQUE = {
   name: "SvcAccount_code",
   fields: ["code"],
@@ -96,6 +124,17 @@ function buildGraph(id: string) {
           },
         ],
       },
+      SvcLabelled: {
+        type: SvcLabelled,
+        unique: [
+          {
+            name: "SvcLabelled_code",
+            fields: ["code"],
+            scope: "kind",
+            collation: "binary",
+          },
+        ],
+      },
       SvcLazyEvent: {
         type: SvcLazyEvent,
         unique: [
@@ -108,6 +147,8 @@ function buildGraph(id: string) {
         ],
       },
       SvcAccount: { type: SvcAccount, unique: [ACCOUNT_CODE_UNIQUE] },
+      SvcVault: { type: SvcVault, unique: [VAULT_CODE_UNIQUE] },
+      SvcAgentVault: { type: SvcAgentVault, unique: [VAULT_CODE_UNIQUE] },
       SvcPartnerAccount: {
         type: SvcPartnerAccount,
         unique: [ACCOUNT_CODE_UNIQUE],
@@ -127,7 +168,10 @@ function buildGraph(id: string) {
         to: [SvcSuffixed, SvcLazyEvent],
       },
     },
-    ontology: [subClassOf(SvcPartnerAccount, SvcAccount)],
+    ontology: [
+      subClassOf(SvcPartnerAccount, SvcAccount),
+      subClassOf(SvcAgentVault, SvcVault),
+    ],
   });
 }
 
@@ -162,6 +206,37 @@ async function liveClaims(
   return rows
     .map((row) => ({ key: row.key, node_id: row.node_id }))
     .toSorted((left, right) => compareStrings(left.node_id, right.node_id));
+}
+
+/**
+ * A child kind holding a claim off its constraint's axis, as a writer from
+ * before the axis move left it: under the child's own kind (the axis is the
+ * parent), or under the parent's kind (the axis is the child).
+ */
+const LEGACY_AXIS_SHAPES = [
+  {
+    name: "under the child's own kind",
+    parent: "SvcAccount",
+    child: "SvcPartnerAccount",
+    legacyAxis: "SvcPartnerAccount",
+    constraintName: "SvcAccount_code",
+  },
+  {
+    name: "under the parent's kind",
+    parent: "SvcVault",
+    child: "SvcAgentVault",
+    legacyAxis: "SvcVault",
+    constraintName: "SvcVault_code",
+  },
+] as const;
+
+/** A call's result, or the name of the error it threw. */
+async function outcomeOf<T>(call: () => Promise<T>): Promise<T | string> {
+  try {
+    return await call();
+  } catch (error) {
+    return error instanceof Error ? error.name : String(error);
+  }
 }
 
 /** Whether a write was refused, by error name, or completed. */
@@ -204,6 +279,41 @@ export function registerStoredValueClaimIntegrationTests(
         duplicate: "UniquenessError",
       });
     });
+
+    for (const inTransaction of [false, true]) {
+      it(`an update naming only the field a unique code derives from moves the claim${inTransaction ? " inside a transaction" : ""}`, async () => {
+        const graphId = nextGraphId();
+        const store = await context.createStore(buildGraph(graphId));
+        type LabelledId = NodeId<typeof SvcLabelled>;
+        await store.nodes.SvcLabelled.create({ label: "A" }, { id: "row" });
+
+        const updated =
+          inTransaction ?
+            await store.transaction((tx) =>
+              tx.nodes.SvcLabelled.update("row" as LabelledId, { label: "B" }),
+            )
+          : await store.nodes.SvcLabelled.update("row" as LabelledId, {
+              label: "B",
+            });
+
+        expect({
+          stored: updated.code,
+          claims: await liveClaims(store.backend, graphId, "SvcLabelled_code"),
+          // The stored code moved from `a` to `b`: `b` is held, `a` is free.
+          duplicateOfNew: await outcome(() =>
+            store.nodes.SvcLabelled.create({ label: "b" }),
+          ),
+          createOfOld: await outcome(() =>
+            store.nodes.SvcLabelled.create({ label: "a" }, { id: "taker" }),
+          ),
+        }).toEqual({
+          stored: "b",
+          claims: [{ key: codeKey("b"), node_id: "row" }],
+          duplicateOfNew: "UniquenessError",
+          createOfOld: "written",
+        });
+      });
+    }
 
     it("an import under onUnknownProperty allow claims the value it writes", async () => {
       const graphId = nextGraphId();
@@ -409,6 +519,53 @@ export function registerStoredValueClaimIntegrationTests(
           id: "partner",
           note: "matched",
         });
+      });
+    }
+    // A claim written before the axis move sits under its owner's own concrete
+    // kind. A child whose update moves its code onto a key it holds there is
+    // probed as already holding it, so the update claims nothing new and its
+    // release keeps the legacy row. A parent create of the same key later in
+    // the same import slice must be refused for that row alone, not fail the
+    // import's flush and roll the child's update back.
+    for (const shape of LEGACY_AXIS_SHAPES) {
+      it(`an import update onto a key its node holds at a legacy axis (${shape.name}) keeps a later create of that key from aborting the import`, async () => {
+        const graphId = nextGraphId();
+        const store = await context.createStore(buildGraph(graphId));
+        await store.nodes[shape.child].create({ code: "j" }, { id: "child" });
+        await store.backend.insertUnique({
+          graphId,
+          nodeKind: shape.legacyAxis,
+          constraintName: shape.constraintName,
+          key: codeKey("k"),
+          nodeId: "child",
+          concreteKind: shape.child,
+        });
+
+        const imported = await outcomeOf(() =>
+          importGraph(
+            store,
+            {
+              formatVersion: FORMAT_VERSION,
+              exportedAt: new Date().toISOString(),
+              source: { type: "external", description: "legacy axis" },
+              nodes: [
+                { kind: shape.child, id: "child", properties: { code: "k" } },
+                { kind: shape.parent, id: "parent", properties: { code: "k" } },
+              ],
+              edges: [],
+            },
+            { onConflict: "update", onUnknownProperty: "error" },
+          ),
+        );
+        const child = await store.nodes[shape.child].getById("child" as never);
+
+        expect({
+          import:
+            typeof imported === "string" ? imported : (
+              imported.errors.map((error) => error.id)
+            ),
+          childCode: child?.code,
+        }).toEqual({ import: ["parent"], childCode: "k" });
       });
     }
   });
