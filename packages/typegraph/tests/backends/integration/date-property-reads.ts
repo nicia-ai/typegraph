@@ -67,6 +67,14 @@ const LATER = new Date("2025-06-01T00:00:00.000Z");
  */
 const NON_PORTABLE = "2024-01-02T03:04:05Z";
 
+/**
+ * Legacy stored text PostgreSQL casts to a `timestamptz` in 1 BC, and the
+ * era-bearing UTC text PostgreSQL's JSON date text renders for that instant,
+ * which no canonical text can carry.
+ */
+const BC_TEXT = "0001-06-01 00:00:00+00 BC";
+const BC_UTC_TEXT = "0001-06-01T00:00:00.000Z BC";
+
 /** A valid `Date` outside PostgreSQL's `timestamptz` range (there is no year 0). */
 const YEAR_ZERO = new Date("0000-06-01T00:00:00.000Z");
 
@@ -836,6 +844,14 @@ export function registerDatePropertyReadIntegrationTests(
       await fork.store.nodes.DatedRead.create(SPARSE_INPUT, { id: "staged" });
       const writes = unwrap(await planMerge(base, [fork], {})).writes
         .nodeUpserts;
+      // The wire props themselves hold the stored text, before any
+      // serialization: `JSON.stringify` would turn a `Date` into the same text.
+      const committed = writes.find((write) => write.id === "committed");
+      expect(committed?.setProps).toMatchObject({
+        plain: PLAIN.toISOString(),
+        nested: { at: NESTED.toISOString() },
+        arr: [ARR_FIRST.toISOString(), ARR_SECOND.toISOString()],
+      });
       const byId = Object.fromEntries(
         writes.map((write) => [write.id, JSON.stringify(write.setProps)]),
       );
@@ -1147,6 +1163,59 @@ export function registerDatePropertyReadIntegrationTests(
       });
     });
 
+    it("a legacy BC date PostgreSQL casts is never collected or batched as a CE Date", async () => {
+      const store = await context.createStore(buildGraph("date_reads_bc_era"));
+      await store.backend.insertNode({
+        graphId: store.graphId,
+        kind: "DatedRead",
+        id: "bc",
+        props: {
+          ...(JSON.parse(FULL_JSON) as Record<string, unknown>),
+          title: "bc era",
+          plain: BC_TEXT,
+        },
+      });
+      const documents = () => store.query().from("DatedRead", "d");
+      const [collected] = await documents()
+        .aggregate((fields) => ({
+          every: expr.collect(fields.d.plain, {
+            orderBy: [{ expression: fields.d.title }],
+          }),
+        }))
+        .asRelation()
+        .execute();
+      const [[batched]] = await store.batchOnce(
+        () =>
+          [
+            documents().aggregate((fields) => ({
+              earliest: expr.min(fields.d.plain),
+            })),
+          ] as const,
+      );
+      const observed: Readonly<Record<string, unknown>> = {
+        collect: collected?.every,
+        batchOnce: batched?.earliest,
+      };
+      // The formatter dropped the era: `0001-06-01T00:00:00.000Z`, a CE
+      // instant one year after the stored one.
+      expect(JSON.stringify(observed)).not.toContain(
+        '"0001-06-01T00:00:00.000Z"',
+      );
+      expectObservation({
+        lane: { dialect: store.backend.dialect },
+        observed,
+        correct: { collect: [BC_TEXT], batchOnce: BC_TEXT },
+        defects: [
+          {
+            // The JSON date text is rendered from the cast instant, not the
+            // stored text, so the stored bytes are not recoverable there.
+            label: "PostgreSQL renders a BC date as its era-bearing UTC text",
+            on: { dialect: ["postgres"] },
+            today: { collect: [BC_UTC_TEXT], batchOnce: BC_UTC_TEXT },
+          },
+        ],
+      });
+    });
     it("$scalar() of a structured property decodes its date positions", async () => {
       const { store } = await seed(context, "date_reads_scalar_structured");
       const [row] = await store

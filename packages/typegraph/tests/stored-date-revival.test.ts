@@ -266,9 +266,12 @@ describe("decodeStoredValue", () => {
       rec: { first: TEXT },
     };
     const decoded = decodeStoredValue(plan, stored) as Record<string, unknown>;
-    expect(JSON.stringify(storedFormOfReadProps(decoded))).toBe(
-      JSON.stringify(stored),
-    );
+    expect(decoded["plain"]).toEqual(DATE);
+    // The props themselves, before any serialization: `JSON.stringify` would
+    // turn a surviving `Date` into the same text.
+    const restored = storedFormOfReadProps(decoded);
+    expect(restored).toStrictEqual(stored);
+    expect(JSON.stringify(restored)).toBe(JSON.stringify(stored));
   });
 });
 
