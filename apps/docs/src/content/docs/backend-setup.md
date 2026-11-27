@@ -1032,7 +1032,11 @@ callback, a transaction TypeGraph opened, the backend closes with that
 transaction: once TypeGraph commits or rolls it back, a statement issued
 through the kept backend is refused with
 [`TransactionClosedError`](/errors#transactionclosederror) instead of running
-on a connection the pool has taken back.
+on a connection the pool has taken back. That covers every member, including
+the ones that write contribution, reconciliation, index-materialization,
+kind-removal and graph-template rows, run lazy DDL, or refresh statistics. A
+savepoint the kept backend opens with `transaction()` is not closed by the
+enclosing transaction's end yet: await it before the callback returns.
 
 #### `createLocalPgliteBackend(options?)`
 

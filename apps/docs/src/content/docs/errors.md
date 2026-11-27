@@ -2466,8 +2466,14 @@ after the end too, on every driver that can identify the transaction behind
 the handle (better-sqlite3, bun:sqlite, libSQL 0.18 and later, PGlite,
 node-postgres, postgres-js). A backend built over a database handle is a root
 backend and is not refused; on better-sqlite3 the native handle is the
-connection itself. A backend adopted over a savepoint's native handle closes
-with the enclosing transaction, not with the savepoint, for now. On sql.js, libSQL before 0.18 and Durable Object
+connection itself. Every member of a constructor-built backend is refused,
+including the ones that write marker, materialization, kind-removal and
+graph-template rows, run lazy DDL or refresh statistics. A backend adopted
+over a savepoint's native handle closes with the enclosing transaction, not
+with the savepoint, for now. A savepoint a constructor-built backend opens with
+`transaction()` closes with the savepoint, not with the enclosing transaction,
+for now: a savepoint callback left running when the enclosing transaction ends
+can still reach the connection. On sql.js, libSQL before 0.18 and Durable Object
 storage, which report no transaction state, such an adoption is not closed. A
 transaction the caller ends (one adopted with `withTransaction` or
 `adoptTransaction`) is not closed by TypeGraph, and an end SQLite makes on
