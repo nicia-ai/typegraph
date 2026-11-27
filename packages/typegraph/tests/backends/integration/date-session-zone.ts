@@ -22,6 +22,7 @@ import {
   defineGraph,
   defineNode,
   expr,
+  field,
   type GraphDef,
   max,
   min,
@@ -95,7 +96,7 @@ export function registerDateSessionZoneIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("dates under a non-UTC PostgreSQL session time zone", () => {
-    it("every collect, projection, aggregate, batch, subgraph and search terminal returns the same Date", async () => {
+    it("every collect, projection, aggregate, group key, prepared, batch, subgraph and search terminal returns the same Date", async () => {
       const { store, close } = await zonedStore(context, graph);
       try {
         const early = await store.nodes.ZonedDoc.create({
@@ -187,6 +188,65 @@ export function registerDateSessionZoneIntegrationTests(
           projected: PROJECTED,
           selected: SELECTED,
           traversed: TRAVERSED,
+        });
+        // The scalar terminals: a date column the compiler cast to the engine's
+        // timestamp type, which a driver that does not parse it (postgres-js)
+        // returns as offset-bearing text in the session zone.
+        const byInstant = (
+          rows: readonly Readonly<{ at?: Date | undefined }>[],
+        ) =>
+          rows
+            .map((row) => row.at)
+            .toSorted(
+              (left, right) =>
+                (left?.getTime() ?? Infinity) - (right?.getTime() ?? Infinity),
+            );
+        const preparedSelect = documents()
+          .whereNode("d", (d) => d.title.eq("early zoned"))
+          .select((ctx) => ({ at: ctx.d.at }))
+          .prepare();
+        const preparedProject = documents()
+          .whereNode("d", (d) => d.title.eq("early zoned"))
+          .project((ctx) => ({ at: ctx.d.at }))
+          .prepare();
+        const page = await documents()
+          .whereNode("d", (d) => d.title.eq("early zoned"))
+          .select((ctx) => ({ at: ctx.d.at }))
+          .orderBy("d", "at")
+          .paginate({ first: 1 });
+        expect({
+          legacyExtremes: await documents()
+            .aggregate({ earliest: min("d", "at"), latest: max("d", "at") })
+            .execute(),
+          legacyGroupKeys: byInstant(
+            await documents()
+              .groupBy("d", "at")
+              .aggregate({ at: field("d", "at") })
+              .execute(),
+          ),
+          expressionGroupKeys: byInstant(
+            await documents()
+              .groupBy((fields) => [fields.d.at])
+              .aggregate((fields) => ({
+                at: fields.d.at,
+                count: expr.count(fields.d.title),
+              }))
+              .execute(),
+          ),
+          derivedStage: await extremes
+            .project((columns) => ({ latest: columns.latest }))
+            .execute(),
+          preparedSelect: await preparedSelect.execute({}),
+          preparedProject: await preparedProject.execute({}),
+          paginated: page.data,
+        }).toEqual({
+          legacyExtremes: EXTREMES,
+          legacyGroupKeys: [EARLY, LATE, undefined],
+          expressionGroupKeys: [EARLY, LATE, undefined],
+          derivedStage: [{ latest: LATE }],
+          preparedSelect: SELECTED,
+          preparedProject: SELECTED,
+          paginated: SELECTED,
         });
         expect(
           await store.batchOnce(
