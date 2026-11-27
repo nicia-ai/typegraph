@@ -2403,7 +2403,8 @@ What guarantees the refusal is the backend, not the Store: every backend object 
 refuses each of its members that can write or run DDL, before any statement, whatever reached it.
 That is a backend built over `tx.sql`, every transaction backend over the same native transaction,
 and, on a SQLite driver that runs every transaction on the database's one connection
-(better-sqlite3 among them), a root backend over that connection. Its refusal is the same error,
+(better-sqlite3 among them), a root backend over that connection, for each member whose statements
+would run inside the read-only transaction. Its refusal is the same error,
 with an `operation` that names the backend member (`backend.upsertFulltextBatch()`). So an entry
 point that takes a backend and knows nothing of the read-only transaction is refused as well:
 `createAdapterStoreWithSchema()`, `migrateSchema()` or `rollbackSchema()` over such a backend,
@@ -2412,9 +2413,24 @@ the Store's own read-only callback on better-sqlite3. Which backend members writ
 over every backend member name, so a new member does not compile until it is classified; a
 transaction opener is a write unless it opens a read-only transaction. Atomic mutation programs are
 refused when they dispatch, and the writes TypeGraph runs through a raw-SQL member (identity
-relations, recorded history, retention pruning, removal cleanup) are marked as writes and refused
-the same way. Reads run: `branch()` from such a Store reads it, and a revision origin the graph has
-not minted yet is refused rather than minted, since minting is a write.
+relations, recorded history, retention pruning, removal cleanup,
+`repairInvertedValidityWindows({ mode: "apply" })`) are marked as writes and refused the same way.
+Reads run: `branch()` from such a Store reads it, and a revision origin the graph has not minted yet
+is refused rather than minted, since minting is a write.
+
+A root backend over such a connection admits most of its work through its serialized queue, which
+the read-only transaction holds until it ends, so that work is not refused: it waits and runs once
+the transaction has ended, as without a read-only transaction. That covers the root Store's writes
+from another flow, a read-write `store.transaction()` opened from another flow, and a second Store on
+another graph over the same backend. Root members that run their statements on the connection as
+they are called would run them inside the read-only transaction, and are refused, from another flow
+as from inside the callback: `refreshStatistics()`, `executeDdl()`, `bootstrapTables()`, the
+`ensure*` provisioning members, `createVectorIndex()`, `deleteVectorSlotContribution()`, the
+materialization and removal records, `registerGraphTemplate()`,
+`adoptBaseSchema()`, `adoptSchemaWriteTransaction()`, `rebuildContribution()` and
+`repairContributions()`. A queued root write awaited inside the read-only callback behaves as before:
+the queue refuses it as a reentrant submission (`SERIALIZED_QUEUE_REENTRANT_SUBMISSION`) where
+AsyncLocalStorage is available, and it waits for the transaction that awaits it where it is not.
 
 A backend you write yourself gets the Store's refusals but no refusal of its own members: nothing
 ties its objects to a native transaction.
