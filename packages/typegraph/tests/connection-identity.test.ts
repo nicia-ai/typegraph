@@ -4,14 +4,16 @@
  *
  * Two consumers ask it: the serialized-resource audit (a serialized
  * verdict's `resource`) and the native-transaction record (a SQLite
- * handle's `connection`, `nativeTransactionConnection`). Before they shared
+ * handle's `connection`, `sqliteConnectionIdentity`). Before they shared
  * the decision, two `sqlite-proxy` wrappers declaring one resource were one
  * connection to the audit and two to the native record, because the record
  * read detection alone and fell back to each wrapper's own handle.
  *
- * Naming one connection is not evidence of one transaction: the cases at
- * the bottom pin that two wrappers on one connection share a native
- * transaction's state only inside one transaction, never across two.
+ * Naming one connection is not evidence of one transaction, and a DECLARED
+ * connection is not evidence at all: the cases at the bottom pin that two
+ * wrappers on one connection get a state per transaction, and that a handle
+ * whose connection only a declaration names never joins a transaction the
+ * engine published on that connection.
  */
 import { drizzle as drizzleSqliteProxy } from "drizzle-orm/sqlite-proxy";
 import { describe, expect, it } from "vitest";
@@ -19,20 +21,27 @@ import { describe, expect, it } from "vitest";
 import { type AnySqliteDatabase } from "../src/backend/drizzle/execution";
 import {
   createSqliteBackend,
-  nativeTransactionConnection,
+  sqliteConnectionIdentity,
 } from "../src/backend/drizzle/sqlite";
 import {
+  type ConnectionIdentity,
   resolveBackendAudit,
   resolveConnectionIdentity,
   type SerializedResourceDeclaration,
   sharesSerializedTransactionResource,
 } from "../src/backend/transaction-resource";
 import { openTransactionSession } from "../src/store/operation-scope";
+import { expectObservation } from "./helpers/known-defect";
 import { createTestDatabase } from "./test-utils";
 
 /** A SQLite database whose driver no detection predicate recognizes. */
 function createUnidentifiableSqliteDatabase(): AnySqliteDatabase {
   return drizzleSqliteProxy(() => Promise.resolve({ rows: [] }));
+}
+
+/** The better-sqlite3 client a test database runs on. */
+function clientOf(db: object): object {
+  return (db as Readonly<{ $client: object }>).$client;
 }
 
 /** The resource a serialized audit names; fails on any other verdict. */
@@ -47,6 +56,16 @@ function auditedResource(backend: object): object {
 describe("resolveConnectionIdentity", () => {
   const detected = { detected: true };
   const declared = { declared: true };
+
+  /** An identity as a comparable label. */
+  function label(identity: ConnectionIdentity | undefined): string {
+    if (identity === undefined) return "none";
+    const named =
+      identity.connection === detected ? "detected object"
+      : identity.connection === declared ? "declared object"
+      : "other object";
+    return `${named} (${identity.source})`;
+  }
 
   it("answers the detected connection, else the declared one, else nothing", () => {
     expect(
@@ -64,19 +83,15 @@ describe("resolveConnectionIdentity", () => {
         }),
         resolveConnectionIdentity(undefined, { mode: "independent" }),
         resolveConnectionIdentity(undefined, undefined),
-      ].map((answer) =>
-        answer === detected ? "detected"
-        : answer === declared ? "declared"
-        : typeof answer,
-      ),
+      ].map((identity) => label(identity)),
     ).toEqual([
-      "detected",
-      "detected",
-      "detected",
-      "detected",
-      "declared",
-      "undefined",
-      "undefined",
+      "detected object (detected)",
+      "detected object (detected)",
+      "detected object (detected)",
+      "detected object (detected)",
+      "declared object (declared)",
+      "none",
+      "none",
     ]);
   });
 });
@@ -101,23 +116,32 @@ describe("one connection identity for the audit and the native record", () => {
     expect(auditedResource(first)).toBe(resource);
     // The native record named each wrapper's own handle here before the
     // two consumers shared one decision.
-    expect(nativeTransactionConnection(firstDb, declaration)).toBe(resource);
-    expect(nativeTransactionConnection(secondDb, declaration)).toBe(resource);
+    expect(sqliteConnectionIdentity(firstDb, declaration)?.connection).toBe(
+      resource,
+    );
+    expect(sqliteConnectionIdentity(secondDb, declaration)?.connection).toBe(
+      resource,
+    );
   });
 
   it("names the detected client for a better-sqlite3 database and a transaction object over it", async () => {
     const db = createTestDatabase();
     const backend = createSqliteBackend(db);
-    const client = (db as unknown as Readonly<{ $client: object }>).$client;
+    const client = clientOf(db);
 
     expect(auditedResource(backend)).toBe(client);
-    expect(nativeTransactionConnection(db, undefined)).toBe(client);
-    const inTransaction = await new Promise<object>((resolve) => {
-      db.transaction((tx) => {
-        resolve(nativeTransactionConnection(tx, undefined));
-      });
+    expect(sqliteConnectionIdentity(db, undefined)).toEqual({
+      connection: client,
+      source: "detected",
     });
-    expect(inTransaction).toBe(client);
+    const inTransaction = await new Promise<ConnectionIdentity | undefined>(
+      (resolve) => {
+        db.transaction((tx) => {
+          resolve(sqliteConnectionIdentity(tx, undefined));
+        });
+      },
+    );
+    expect(inTransaction?.connection).toBe(client);
   });
 
   it("keeps naming the detected client under an independent declaration", () => {
@@ -125,20 +149,58 @@ describe("one connection identity for the audit and the native record", () => {
     const backend = createSqliteBackend(db, {
       serializedResource: { mode: "independent" },
     });
-    const client = (db as unknown as Readonly<{ $client: object }>).$client;
 
     // The declaration lifts the stream guard; it does not move statements
     // off the connection they land on, so the native record still names it.
     expect(resolveBackendAudit(backend)?.kind).toBe("independent");
-    expect(nativeTransactionConnection(db, { mode: "independent" })).toBe(
-      client,
-    );
+    expect(
+      sqliteConnectionIdentity(db, { mode: "independent" })?.connection,
+    ).toBe(clientOf(db));
   });
 
-  it("names the handle itself when neither detection nor a declaration identifies one", () => {
-    const db = createUnidentifiableSqliteDatabase();
+  it("names nothing when neither detection nor a declaration identifies a connection", () => {
+    expect(
+      sqliteConnectionIdentity(createUnidentifiableSqliteDatabase(), undefined),
+    ).toBeUndefined();
+  });
 
-    expect(nativeTransactionConnection(db, undefined)).toBe(db);
+  // Pinned, not fixed here: the factory audits a backend from the handle's
+  // `$client`, which a Drizzle transaction object does not carry, while the
+  // native record reads the transaction's session client. A backend built
+  // over a better-sqlite3 transaction object is therefore audited
+  // independent although its record names the client. Changing the audit
+  // for transaction-object backends is a behaviour change of its own (a
+  // libSQL transaction runs on a connection of its own, which the client
+  // does not name), so it is left to its own change.
+  it("audits a backend over a better-sqlite3 transaction object from its handle, not its session client", () => {
+    const db = createTestDatabase();
+    const client = clientOf(db);
+    const observed = db.transaction((tx) => {
+      const backend = createSqliteBackend(tx);
+      const audit = resolveBackendAudit(backend);
+      return {
+        audit:
+          audit?.kind === "serialized" && audit.resource === client ?
+            "the client"
+          : (audit?.kind ?? "unaudited"),
+        record:
+          sqliteConnectionIdentity(tx, undefined)?.connection === client ?
+            "the client"
+          : "other",
+      };
+    });
+    expectObservation({
+      lane: { driver: "better-sqlite3" },
+      observed,
+      correct: { audit: "the client", record: "the client" },
+      defects: [
+        {
+          label: "transaction-object-backend-audit",
+          on: { driver: ["better-sqlite3"] },
+          today: { audit: "independent", record: "the client" },
+        },
+      ],
+    });
   });
 });
 
@@ -169,5 +231,35 @@ describe("one connection is not one transaction", () => {
     ];
 
     expect(new Set(states).size).toBe(3);
+  });
+
+  it("never joins a handle to a live transaction through a connection only a declaration names", async () => {
+    // A proxy backend declaring a real better-sqlite3 client as its resource.
+    // While another backend over that client holds a transaction open on it,
+    // a handle the proxy backend adopts is not shown to run on that
+    // transaction by anything read off its own session, so it must not join
+    // the transaction's state.
+    const db = createTestDatabase();
+    const owner = createSqliteBackend(db);
+    const proxyDb = createUnidentifiableSqliteDatabase();
+    const proxy = createSqliteBackend(proxyDb, {
+      serializedResource: { mode: "shared", resource: clientOf(db) },
+    });
+    expect(sharesSerializedTransactionResource(owner, proxy)).toBe(true);
+
+    const observed = await owner.transactionWithNative((target, native) => {
+      const opener = openTransactionSession(target).native;
+      return Promise.resolve({
+        ownerJoin: openTransactionSession(owner.adoptTransaction(native))
+          .native,
+        proxyJoin: openTransactionSession(proxy.adoptTransaction(proxyDb))
+          .native,
+        opener,
+      });
+    });
+
+    // Detection proves the owner's own adoption, so it joins.
+    expect(observed.ownerJoin).toBe(observed.opener);
+    expect(observed.proxyJoin).not.toBe(observed.opener);
   });
 });

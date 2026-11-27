@@ -187,6 +187,8 @@ import {
   SQLITE_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
 import {
+  captureSerializedResourceDeclaration,
+  type ConnectionIdentity,
   resolveConnectionIdentity,
   resolveDeclaredBackendResource,
   type SerializedResourceDeclaration,
@@ -1346,7 +1348,9 @@ export function buildSqliteEngineProfile(
   // work that could fail after wrappers already observed an unmarked backend.
   // A `serializedResource` declaration that contradicts detection is refused
   // here too, before any object a caller could hold has been built.
-  const { serializedResource } = options;
+  const serializedResource = captureSerializedResourceDeclaration(
+    options.serializedResource,
+  );
   const resourceAudit = resolveDeclaredBackendResource(
     getSerializedSqliteConnection(db),
     serializedResource,
@@ -2777,25 +2781,23 @@ function sqliteHandleClient(db: AnySqliteDatabase): unknown {
  * serialized-resource audit too — the driver client or Durable Object
  * storage detected for the handle's client (every Drizzle wrapper and
  * transaction object over one client shares it), else the resource the
- * backend's `{ mode: "shared" }` declaration names — or the handle itself
- * when neither identifies one.
+ * backend's `{ mode: "shared" }` declaration names; `undefined` when neither
+ * identifies one.
  *
  * Exported for the connection-identity agreement tests only; production code
  * reaches it through the native-transaction record.
  *
  * @internal
  */
-export function nativeTransactionConnection(
+export function sqliteConnectionIdentity(
   db: AnySqliteDatabase,
   serializedResource: SerializedResourceDeclaration | undefined,
-): object {
-  return (
-    resolveConnectionIdentity(
-      getSerializedSqliteConnection({
-        $client: sqliteHandleClient(db),
-      } as unknown as AnySqliteDatabase),
-      serializedResource,
-    ) ?? db
+): ConnectionIdentity | undefined {
+  return resolveConnectionIdentity(
+    getSerializedSqliteConnection({
+      $client: sqliteHandleClient(db),
+    } as unknown as AnySqliteDatabase),
+    serializedResource,
   );
 }
 
@@ -2829,21 +2831,24 @@ function sqliteNativeHandle(
   serializedResource: SerializedResourceDeclaration | undefined,
 ): NativeHandle {
   const pinned = pinnedLibsqlTransaction(db);
-  return pinned === undefined ?
-      {
-        kind: "connection",
-        handle: db,
-        connection: nativeTransactionConnection(db, serializedResource),
-      }
-    : {
-        kind: "pinned",
-        handle: db,
-        pinned,
+  if (pinned === undefined) {
+    const identity = sqliteConnectionIdentity(db, serializedResource);
+    return {
+      kind: "connection",
+      handle: db,
+      connection: identity?.connection ?? db,
+      detected: identity?.source === "detected",
+    };
+  }
+  return {
+    kind: "pinned",
+    handle: db,
+    pinned,
         // A libSQL transaction handle reports `closed` once its transaction
         // has ended, committed, rolled back or ended by the engine, and
         // refuses every statement from then on.
-        isOpen: () => !(pinned as Readonly<{ closed: boolean }>).closed,
-      };
+    isOpen: () => !(pinned as Readonly<{ closed: boolean }>).closed,
+  };
 }
 
 /**
@@ -2880,8 +2885,12 @@ function sqliteConnectionProbe(
     return undefined;
   }
   const driverClient = client as object;
+  // The connection the record publishes the token on: the one the audit
+  // names, detected on this very client.
+  const identity = sqliteConnectionIdentity(db, serializedResource);
+  if (identity?.source !== "detected") return undefined;
   return {
-    connection: nativeTransactionConnection(db, serializedResource),
+    connection: identity.connection,
     isTransactionOpen: () => readSqliteInTransaction(driverClient),
   };
 }

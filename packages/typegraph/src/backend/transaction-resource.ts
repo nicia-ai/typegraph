@@ -386,16 +386,48 @@ function describeSerializedResource(resource: object): string {
  * runs one transaction after another, so the native-transaction record shares
  * state only on proof of the same transaction (`native-transaction-handle.ts`:
  * a token the engine published on the connection, verified live at the
- * lookup), never on this answer alone.
+ * lookup), never on this answer alone. And only a `"detected"` identity can
+ * carry that proof: a `"declared"` one is the caller's claim about the
+ * backend, not a fact read off the session a handle runs on, so a handle the
+ * backend adopts from somewhere else is never joined to a transaction through
+ * it.
  *
  * @internal
  */
 export function resolveConnectionIdentity(
   detected: object | undefined,
   declaration: SerializedResourceDeclaration | undefined,
-): object | undefined {
-  if (detected !== undefined) return detected;
-  return declaration?.mode === "shared" ? declaration.resource : undefined;
+): ConnectionIdentity | undefined {
+  if (detected !== undefined)
+    return { connection: detected, source: "detected" };
+  return declaration?.mode === "shared" ?
+      { connection: declaration.resource, source: "declared" }
+    : undefined;
+}
+
+/**
+ * Which connection a handle runs on ({@link resolveConnectionIdentity}), and
+ * how that is known: `"detected"` on the handle's own driver client, or
+ * `"declared"` by the backend's `{ mode: "shared" }` declaration.
+ */
+export type ConnectionIdentity = Readonly<{
+  connection: object;
+  source: "detected" | "declared";
+}>;
+
+/**
+ * The declaration a factory applies for its whole lifetime, captured once at
+ * construction so the audit and every later native-transaction bind read
+ * the same value even if the caller's options object is mutated afterwards.
+ *
+ * @internal
+ */
+export function captureSerializedResourceDeclaration(
+  declaration: SerializedResourceDeclaration | undefined,
+): SerializedResourceDeclaration | undefined {
+  return declaration === undefined ? undefined : (
+      Object.freeze({ ...declaration })
+    );
 }
 
 /**
@@ -473,10 +505,10 @@ export function resolveDeclaredBackendResource(
   }
   // The resource a serialized verdict names IS the connection identity the
   // native-transaction record names, by construction: one function answers.
-  const connection = resolveConnectionIdentity(detected, declaration);
-  return connection === undefined ?
+  const identity = resolveConnectionIdentity(detected, declaration);
+  return identity === undefined ?
       { kind: "independent" }
-    : { kind: "serialized", resource: connection };
+    : { kind: "serialized", resource: identity.connection };
 }
 
 /**

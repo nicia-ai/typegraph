@@ -189,6 +189,7 @@ import {
   type SavepointGuard,
 } from "../session-savepoint";
 import {
+  captureSerializedResourceDeclaration,
   resolveConnectionIdentity,
   resolveDeclaredBackendResource,
   type SerializedResourceDeclaration,
@@ -1159,14 +1160,15 @@ function postgresNativeHandle(
   serializedResource: SerializedResourceDeclaration | undefined,
 ): NativeHandle {
   if (!isPostgresTransactionHandle(db)) {
+    const identity = resolveConnectionIdentity(
+      getSerializedPostgresClient(db as AnyPgDatabase),
+      serializedResource,
+    );
     return {
       kind: "connection",
       handle: db,
-      connection:
-        resolveConnectionIdentity(
-          getSerializedPostgresClient(db as AnyPgDatabase),
-          serializedResource,
-        ) ?? db,
+      connection: identity?.connection ?? db,
+      detected: identity?.source === "detected",
     };
   }
   const pinned = getPinnedPgliteTransaction(db);
@@ -1270,7 +1272,9 @@ function buildPostgresEngineProfileInternal(
   // work that could fail after a wrapper already observed an unmarked backend.
   // A `serializedResource` declaration that contradicts detection is refused
   // here too, before any object a caller could hold has been built.
-  const { serializedResource } = options;
+  const serializedResource = captureSerializedResourceDeclaration(
+    options.serializedResource,
+  );
   const resourceAudit = resolveDeclaredBackendResource(
     getSerializedPostgresClient(db),
     serializedResource,

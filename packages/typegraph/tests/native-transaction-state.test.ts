@@ -69,6 +69,7 @@ function bindOnConnection(connection: object): object {
     kind: "connection",
     handle: connection,
     connection,
+    detected: true,
   });
   return bound;
 }
@@ -276,6 +277,7 @@ describe("native transaction record of a nested handle", () => {
         kind: "connection",
         handle: savepoint,
         connection: probe.connection,
+        detected: true,
       });
       return bound;
     };

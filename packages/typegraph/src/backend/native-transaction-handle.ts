@@ -99,6 +99,12 @@ export type NativeHandle =
       kind: "connection";
       handle: object;
       connection: object;
+      /**
+       * Whether `connection` was detected on the handle's own driver
+       * client. Only such a connection can verify a token (proof 4): one a
+       * backend declared is a claim, not a fact read off this session.
+       */
+      detected: boolean;
     }>;
 
 /** Bound transaction backend → the native transaction (or token) it runs on. */
@@ -182,7 +188,9 @@ function identifyNativeTransaction(handle: NativeHandle): object | undefined {
     }
     case "connection": {
       // Proof 4: the token the engine published on the connection, only
-      // while the driver confirms it is still the open transaction.
+      // while the driver confirms it is still the open transaction, and
+      // only through a connection detected on this handle's own client.
+      if (!handle.detected) return undefined;
       const published = PUBLISHED_TOKENS.get(handle.connection);
       return published !== undefined && isTokenLive(published) ?
           published
