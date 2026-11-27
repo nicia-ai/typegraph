@@ -13,12 +13,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "a1",
-        "a2",
-        "t1",
-        "t2"
-      ]
+      "rows": ["a1", "a2", "t1", "t2"]
     },
     "read-only: reads through the context, commit": {
       "trace": [
@@ -31,25 +26,16 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only: a write through the context is refused": {
-      "trace": [
-        "BEGIN",
-        "COMMIT"
-      ],
+      "trace": ["BEGIN", "COMMIT"],
       "outcomes": {
         "transaction": "fulfilled",
         "write": "UnsupportedBackendCapabilityError"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only: a write through a Store adopted over tx.sql": {
       "trace": [
@@ -64,11 +50,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2",
-        "w"
-      ]
+      "rows": ["t1", "t2", "w"]
     },
     "read-write: a write through a Store adopted over tx.sql": {
       "trace": [
@@ -83,11 +65,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2",
-        "w"
-      ]
+      "rows": ["t1", "t2", "w"]
     },
     "read-write: a write through a backend adopted over tx.sql": {
       "trace": [
@@ -101,26 +79,16 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2",
-        "w"
-      ]
+      "rows": ["t1", "t2", "w"]
     },
     "read-only: the root store writes from inside the callback": {
-      "trace": [
-        "BEGIN",
-        "COMMIT"
-      ],
+      "trace": ["BEGIN", "COMMIT"],
       "outcomes": {
         "root write": "ConfigurationError SERIALIZED_QUEUE_REENTRANT_SUBMISSION",
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only: root refreshStatistics() from inside the callback": {
       "trace": [
@@ -144,10 +112,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: the root store creates from another flow": {
       "trace": [
@@ -165,11 +130,7 @@
         "root create": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "q",
-        "t1",
-        "t2"
-      ]
+      "rows": ["q", "t1", "t2"]
     },
     "read-only held: a root read-write transaction from another flow": {
       "trace": [
@@ -187,11 +148,7 @@
         "root transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "q",
-        "t1",
-        "t2"
-      ]
+      "rows": ["q", "t1", "t2"]
     },
     "read-only held: a second read-only transaction from another flow": {
       "trace": [
@@ -208,10 +165,7 @@
         "second read-only transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: the root store reads from another flow": {
       "trace": [
@@ -226,10 +180,7 @@
         "root read": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: a second Store on another graph creates from another flow": {
       "trace": [
@@ -247,10 +198,7 @@
         "other store create": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root store.refreshStatistics() from another flow": {
       "trace": [
@@ -275,13 +223,8 @@
         "held transaction": "fulfilled",
         "refreshStatistics": "fulfilled"
       },
-      "settledInsideSpan": [
-        "refreshStatistics"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["refreshStatistics"],
+      "rows": ["t1", "t2"]
     },
     "read-write held: the root store creates from another flow": {
       "trace": [
@@ -299,11 +242,7 @@
         "root create": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "q",
-        "t1",
-        "t2"
-      ]
+      "rows": ["q", "t1", "t2"]
     },
     "read-write held: root store.refreshStatistics() from another flow": {
       "trace": [
@@ -328,13 +267,8 @@
         "held transaction": "fulfilled",
         "refreshStatistics": "fulfilled"
       },
-      "settledInsideSpan": [
-        "refreshStatistics"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["refreshStatistics"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.adoptBaseSchema() from another flow": {
       "trace": [
@@ -349,13 +283,8 @@
         "adoptBaseSchema": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "adoptBaseSchema"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["adoptBaseSchema"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.adoptSchemaWriteTransaction() from another flow": {
       "trace": [
@@ -377,13 +306,8 @@
         "adoptSchemaWriteTransaction": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "adoptSchemaWriteTransaction"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["adoptSchemaWriteTransaction"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.bootstrapTables() from another flow": {
       "trace": [
@@ -466,13 +390,8 @@
         "bootstrapTables": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "bootstrapTables"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["bootstrapTables"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimEdgeCardinality() from another flow": {
       "trace": [
@@ -488,10 +407,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimEdgeCardinalityBatch() from another flow": {
       "trace": [
@@ -507,10 +423,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimEdgeCardinalityGuarded() from another flow": {
       "trace": [
@@ -526,10 +439,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.clearGraph() from another flow": {
       "trace": [
@@ -649,11 +559,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-command",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-command", "t1", "t2"]
     },
     "read-only held: root backend.commitSchemaVersion() from another flow": {
       "trace": [
@@ -675,10 +581,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.commitSchemaVersionIfKindsEmpty() from another flow": {
       "trace": [
@@ -699,10 +602,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.commitSchemaVersionWithPreflight() from another flow": {
       "trace": [
@@ -724,10 +624,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.compareAndSetNode() from another flow": {
       "trace": [
@@ -741,13 +638,8 @@
         "compareAndSetNode": "ConfigurationError",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "compareAndSetNode"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["compareAndSetNode"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.createVectorIndex() from another flow": {
       "trace": [
@@ -761,13 +653,8 @@
         "createVectorIndex": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "createVectorIndex"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["createVectorIndex"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEdge() from another flow": {
       "trace": [
@@ -783,10 +670,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEdgesBatch() from another flow": {
       "trace": [
@@ -802,10 +686,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteFulltext() from another flow": {
       "trace": [
@@ -821,10 +702,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteFulltextBatch() from another flow": {
       "trace": [
@@ -840,10 +718,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteNode() from another flow": {
       "trace": [
@@ -859,9 +734,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1"
-      ]
+      "rows": ["t1"]
     },
     "read-only held: root backend.deleteSchemaVectorSlotContribution() from another flow": {
       "trace": [
@@ -875,10 +748,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteUnique() from another flow": {
       "trace": [
@@ -894,10 +764,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.dropVectorIndex() from another flow": {
       "trace": [
@@ -911,13 +778,8 @@
         "dropVectorIndex": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "dropVectorIndex"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["dropVectorIndex"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureContributionMaterializationsTable() from another flow": {
       "trace": [
@@ -932,13 +794,8 @@
         "ensureContributionMaterializationsTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureContributionMaterializationsTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureContributionMaterializationsTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureEdgeMatchIdentityStorage() from another flow": {
       "trace": [
@@ -954,13 +811,8 @@
         "ensureEdgeMatchIdentityStorage": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureEdgeMatchIdentityStorage"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureEdgeMatchIdentityStorage"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureFulltextTable() from another flow": {
       "trace": [
@@ -974,13 +826,8 @@
         "ensureFulltextTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureFulltextTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureFulltextTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureIdentityTables() from another flow": {
       "trace": [
@@ -1018,13 +865,8 @@
         "ensureIdentityTables": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureIdentityTables"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureIdentityTables"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureIndexMaterializationsTable() from another flow": {
       "trace": [
@@ -1039,13 +881,8 @@
         "ensureIndexMaterializationsTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureIndexMaterializationsTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureIndexMaterializationsTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureKindRemovalsTable() from another flow": {
       "trace": [
@@ -1060,13 +897,8 @@
         "ensureKindRemovalsTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureKindRemovalsTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureKindRemovalsTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureReconciliationMarkersTable() from another flow": {
       "trace": [
@@ -1081,13 +913,8 @@
         "ensureReconciliationMarkersTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureReconciliationMarkersTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureReconciliationMarkersTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureRevisionChangesJournal() from another flow": {
       "trace": [
@@ -1111,13 +938,8 @@
         "ensureRevisionChangesJournal": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureRevisionChangesJournal"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureRevisionChangesJournal"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureRevisionOriginsTable() from another flow": {
       "trace": [
@@ -1132,13 +954,8 @@
         "ensureRevisionOriginsTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureRevisionOriginsTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureRevisionOriginsTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureRuntimeContributions() from another flow": {
       "trace": [
@@ -1152,13 +969,8 @@
         "ensureRuntimeContributions": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureRuntimeContributions"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureRuntimeContributions"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.executeDdl() from another flow": {
       "trace": [
@@ -1173,13 +985,8 @@
         "executeDdl": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "executeDdl"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["executeDdl"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.executeSchemaDdl() from another flow": {
       "trace": [
@@ -1193,10 +1000,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteEdge() from another flow": {
       "trace": [
@@ -1212,10 +1016,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteEdgesBatch() from another flow": {
       "trace": [
@@ -1231,10 +1032,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteNode() from another flow": {
       "trace": [
@@ -1253,9 +1051,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1"
-      ]
+      "rows": ["t1"]
     },
     "read-only held: root backend.hardDeleteNodesBatch() from another flow": {
       "trace": [
@@ -1274,9 +1070,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1"
-      ]
+      "rows": ["t1"]
     },
     "read-only held: root backend.hardDeleteUniquesByConcreteKind() from another flow": {
       "trace": [
@@ -1292,10 +1086,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteUniquesByNodeIds() from another flow": {
       "trace": [
@@ -1311,10 +1102,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdge() from another flow": {
       "trace": [
@@ -1330,10 +1118,7 @@
         "insertEdge": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgeNoReturn() from another flow": {
       "trace": [
@@ -1349,10 +1134,7 @@
         "insertEdgeNoReturn": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgesBatch() from another flow": {
       "trace": [
@@ -1368,10 +1150,7 @@
         "insertEdgesBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgesBatchReturning() from another flow": {
       "trace": [
@@ -1387,10 +1166,7 @@
         "insertEdgesBatchReturning": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgesDurableBatchReturning() from another flow": {
       "trace": [
@@ -1404,13 +1180,8 @@
         "held transaction": "fulfilled",
         "insertEdgesDurableBatchReturning": "CompilerInvariantError"
       },
-      "settledInsideSpan": [
-        "insertEdgesDurableBatchReturning"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["insertEdgesDurableBatchReturning"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertNode() from another flow": {
       "trace": [
@@ -1426,11 +1197,7 @@
         "insertNode": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeIfAbsent() from another flow": {
       "trace": [
@@ -1446,11 +1213,7 @@
         "insertNodeIfAbsent": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeIfAbsentWithSchemaFence() from another flow": {
       "trace": [
@@ -1466,11 +1229,7 @@
         "insertNodeIfAbsentWithSchemaFence": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeNoReturn() from another flow": {
       "trace": [
@@ -1486,11 +1245,7 @@
         "insertNodeNoReturn": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeWithSchemaFence() from another flow": {
       "trace": [
@@ -1506,11 +1261,7 @@
         "insertNodeWithSchemaFence": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodesBatch() from another flow": {
       "trace": [
@@ -1526,11 +1277,7 @@
         "insertNodesBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodesBatchReturning() from another flow": {
       "trace": [
@@ -1546,11 +1293,7 @@
         "insertNodesBatchReturning": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertUnique() from another flow": {
       "trace": [
@@ -1566,10 +1309,7 @@
         "insertUnique": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertUniqueBatch() from another flow": {
       "trace": [
@@ -1585,10 +1325,7 @@
         "insertUniqueBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.instantiateGraphTemplate() from another flow": {
       "trace": [
@@ -1604,10 +1341,7 @@
         "instantiateGraphTemplate": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.lockNodes() from another flow": {
       "trace": [
@@ -1623,10 +1357,7 @@
         "lockNodes": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.lockSchemaVersionForWrite() from another flow": {
       "trace": [
@@ -1640,13 +1371,8 @@
         "held transaction": "fulfilled",
         "lockSchemaVersionForWrite": "ConfigurationError SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED"
       },
-      "settledInsideSpan": [
-        "lockSchemaVersionForWrite"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["lockSchemaVersionForWrite"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.purgeEdgeClaims() from another flow": {
       "trace": [
@@ -1662,10 +1388,7 @@
         "purgeEdgeClaims": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.rebuildContribution() from another flow": {
       "trace": [
@@ -1692,10 +1415,7 @@
         "rebuildContribution": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.recordContributionMaterialization() from another flow": {
       "trace": [
@@ -1710,13 +1430,8 @@
         "held transaction": "fulfilled",
         "recordContributionMaterialization": "fulfilled"
       },
-      "settledInsideSpan": [
-        "recordContributionMaterialization"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["recordContributionMaterialization"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.recordIndexMaterialization() from another flow": {
       "trace": [
@@ -1731,13 +1446,8 @@
         "held transaction": "fulfilled",
         "recordIndexMaterialization": "fulfilled"
       },
-      "settledInsideSpan": [
-        "recordIndexMaterialization"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["recordIndexMaterialization"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.recordKindRemoval() from another flow": {
       "trace": [
@@ -1752,13 +1462,8 @@
         "held transaction": "fulfilled",
         "recordKindRemoval": "fulfilled"
       },
-      "settledInsideSpan": [
-        "recordKindRemoval"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["recordKindRemoval"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.refreshStatistics() from another flow": {
       "trace": [
@@ -1784,13 +1489,8 @@
         "held transaction": "fulfilled",
         "refreshStatistics": "fulfilled"
       },
-      "settledInsideSpan": [
-        "refreshStatistics"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["refreshStatistics"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.registerGraphTemplate() from another flow": {
       "trace": [
@@ -1806,13 +1506,8 @@
         "held transaction": "fulfilled",
         "registerGraphTemplate": "fulfilled"
       },
-      "settledInsideSpan": [
-        "registerGraphTemplate"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["registerGraphTemplate"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.repairContributions() from another flow": {
       "trace": [
@@ -1832,13 +1527,8 @@
         "held transaction": "fulfilled",
         "repairContributions": "fulfilled"
       },
-      "settledInsideSpan": [
-        "repairContributions"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["repairContributions"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.schemaWriteTransaction() from another flow": {
       "trace": [
@@ -1855,10 +1545,7 @@
         "schemaWriteTransaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.setActiveVersion() from another flow": {
       "trace": [
@@ -1879,10 +1566,7 @@
         "setActiveVersion": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.setActiveVersionWithPreflight() from another flow": {
       "trace": [
@@ -1903,10 +1587,7 @@
         "setActiveVersionWithPreflight": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.setReconciliationMarker() from another flow": {
       "trace": [
@@ -1921,13 +1602,8 @@
         "held transaction": "fulfilled",
         "setReconciliationMarker": "fulfilled"
       },
-      "settledInsideSpan": [
-        "setReconciliationMarker"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["setReconciliationMarker"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.transaction() from another flow": {
       "trace": [
@@ -1944,10 +1620,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.transactionWithNative() from another flow": {
       "trace": [
@@ -1964,10 +1637,7 @@
         "transactionWithNative": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.trustedImport() from another flow": {
       "trace": [
@@ -1985,10 +1655,7 @@
         "trustedImport": "TrustedImportError"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateEdge() from another flow": {
       "trace": [
@@ -2004,10 +1671,7 @@
         "updateEdge": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateNode() from another flow": {
       "trace": [
@@ -2023,10 +1687,7 @@
         "updateNode": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateNodeSet() from another flow": {
       "trace": [
@@ -2042,10 +1703,7 @@
         "updateNodeSet": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateResolvedNodesBatch() from another flow": {
       "trace": [
@@ -2061,10 +1719,7 @@
         "updateResolvedNodesBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertFulltext() from another flow": {
       "trace": [
@@ -2081,10 +1736,7 @@
         "upsertFulltext": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertFulltextBatch() from another flow": {
       "trace": [
@@ -2101,10 +1753,7 @@
         "upsertFulltextBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     }
   },
   "libsql": {
@@ -2121,12 +1770,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "a1",
-        "a2",
-        "t1",
-        "t2"
-      ]
+      "rows": ["a1", "a2", "t1", "t2"]
     },
     "read-only: reads through the context, commit": {
       "trace": [
@@ -2139,25 +1783,16 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only: a write through the context is refused": {
-      "trace": [
-        "-- libsql transaction default",
-        "-- libsql commit"
-      ],
+      "trace": ["-- libsql transaction default", "-- libsql commit"],
       "outcomes": {
         "transaction": "fulfilled",
         "write": "UnsupportedBackendCapabilityError"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only: a write through a Store adopted over tx.sql": {
       "trace": [
@@ -2171,11 +1806,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2",
-        "w"
-      ]
+      "rows": ["t1", "t2", "w"]
     },
     "read-write: a write through a Store adopted over tx.sql": {
       "trace": [
@@ -2189,11 +1820,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2",
-        "w"
-      ]
+      "rows": ["t1", "t2", "w"]
     },
     "read-write: a write through a backend adopted over tx.sql": {
       "trace": [
@@ -2206,26 +1833,16 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2",
-        "w"
-      ]
+      "rows": ["t1", "t2", "w"]
     },
     "read-only: the root store writes from inside the callback": {
-      "trace": [
-        "-- libsql transaction default",
-        "-- libsql commit"
-      ],
+      "trace": ["-- libsql transaction default", "-- libsql commit"],
       "outcomes": {
         "root write": "ConfigurationError SERIALIZED_QUEUE_REENTRANT_SUBMISSION",
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only: root refreshStatistics() from inside the callback": {
       "trace": [
@@ -2239,10 +1856,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: the root store creates from another flow": {
       "trace": [
@@ -2260,11 +1874,7 @@
         "root create": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "q",
-        "t1",
-        "t2"
-      ]
+      "rows": ["q", "t1", "t2"]
     },
     "read-only held: a root read-write transaction from another flow": {
       "trace": [
@@ -2282,11 +1892,7 @@
         "root transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "q",
-        "t1",
-        "t2"
-      ]
+      "rows": ["q", "t1", "t2"]
     },
     "read-only held: a second read-only transaction from another flow": {
       "trace": [
@@ -2303,10 +1909,7 @@
         "second read-only transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: the root store reads from another flow": {
       "trace": [
@@ -2321,10 +1924,7 @@
         "root read": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: a second Store on another graph creates from another flow": {
       "trace": [
@@ -2342,10 +1942,7 @@
         "other store create": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root store.refreshStatistics() from another flow": {
       "trace": [
@@ -2360,13 +1957,8 @@
         "held transaction": "fulfilled",
         "refreshStatistics": "untyped: Error: Failed query: ANALYZE \"typegraph_nodes\""
       },
-      "settledInsideSpan": [
-        "refreshStatistics"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["refreshStatistics"],
+      "rows": ["t1", "t2"]
     },
     "read-write held: the root store creates from another flow": {
       "trace": [
@@ -2384,11 +1976,7 @@
         "root create": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "q",
-        "t1",
-        "t2"
-      ]
+      "rows": ["q", "t1", "t2"]
     },
     "read-write held: root store.refreshStatistics() from another flow": {
       "trace": [
@@ -2403,13 +1991,8 @@
         "held transaction": "fulfilled",
         "refreshStatistics": "untyped: Error: Failed query: ANALYZE \"typegraph_nodes\""
       },
-      "settledInsideSpan": [
-        "refreshStatistics"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["refreshStatistics"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.adoptBaseSchema() from another flow": {
       "trace": [
@@ -2424,13 +2007,8 @@
         "adoptBaseSchema": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "adoptBaseSchema"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["adoptBaseSchema"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.bootstrapTables() from another flow": {
       "trace": [
@@ -2513,13 +2091,8 @@
         "bootstrapTables": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "bootstrapTables"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["bootstrapTables"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimEdgeCardinality() from another flow": {
       "trace": [
@@ -2535,10 +2108,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimEdgeCardinalityBatch() from another flow": {
       "trace": [
@@ -2554,10 +2124,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimEdgeCardinalityGuarded() from another flow": {
       "trace": [
@@ -2573,10 +2140,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.clearGraph() from another flow": {
       "trace": [
@@ -2696,11 +2260,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-command",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-command", "t1", "t2"]
     },
     "read-only held: root backend.commitSchemaVersion() from another flow": {
       "trace": [
@@ -2722,10 +2282,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.commitSchemaVersionIfKindsEmpty() from another flow": {
       "trace": [
@@ -2746,10 +2303,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.commitSchemaVersionWithPreflight() from another flow": {
       "trace": [
@@ -2771,10 +2325,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.compareAndSetNode() from another flow": {
       "trace": [
@@ -2788,13 +2339,8 @@
         "compareAndSetNode": "ConfigurationError",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "compareAndSetNode"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["compareAndSetNode"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.createVectorIndex() from another flow": {
       "trace": [
@@ -2813,13 +2359,8 @@
         "createVectorIndex": "untyped: Error: Failed query: insert into \"typegraph_contribution_materializations\" (\"graph_id\", \"logical_name\", \"owner\", \"table_name\", \"signature\", \"materialized_at\", \"last_attempted_at\", \"last_error\") values (?, ?, ?, ?, ?, null, ?, ?) on conflict (\"typegraph_contribution_materializations\".\"graph_id\", \"typegraph_contribution_materializations\".\"logical_name\", \"typegraph_contribution_materializations\".\"owner\", \"typegraph_contribution_materializations\".\"table_name\") do update set \"signature\" = excluded.\"signature\", \"materialized_at\" = COALESCE(excluded.\"materialized_at\", \"typegraph_contribution_materializations\".\"materialized_at\"), \"last_attempted_at\" = excluded.\"last_attempted_at\", \"last_error\" = excluded.\"last_error\"",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "createVectorIndex"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["createVectorIndex"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEdge() from another flow": {
       "trace": [
@@ -2835,10 +2376,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEdgesBatch() from another flow": {
       "trace": [
@@ -2854,10 +2392,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEmbedding() from another flow": {
       "trace": [
@@ -2872,13 +2407,8 @@
         "deleteEmbedding": "StoreNotInitializedError",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "deleteEmbedding"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["deleteEmbedding"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEmbeddingBatch() from another flow": {
       "trace": [
@@ -2893,13 +2423,8 @@
         "deleteEmbeddingBatch": "StoreNotInitializedError",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "deleteEmbeddingBatch"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["deleteEmbeddingBatch"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteFulltext() from another flow": {
       "trace": [
@@ -2915,10 +2440,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteFulltextBatch() from another flow": {
       "trace": [
@@ -2934,10 +2456,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteNode() from another flow": {
       "trace": [
@@ -2953,9 +2472,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1"
-      ]
+      "rows": ["t1"]
     },
     "read-only held: root backend.deleteSchemaVectorSlotContribution() from another flow": {
       "trace": [
@@ -2969,10 +2486,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteUnique() from another flow": {
       "trace": [
@@ -2988,10 +2502,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteVectorSlotContribution() from another flow": {
       "trace": [
@@ -3006,13 +2517,8 @@
         "deleteVectorSlotContribution": "untyped: Error: Failed query: delete from \"typegraph_contribution_materializations\" where (\"typegraph_contribution_materializations\".\"graph_id\" = ? and \"typegraph_contribution_materializations\".\"logical_name\" = ? and \"typegraph_contribution_materializations\".\"owner\" = ? and \"typegraph_contribution_materializations\".\"table_name\" = ?)",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "deleteVectorSlotContribution"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["deleteVectorSlotContribution"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.dropVectorIndex() from another flow": {
       "trace": [
@@ -3028,10 +2534,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureContributionMaterializationsTable() from another flow": {
       "trace": [
@@ -3046,13 +2549,8 @@
         "ensureContributionMaterializationsTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureContributionMaterializationsTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureContributionMaterializationsTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureEdgeMatchIdentityStorage() from another flow": {
       "trace": [
@@ -3068,13 +2566,8 @@
         "ensureEdgeMatchIdentityStorage": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureEdgeMatchIdentityStorage"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureEdgeMatchIdentityStorage"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureFulltextTable() from another flow": {
       "trace": [
@@ -3088,13 +2581,8 @@
         "ensureFulltextTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureFulltextTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureFulltextTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureIdentityTables() from another flow": {
       "trace": [
@@ -3132,13 +2620,8 @@
         "ensureIdentityTables": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureIdentityTables"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureIdentityTables"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureIndexMaterializationsTable() from another flow": {
       "trace": [
@@ -3153,13 +2636,8 @@
         "ensureIndexMaterializationsTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureIndexMaterializationsTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureIndexMaterializationsTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureKindRemovalsTable() from another flow": {
       "trace": [
@@ -3174,13 +2652,8 @@
         "ensureKindRemovalsTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureKindRemovalsTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureKindRemovalsTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureReconciliationMarkersTable() from another flow": {
       "trace": [
@@ -3195,13 +2668,8 @@
         "ensureReconciliationMarkersTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureReconciliationMarkersTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureReconciliationMarkersTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureRevisionChangesJournal() from another flow": {
       "trace": [
@@ -3217,13 +2685,8 @@
         "ensureRevisionChangesJournal": "untyped: Error: Failed query: CREATE TRIGGER IF NOT EXISTS \"tg_rc_typegraph_nodes_node_insert\" AFTER INSERT ON \"typegraph_nodes\" BEGIN INSERT INTO \"typegraph_revision_changes\" (entry_id, graph_id, revision, complete, entity, kind, id) SELECT lower(hex(randomblob(16))), NEW.graph_id, COALESCE((SELECT revision FROM \"typegraph_recorded_clock\" WHERE graph_id = NEW.graph_id), 0) + 1, 1, 'node', NEW.kind, NEW.id; END",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureRevisionChangesJournal"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureRevisionChangesJournal"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureRevisionOriginsTable() from another flow": {
       "trace": [
@@ -3238,13 +2701,8 @@
         "ensureRevisionOriginsTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureRevisionOriginsTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureRevisionOriginsTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureRuntimeContributions() from another flow": {
       "trace": [
@@ -3258,13 +2716,8 @@
         "ensureRuntimeContributions": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureRuntimeContributions"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureRuntimeContributions"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureVectorSlotContribution() from another flow": {
       "trace": [
@@ -3283,13 +2736,8 @@
         "ensureVectorSlotContribution": "untyped: Error: Failed query: insert into \"typegraph_contribution_materializations\" (\"graph_id\", \"logical_name\", \"owner\", \"table_name\", \"signature\", \"materialized_at\", \"last_attempted_at\", \"last_error\") values (?, ?, ?, ?, ?, null, ?, ?) on conflict (\"typegraph_contribution_materializations\".\"graph_id\", \"typegraph_contribution_materializations\".\"logical_name\", \"typegraph_contribution_materializations\".\"owner\", \"typegraph_contribution_materializations\".\"table_name\") do update set \"signature\" = excluded.\"signature\", \"materialized_at\" = COALESCE(excluded.\"materialized_at\", \"typegraph_contribution_materializations\".\"materialized_at\"), \"last_attempted_at\" = excluded.\"last_attempted_at\", \"last_error\" = excluded.\"last_error\"",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureVectorSlotContribution"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureVectorSlotContribution"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureVectorSlotContributions() from another flow": {
       "trace": [
@@ -3308,13 +2756,8 @@
         "ensureVectorSlotContributions": "untyped: Error: Failed query: insert into \"typegraph_contribution_materializations\" (\"graph_id\", \"logical_name\", \"owner\", \"table_name\", \"signature\", \"materialized_at\", \"last_attempted_at\", \"last_error\") values (?, ?, ?, ?, ?, null, ?, ?) on conflict (\"typegraph_contribution_materializations\".\"graph_id\", \"typegraph_contribution_materializations\".\"logical_name\", \"typegraph_contribution_materializations\".\"owner\", \"typegraph_contribution_materializations\".\"table_name\") do update set \"signature\" = excluded.\"signature\", \"materialized_at\" = COALESCE(excluded.\"materialized_at\", \"typegraph_contribution_materializations\".\"materialized_at\"), \"last_attempted_at\" = excluded.\"last_attempted_at\", \"last_error\" = excluded.\"last_error\"",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureVectorSlotContributions"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureVectorSlotContributions"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.executeDdl() from another flow": {
       "trace": [
@@ -3329,13 +2772,8 @@
         "executeDdl": "untyped: Error: Failed query: CREATE TABLE rot_gate_probe (x INTEGER)",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "executeDdl"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["executeDdl"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.executeSchemaDdl() from another flow": {
       "trace": [
@@ -3349,10 +2787,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteEdge() from another flow": {
       "trace": [
@@ -3368,10 +2803,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteEdgesBatch() from another flow": {
       "trace": [
@@ -3387,10 +2819,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteNode() from another flow": {
       "trace": [
@@ -3409,9 +2838,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1"
-      ]
+      "rows": ["t1"]
     },
     "read-only held: root backend.hardDeleteNodesBatch() from another flow": {
       "trace": [
@@ -3430,9 +2857,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1"
-      ]
+      "rows": ["t1"]
     },
     "read-only held: root backend.hardDeleteUniquesByConcreteKind() from another flow": {
       "trace": [
@@ -3448,10 +2873,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteUniquesByNodeIds() from another flow": {
       "trace": [
@@ -3467,10 +2889,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdge() from another flow": {
       "trace": [
@@ -3486,10 +2905,7 @@
         "insertEdge": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgeNoReturn() from another flow": {
       "trace": [
@@ -3505,10 +2921,7 @@
         "insertEdgeNoReturn": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgesBatch() from another flow": {
       "trace": [
@@ -3524,10 +2937,7 @@
         "insertEdgesBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgesBatchReturning() from another flow": {
       "trace": [
@@ -3543,10 +2953,7 @@
         "insertEdgesBatchReturning": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgesDurableBatchReturning() from another flow": {
       "trace": [
@@ -3560,13 +2967,8 @@
         "held transaction": "fulfilled",
         "insertEdgesDurableBatchReturning": "CompilerInvariantError"
       },
-      "settledInsideSpan": [
-        "insertEdgesDurableBatchReturning"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["insertEdgesDurableBatchReturning"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertNode() from another flow": {
       "trace": [
@@ -3582,11 +2984,7 @@
         "insertNode": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeIfAbsent() from another flow": {
       "trace": [
@@ -3602,11 +3000,7 @@
         "insertNodeIfAbsent": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeIfAbsentWithSchemaFence() from another flow": {
       "trace": [
@@ -3622,11 +3016,7 @@
         "insertNodeIfAbsentWithSchemaFence": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeNoReturn() from another flow": {
       "trace": [
@@ -3642,11 +3032,7 @@
         "insertNodeNoReturn": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeWithSchemaFence() from another flow": {
       "trace": [
@@ -3662,11 +3048,7 @@
         "insertNodeWithSchemaFence": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodesBatch() from another flow": {
       "trace": [
@@ -3682,11 +3064,7 @@
         "insertNodesBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodesBatchReturning() from another flow": {
       "trace": [
@@ -3702,11 +3080,7 @@
         "insertNodesBatchReturning": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertUnique() from another flow": {
       "trace": [
@@ -3722,10 +3096,7 @@
         "insertUnique": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertUniqueBatch() from another flow": {
       "trace": [
@@ -3741,10 +3112,7 @@
         "insertUniqueBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.instantiateGraphTemplate() from another flow": {
       "trace": [
@@ -3760,10 +3128,7 @@
         "instantiateGraphTemplate": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.lockNodes() from another flow": {
       "trace": [
@@ -3779,10 +3144,7 @@
         "lockNodes": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.lockSchemaVersionForWrite() from another flow": {
       "trace": [
@@ -3796,13 +3158,8 @@
         "held transaction": "fulfilled",
         "lockSchemaVersionForWrite": "ConfigurationError SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED"
       },
-      "settledInsideSpan": [
-        "lockSchemaVersionForWrite"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["lockSchemaVersionForWrite"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.purgeEdgeClaims() from another flow": {
       "trace": [
@@ -3818,10 +3175,7 @@
         "purgeEdgeClaims": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.rebuildContribution() from another flow": {
       "trace": [
@@ -3848,10 +3202,7 @@
         "rebuildContribution": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.recordContributionMaterialization() from another flow": {
       "trace": [
@@ -3866,13 +3217,8 @@
         "held transaction": "fulfilled",
         "recordContributionMaterialization": "untyped: Error: Failed query: insert into \"typegraph_contribution_materializations\" (\"graph_id\", \"logical_name\", \"owner\", \"table_name\", \"signature\", \"materialized_at\", \"last_attempted_at\", \"last_error\") values (?, ?, ?, ?, ?, ?, ?, null) on conflict (\"typegraph_contribution_materializations\".\"graph_id\", \"typegraph_contribution_materializations\".\"logical_name\", \"typegraph_contribution_materializations\".\"owner\", \"typegraph_contribution_materializations\".\"table_name\") do update set \"signature\" = excluded.\"signature\", \"materialized_at\" = excluded.\"materialized_at\", \"last_attempted_at\" = excluded.\"last_attempted_at\", \"last_error\" = excluded.\"last_error\""
       },
-      "settledInsideSpan": [
-        "recordContributionMaterialization"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["recordContributionMaterialization"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.recordIndexMaterialization() from another flow": {
       "trace": [
@@ -3887,13 +3233,8 @@
         "held transaction": "fulfilled",
         "recordIndexMaterialization": "untyped: Error: Failed query: insert into \"typegraph_index_materializations\" (\"index_name\", \"graph_id\", \"entity\", \"kind\", \"signature\", \"schema_version\", \"materialized_at\", \"last_attempted_at\", \"last_error\") values (?, ?, ?, ?, ?, ?, ?, ?, null) on conflict (\"typegraph_index_materializations\".\"index_name\") do update set \"graph_id\" = excluded.\"graph_id\", \"entity\" = excluded.\"entity\", \"kind\" = excluded.\"kind\", \"signature\" = excluded.\"signature\", \"schema_version\" = excluded.\"schema_version\", \"materialized_at\" = excluded.\"materialized_at\", \"last_attempted_at\" = excluded.\"last_attempted_at\", \"last_error\" = excluded.\"last_error\""
       },
-      "settledInsideSpan": [
-        "recordIndexMaterialization"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["recordIndexMaterialization"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.recordKindRemoval() from another flow": {
       "trace": [
@@ -3908,13 +3249,8 @@
         "held transaction": "fulfilled",
         "recordKindRemoval": "untyped: Error: Failed query: insert into \"typegraph_kind_removals\" (\"graph_id\", \"kind_name\", \"entity\", \"schema_version\", \"removed_at\", \"last_attempted_at\", \"last_error\") values (?, ?, ?, ?, null, ?, null) on conflict (\"typegraph_kind_removals\".\"graph_id\", \"typegraph_kind_removals\".\"kind_name\", \"typegraph_kind_removals\".\"entity\", \"typegraph_kind_removals\".\"schema_version\") do update set \"entity\" = excluded.\"entity\", \"schema_version\" = excluded.\"schema_version\", \"removed_at\" = COALESCE(excluded.\"removed_at\", \"typegraph_kind_removals\".\"removed_at\"), \"last_attempted_at\" = excluded.\"last_attempted_at\", \"last_error\" = excluded.\"last_error\""
       },
-      "settledInsideSpan": [
-        "recordKindRemoval"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["recordKindRemoval"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.refreshStatistics() from another flow": {
       "trace": [
@@ -3930,13 +3266,8 @@
         "held transaction": "fulfilled",
         "refreshStatistics": "untyped: Error: Failed query: ANALYZE \"typegraph_nodes\""
       },
-      "settledInsideSpan": [
-        "refreshStatistics"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["refreshStatistics"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.registerGraphTemplate() from another flow": {
       "trace": [
@@ -3951,13 +3282,8 @@
         "held transaction": "fulfilled",
         "registerGraphTemplate": "untyped: Error: Failed query: insert into \"typegraph_graph_templates\" (\"template_id\", \"schema_hash\", \"schema_doc\", \"created_at\") values (?, ?, ?, ?) on conflict do nothing"
       },
-      "settledInsideSpan": [
-        "registerGraphTemplate"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["registerGraphTemplate"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.repairContributions() from another flow": {
       "trace": [
@@ -3977,13 +3303,8 @@
         "held transaction": "fulfilled",
         "repairContributions": "fulfilled"
       },
-      "settledInsideSpan": [
-        "repairContributions"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["repairContributions"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.schemaWriteTransaction() from another flow": {
       "trace": [
@@ -4000,10 +3321,7 @@
         "schemaWriteTransaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.setActiveVersion() from another flow": {
       "trace": [
@@ -4024,10 +3342,7 @@
         "setActiveVersion": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.setActiveVersionWithPreflight() from another flow": {
       "trace": [
@@ -4048,10 +3363,7 @@
         "setActiveVersionWithPreflight": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.setReconciliationMarker() from another flow": {
       "trace": [
@@ -4066,13 +3378,8 @@
         "held transaction": "fulfilled",
         "setReconciliationMarker": "untyped: Error: Failed query: insert into \"typegraph_reconciliation_markers\" (\"graph_id\", \"reconciled_to_version\") values (?, ?) on conflict (\"typegraph_reconciliation_markers\".\"graph_id\") do update set \"reconciled_to_version\" = ?"
       },
-      "settledInsideSpan": [
-        "setReconciliationMarker"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["setReconciliationMarker"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.transaction() from another flow": {
       "trace": [
@@ -4089,10 +3396,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.transactionWithNative() from another flow": {
       "trace": [
@@ -4109,10 +3413,7 @@
         "transactionWithNative": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateEdge() from another flow": {
       "trace": [
@@ -4128,10 +3429,7 @@
         "updateEdge": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateNode() from another flow": {
       "trace": [
@@ -4147,10 +3445,7 @@
         "updateNode": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateNodeSet() from another flow": {
       "trace": [
@@ -4166,10 +3461,7 @@
         "updateNodeSet": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateResolvedNodesBatch() from another flow": {
       "trace": [
@@ -4185,10 +3477,7 @@
         "updateResolvedNodesBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertEmbedding() from another flow": {
       "trace": [
@@ -4203,13 +3492,8 @@
         "held transaction": "fulfilled",
         "upsertEmbedding": "StoreNotInitializedError"
       },
-      "settledInsideSpan": [
-        "upsertEmbedding"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["upsertEmbedding"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertEmbeddingBatch() from another flow": {
       "trace": [
@@ -4224,13 +3508,8 @@
         "held transaction": "fulfilled",
         "upsertEmbeddingBatch": "StoreNotInitializedError"
       },
-      "settledInsideSpan": [
-        "upsertEmbeddingBatch"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["upsertEmbeddingBatch"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertFulltext() from another flow": {
       "trace": [
@@ -4247,10 +3526,7 @@
         "upsertFulltext": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertFulltextBatch() from another flow": {
       "trace": [
@@ -4267,10 +3543,7 @@
         "upsertFulltextBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     }
   },
   "libsql-0.17": {
@@ -4287,12 +3560,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "a1",
-        "a2",
-        "t1",
-        "t2"
-      ]
+      "rows": ["a1", "a2", "t1", "t2"]
     },
     "read-only: reads through the context, commit": {
       "trace": [
@@ -4305,25 +3573,16 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only: a write through the context is refused": {
-      "trace": [
-        "BEGIN",
-        "COMMIT"
-      ],
+      "trace": ["BEGIN", "COMMIT"],
       "outcomes": {
         "transaction": "fulfilled",
         "write": "UnsupportedBackendCapabilityError"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only: a write through a Store adopted over tx.sql": {
       "trace": [
@@ -4337,11 +3596,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2",
-        "w"
-      ]
+      "rows": ["t1", "t2", "w"]
     },
     "read-write: a write through a Store adopted over tx.sql": {
       "trace": [
@@ -4355,11 +3610,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2",
-        "w"
-      ]
+      "rows": ["t1", "t2", "w"]
     },
     "read-write: a write through a backend adopted over tx.sql": {
       "trace": [
@@ -4372,26 +3623,16 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2",
-        "w"
-      ]
+      "rows": ["t1", "t2", "w"]
     },
     "read-only: the root store writes from inside the callback": {
-      "trace": [
-        "BEGIN",
-        "COMMIT"
-      ],
+      "trace": ["BEGIN", "COMMIT"],
       "outcomes": {
         "root write": "ConfigurationError SERIALIZED_QUEUE_REENTRANT_SUBMISSION",
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only: root refreshStatistics() from inside the callback": {
       "trace": [
@@ -4415,10 +3656,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: the root store creates from another flow": {
       "trace": [
@@ -4436,11 +3674,7 @@
         "root create": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "q",
-        "t1",
-        "t2"
-      ]
+      "rows": ["q", "t1", "t2"]
     },
     "read-only held: a root read-write transaction from another flow": {
       "trace": [
@@ -4458,11 +3692,7 @@
         "root transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "q",
-        "t1",
-        "t2"
-      ]
+      "rows": ["q", "t1", "t2"]
     },
     "read-only held: a second read-only transaction from another flow": {
       "trace": [
@@ -4479,10 +3709,7 @@
         "second read-only transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: the root store reads from another flow": {
       "trace": [
@@ -4497,10 +3724,7 @@
         "root read": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: a second Store on another graph creates from another flow": {
       "trace": [
@@ -4518,10 +3742,7 @@
         "other store create": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root store.refreshStatistics() from another flow": {
       "trace": [
@@ -4546,13 +3767,8 @@
         "held transaction": "fulfilled",
         "refreshStatistics": "fulfilled"
       },
-      "settledInsideSpan": [
-        "refreshStatistics"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["refreshStatistics"],
+      "rows": ["t1", "t2"]
     },
     "read-write held: the root store creates from another flow": {
       "trace": [
@@ -4570,11 +3786,7 @@
         "root create": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "q",
-        "t1",
-        "t2"
-      ]
+      "rows": ["q", "t1", "t2"]
     },
     "read-write held: root store.refreshStatistics() from another flow": {
       "trace": [
@@ -4599,13 +3811,8 @@
         "held transaction": "fulfilled",
         "refreshStatistics": "fulfilled"
       },
-      "settledInsideSpan": [
-        "refreshStatistics"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["refreshStatistics"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.adoptBaseSchema() from another flow": {
       "trace": [
@@ -4620,13 +3827,8 @@
         "adoptBaseSchema": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "adoptBaseSchema"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["adoptBaseSchema"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.bootstrapTables() from another flow": {
       "trace": [
@@ -4709,13 +3911,8 @@
         "bootstrapTables": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "bootstrapTables"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["bootstrapTables"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimEdgeCardinality() from another flow": {
       "trace": [
@@ -4731,10 +3928,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimEdgeCardinalityBatch() from another flow": {
       "trace": [
@@ -4750,10 +3944,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimEdgeCardinalityGuarded() from another flow": {
       "trace": [
@@ -4769,10 +3960,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.clearGraph() from another flow": {
       "trace": [
@@ -4892,11 +4080,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-command",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-command", "t1", "t2"]
     },
     "read-only held: root backend.commitSchemaVersion() from another flow": {
       "trace": [
@@ -4918,10 +4102,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.commitSchemaVersionIfKindsEmpty() from another flow": {
       "trace": [
@@ -4942,10 +4123,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.commitSchemaVersionWithPreflight() from another flow": {
       "trace": [
@@ -4967,10 +4145,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.compareAndSetNode() from another flow": {
       "trace": [
@@ -4984,13 +4159,8 @@
         "compareAndSetNode": "ConfigurationError",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "compareAndSetNode"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["compareAndSetNode"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.createVectorIndex() from another flow": {
       "trace": [
@@ -5012,10 +4182,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEdge() from another flow": {
       "trace": [
@@ -5031,10 +4198,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEdgesBatch() from another flow": {
       "trace": [
@@ -5050,10 +4214,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEmbedding() from another flow": {
       "trace": [
@@ -5068,13 +4229,8 @@
         "deleteEmbedding": "StoreNotInitializedError",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "deleteEmbedding"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["deleteEmbedding"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEmbeddingBatch() from another flow": {
       "trace": [
@@ -5089,13 +4245,8 @@
         "deleteEmbeddingBatch": "StoreNotInitializedError",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "deleteEmbeddingBatch"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["deleteEmbeddingBatch"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteFulltext() from another flow": {
       "trace": [
@@ -5111,10 +4262,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteFulltextBatch() from another flow": {
       "trace": [
@@ -5130,10 +4278,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteNode() from another flow": {
       "trace": [
@@ -5149,9 +4294,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1"
-      ]
+      "rows": ["t1"]
     },
     "read-only held: root backend.deleteSchemaVectorSlotContribution() from another flow": {
       "trace": [
@@ -5165,10 +4308,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteUnique() from another flow": {
       "trace": [
@@ -5184,10 +4324,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteVectorSlotContribution() from another flow": {
       "trace": [
@@ -5202,13 +4339,8 @@
         "deleteVectorSlotContribution": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "deleteVectorSlotContribution"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["deleteVectorSlotContribution"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.dropVectorIndex() from another flow": {
       "trace": [
@@ -5224,10 +4356,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureContributionMaterializationsTable() from another flow": {
       "trace": [
@@ -5242,13 +4371,8 @@
         "ensureContributionMaterializationsTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureContributionMaterializationsTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureContributionMaterializationsTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureEdgeMatchIdentityStorage() from another flow": {
       "trace": [
@@ -5264,13 +4388,8 @@
         "ensureEdgeMatchIdentityStorage": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureEdgeMatchIdentityStorage"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureEdgeMatchIdentityStorage"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureFulltextTable() from another flow": {
       "trace": [
@@ -5284,13 +4403,8 @@
         "ensureFulltextTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureFulltextTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureFulltextTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureIdentityTables() from another flow": {
       "trace": [
@@ -5328,13 +4442,8 @@
         "ensureIdentityTables": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureIdentityTables"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureIdentityTables"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureIndexMaterializationsTable() from another flow": {
       "trace": [
@@ -5349,13 +4458,8 @@
         "ensureIndexMaterializationsTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureIndexMaterializationsTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureIndexMaterializationsTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureKindRemovalsTable() from another flow": {
       "trace": [
@@ -5370,13 +4474,8 @@
         "ensureKindRemovalsTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureKindRemovalsTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureKindRemovalsTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureReconciliationMarkersTable() from another flow": {
       "trace": [
@@ -5391,13 +4490,8 @@
         "ensureReconciliationMarkersTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureReconciliationMarkersTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureReconciliationMarkersTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureRevisionChangesJournal() from another flow": {
       "trace": [
@@ -5421,13 +4515,8 @@
         "ensureRevisionChangesJournal": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureRevisionChangesJournal"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureRevisionChangesJournal"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureRevisionOriginsTable() from another flow": {
       "trace": [
@@ -5442,13 +4531,8 @@
         "ensureRevisionOriginsTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureRevisionOriginsTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureRevisionOriginsTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureRuntimeContributions() from another flow": {
       "trace": [
@@ -5462,13 +4546,8 @@
         "ensureRuntimeContributions": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureRuntimeContributions"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureRuntimeContributions"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureVectorSlotContribution() from another flow": {
       "trace": [
@@ -5487,13 +4566,8 @@
         "ensureVectorSlotContribution": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureVectorSlotContribution"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureVectorSlotContribution"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureVectorSlotContributions() from another flow": {
       "trace": [
@@ -5512,13 +4586,8 @@
         "ensureVectorSlotContributions": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureVectorSlotContributions"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureVectorSlotContributions"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.executeDdl() from another flow": {
       "trace": [
@@ -5533,13 +4602,8 @@
         "executeDdl": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "executeDdl"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["executeDdl"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.executeSchemaDdl() from another flow": {
       "trace": [
@@ -5553,10 +4617,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteEdge() from another flow": {
       "trace": [
@@ -5572,10 +4633,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteEdgesBatch() from another flow": {
       "trace": [
@@ -5591,10 +4649,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteNode() from another flow": {
       "trace": [
@@ -5613,9 +4668,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1"
-      ]
+      "rows": ["t1"]
     },
     "read-only held: root backend.hardDeleteNodesBatch() from another flow": {
       "trace": [
@@ -5634,9 +4687,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1"
-      ]
+      "rows": ["t1"]
     },
     "read-only held: root backend.hardDeleteUniquesByConcreteKind() from another flow": {
       "trace": [
@@ -5652,10 +4703,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteUniquesByNodeIds() from another flow": {
       "trace": [
@@ -5671,10 +4719,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdge() from another flow": {
       "trace": [
@@ -5690,10 +4735,7 @@
         "insertEdge": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgeNoReturn() from another flow": {
       "trace": [
@@ -5709,10 +4751,7 @@
         "insertEdgeNoReturn": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgesBatch() from another flow": {
       "trace": [
@@ -5728,10 +4767,7 @@
         "insertEdgesBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgesBatchReturning() from another flow": {
       "trace": [
@@ -5747,10 +4783,7 @@
         "insertEdgesBatchReturning": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgesDurableBatchReturning() from another flow": {
       "trace": [
@@ -5764,13 +4797,8 @@
         "held transaction": "fulfilled",
         "insertEdgesDurableBatchReturning": "CompilerInvariantError"
       },
-      "settledInsideSpan": [
-        "insertEdgesDurableBatchReturning"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["insertEdgesDurableBatchReturning"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertNode() from another flow": {
       "trace": [
@@ -5786,11 +4814,7 @@
         "insertNode": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeIfAbsent() from another flow": {
       "trace": [
@@ -5806,11 +4830,7 @@
         "insertNodeIfAbsent": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeIfAbsentWithSchemaFence() from another flow": {
       "trace": [
@@ -5826,11 +4846,7 @@
         "insertNodeIfAbsentWithSchemaFence": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeNoReturn() from another flow": {
       "trace": [
@@ -5846,11 +4862,7 @@
         "insertNodeNoReturn": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeWithSchemaFence() from another flow": {
       "trace": [
@@ -5866,11 +4878,7 @@
         "insertNodeWithSchemaFence": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodesBatch() from another flow": {
       "trace": [
@@ -5886,11 +4894,7 @@
         "insertNodesBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodesBatchReturning() from another flow": {
       "trace": [
@@ -5906,11 +4910,7 @@
         "insertNodesBatchReturning": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertUnique() from another flow": {
       "trace": [
@@ -5926,10 +4926,7 @@
         "insertUnique": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertUniqueBatch() from another flow": {
       "trace": [
@@ -5945,10 +4942,7 @@
         "insertUniqueBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.instantiateGraphTemplate() from another flow": {
       "trace": [
@@ -5964,10 +4958,7 @@
         "instantiateGraphTemplate": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.lockNodes() from another flow": {
       "trace": [
@@ -5983,10 +4974,7 @@
         "lockNodes": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.lockSchemaVersionForWrite() from another flow": {
       "trace": [
@@ -6000,13 +4988,8 @@
         "held transaction": "fulfilled",
         "lockSchemaVersionForWrite": "ConfigurationError SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED"
       },
-      "settledInsideSpan": [
-        "lockSchemaVersionForWrite"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["lockSchemaVersionForWrite"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.purgeEdgeClaims() from another flow": {
       "trace": [
@@ -6022,10 +5005,7 @@
         "purgeEdgeClaims": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.rebuildContribution() from another flow": {
       "trace": [
@@ -6052,10 +5032,7 @@
         "rebuildContribution": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.recordContributionMaterialization() from another flow": {
       "trace": [
@@ -6070,13 +5047,8 @@
         "held transaction": "fulfilled",
         "recordContributionMaterialization": "fulfilled"
       },
-      "settledInsideSpan": [
-        "recordContributionMaterialization"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["recordContributionMaterialization"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.recordIndexMaterialization() from another flow": {
       "trace": [
@@ -6091,13 +5063,8 @@
         "held transaction": "fulfilled",
         "recordIndexMaterialization": "fulfilled"
       },
-      "settledInsideSpan": [
-        "recordIndexMaterialization"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["recordIndexMaterialization"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.recordKindRemoval() from another flow": {
       "trace": [
@@ -6112,13 +5079,8 @@
         "held transaction": "fulfilled",
         "recordKindRemoval": "fulfilled"
       },
-      "settledInsideSpan": [
-        "recordKindRemoval"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["recordKindRemoval"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.refreshStatistics() from another flow": {
       "trace": [
@@ -6144,13 +5106,8 @@
         "held transaction": "fulfilled",
         "refreshStatistics": "fulfilled"
       },
-      "settledInsideSpan": [
-        "refreshStatistics"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["refreshStatistics"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.registerGraphTemplate() from another flow": {
       "trace": [
@@ -6166,13 +5123,8 @@
         "held transaction": "fulfilled",
         "registerGraphTemplate": "fulfilled"
       },
-      "settledInsideSpan": [
-        "registerGraphTemplate"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["registerGraphTemplate"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.repairContributions() from another flow": {
       "trace": [
@@ -6192,13 +5144,8 @@
         "held transaction": "fulfilled",
         "repairContributions": "fulfilled"
       },
-      "settledInsideSpan": [
-        "repairContributions"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["repairContributions"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.schemaWriteTransaction() from another flow": {
       "trace": [
@@ -6215,10 +5162,7 @@
         "schemaWriteTransaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.setActiveVersion() from another flow": {
       "trace": [
@@ -6239,10 +5183,7 @@
         "setActiveVersion": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.setActiveVersionWithPreflight() from another flow": {
       "trace": [
@@ -6263,10 +5204,7 @@
         "setActiveVersionWithPreflight": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.setReconciliationMarker() from another flow": {
       "trace": [
@@ -6281,13 +5219,8 @@
         "held transaction": "fulfilled",
         "setReconciliationMarker": "fulfilled"
       },
-      "settledInsideSpan": [
-        "setReconciliationMarker"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["setReconciliationMarker"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.transaction() from another flow": {
       "trace": [
@@ -6304,10 +5237,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.transactionWithNative() from another flow": {
       "trace": [
@@ -6324,10 +5254,7 @@
         "transactionWithNative": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateEdge() from another flow": {
       "trace": [
@@ -6343,10 +5270,7 @@
         "updateEdge": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateNode() from another flow": {
       "trace": [
@@ -6362,10 +5286,7 @@
         "updateNode": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateNodeSet() from another flow": {
       "trace": [
@@ -6381,10 +5302,7 @@
         "updateNodeSet": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateResolvedNodesBatch() from another flow": {
       "trace": [
@@ -6400,10 +5318,7 @@
         "updateResolvedNodesBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertEmbedding() from another flow": {
       "trace": [
@@ -6418,13 +5333,8 @@
         "held transaction": "fulfilled",
         "upsertEmbedding": "StoreNotInitializedError"
       },
-      "settledInsideSpan": [
-        "upsertEmbedding"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["upsertEmbedding"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertEmbeddingBatch() from another flow": {
       "trace": [
@@ -6439,13 +5349,8 @@
         "held transaction": "fulfilled",
         "upsertEmbeddingBatch": "StoreNotInitializedError"
       },
-      "settledInsideSpan": [
-        "upsertEmbeddingBatch"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["upsertEmbeddingBatch"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertFulltext() from another flow": {
       "trace": [
@@ -6462,10 +5367,7 @@
         "upsertFulltext": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertFulltextBatch() from another flow": {
       "trace": [
@@ -6482,10 +5384,7 @@
         "upsertFulltextBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     }
   },
   "pglite": {
@@ -6504,12 +5403,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "a1",
-        "a2",
-        "t1",
-        "t2"
-      ]
+      "rows": ["a1", "a2", "t1", "t2"]
     },
     "read-only: reads through the context, commit": {
       "trace": [
@@ -6523,26 +5417,16 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only: a write through the context is refused": {
-      "trace": [
-        "BEGIN",
-        "set transaction read only",
-        "COMMIT"
-      ],
+      "trace": ["BEGIN", "set transaction read only", "COMMIT"],
       "outcomes": {
         "transaction": "fulfilled",
         "write": "UnsupportedBackendCapabilityError"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only: a write through a Store adopted over tx.sql": {
       "trace": [
@@ -6558,10 +5442,7 @@
         "transaction": "TransactionOutcomeUnknownError"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-write: a write through a Store adopted over tx.sql": {
       "trace": [
@@ -6578,11 +5459,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2",
-        "w"
-      ]
+      "rows": ["t1", "t2", "w"]
     },
     "read-write: a write through a backend adopted over tx.sql": {
       "trace": [
@@ -6597,11 +5474,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2",
-        "w"
-      ]
+      "rows": ["t1", "t2", "w"]
     },
     "read-only held: the root store creates from another flow": {
       "trace": [
@@ -6623,11 +5496,7 @@
         "root create": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "q",
-        "t1",
-        "t2"
-      ]
+      "rows": ["q", "t1", "t2"]
     },
     "read-only held: a root read-write transaction from another flow": {
       "trace": [
@@ -6649,11 +5518,7 @@
         "root transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "q",
-        "t1",
-        "t2"
-      ]
+      "rows": ["q", "t1", "t2"]
     },
     "read-only held: a second read-only transaction from another flow": {
       "trace": [
@@ -6674,10 +5539,7 @@
         "second read-only transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: the root store reads from another flow": {
       "trace": [
@@ -6695,10 +5557,7 @@
         "root read": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: a second Store on another graph creates from another flow": {
       "trace": [
@@ -6720,10 +5579,7 @@
         "other store create": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root store.refreshStatistics() from another flow": {
       "trace": [
@@ -6758,10 +5614,7 @@
         "refreshStatistics": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-write held: the root store creates from another flow": {
       "trace": [
@@ -6783,11 +5636,7 @@
         "root create": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "q",
-        "t1",
-        "t2"
-      ]
+      "rows": ["q", "t1", "t2"]
     },
     "read-write held: root store.refreshStatistics() from another flow": {
       "trace": [
@@ -6822,10 +5671,7 @@
         "refreshStatistics": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.adoptBaseSchema() from another flow": {
       "trace": [
@@ -6844,10 +5690,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.adoptSchemaWriteTransaction() from another flow": {
       "trace": [
@@ -6874,13 +5717,8 @@
         "adoptSchemaWriteTransaction": "untyped: Error: Failed query:",
         "held transaction": "TransactionOutcomeUnknownError"
       },
-      "settledInsideSpan": [
-        "adoptSchemaWriteTransaction"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["adoptSchemaWriteTransaction"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.bootstrapTables() from another flow": {
       "trace": [
@@ -6974,10 +5812,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimEdgeCardinality() from another flow": {
       "trace": [
@@ -6996,10 +5831,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimEdgeCardinalityBatch() from another flow": {
       "trace": [
@@ -7018,10 +5850,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimEdgeCardinalityGuarded() from another flow": {
       "trace": [
@@ -7040,10 +5869,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.claimIndexMaterialization() from another flow": {
       "trace": [
@@ -7062,10 +5888,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.clearGraph() from another flow": {
       "trace": [
@@ -7194,11 +6017,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-command",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-command", "t1", "t2"]
     },
     "read-only held: root backend.commitSchemaVersion() from another flow": {
       "trace": [
@@ -7226,10 +6045,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.commitSchemaVersionIfKindsEmpty() from another flow": {
       "trace": [
@@ -7256,10 +6072,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.commitSchemaVersionWithPreflight() from another flow": {
       "trace": [
@@ -7287,10 +6100,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.compareAndSetNode() from another flow": {
       "trace": [
@@ -7307,13 +6117,8 @@
         "compareAndSetNode": "ConfigurationError",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "compareAndSetNode"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["compareAndSetNode"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.createVectorIndex() from another flow": {
       "trace": [
@@ -7336,10 +6141,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEdge() from another flow": {
       "trace": [
@@ -7358,10 +6160,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEdgesBatch() from another flow": {
       "trace": [
@@ -7380,10 +6179,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEmbedding() from another flow": {
       "trace": [
@@ -7402,10 +6198,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteEmbeddingBatch() from another flow": {
       "trace": [
@@ -7424,10 +6217,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteFulltext() from another flow": {
       "trace": [
@@ -7446,10 +6236,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteFulltextBatch() from another flow": {
       "trace": [
@@ -7468,10 +6255,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteNode() from another flow": {
       "trace": [
@@ -7490,9 +6274,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1"
-      ]
+      "rows": ["t1"]
     },
     "read-only held: root backend.deleteSchemaVectorSlotContribution() from another flow": {
       "trace": [
@@ -7509,10 +6291,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteUnique() from another flow": {
       "trace": [
@@ -7531,10 +6310,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.deleteVectorSlotContribution() from another flow": {
       "trace": [
@@ -7553,10 +6329,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.dropVectorIndex() from another flow": {
       "trace": [
@@ -7575,10 +6348,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureContributionMaterializationsTable() from another flow": {
       "trace": [
@@ -7597,10 +6367,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureEdgeMatchIdentityStorage() from another flow": {
       "trace": [
@@ -7619,10 +6386,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureExtension() from another flow": {
       "trace": [
@@ -7644,10 +6408,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureFulltextTable() from another flow": {
       "trace": [
@@ -7664,13 +6425,8 @@
         "ensureFulltextTable": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureFulltextTable"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureFulltextTable"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureIdentityTables() from another flow": {
       "trace": [
@@ -7712,10 +6468,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureIndexMaterializationsTable() from another flow": {
       "trace": [
@@ -7736,10 +6489,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureKindRemovalsTable() from another flow": {
       "trace": [
@@ -7758,10 +6508,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureReconciliationMarkersTable() from another flow": {
       "trace": [
@@ -7780,10 +6527,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureRevisionChangesJournal() from another flow": {
       "trace": [
@@ -7806,10 +6550,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureRevisionOriginsTable() from another flow": {
       "trace": [
@@ -7828,10 +6569,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureRuntimeContributions() from another flow": {
       "trace": [
@@ -7848,13 +6586,8 @@
         "ensureRuntimeContributions": "fulfilled",
         "held transaction": "fulfilled"
       },
-      "settledInsideSpan": [
-        "ensureRuntimeContributions"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["ensureRuntimeContributions"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureTrigramExtension() from another flow": {
       "trace": [
@@ -7876,10 +6609,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureVectorSlotContribution() from another flow": {
       "trace": [
@@ -7902,10 +6632,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.ensureVectorSlotContributions() from another flow": {
       "trace": [
@@ -7928,10 +6655,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.executeDdl() from another flow": {
       "trace": [
@@ -7950,10 +6674,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.executeSchemaDdl() from another flow": {
       "trace": [
@@ -7970,10 +6691,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteEdge() from another flow": {
       "trace": [
@@ -7992,10 +6710,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteEdgesBatch() from another flow": {
       "trace": [
@@ -8014,10 +6729,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteNode() from another flow": {
       "trace": [
@@ -8039,9 +6751,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1"
-      ]
+      "rows": ["t1"]
     },
     "read-only held: root backend.hardDeleteNodesBatch() from another flow": {
       "trace": [
@@ -8063,9 +6773,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1"
-      ]
+      "rows": ["t1"]
     },
     "read-only held: root backend.hardDeleteUniquesByConcreteKind() from another flow": {
       "trace": [
@@ -8084,10 +6792,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.hardDeleteUniquesByNodeIds() from another flow": {
       "trace": [
@@ -8106,10 +6811,7 @@
         "held transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdge() from another flow": {
       "trace": [
@@ -8128,10 +6830,7 @@
         "insertEdge": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgeNoReturn() from another flow": {
       "trace": [
@@ -8150,10 +6849,7 @@
         "insertEdgeNoReturn": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgesBatch() from another flow": {
       "trace": [
@@ -8172,10 +6868,7 @@
         "insertEdgesBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgesBatchReturning() from another flow": {
       "trace": [
@@ -8194,10 +6887,7 @@
         "insertEdgesBatchReturning": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertEdgesDurableBatchReturning() from another flow": {
       "trace": [
@@ -8214,13 +6904,8 @@
         "held transaction": "fulfilled",
         "insertEdgesDurableBatchReturning": "CompilerInvariantError"
       },
-      "settledInsideSpan": [
-        "insertEdgesDurableBatchReturning"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["insertEdgesDurableBatchReturning"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertNode() from another flow": {
       "trace": [
@@ -8239,11 +6924,7 @@
         "insertNode": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeIfAbsent() from another flow": {
       "trace": [
@@ -8262,11 +6943,7 @@
         "insertNodeIfAbsent": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeIfAbsentWithSchemaFence() from another flow": {
       "trace": [
@@ -8285,11 +6962,7 @@
         "insertNodeIfAbsentWithSchemaFence": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeNoReturn() from another flow": {
       "trace": [
@@ -8308,11 +6981,7 @@
         "insertNodeNoReturn": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodeWithSchemaFence() from another flow": {
       "trace": [
@@ -8331,11 +7000,7 @@
         "insertNodeWithSchemaFence": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodesBatch() from another flow": {
       "trace": [
@@ -8354,11 +7019,7 @@
         "insertNodesBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertNodesBatchReturning() from another flow": {
       "trace": [
@@ -8377,11 +7038,7 @@
         "insertNodesBatchReturning": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t-new",
-        "t1",
-        "t2"
-      ]
+      "rows": ["t-new", "t1", "t2"]
     },
     "read-only held: root backend.insertUnique() from another flow": {
       "trace": [
@@ -8400,10 +7057,7 @@
         "insertUnique": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.insertUniqueBatch() from another flow": {
       "trace": [
@@ -8422,10 +7076,7 @@
         "insertUniqueBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.instantiateGraphTemplate() from another flow": {
       "trace": [
@@ -8444,10 +7095,7 @@
         "instantiateGraphTemplate": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.lockNodes() from another flow": {
       "trace": [
@@ -8466,10 +7114,7 @@
         "lockNodes": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.lockSchemaVersionForWrite() from another flow": {
       "trace": [
@@ -8486,13 +7131,8 @@
         "held transaction": "fulfilled",
         "lockSchemaVersionForWrite": "ConfigurationError SCHEMA_WRITE_FENCE_TRANSACTION_REQUIRED"
       },
-      "settledInsideSpan": [
-        "lockSchemaVersionForWrite"
-      ],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "settledInsideSpan": ["lockSchemaVersionForWrite"],
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.purgeEdgeClaims() from another flow": {
       "trace": [
@@ -8511,10 +7151,7 @@
         "purgeEdgeClaims": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.rebuildContribution() from another flow": {
       "trace": [
@@ -8551,10 +7188,7 @@
         "rebuildContribution": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.recordContributionMaterialization() from another flow": {
       "trace": [
@@ -8573,10 +7207,7 @@
         "recordContributionMaterialization": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.recordIndexMaterialization() from another flow": {
       "trace": [
@@ -8595,10 +7226,7 @@
         "recordIndexMaterialization": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.recordKindRemoval() from another flow": {
       "trace": [
@@ -8617,10 +7245,7 @@
         "recordKindRemoval": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.refreshStatistics() from another flow": {
       "trace": [
@@ -8656,10 +7281,7 @@
         "refreshStatistics": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.registerGraphTemplate() from another flow": {
       "trace": [
@@ -8679,10 +7301,7 @@
         "registerGraphTemplate": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.releaseIndexMaterializationClaim() from another flow": {
       "trace": [
@@ -8701,10 +7320,7 @@
         "releaseIndexMaterializationClaim": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.repairContributions() from another flow": {
       "trace": [
@@ -8728,10 +7344,7 @@
         "repairContributions": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.schemaWriteTransaction() from another flow": {
       "trace": [
@@ -8754,10 +7367,7 @@
         "schemaWriteTransaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.setActiveVersion() from another flow": {
       "trace": [
@@ -8784,10 +7394,7 @@
         "setActiveVersion": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.setActiveVersionWithPreflight() from another flow": {
       "trace": [
@@ -8814,10 +7421,7 @@
         "setActiveVersionWithPreflight": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.setReconciliationMarker() from another flow": {
       "trace": [
@@ -8836,10 +7440,7 @@
         "setReconciliationMarker": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.transaction() from another flow": {
       "trace": [
@@ -8859,10 +7460,7 @@
         "transaction": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.transactionWithNative() from another flow": {
       "trace": [
@@ -8884,10 +7482,7 @@
         "transactionWithNative": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.trustedImport() from another flow": {
       "trace": [
@@ -8909,10 +7504,7 @@
         "trustedImport": "TrustedImportError"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateEdge() from another flow": {
       "trace": [
@@ -8931,10 +7523,7 @@
         "updateEdge": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateNode() from another flow": {
       "trace": [
@@ -8953,10 +7542,7 @@
         "updateNode": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateNodeSet() from another flow": {
       "trace": [
@@ -8975,10 +7561,7 @@
         "updateNodeSet": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.updateResolvedNodesBatch() from another flow": {
       "trace": [
@@ -8997,10 +7580,7 @@
         "updateResolvedNodesBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertEmbedding() from another flow": {
       "trace": [
@@ -9019,10 +7599,7 @@
         "upsertEmbedding": "StoreNotInitializedError"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertEmbeddingBatch() from another flow": {
       "trace": [
@@ -9041,10 +7618,7 @@
         "upsertEmbeddingBatch": "StoreNotInitializedError"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertFulltext() from another flow": {
       "trace": [
@@ -9063,10 +7637,7 @@
         "upsertFulltext": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     },
     "read-only held: root backend.upsertFulltextBatch() from another flow": {
       "trace": [
@@ -9085,10 +7656,7 @@
         "upsertFulltextBatch": "fulfilled"
       },
       "settledInsideSpan": [],
-      "rows": [
-        "t1",
-        "t2"
-      ]
+      "rows": ["t1", "t2"]
     }
   }
 }

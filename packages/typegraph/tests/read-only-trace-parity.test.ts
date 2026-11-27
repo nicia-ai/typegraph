@@ -236,7 +236,9 @@ function describeOutcome(error: unknown): string {
  * Whether a held transaction's callback is running: set by {@link whileHeld}
  * from the callback beginning to its release.
  */
-interface Span { inside: boolean }
+interface Span {
+  inside: boolean;
+}
 
 /**
  * Collects each named call's outcome as it settles, and the calls that
