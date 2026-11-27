@@ -2378,10 +2378,14 @@ export class QueryBuilder<
   fuseWith(
     options: HybridFusionOptions,
   ): QueryBuilder<G, Aliases, EdgeAliases, RecursiveAliases, CoordinateState> {
-    validateHybridFusionOptions(options);
+    // A copy, validated and then kept: the query compiles and fingerprints
+    // its cursor from the options supplied here, never from a caller object
+    // mutated later.
+    const fusion = structuredClone(options);
+    validateHybridFusionOptions(fusion);
     return new QueryBuilder(this.#config, {
       ...this.#state,
-      fusion: options,
+      fusion,
     });
   }
 

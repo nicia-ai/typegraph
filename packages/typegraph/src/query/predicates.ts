@@ -1103,7 +1103,9 @@ function vectorSimilarity(
   const expr: VectorSimilarityPredicate = {
     __type: "vector_similarity",
     field,
-    queryEmbedding,
+    // A copy: the query compiles and fingerprints its cursor from the
+    // values supplied here, never from a caller array mutated later.
+    queryEmbedding: Object.freeze([...queryEmbedding]),
     // Leave metric unset when the caller didn't specify one, so the compiler
     // resolves the field's declared metric per kind. Defaulting to "cosine"
     // here would mis-rank l2/inner_product fields and bypass their ANN index.
