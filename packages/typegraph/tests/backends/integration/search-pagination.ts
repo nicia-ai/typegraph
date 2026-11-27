@@ -1492,6 +1492,33 @@ export function registerSearchPaginationIntegrationTests(
                 SEARCH_CURSOR_MISMATCH,
               ]),
         });
+        // A double that a NUMERIC cannot hold as written: a NUMERIC keeps
+        // every written fraction digit (less the exponent), trailing zeros
+        // and a zero's included, and holds at most 16383 of them. Refused
+        // where the key is a NUMERIC; a valid position (0 or 1) where it is
+        // a double.
+        const outsideNumericScale = [
+          "0e-20000",
+          `0.${"0".repeat(20_000)}`,
+          `1.${"0".repeat(16_384)}`,
+          `1.5${"0".repeat(16_383)}e-1`,
+        ];
+        const scaleOutcomes = [];
+        for (const forged of outsideNumericScale) {
+          scaleOutcomes.push(
+            await readOrRefusal(() =>
+              query().paginate({ first: 2, after: forge(forged) }),
+            ).then((outcome) =>
+              outcome === SEARCH_CURSOR_MISMATCH ? outcome : "page",
+            ),
+          );
+        }
+        expect({ kind, scaleOutcomes }).toEqual({
+          kind,
+          scaleOutcomes: outsideNumericScale.map(() =>
+            keyIsNumeric ? SEARCH_CURSOR_MISMATCH : "page",
+          ),
+        });
         // Representable as a double but not as PostgreSQL's `real` (the type
         // `ts_rank_cd` returns): a valid position past every row.
         const large = encodeCursorJson({
