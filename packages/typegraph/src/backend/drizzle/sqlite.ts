@@ -1004,9 +1004,12 @@ function createSqliteOperationBackend(
   // `applySearchOverrides` and `runIndexBuild`.
   const vectorMembers =
     vectorStrategy === undefined ?
-      createVectorMembers({ vectorStrategy: undefined, transactionScoped })
+      createVectorMembers({
+        vectorStrategy: undefined,
+        refusesContributionAdministration: transactionScoped,
+      })
     : createVectorMembers({
-        transactionScoped,
+        refusesContributionAdministration: transactionScoped,
         vectorStrategy,
         execution: { execRun },
         batchConfig,

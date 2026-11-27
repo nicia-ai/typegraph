@@ -1845,6 +1845,7 @@ function buildPostgresEngineProfileInternal(
       schemaVersionsTable: tables.schemaVersions,
       fenceTarget: ctx.fenceTarget,
       transactionScoped,
+      transactionBind: false,
       // The SAME object exposed as `backend.catalog` (via
       // `provisioning.catalog`), not a second one built from this call's own
       // `db`/`executionAdapter` — see `CreatePostgresOperationBackendOptions.catalog`.
@@ -3617,6 +3618,14 @@ type CreatePostgresOperationBackendOptions = Readonly<{
   /** Whether this operation backend is bound to an explicit transaction. */
   transactionScoped: boolean;
   /**
+   * Whether this operation backend is a bind of a transaction TypeGraph
+   * opened or adopted (`createTransactionBackend`), whose marker gate
+   * refuses contribution administration. `false` on a backend a caller
+   * built over a transaction handle, which is `transactionScoped` but
+   * provisions through its own materializer in the caller's transaction.
+   */
+  transactionBind: boolean;
+  /**
    * The root backend's own `catalog` bag, threaded through so this call
    * exposes the SAME object rather than building a second one from `db` /
    * `executionAdapter` — see `EngineProvisioning.catalog`. Omitted on the
@@ -3715,6 +3724,7 @@ function createPostgresOperationBackend(
     schemaVersionsTable,
     fenceTarget,
     transactionScoped,
+    transactionBind,
     catalog,
     allocationSchema,
     lineage,
@@ -4119,9 +4129,12 @@ function createPostgresOperationBackend(
   // `runIndexBuild`.
   const vectorMembers =
     vectorStrategy === undefined ?
-      createVectorMembers({ vectorStrategy: undefined, transactionScoped })
+      createVectorMembers({
+        vectorStrategy: undefined,
+        refusesContributionAdministration: transactionBind,
+      })
     : createVectorMembers({
-        transactionScoped,
+        refusesContributionAdministration: transactionBind,
         vectorStrategy,
         execution: { execRun },
         batchConfig,
@@ -4654,6 +4667,7 @@ function createTransactionBackend(
     schemaVersionsTable: options.schemaVersionsTable,
     fenceTarget: options.fenceTarget,
     transactionScoped: true,
+    transactionBind: true,
     allocationSchema: options.allocationSchema,
     lineage: options.lineage,
     recordedTime: options.recordedTime,

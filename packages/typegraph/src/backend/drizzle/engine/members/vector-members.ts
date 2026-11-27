@@ -68,13 +68,18 @@ type VectorSearchRawRow = Readonly<{ node_id: string; score: number }>;
  */
 export type CreateVectorMembersDeps = Readonly<{
   /**
-   * Whether these members belong to a transaction-scoped backend. Vector
-   * index creation provisions storage (table, durable marker, ANN index), a
-   * privileged root operation, so a transaction-scoped `createVectorIndex`
-   * refuses before any statement — while its transaction is open and after
-   * it ended alike.
+   * Whether these members belong to a bind of a transaction TypeGraph opened
+   * or adopted (a transaction callback's backend, `adoptTransaction`),
+   * whose marker gate refuses contribution administration. Vector index
+   * creation provisions storage (table, durable marker, ANN index), so such
+   * a bind's `createVectorIndex` refuses before any statement — while its
+   * transaction is open and after it ended alike. A backend a caller built
+   * over a transaction handle (`createPostgresTransactionBackend`) is not
+   * such a bind: it provisions in the caller's transaction, through its own
+   * materializer, as every member that recreates storage
+   * (`Store.reembedVectorField`) expects.
    */
-  transactionScoped: boolean;
+  refusesContributionAdministration: boolean;
 }> &
   (
   | Readonly<{ vectorStrategy: undefined }>
@@ -326,7 +331,7 @@ export function createVectorMembers(
     },
 
     async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
-      if (deps.transactionScoped) {
+      if (deps.refusesContributionAdministration) {
         throw transactionContributionAdministrationError("createVectorIndex");
       }
       if (deps.vectorStrategy === undefined) return;
