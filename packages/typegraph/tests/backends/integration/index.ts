@@ -155,6 +155,7 @@ export { registerTransactionReceiptIntegrationTests } from "./transaction-receip
 export { registerTransactionSessionHazardTests } from "./transaction-session-hazards";
 export { registerTransactionStatementAdmissionTests } from "./transaction-statement-admission";
 export { registerTransactionPortCallBudgetTests } from "./transaction-statement-budget";
+export { registerTransactionViewConsumerTests } from "./transaction-view-consumers";
 export { registerTraversalLimitPushdownIntegrationTests } from "./traversal-limit-pushdown";
 export { registerTraversalIntegrationTests } from "./traversals";
 export { registerTrustedImportIntegrationTests } from "./trusted-import";

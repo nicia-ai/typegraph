@@ -150,4 +150,48 @@ describe("a libSQL transaction's contribution-marker check", () => {
       client.close();
     }
   });
+
+  // The same root-client read, on a client with a connection to spare (a
+  // WAL file): after the transaction deletes a slot's marker and evicts it,
+  // its next vector write re-reads the marker on the root client, which sees
+  // the committed marker the transaction deleted, and is authorised by it.
+  // Main reads the same way and authorises the same way.
+  it("authorises a vector write with a marker the transaction deleted, read on the root client (known limit)", async () => {
+    const path = createTemporaryDbPath();
+    const client = createClient({ url: `file:${path}` });
+    await client.execute("PRAGMA journal_mode=WAL");
+    const { backend } = await createLibsqlBackend(client);
+    try {
+      const params = slotParams(backend);
+      await requireDefined(backend.createVectorIndex)(params);
+      let afterDelete = "not run";
+      await backend.transaction(async (tx) => {
+        await (
+          tx as unknown as Readonly<{
+            deleteSchemaVectorSlotContribution: (
+              slot: typeof params,
+            ) => Promise<void>;
+          }>
+        ).deleteSchemaVectorSlotContribution(params);
+        afterDelete = await outcomeOf(
+          requireDefined(tx.deleteEmbedding)({ ...params, nodeId: "d1" }),
+        );
+      });
+      expectObservation({
+        lane: { driver: "libsql" },
+        observed: afterDelete,
+        correct: "StoreNotInitializedError",
+        defects: [
+          {
+            label: "writer-slot marker read on the root client",
+            on: { driver: ["libsql"] },
+            today: "fulfilled",
+          },
+        ],
+      });
+    } finally {
+      await backend.close();
+      client.close();
+    }
+  });
 });

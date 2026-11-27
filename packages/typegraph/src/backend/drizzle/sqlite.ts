@@ -1386,7 +1386,10 @@ export function buildSqliteEngineProfile(
   const fulltextStrategy =
     options.fulltext === false ? undefined : (options.fulltext ?? fts5Strategy);
   const profileHints = options.executionProfile ?? {};
-  const executionAdapter = createSqliteExecutionAdapter(db, { profileHints });
+  const executionAdapter = adoptTransactionHandleView(
+    db,
+    createSqliteExecutionAdapter(db, { profileHints }),
+  );
   const atomicSqlProgramExecutor =
     createAtomicSqlProgramExecutor(executionAdapter);
   const { isSync, transactionMode } = executionAdapter.profile;
@@ -2975,6 +2978,31 @@ function createTransactionBackend(
  */
 function isSqliteTransactionHandle(handle: unknown): boolean {
   return is(handle, SQLiteTransaction);
+}
+
+/**
+ * The execution a backend built over `db` runs on. A backend built over a
+ * transaction object (`createSqliteBackend(tx)`, as a libSQL transaction's
+ * native handle is) adopts that transaction: proven to run on a transaction
+ * TypeGraph opened, it admits through the view the transaction's owner
+ * closes, so a statement it issues once that transaction ended is refused
+ * (`openTransactionView`). A database handle, including the connection a
+ * manual-frame transaction runs on, is a root connection: its statements are
+ * never refused.
+ */
+function adoptTransactionHandleView(
+  db: AnySqliteDatabase,
+  adapter: SqliteExecutionAdapter,
+): SqliteExecutionAdapter {
+  if (!isSqliteTransactionHandle(db)) return adapter;
+  return createSqliteTransactionExecutionView(
+    adapter,
+    openTransactionView(
+      "adoption",
+      identifyNativeTransaction(sqliteNativeHandle(db)),
+      db,
+    ),
+  ).adapter;
 }
 
 /** Whether `handle` is a Drizzle SQLite database or transaction object. */

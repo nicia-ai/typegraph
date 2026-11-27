@@ -1445,10 +1445,26 @@ function buildPostgresEngineProfileInternal(
     transactionScoped ?
       (getPinnedPostgresTransactionConnection(db) ?? db)
     : bareClient;
+  // A backend built over a transaction handle (`createPostgresTransactionBackend`,
+  // and `createPostgresBackend` given one) adopts that transaction: proven
+  // to run on a transaction TypeGraph opened, it admits through the view the
+  // transaction's owner closes, so a statement it issues once that
+  // transaction ended is refused (`openTransactionView`). This profile never
+  // closes the view itself.
   const executionAdapter =
     queueOwner === undefined ?
       unqueuedExecutionAdapter
-    : createSerialExecutionAdapter(unqueuedExecutionAdapter, queueOwner);
+    : createSerialExecutionAdapter(
+        unqueuedExecutionAdapter,
+        queueOwner,
+        transactionScoped ?
+          openTransactionView(
+            "adoption",
+            identifyNativeTransaction(postgresNativeHandle(db)),
+            db,
+          )
+        : undefined,
+      );
   const atomicSqlProgramExecutor =
     createAtomicSqlProgramExecutor(executionAdapter);
   // `declaredCapabilities` above is this profile's contribution; the
