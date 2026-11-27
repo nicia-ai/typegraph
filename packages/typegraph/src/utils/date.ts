@@ -14,6 +14,67 @@ import {
 } from "../errors";
 
 /**
+ * The time value a `Date` holds, read from the object itself rather than
+ * through any `getTime` it carries. A caller's `Date` can carry its own
+ * `getTime`, `toISOString` or `toJSON` (an own property, a subclass, a
+ * polyfill), so calling those on the value lets it state an instant other
+ * than the one it holds; `Date.prototype`'s own method reads the time value: `NaN` for an invalid `Date` and for an
+ * object that inherits from `Date.prototype` without holding a time value.
+ */
+export function dateTimeValue(date: Date): number {
+  try {
+    return Date.prototype.getTime.call(date);
+  } catch {
+    return Number.NaN;
+  }
+}
+
+/**
+ * The UTC ISO text of the instant a valid `Date` holds — the one encoder of a
+ * `Date` to text for every write, predicate and binding. Never the value's own
+ * `toJSON` or `toISOString`, which a caller's object can override to name a
+ * different instant: a `compareAndSet` expectation then matched a row holding
+ * the instant it named, and a create stored it. The caller has refused an
+ * invalid `Date` first (`dateTimeValue` is `NaN`); this throws `RangeError`
+ * for one, as `toISOString` does.
+ */
+export function dateInstantText(date: Date): string {
+  return Date.prototype.toISOString.call(new Date(dateTimeValue(date)));
+}
+
+/**
+ * The JSON replacer behind {@link storedJsonText}. `JSON.stringify` calls a
+ * value's own `toJSON` before a replacer sees it, so the replacer reads the
+ * original from its holder: a `Date` there is written as the instant it
+ * holds, and an invalid one as `null`, as `Date.prototype.toJSON` writes it.
+ */
+function storedDateReplacer(
+  this: Readonly<Record<string, unknown>>,
+  key: string,
+  value: unknown,
+): unknown {
+  const original = this[key];
+  if (!(original instanceof Date)) return value;
+  if (Number.isFinite(dateTimeValue(original)))
+    return dateInstantText(original);
+  // eslint-disable-next-line unicorn/no-null -- JSON `null`, what `Date.prototype.toJSON` writes for an invalid `Date`
+  return null;
+}
+
+/**
+ * `value` as the JSON text the store persists: `JSON.stringify`, except that
+ * every `Date` it holds (itself, an array element, or a value at any depth) is
+ * written as {@link dateInstantText} of the instant it holds, never through a
+ * `toJSON` or `toISOString` the caller's object carries. This is where a
+ * validated `Date` becomes stored text on every built-in backend write and in
+ * every uniqueness key, so the props the schema returned are handed on
+ * untouched until then.
+ */
+export function storedJsonText(value: unknown): string {
+  return JSON.stringify(value, storedDateReplacer);
+}
+
+/**
  * ISO 8601 datetime pattern.
  * Matches formats like:
  * - 2024-01-15T10:30:00.000Z
@@ -225,9 +286,9 @@ const YEAR_ZERO_PREFIX = "0000-";
 export function canonicalDateOperandText(operand: unknown): string | undefined {
   const text =
     operand instanceof Date ?
-      Number.isNaN(operand.getTime()) ?
+      Number.isNaN(dateTimeValue(operand)) ?
         undefined
-      : operand.toISOString()
+      : dateInstantText(operand)
     : operand;
   if (typeof text !== "string" || !isCanonicalIsoDate(text)) return undefined;
   return text.startsWith(YEAR_ZERO_PREFIX) ? undefined : text;
@@ -314,8 +375,8 @@ export const CANONICAL_DATE_OPERAND_EXPECTATION =
  */
 export function describeDateOperand(operand: unknown): string {
   if (operand instanceof Date) {
-    return Number.isNaN(operand.getTime()) ? "an invalid Date" : (
-        `the Date ${operand.toISOString()}`
+    return Number.isNaN(dateTimeValue(operand)) ? "an invalid Date" : (
+        `the Date ${dateInstantText(operand)}`
       );
   }
   return `${typeof operand} ${operandText(operand)}`;

@@ -9,6 +9,7 @@ import { ConfigurationError, UnsupportedPredicateError } from "../errors";
 import {
   CANONICAL_DATE_OPERAND_EXPECTATION,
   canonicalDateOperandText,
+  dateInstantText,
   describeDateOperand,
 } from "../utils/date";
 import {
@@ -701,7 +702,11 @@ function inferLiteralValueType(value: string | number | boolean): ValueType {
  */
 function literal(value: string | number | boolean | Date): LiteralValue {
   if (value instanceof Date) {
-    return { __type: "literal", value: value.toISOString(), valueType: "date" };
+    return {
+      __type: "literal",
+      value: dateInstantText(value),
+      valueType: "date",
+    };
   }
   const valueType = inferLiteralValueType(value);
   return {

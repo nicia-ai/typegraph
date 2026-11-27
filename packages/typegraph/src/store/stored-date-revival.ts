@@ -1,5 +1,6 @@
 /**
- * Stored date text, revived to the `Date` a kind's schema accepts.
+ * Stored date text and the `Date` a kind's schema accepts: the one owner of
+ * both directions.
  *
  * The store persists props as JSON, so a `z.date()` property's `Date` is
  * written as its `toISOString()` text and read back as that text. A path that
@@ -16,8 +17,12 @@
  *    props object through `.optional()`, `.nullable()`, `.default()`,
  *    `.prefault()`, `.catch()`, `.readonly()` and `.nonoptional()` wrappers,
  *    the shape of a nested `z.object()`, or the element of a `z.array()`,
- *    with no `.overwrite()` check on the way (one rewrites its value on every
- *    parse, so it would rewrite the revived, untouched value);
+ *    with no `.overwrite()` check on the schema under those wrappers (one
+ *    rewrites its value on every parse, so it would rewrite the revived,
+ *    untouched value). An `.overwrite()` on a wrapper is not consulted: the
+ *    revived value is parsed through it, so a rewriting one changes an
+ *    untouched date on every update. That re-parse of values the caller did
+ *    not touch is the deferred update-validation design, not this one;
  *  - the stored value is portable timestamp text ({@link isPortableTimestamp}):
  *    exactly the text the store writes for a `Date` it accepts (canonical UTC
  *    ISO in the years 0001 to 9999), so the revived `Date` serializes back to
@@ -36,12 +41,23 @@
  * decide where a stored value compares as a date: `z.string().pipe(z.coerce.date())`
  * is a date there, but its input is a string that a revived `Date` would fail.
  *
+ * The same decision serves every document that carries props in their stored
+ * form: an interchange document `exportGraph` wrote, which `importGraph`
+ * revives before parsing it through the kind's schema, and a graph merge's
+ * planned writes, which carry the props the branch read.
+ *
+ * The opposite direction — a validated `Date` to the stored text — is
+ * {@link encodeStoredDatesFor}, for a write that hands the backend JSON
+ * rather than props for the backend to serialize (the set-update patch and
+ * the `compareAndSet` expectation). Both encode a `Date` with the one encoder
+ * every stored text comes from, `dateInstantText`.
+ *
  * Reads are unchanged: they return the stored text.
  */
 import { type z } from "zod";
 
 import { objectSchemaShape } from "../core/kind-schema";
-import { isPortableTimestamp } from "../utils/date";
+import { dateInstantText, isPortableTimestamp } from "../utils/date";
 import { isPlainObject } from "../utils/object";
 
 /** The schema wrappers whose input is their inner schema's input. */
@@ -142,4 +158,109 @@ export function reviveStoredDateProps(
   props: Record<string, unknown>,
 ): Record<string, unknown> {
   return reviveStoredDates(schema, props) as Record<string, unknown>;
+}
+
+/**
+ * `value`, as validated by a kind's schema, with every `Date` it holds —
+ * itself, an array element, or a plain-object value at any depth — replaced
+ * by the text the store persists for it: the ISO text of the instant it
+ * holds (`dateInstantText`), exactly what the backends write for a `Date` on
+ * the single-row write paths (`storedJsonText`), so a set update's encoded
+ * patch stores the same bytes. The inverse
+ * of {@link reviveStoredDates} for every `Date` the store accepts (the
+ * validation boundary refuses an invalid or unstorable `Date` first).
+ *
+ * Every other value is returned untouched — a `Map`, a class instance or a
+ * non-finite number is left for the caller's JSON check to refuse — and
+ * `value` itself is returned when it holds no `Date`.
+ */
+function encodeStoredDates(value: unknown): unknown {
+  if (value instanceof Date) return dateInstantText(value);
+  if (Array.isArray(value)) {
+    const items = value as readonly unknown[];
+    const encoded = items.map((item) => encodeStoredDates(item));
+    return encoded.some((item, index) => item !== items[index]) ? encoded : (
+        value
+      );
+  }
+  if (!isPlainObject(value)) return value;
+  const entries = Object.entries(value).map(
+    ([key, element]) => [key, encodeStoredDates(element)] as const,
+  );
+  const changed = entries.some(([key, element]) => element !== value[key]);
+  // `Object.fromEntries` defines own data properties, so a `__proto__` key
+  // stays a property rather than reaching the setter.
+  return changed ? Object.fromEntries(entries) : value;
+}
+
+/** A value encoded for storage, or the first `Date` it would not read back. */
+export type StoredDateEncoding =
+  | Readonly<{ kind: "encoded"; value: unknown }>
+  | Readonly<{ kind: "not-revivable"; path: string }>;
+
+function propsPath(parent: string, key: string | number): string {
+  if (typeof key === "number") return `${parent}[${key}]`;
+  return parent === "" ? key : `${parent}.${key}`;
+}
+
+/** The first position where `original` holds a `Date` and `revived` does not. */
+function findUnrevivedDate(
+  original: unknown,
+  revived: unknown,
+  path: string,
+): string | undefined {
+  if (original instanceof Date) {
+    return revived instanceof Date ? undefined : path;
+  }
+  if (Array.isArray(original)) {
+    const revivedItems = revived as readonly unknown[];
+    for (const [index, item] of (original as readonly unknown[]).entries()) {
+      const found = findUnrevivedDate(
+        item,
+        revivedItems[index],
+        propsPath(path, index),
+      );
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (!isPlainObject(original)) return undefined;
+  const revivedObject = revived as Record<string, unknown>;
+  for (const [key, element] of Object.entries(original)) {
+    const found = findUnrevivedDate(
+      element,
+      revivedObject[key],
+      propsPath(path, key),
+    );
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/**
+ * `value`, validated by `schema`, encoded for a write that hands the backend
+ * JSON ({@link encodeStoredDates}) — but only when every `Date` it holds sits
+ * where {@link reviveStoredDates} reads the stored text back as that `Date`.
+ * Anywhere else (a union, a record, `z.any()`, an `.overwrite()`) the stored
+ * text would be read back as a string, so the row would hold a value the
+ * schema distinguishes from the `Date` that was written, and a uniqueness
+ * claim rebuilt from it would not match the claim a create takes for that
+ * `Date`. Such a value is reported with the path of the first such `Date`, for
+ * the caller to refuse.
+ */
+export function encodeStoredDatesFor(
+  schema: z.ZodType,
+  value: unknown,
+  path: string,
+): StoredDateEncoding {
+  const encoded = encodeStoredDates(value);
+  if (encoded === value) return { kind: "encoded", value };
+  const unrevived = findUnrevivedDate(
+    value,
+    reviveStoredDates(schema, encoded),
+    path,
+  );
+  return unrevived === undefined ?
+      { kind: "encoded", value: encoded }
+    : { kind: "not-revivable", path: unrevived };
 }

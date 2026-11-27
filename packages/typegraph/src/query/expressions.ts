@@ -1,4 +1,5 @@
 import { UnsupportedPredicateError } from "../errors";
+import { dateTimeValue } from "../utils/date";
 import {
   assertPortableCountDistinctValueType,
   assertPortableScalarValueType,
@@ -412,9 +413,12 @@ export function normalizeDatabaseLiteral(
   contextName = "$literal",
 ): DatabaseLiteral {
   if (value instanceof Date) {
-    if (!Number.isFinite(value.getTime()))
+    // A plain `Date` of the instant the value holds, so no `getTime`,
+    // `toJSON` or `toISOString` of the caller's own decides what binds.
+    const time = dateTimeValue(value);
+    if (!Number.isFinite(time))
       throw new TypeError(`${contextName} must be a valid Date`);
-    return new Date(value);
+    return new Date(time);
   }
   if (value === undefined) return undefined;
   validateJsonLiteral(value, contextName, new WeakSet());

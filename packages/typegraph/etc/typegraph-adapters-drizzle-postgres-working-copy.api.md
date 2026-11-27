@@ -761,7 +761,7 @@ const compareAndSetAbsent: unique symbol;
 
 // @public
 type CompareAndSetExpected<Props> = Readonly<{
-    [Property in keyof Props]?: Extract<Exclude<Props[Property], undefined>, JsonScalar> | CompareAndSetAbsent;
+    [Property in keyof Props]?: Extract<Exclude<Props[Property], undefined>, JsonScalar | Date> | CompareAndSetAbsent;
 }>;
 
 // @public (undocumented)

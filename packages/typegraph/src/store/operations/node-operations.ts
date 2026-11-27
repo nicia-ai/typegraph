@@ -121,6 +121,7 @@ import {
 } from "../../errors";
 import {
   unrecognizedOptionKeyIssues,
+  unstorableDateIssue,
   validateNodeProps,
 } from "../../errors/validation";
 import { type IdentityFoldPlan } from "../../identity/service";
@@ -152,9 +153,11 @@ import { compareCodePoints, compareStrings } from "../../utils/compare";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
+  dateInstantText,
   nowIso,
   preservesImmutableLowerBound,
   resolveStampedValidityLowerBound,
+  storedJsonText,
   validateOptionalCanonicalIsoDate,
   validateStatedValidityLowerBound,
 } from "../../utils/date";
@@ -229,7 +232,10 @@ import {
   unsupportedResolvedMutationSet,
 } from "../resolved-mutation-set";
 import { type NodeRow, rowToEdge, rowToNode } from "../row-mappers";
-import { reviveStoredDateProps } from "../stored-date-revival";
+import {
+  encodeStoredDatesFor,
+  reviveStoredDateProps,
+} from "../stored-date-revival";
 import {
   type BulkOperationHookContext,
   compareAndSetAbsent,
@@ -1299,7 +1305,7 @@ export function createNodeBatchValidationSeams(
       graph_id: params.graphId,
       kind: params.kind,
       id: params.id,
-      props: JSON.stringify(params.props),
+      props: storedJsonText(params.props),
       version: 1,
       // The simulated cached row only needs a NodeRow-shaped valid_from
       // (string | undefined, never null) for existence/uniqueness checks,
@@ -6408,6 +6414,68 @@ function validateNodePropertySubset(
   );
 }
 
+/**
+ * A set update's validated patch or expectation value, encoded as the JSON the
+ * backend receives (`encodeStoredDatesFor`). A `Date` its property's schema
+ * would not read back as a `Date` is refused: the after-image would hold a
+ * string where the caller stated a `Date`, and the uniqueness claim rebuilt
+ * from it would not match the one a create takes for that `Date`.
+ */
+function encodeSetUpdateValue(
+  schema: z.ZodObject<z.ZodRawShape>,
+  kind: string,
+  property: string,
+  value: unknown,
+): unknown {
+  // Encoded as a one-property props object, so the kind schema states the
+  // property's position and the reported path starts at the property.
+  const encoding = encodeStoredDatesFor(schema, { [property]: value }, "");
+  if (encoding.kind === "encoded") {
+    return (encoding.value as Record<string, unknown>)[property];
+  }
+  throw new ValidationError(
+    `Set update property "${property}" holds a Date at ${encoding.path} that its schema does not read back as a Date`,
+    {
+      entityType: "node",
+      kind,
+      operation: "update",
+      issues: [
+        {
+          path: encoding.path,
+          message:
+            "A set update stores a Date as its ISO text, which only a position whose schema accepts nothing but a Date reads back as a Date",
+        },
+      ],
+    },
+  );
+}
+
+/**
+ * The stored text a `compareAndSet()` expectation's `Date` compares as: the
+ * instant the caller stated, encoded by the encoder every write uses
+ * (`encodeSetUpdateValue`). Only its type is validated: it must be a
+ * storable `Date` (`unstorableDateIssue`, the decision every write makes)
+ * at a position the store reads back as a `Date`. A schema's transforms and
+ * `.overwrite()` checks decide what a WRITE stores; applying one here would
+ * compare a different instant than the caller stated, so an expectation of
+ * noon matched a row holding the midnight a normalizing schema writes.
+ */
+function expectedDateText(
+  schema: z.ZodObject<z.ZodRawShape>,
+  kind: string,
+  property: string,
+  value: Date,
+): JsonScalar {
+  const unstorable = unstorableDateIssue({ [property]: value });
+  if (unstorable !== undefined) {
+    throw new ValidationError(
+      `compareAndSet() expected property "${property}": ${unstorable.path}: ${unstorable.message}`,
+      { entityType: "node", kind, operation: "update", issues: [unstorable] },
+    );
+  }
+  return encodeSetUpdateValue(schema, kind, property, value) as JsonScalar;
+}
+
 function normalizeCompareAndSetExpectations(
   schema: z.ZodObject<z.ZodRawShape>,
   kind: string,
@@ -6448,9 +6516,20 @@ function normalizeCompareAndSetExpectations(
       expected[property] = { kind: "absent" };
       continue;
     }
+    // A `Date` is the one object an expectation may state. It names an
+    // instant to compare, not a value to write, so it is not parsed through
+    // the property's schema: a transform or `.overwrite()` there would turn
+    // it into a different instant than the caller stated.
+    if (value instanceof Date) {
+      expected[property] = {
+        kind: "value",
+        value: expectedDateText(schema, kind, property, value),
+      };
+      continue;
+    }
     if (value === undefined || (typeof value === "object" && value !== null)) {
       throw new ValidationError(
-        `compareAndSet() expected property "${property}" must be a JSON scalar or compareAndSetAbsent`,
+        `compareAndSet() expected property "${property}" must be a JSON scalar, a Date, or compareAndSetAbsent`,
         {
           entityType: "node",
           kind,
@@ -6459,7 +6538,7 @@ function normalizeCompareAndSetExpectations(
             {
               path: property,
               message:
-                "Expected a string, number, boolean, null, or compareAndSetAbsent",
+                "Expected a string, number, boolean, null, Date, or compareAndSetAbsent",
             },
           ],
         },
@@ -6468,13 +6547,19 @@ function normalizeCompareAndSetExpectations(
     scalarExpectedInput[property] = value;
   }
 
+  if (Object.keys(scalarExpectedInput).length === 0) return expected;
   const parsedExpected = validateNodePropertySubset(
     schema,
     scalarExpectedInput,
     { kind, operation: "update" },
   );
   for (const property of Object.keys(scalarExpectedInput)) {
-    const value = parsedExpected[property];
+    const value = encodeSetUpdateValue(
+      schema,
+      kind,
+      property,
+      parsedExpected[property],
+    );
     if (value === undefined || (typeof value === "object" && value !== null)) {
       throw new ValidationError(
         `compareAndSet() expected property "${property}" did not resolve to a JSON scalar`,
@@ -6577,8 +6662,11 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
       unsetProperties.push(property);
       continue;
     }
-    assertJsonValue(value, property, `Node "${kind}" ${operation} patch`);
-    patch[property] = value as JsonValue;
+    // The backend receives JSON, so a validated `Date` is encoded here as the
+    // text every other write stores for it; anything else non-JSON is refused.
+    const encoded = encodeSetUpdateValue(schema, kind, property, value);
+    assertJsonValue(encoded, property, `Node "${kind}" ${operation} patch`);
+    patch[property] = encoded as JsonValue;
   }
   if (Object.keys(patch).length === 0 && unsetProperties.length === 0) {
     throw new ValidationError(
@@ -8492,7 +8580,7 @@ type ProbeScalar = string | number | boolean | Date;
  * string normalize identically — and produce identical predicates).
  */
 function normalizeProbeScalar(value: ProbeScalar): string | number | boolean {
-  return value instanceof Date ? value.toISOString() : value;
+  return value instanceof Date ? dateInstantText(value) : value;
 }
 
 const PROBE_NULL_TAG = 0;

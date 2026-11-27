@@ -119,7 +119,9 @@ export function unstorableDateIssue(
  * Validates props with full context for error messages.
  *
  * Props the schema accepts must also be storable on every backend: a `Date`
- * anywhere in them is written as its `toISOString()` text, so one outside the
+ * anywhere in them is written as the ISO text of the instant it holds
+ * (`storedJsonText`, where the `Date` becomes stored text: the props returned
+ * here are the schema's own output, untouched), so one outside the
  * years 0001 to 9999 is refused (`findUnstorableDate`, deciding through
  * `canonicalDateOperandText` like every date operand). PostgreSQL could not
  * cast such a stored value to `timestamptz`, so it broke every later date

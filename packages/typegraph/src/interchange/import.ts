@@ -194,6 +194,7 @@ import {
   storeRuntime,
 } from "../store/runtime-port";
 import { type Store } from "../store/store";
+import { reviveStoredDateProps } from "../store/stored-date-revival";
 import { type CompositionNodeRef } from "../store/types";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
@@ -6143,13 +6144,22 @@ function storableImportProperties(
 }
 
 export function validateImportProperties(
-  properties: Record<string, unknown>,
+  documentProperties: Record<string, unknown>,
   schema: z.ZodObject<z.ZodRawShape>,
   unknownStrategy: UnknownPropertyStrategy,
 ):
   | { success: true; data: Record<string, unknown> }
   | { success: false; error: string } {
   try {
+    // An interchange document carries props in their STORED form — what
+    // `exportGraph` read from the row — so a `z.date()` property holds the
+    // ISO text the store wrote for its `Date`. Revive that text with the one
+    // decision every re-validating write makes before parsing; any other
+    // value, including non-canonical date text, is parsed (and refused) as
+    // stated. A revived `Date` serializes back to the same bytes, so every
+    // strategy below persists the document's text unchanged.
+    const properties = reviveStoredDateProps(schema, documentProperties);
+
     // Get the schema's known keys
     const knownKeys = new Set(Object.keys(schema.shape));
 
@@ -6187,7 +6197,11 @@ export function validateImportProperties(
         }
         case "allow": {
           // Validate the known fields, then return the ORIGINAL properties
-          // verbatim — unknown keys preserved, known values byte-for-byte.
+          // verbatim — unknown keys preserved, known values byte-for-byte —
+          // except that a revived stored date stays the `Date`: it persists
+          // as the same text, and a uniqueness claim keyed off the text
+          // instead of the `Date` would not match the claim the store's own
+          // writes take, so a duplicate date would be accepted.
           // Exported data already carries post-transform values, so
           // re-applying schema transforms here would corrupt every
           // export→import round trip whose transforms are not idempotent.

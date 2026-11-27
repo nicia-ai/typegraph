@@ -125,11 +125,41 @@ violation. Text is turned back into a `Date` only where the schema accepts
 nothing but a `Date` — a `z.date()`, possibly inside `.optional()`,
 `.nullable()`, `.default()`, `.catch()` and similar wrappers, a nested
 `z.object()` or a `z.array()` — and only when it is exactly the text the store
-writes. A date under a union, a record, a tuple, a `.transform()` or an
-`.overwrite()` is parsed as stored. A value you pass yourself is never converted: state a date
-property as a `Date`. The `getOrCreate…` forms parse the properties you state
-as a create first, so a property you omit that declares a `.default()` or
-`.catch()` takes that value rather than the stored one.
+writes. A date under a union, a record, a tuple, a `.transform()`, or an
+`.overwrite()` on the date itself or on an object or array holding it, is
+parsed as stored. An `.overwrite()` on a wrapper around the date
+(`z.date().optional().overwrite(…)`) runs on the revived `Date`, so one that
+changes its input changes the stored date on every update of another property,
+and on an import or merge of the row; this is a known limitation of
+re-validating the whole row. A value you pass
+yourself is never converted: state a date property as a `Date`.
+The `getOrCreate…` forms parse the properties you state as a create first, so a
+property you omit that declares a `.default()` or `.catch()` takes that value
+rather than the stored one.
+
+Every write stores a `Date` you state the same way: as the ISO text of the
+instant it holds, read from the `Date` itself, never from a `toJSON()` or
+`toISOString()` the object carries (an own property or a subclass), so a
+`Date` cannot be stored, matched or compared as an instant other than its
+own. This holds for every node and edge write on the built-in backends, a
+uniqueness constraint, an endpoint match, `importGraph()` and
+`trustedImportGraph()` of an in-memory document, a `compareAndSet()`
+expectation, an index lookup, and a predicate or parameter compared with a
+date. `updateWhere()` and `compareAndSet()` accept a `Date` in their `patch`,
+at any depth of a nested object or array, and store the same text `create()`
+and `update()` store. They refuse a `Date` at a position whose schema would
+read that text back as something else, such as under a union, a record or
+`z.any()`, with a `ValidationError`, since the row would then hold a string
+where you wrote a `Date`. A `compareAndSet()` `expected` value may be a
+`Date`; it matches when the stored text is that `Date`'s ISO text. It is a
+comparison, not a write, so it is not parsed through the property's schema: a
+transform or `.overwrite()` there does not change the instant it compares.
+`importGraph()` reads the stored text an export wrote back as a `Date` by the
+same rule as the updates above
+([Date properties in interchange](/interchange#date-properties)), and so does
+a [graph merge](/graph-merge), whose plans carry each row's properties in their
+stored form: `applyMergePlan()`, `merge()`, candidate write sets and mutation
+plans all apply a dated write.
 
 ### Node Operations
 
