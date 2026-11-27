@@ -2019,7 +2019,11 @@ tables that removal never finds.
   write, only when that session's current schema is the allocation's; otherwise
   it is refused with a `ConfigurationError`
   (`ALLOCATION_SCHEMA_SESSION_MISMATCH`). The caller owns that session's search
-  path, so it is checked rather than rewritten.
+  path, so it is checked rather than rewritten. A `control` backend built over a caller's
+  transaction leaves it the same way: provisioning leads `search_path` with the
+  allocation schema, and ledger and removal units set `lock_timeout` to
+  `cleanupLockTimeoutMs`, each only for itself, and the caller's values are
+  restored before the manager call returns.
 - **Removal** (`close`, `abort`, `destroy`, `abortAllocation`) searches the
   catalog across every schema for relations named with the allocation's reserved
   prefixes. It drops those in the recorded schema, schema-qualified in one

@@ -1022,6 +1022,13 @@ on its single pinned connection, including concurrent reads started by the
 same Store operation. Backends created for the same transaction handle share
 one queue. The application owns commit and rollback and must await all work
 using these backends before its transaction callback returns.
+TypeGraph leaves the transaction's settings as it found them: a unit that sets
+a transaction-local setting for itself (an algorithm's `workingMemory`, a
+working-copy manager's `lock_timeout` and allocation `search_path`, a vector
+search's index parameters) reads the caller's value in the statement that sets
+it and restores it before returning. A unit that fails rolls back to its
+savepoint, or leaves the transaction aborted for the application to roll back,
+and either rollback discards the setting.
 `createPostgresBackend(tx)` also routes a PostgreSQL transaction handle to the
 transaction-scoped backend automatically. Use `createPostgresTransactionBackend`
 when you want the transaction-scoped intent to be explicit; a regular database
