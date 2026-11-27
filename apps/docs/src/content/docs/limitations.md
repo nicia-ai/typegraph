@@ -243,6 +243,17 @@ start nodes in a non-recursive query and run the walk for each page. See
 compile to a fixed one-hop step, so they page and stream. See
 [Paging direct parts](/queries/recursive#paging-direct-parts).
 
+### Recursive traversals refuse fulltext and vector predicates
+
+A `$fulltext.matches()` or `.similarTo()` predicate on an alias a recursive traversal walks from or
+to is refused with `UnsupportedPredicateError` (`details.reason` is `"recursive_traversal"`) when the
+query is compiled: these predicates select a ranked top-k set and order rows by relevance, which a
+recursive statement cannot apply. A one-hop traversal (`minHops` and `maxHops` both 1, with no `depth`, `path` or
+`stopExpansion()`) that is the query's only traversal compiles to a fixed step and applies them. A
+fixed traversal chained with a recursive one applies them on its own aliases as a top-k filter only:
+the completed rows follow `orderBy()` alone, not relevance, and `.fuseWith()` is refused. See
+[Recursive traversal limitations](/queries/recursive#limitations).
+
 ## Composition Cascade
 
 Deleting a [composition](/ontology#composition) whole cascades leaf-first

@@ -637,6 +637,16 @@ try {
 }
 ```
 
+What materialization would refuse before building anything is refused
+before the schema commit instead, so no version is written: a backend
+without the materialization primitives (`executeDdl`, the status-row
+primitives, `catalog`), an `eager.kinds` entry the evolved graph does not
+declare, and a date-typed index the backend cannot build
+(`capabilities.dateIndexExpressions`). Eager materialization then builds the
+indexes of the schema version this call committed, not of a version another
+writer commits in between; that writer's indexes are left to its own
+`materializeIndexes()`.
+
 ## Reaching extension kinds from the type system
 
 TypeScript can't see kinds that don't exist at compile time. The

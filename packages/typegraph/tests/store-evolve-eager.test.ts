@@ -15,14 +15,21 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { projectBackendWithout } from "../src/backend/derive-backend";
 import { defineGraph } from "../src/core/define-graph";
 import { defineNode } from "../src/core/node";
-import { EagerMaterializationError } from "../src/errors";
+import {
+  ConfigurationError,
+  EagerMaterializationError,
+  KindNotFoundError,
+} from "../src/errors";
 import { defineGraphExtension } from "../src/graph-extension";
 import { defineNodeIndex } from "../src/indexes";
+import { getCommittedSchemaVersion } from "../src/schema";
 import type { Store } from "../src/store/store";
 import {
   createAdapterStoreWithSchema,
+  createStore,
   createStoreWithSchema,
 } from "../src/store/store";
 import { type StoreRef } from "../src/store/types";
@@ -71,6 +78,15 @@ async function forceSignatureDrift(
     materializedAt: new Date().toISOString(),
     error: undefined,
   });
+}
+
+async function rejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  return undefined;
 }
 
 describe("Store.evolve — eager materialization", () => {
@@ -300,4 +316,57 @@ describe("Store.evolve — eager materialization", () => {
       "EAGER_MATERIALIZATION_FAILED",
     );
   });
+
+  it("refuses an unknown eager kind before committing the schema version", async () => {
+    const backend = createTestBackend();
+    const graph = buildGraphWithIndexes();
+    const [store] = await createStoreWithSchema(graph, backend);
+    const before = await getCommittedSchemaVersion(backend, graph.id);
+
+    await expect(
+      store.evolve(
+        defineGraphExtension({
+          nodes: { Tag: { properties: { label: { type: "string" } } } },
+        }),
+        { eager: { kinds: ["Missing"] } },
+      ),
+    ).rejects.toBeInstanceOf(KindNotFoundError);
+
+    expect(await getCommittedSchemaVersion(backend, graph.id)).toBe(before);
+  });
+
+  for (const [missing, code] of [
+    ["executeDdl", "MATERIALIZE_BACKEND_UNSUPPORTED"],
+    ["recordIndexMaterialization", "MATERIALIZE_BACKEND_UNSUPPORTED"],
+    ["catalog", "CATALOG_UNAVAILABLE"],
+  ] as const) {
+    it(`refuses an eager evolve on a backend without ${missing} before committing the schema version`, async () => {
+      const backend = createTestBackend();
+      const graph = buildGraphWithIndexes();
+      await createStoreWithSchema(graph, backend);
+      const store = createStore(
+        graph,
+        projectBackendWithout(backend, [missing]),
+      );
+      const before = await getCommittedSchemaVersion(backend, graph.id);
+
+      const caught = await rejection(
+        store.evolve(
+          defineGraphExtension({
+            nodes: { Tag: { properties: { label: { type: "string" } } } },
+          }),
+          { eager: {} },
+        ),
+      );
+
+      expect({
+        type: caught instanceof ConfigurationError ? caught.name : caught,
+        code:
+          caught instanceof ConfigurationError ?
+            caught.details["code"]
+          : undefined,
+        committed: await getCommittedSchemaVersion(backend, graph.id),
+      }).toEqual({ type: "ConfigurationError", code, committed: before });
+    });
+  }
 });

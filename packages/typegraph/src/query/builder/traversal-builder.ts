@@ -72,7 +72,10 @@ import {
   type UniqueAlias,
   type ValidEdgeTargets,
 } from "./types";
-import { validateSqlIdentifier } from "./validation";
+import {
+  refuseMisplacedRelevancePredicate,
+  validateSqlIdentifier,
+} from "./validation";
 
 /**
  * Resolves the edge type for an edge alias based on its kind type parameter.
@@ -430,6 +433,7 @@ export class TraversalBuilder<
   > {
     const accessor = this.#createEdgeAccessor(alias);
     const predicate = predicateFunction(accessor as EdgeAccessor<ET>);
+    refuseMisplacedRelevancePredicate(predicate.__expr, "edge_predicate");
 
     const newPredicate: NodePredicate = {
       targetAlias: alias,
