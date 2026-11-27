@@ -10,6 +10,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
     "rebuild": true,
     "supported": true,
   },
+  "dateIndexExpressions": false,
   "durableEdgeMatchIdentity": true,
   "durableStoreOperations": true,
   "execution": {
@@ -252,6 +253,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
     "rebuild": true,
     "supported": true,
   },
+  "dateIndexExpressions": false,
   "durableEdgeMatchIdentity": true,
   "durableStoreOperations": true,
   "execution": {
@@ -469,6 +471,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
     "rebuild": true,
     "supported": true,
   },
+  "dateIndexExpressions": true,
   "durableEdgeMatchIdentity": true,
   "durableStoreOperations": true,
   "execution": {
@@ -685,6 +688,7 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
     "rebuild": true,
     "supported": true,
   },
+  "dateIndexExpressions": true,
   "durableEdgeMatchIdentity": true,
   "durableStoreOperations": true,
   "execution": {

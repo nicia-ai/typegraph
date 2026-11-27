@@ -3321,7 +3321,11 @@ issues no DDL. It installs the retry ledger, creates the graph's per-field
 pgvector tables, and builds every index the source has materialized for the
 graph with the DDL the source used. It writes no graph rows and no
 materialization records, so it can run before the target is empty-checked,
-and running it again is harmless. Indexes whose build never completed on the
+and running it again is harmless. An index the target backend cannot build
+(a date-typed index on a bundled PostgreSQL target,
+`capabilities.dateIndexExpressions`) is refused with
+`UnsupportedBackendCapabilityError` before any target DDL, the retry ledger
+included. Indexes whose build never completed on the
 source are neither built nor required. IVFFlat indexes are the exception:
 IVFFlat clusters the rows present when it is built, so building one on an
 empty table gives poor recall. They are not built by preparation and their

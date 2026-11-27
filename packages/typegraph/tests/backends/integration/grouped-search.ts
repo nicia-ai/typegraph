@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { count, expr, field } from "../../../src";
+import { count, expr, field, type Predicate } from "../../../src";
+import { UnsupportedPredicateError } from "../../../src/errors";
 import type { EmbeddableOneStatementRead } from "../../../src/query/builder/types";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
@@ -289,6 +290,44 @@ export function registerGroupedSearchIntegrationTests(
           { category: "z", n: 3 },
         ],
       );
+    });
+
+    it("refuses a fulltext predicate in having(), alone or reused from whereNode() under NOT", async (ctx) => {
+      const store = storeWith(context, ctx, ["fulltext"]);
+      await seedCategories(store);
+      let captured: Predicate | undefined;
+      const matched = store
+        .query()
+        .from("Article", "a")
+        .whereNode("a", (a) => {
+          captured = a.$fulltext.matches("climate", 10);
+          return captured;
+        })
+        .groupBy("a", "category");
+      const match = requireDefined(captured);
+      const unmatched = store
+        .query()
+        .from("Article", "a")
+        .groupBy("a", "category");
+
+      for (const place of [
+        () => matched.having(match.not().__expr),
+        () => unmatched.having(match.__expr),
+        () => unmatched.having(() => match as never),
+      ]) {
+        let refusal: unknown;
+        try {
+          place();
+        } catch (error) {
+          refusal = error;
+        }
+        expect(refusal).toBeInstanceOf(UnsupportedPredicateError);
+        expect((refusal as UnsupportedPredicateError).details).toEqual({
+          predicate: "fulltext_match",
+          alias: "a",
+          reason: "having",
+        });
+      }
     });
 
     it("aggregates fulltext matches without grouping", async (ctx) => {

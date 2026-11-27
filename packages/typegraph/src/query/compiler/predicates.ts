@@ -577,6 +577,13 @@ export type PredicateCompilerContext = Readonly<{
   resolveFieldCteAlias?: FieldCteAliasResolver;
   /** Final recursive CTE qualifier used by completed-result expressions. */
   recursiveResultAlias?: string;
+  /**
+   * The vector and fulltext predicates the statement being compiled applies
+   * through its relevance CTE joins. Set only by the standard pass pipeline,
+   * the one path that builds those joins; a relevance predicate absent from it
+   * is a compiler defect (see `compileRelevancePredicatePosition`).
+   */
+  appliedRelevancePredicates?: ReadonlySet<PredicateExpression>;
 }>;
 
 /**
@@ -815,10 +822,7 @@ export function compilePredicateExpression(
 
     case "vector_similarity":
     case "fulltext_match": {
-      // Structural predicates — handled by the main compiler via JOINs,
-      // ORDER BY, and LIMIT. Compile to 1=1 so they compose safely with
-      // surrounding AND branches.
-      return STRUCTURAL_PREDICATE_NOOP;
+      return compileRelevancePredicatePosition(expr, ctx);
     }
 
     case "relevance_comparison": {
@@ -832,7 +836,29 @@ export function compilePredicateExpression(
   }
 }
 
-const STRUCTURAL_PREDICATE_NOOP = sql.raw("1=1");
+/**
+ * The SQL a vector or fulltext predicate leaves at its position in a WHERE
+ * clause. These predicates are not row filters: the standard pass pipeline
+ * extracts them, and the emitter applies them through the relevance CTE it
+ * joins (top-k, minScore, relevance ORDER BY). Only a predicate that pipeline
+ * recorded as applied (`appliedRelevancePredicates`) compiles to a neutral
+ * `1=1` here. Any other sits in a statement that never applies it; emitting
+ * `1=1` for it would silently drop the filter, so reaching this is a compiler
+ * defect, refused rather than compiled.
+ */
+function compileRelevancePredicatePosition(
+  expr: VectorSimilarityPredicate | FulltextMatchPredicate,
+  ctx: PredicateCompilerContext,
+): SqlFragment {
+  if (ctx.appliedRelevancePredicates?.has(expr) === true)
+    return APPLIED_BY_RELEVANCE_JOIN;
+  throw new CompilerInvariantError(
+    `A ${expr.__type} predicate on alias "${expr.field.alias}" reached a statement that does not apply it`,
+    { predicate: expr.__type, alias: expr.field.alias },
+  );
+}
+
+const APPLIED_BY_RELEVANCE_JOIN = sql.raw("1=1");
 
 /**
  * Compiles a comparison predicate.

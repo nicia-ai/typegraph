@@ -728,6 +728,14 @@ const personalizedSearch = await store
   .execute();
 ```
 
+`.similarTo()` and `$fulltext.matches()` on an alias a recursive traversal walks from or to are
+refused with `UnsupportedPredicateError`, unless that traversal is the query's only one and is one
+hop (`minHops` and `maxHops` both 1, with no `depth`, `path` or `stopExpansion()`): the ranked top-k set has no
+relevance order to apply through a recursive statement. A fixed traversal chained with a recursive
+one still applies them on its own aliases, as a top-k filter whose completed rows follow `orderBy()`
+alone rather than relevance; `.fuseWith()` is refused on any query with a recursive traversal. See
+[Recursive traversal limitations](/queries/recursive#limitations).
+
 ## Best Practices
 
 ### Normalize Your Embeddings
@@ -910,7 +918,14 @@ GUC can't, a per-call override can.
 
 **Mechanics and limits.** The override is applied transaction-locally
 (`SET LOCAL hnsw.ef_search`) around the vector `SELECT`, so it never
-leaks to the next query on a pooled connection. Omitting it preserves
+leaks to the next query on a pooled connection. Inside a transaction (a
+`store.transaction()`, an adopted transaction, or a backend over a caller's
+transaction) the search reads each parameter it overrides and restores it
+after the `SELECT`, so the rest of that transaction keeps its own value. The
+read tolerates a parameter that the connection has not defined yet, or that
+holds no value, and restores such a parameter to its default. pgvector defines
+its parameters only when its library first loads in a connection, and a
+rolled-back `SET LOCAL` from before that leaves one without a value. Omitting it preserves
 today's behavior exactly — no transaction is opened. It applies to the
 **Postgres HNSW** path only:
 

@@ -3,11 +3,17 @@
  *
  * Validates aliases and identifiers to prevent SQL injection.
  */
-import { ConfigurationError, ValidationError } from "../../errors";
 import {
+  ConfigurationError,
+  UnsupportedPredicateError,
+  ValidationError,
+} from "../../errors";
+import {
+  type FulltextMatchPredicate,
   type HybridFusionOptions,
   type PredicateExpression,
   type SortDirection,
+  type VectorSimilarityPredicate,
 } from "../ast";
 import {
   isReservedSqlName,
@@ -561,4 +567,96 @@ export function validateSortDirection(
 ): asserts value is SortDirection {
   if (value !== "asc" && value !== "desc")
     throw new ConfigurationError("Invalid order direction.");
+}
+
+/**
+ * The first `.similarTo()` or `$fulltext.matches()` predicate anywhere in
+ * `expression`, at any depth of AND, OR and NOT; `undefined` when it has
+ * none. A subquery's own predicates are not searched: its statement applies
+ * them.
+ */
+function findRelevancePredicate(
+  expression: PredicateExpression,
+): VectorSimilarityPredicate | FulltextMatchPredicate | undefined {
+  switch (expression.__type) {
+    case "vector_similarity":
+    case "fulltext_match": {
+      return expression;
+    }
+    case "and":
+    case "or": {
+      for (const child of expression.predicates) {
+        const found = findRelevancePredicate(child);
+        if (found !== undefined) return found;
+      }
+      return undefined;
+    }
+    case "not": {
+      return findRelevancePredicate(expression.predicate);
+    }
+    case "comparison":
+    case "tuple_comparison":
+    case "string_op":
+    case "null_check":
+    case "between":
+    case "array_op":
+    case "object_op":
+    case "database_expression_predicate":
+    case "aggregate_comparison":
+    case "exists":
+    case "in_subquery":
+    case "relevance_comparison": {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * A builder position that accepts a predicate expression but cannot apply a
+ * relevance predicate: a `having()` group filter, or a `whereEdge()` match
+ * constraint on an edge alias.
+ */
+export type RelevancePredicatePlacement = "having" | "edge_predicate";
+
+const RELEVANCE_PLACEMENT_DESCRIPTIONS: Readonly<
+  Record<RelevancePredicatePlacement, string>
+> = {
+  having: "in having()",
+  edge_predicate: "in a whereEdge() predicate",
+};
+
+/**
+ * Refuses a `.similarTo()` or `$fulltext.matches()` predicate in a builder
+ * position other than a node alias's `whereNode()` match constraint.
+ *
+ * Those predicates are not row filters: the standard statement extracts the
+ * ones in its node match constraints and applies them through a relevance
+ * join (a top-k candidate set and a relevance order). Anywhere else nothing
+ * applies them: a group filter compiled the predicate to a constant-true term,
+ * so `NOT` of it removed every group, and an edge alias has no relevance
+ * join. The builder method refuses it before any SQL exists.
+ *
+ * @throws UnsupportedPredicateError with `details.reason` naming the
+ *   placement and `details.predicate` / `details.alias` naming the predicate.
+ */
+export function refuseMisplacedRelevancePredicate(
+  expression: PredicateExpression,
+  placement: RelevancePredicatePlacement,
+): void {
+  const relevancePredicate = findRelevancePredicate(expression);
+  if (relevancePredicate === undefined) return;
+  const operation =
+    relevancePredicate.__type === "fulltext_match" ?
+      "$fulltext.matches()"
+    : "similarTo()";
+  const alias = relevancePredicate.field.alias;
+  throw new UnsupportedPredicateError(
+    `${operation} on alias "${alias}" is not supported ${RELEVANCE_PLACEMENT_DESCRIPTIONS[placement]}: ` +
+      "a relevance predicate is applied only as a whereNode() match constraint on a node alias.",
+    { predicate: relevancePredicate.__type, alias, reason: placement },
+    {
+      suggestion:
+        "Move the predicate into whereNode() on the node alias it searches, at top level or inside an AND.",
+    },
+  );
 }

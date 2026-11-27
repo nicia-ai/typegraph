@@ -147,6 +147,7 @@ import {
 } from "./types";
 import {
   hasQuerySource,
+  refuseMisplacedRelevancePredicate,
   validateHybridFusionOptions,
   validateQueryRange,
   validateQuerySource,
@@ -994,6 +995,8 @@ export class QueryBuilder<
       accessor as EdgeAccessor<EdgeAliases[EA]["type"]>,
       this.#expressionContext(),
     );
+    const expression = this.#expressionPredicate(predicate);
+    refuseMisplacedRelevancePredicate(expression, "edge_predicate");
 
     const newState: QueryBuilderState = {
       ...this.#state,
@@ -1002,7 +1005,7 @@ export class QueryBuilder<
         {
           targetAlias: alias,
           targetType: "edge",
-          expression: this.#expressionPredicate(predicate),
+          expression: expression,
         },
       ],
     };
@@ -2343,6 +2346,7 @@ export class QueryBuilder<
       typeof predicateOrBuild === "function" ?
         this.#expressionPredicate(predicateOrBuild(this.#expressionContext()))
       : predicateOrBuild;
+    refuseMisplacedRelevancePredicate(predicate, "having");
     return new QueryBuilder(this.#config, {
       ...this.#state,
       having:

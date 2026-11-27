@@ -411,7 +411,7 @@ describe("dropInvalidIndexLeftover", () => {
 });
 
 describe("materializeIndexes / materializeSystemIndexes — catalog refusal ordering", () => {
-  it("runs the status-table ensure step before the CATALOG_UNAVAILABLE refusal, but skips it for a kind filter with no candidates", async () => {
+  it("materializeIndexes refuses CATALOG_UNAVAILABLE before the status-table ensure step and skips both for a kind filter with no candidates; materializeSystemIndexes ensures first", async () => {
     const rawBackend = createTestBackend();
     const ensureIndexMaterializationsTable = vi.fn(
       requireDefined(rawBackend.ensureIndexMaterializationsTable),
@@ -449,7 +449,9 @@ describe("materializeIndexes / materializeSystemIndexes — catalog refusal orde
     expect(
       (materializeIndexesError as ConfigurationError).details["code"],
     ).toBe("CATALOG_UNAVAILABLE");
-    expect(ensureIndexMaterializationsTable).toHaveBeenCalledTimes(1);
+    // Refused by `preflightIndexMaterialization`, before any I/O, so the
+    // status table is never created for a call that cannot build anything.
+    expect(ensureIndexMaterializationsTable).not.toHaveBeenCalled();
 
     let materializeSystemIndexesError: unknown;
     try {
@@ -461,8 +463,8 @@ describe("materializeIndexes / materializeSystemIndexes — catalog refusal orde
     expect(
       (materializeSystemIndexesError as ConfigurationError).details["code"],
     ).toBe("CATALOG_UNAVAILABLE");
-    // `materializeSystemIndexes` has no candidate short circuit, so this is
-    // its own ensure-step call, on top of `materializeIndexes`'s above.
-    expect(ensureIndexMaterializationsTable).toHaveBeenCalledTimes(2);
+    // `materializeSystemIndexes` has no preflight and no candidate short
+    // circuit: it runs its ensure step and then refuses.
+    expect(ensureIndexMaterializationsTable).toHaveBeenCalledTimes(1);
   });
 });

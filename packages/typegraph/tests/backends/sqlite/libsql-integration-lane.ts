@@ -10,6 +10,7 @@ import { afterEach } from "vitest";
 
 import { createSqliteTables } from "../../../src/backend/drizzle/schema/sqlite";
 import { createLibsqlBackend } from "../../../src/backend/sqlite/libsql";
+import { openReopenableLibsqlStorage } from "../../helpers/reopenable-storage";
 import { openTracedLibsqlConnection } from "../../helpers/traced-connection";
 import { refuseUnsupportedSerializedBackendCapabilities } from "../integration/test-context";
 import type { IntegrationSuiteSlice } from "../integration-registrations";
@@ -70,6 +71,7 @@ export function registerLibsqlIntegrationLane(
       slice: params.slice,
       driver: "libsql",
       openTracedConnection: openTracedLibsqlConnection,
+      openReopenableStorage: openReopenableLibsqlStorage,
     },
   );
 }
