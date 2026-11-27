@@ -17,6 +17,7 @@ import {
   defineNode,
   embedding,
 } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import {
   createPostgresBackend,
   createPostgresTransactionBackend,
@@ -142,6 +143,128 @@ function deletingSlot(backend: TransactionBackend): Readonly<{
   }>;
 }
 
+/**
+ * The members of a backend a public constructor builds whose statements the
+ * profile composes on its Drizzle handle (markers, materialization records,
+ * graph templates, DDL, maintenance), each called with arguments that reach
+ * its statement, keyed by the label the outcome is reported under.
+ */
+function handleStatementCalls(
+  backend: GraphBackend,
+  graphId: string,
+): Readonly<Record<string, (() => Promise<unknown>) | undefined>> {
+  const attemptedAt = "2026-01-01T00:00:00.000Z";
+  const indexName = `${graphId}_late_index`;
+  const claim = {
+    indexName,
+    graphId,
+    entity: "node",
+    kind: "TvItem",
+    signature: "late",
+    schemaVersion: 1,
+  } as const;
+  function bound<TArguments extends readonly unknown[]>(
+    member: ((...args: TArguments) => Promise<unknown>) | undefined,
+    ...args: TArguments
+  ): (() => Promise<unknown>) | undefined {
+    return member === undefined ? undefined : () => member(...args);
+  }
+  return {
+    recordContributionMaterialization: bound(
+      backend.recordContributionMaterialization,
+      {
+        graphId,
+        logicalName: "late",
+        owner: "late",
+        tableName: "late",
+        signature: "late",
+        attemptedAt,
+        materializedAt: attemptedAt,
+        error: undefined,
+      },
+    ),
+    getContributionMaterialization: bound(
+      backend.getContributionMaterialization,
+      { graphId, logicalName: "late", owner: "late", tableName: "late" },
+    ),
+    ensureContributionMaterializationsTable: bound(
+      backend.ensureContributionMaterializationsTable,
+    ),
+    setReconciliationMarker: bound(backend.setReconciliationMarker, graphId, 1),
+    getReconciliationMarker: bound(backend.getReconciliationMarker, graphId),
+    recordKindRemoval: bound(backend.recordKindRemoval, {
+      graphId,
+      kindName: "TvItem",
+      entity: "node",
+      schemaVersion: 1,
+      attemptedAt,
+      removedAt: undefined,
+      error: undefined,
+    }),
+    getAllKindRemovals: bound(backend.getAllKindRemovals, graphId),
+    getPendingKindRemovals: bound(backend.getPendingKindRemovals, graphId),
+    recordIndexMaterialization: bound(backend.recordIndexMaterialization, {
+      ...claim,
+      attemptedAt,
+      materializedAt: attemptedAt,
+      error: undefined,
+    }),
+    getIndexMaterialization: bound(backend.getIndexMaterialization, indexName),
+    claimIndexMaterialization: bound(backend.claimIndexMaterialization, {
+      ...claim,
+      token: "late",
+      leaseMs: 60_000,
+    }),
+    releaseIndexMaterializationClaim: bound(
+      backend.releaseIndexMaterializationClaim,
+      { indexName, token: "late" },
+    ),
+    registerGraphTemplate: bound(backend.registerGraphTemplate, {
+      templateId: `${graphId}_late_template`,
+      schemaHash: "late",
+      schemaDoc: { graphId } as never,
+    }),
+    executeDdl: bound(
+      backend.executeDdl,
+      `CREATE TABLE IF NOT EXISTS ${graphId}_late_ddl (x INTEGER)`,
+    ),
+    refreshStatistics: bound(backend.refreshStatistics),
+  };
+}
+
+/** What the root reads of each record a late handle statement would write. */
+async function lateRecords(
+  backend: GraphBackend,
+  graphId: string,
+): Promise<Readonly<Record<string, unknown>>> {
+  return {
+    contribution: await backend.getContributionMaterialization?.({
+      graphId,
+      logicalName: "late",
+      owner: "late",
+      tableName: "late",
+    }),
+    reconciliation: await backend.getReconciliationMarker?.(graphId),
+    kindRemovals: ((await backend.getAllKindRemovals?.(graphId)) ?? []).length,
+    index: await backend.getIndexMaterialization?.(`${graphId}_late_index`),
+    ddlTable: await backend.catalog?.tableExists(`${graphId}_late_ddl`),
+  };
+}
+
+/** A promise and the function that fulfils it. */
+function createLatch(): Readonly<{
+  promise: Promise<undefined>;
+  open: () => void;
+}> {
+  const opener: { open?: () => void } = {};
+  const promise = new Promise<undefined>((resolve) => {
+    opener.open = () => {
+      resolve(undefined);
+    };
+  });
+  return { promise, open: requireDefined(opener.open) };
+}
+
 export function registerTransactionViewConsumerTests(
   context: IntegrationTestContext,
 ): void {
@@ -185,6 +308,50 @@ export function registerTransactionViewConsumerTests(
         expect(observed).toEqual(expected);
       });
     }
+    it("refuses every member that composes its statement on the Drizzle handle once TypeGraph rolled the transaction back, and none of them writes", async () => {
+      const constructors = constructorsFor(context);
+      if (constructors.length === 0) return;
+      const backend = context.getBackend();
+      const observed: Record<string, unknown> = {};
+      const expected: Record<string, unknown> = {};
+      for (const name of constructors) {
+        const graphId = nextGraphId();
+        let kept: GraphBackend | undefined;
+        await outcomeOf(
+          backend.transactionWithNative(async (_tx, native) => {
+            kept = PUBLIC_CONSTRUCTORS[name](native);
+            await kept.insertNode(node(graphId, "built-inside"));
+            throw new Error("callback failed");
+          }),
+        );
+        const late: Record<string, string> = {};
+        for (const [member, call] of Object.entries(
+          handleStatementCalls(requireDefined(kept), graphId),
+        )) {
+          if (call !== undefined) late[member] = await outcomeOf(call());
+        }
+        observed[name] = {
+          late,
+          records: await lateRecords(backend, graphId),
+        };
+        expected[name] = {
+          late: Object.fromEntries(
+            Object.keys(late).map((member) => [
+              member,
+              "TransactionClosedError",
+            ]),
+          ),
+          records: {
+            contribution: undefined,
+            reconciliation: undefined,
+            kindRemovals: 0,
+            index: undefined,
+            ddlTable: false,
+          },
+        };
+      }
+      expect(observed).toEqual(expected);
+    });
   });
 
   describe("a Store over a transaction backend re-embedding a vector field", () => {
@@ -229,10 +396,16 @@ export function registerTransactionViewConsumerTests(
         queryEmbedding: [0, 1, 0],
         limit: 5,
       });
+      // The score tells the re-embedded vector [0, 1, 0] (cosine 1 to the
+      // query) from the original [1, 0, 0] (cosine 0), which would also be
+      // the sole hit.
       expect({
         reembed,
-        hits: hits.map((hit) => hit.node.id),
-      }).toEqual({ reembed: "fulfilled", hits: ["a"] });
+        hits: hits.map((hit) => ({
+          id: hit.node.id,
+          score: Number(hit.score.toFixed(6)),
+        })),
+      }).toEqual({ reembed: "fulfilled", hits: [{ id: "a", score: 1 }] });
     });
 
     // `materializeIndexes()` drops an IVFFlat index before it rebuilds it
@@ -288,19 +461,51 @@ export function registerTransactionViewConsumerTests(
         return Number(requireDefined(row).count);
       }
       const before = await indexCount();
-      await outcomeOf(
+      // Which index members the rebuild reached, in order, and how each
+      // settled: the drop must run for the test to say anything about it.
+      const attempted: string[] = [];
+      let materialized = "not run";
+      const transaction = await outcomeOf(
         backend.transactionWithNative(async (_tx, native) => {
-          const [scoped] = await createAdapterStoreWithSchema(
-            graph,
-            createPostgresTransactionBackend(
-              native as never,
-            ) as AdapterBackend<unknown>,
-          );
-          // The caller does not inspect the result, and commits.
-          await scoped.materializeIndexes();
+          const built = createPostgresTransactionBackend(
+            native as never,
+          ) as AdapterBackend<unknown>;
+          const dropVectorIndex = requireDefined(built.dropVectorIndex);
+          const createIndex = requireDefined(built.createVectorIndex);
+          const recorded = deriveBackend(built, {
+            async dropVectorIndex(params) {
+              const result = await outcomeOf(dropVectorIndex(params));
+              attempted.push(`dropVectorIndex: ${result}`);
+              if (result !== "fulfilled") throw new Error(result);
+            },
+            async createVectorIndex(params) {
+              const result = await outcomeOf(createIndex(params));
+              attempted.push(`createVectorIndex: ${result}`);
+              if (result !== "fulfilled") throw new Error(result);
+            },
+          });
+          const [scoped] = await createAdapterStoreWithSchema(graph, recorded);
+          // The caller catches what the rebuild throws, and commits: the
+          // failed `CREATE INDEX CONCURRENTLY` aborted the transaction, so
+          // the failure record cannot be written and the commit rolls back.
+          materialized = await outcomeOf(scoped.materializeIndexes());
         }),
       );
-      expect({ before, after: await indexCount() }).toEqual({
+      expect({
+        transaction,
+        attempted: attempted.map((entry) => entry.split("\n")[0]),
+        materialized,
+        before,
+        after: await indexCount(),
+      }).toEqual({
+        transaction: "TransactionOutcomeUnknownError",
+        attempted: [
+          "dropVectorIndex: fulfilled",
+          expect.stringMatching(/^createVectorIndex: untyped: /) as unknown,
+        ],
+        materialized: expect.stringMatching(
+          /^untyped: Error: Failed query: insert into "typegraph_index_materializations"/,
+        ) as unknown,
         before: 1,
         after: 1,
       });
@@ -350,6 +555,63 @@ export function registerTransactionViewConsumerTests(
             label: "savepoint adoption outlives its savepoint",
             on: { driver: POSTGRES_DRIVERS },
             today: { late: "fulfilled", nodes: ["savepoint-late"] },
+          },
+        ],
+      });
+    });
+  });
+
+  // A savepoint a constructor-built backend opens gets a view of its own,
+  // closed when the savepoint ends: the enclosing transaction's end does not
+  // reach it. A savepoint callback the enclosing callback left pending can
+  // therefore write after the enclosing transaction rolled back, on the
+  // released connection. Savepoint lifetime is not tracked yet; main has no
+  // view at all and saves the late write too.
+  describe("a savepoint a constructor-built backend opened, left pending when its enclosing transaction ends (known defect)", () => {
+    it("is refused once the enclosing transaction rolled back, and its late write is not saved", async () => {
+      if (!isPostgresLane(context)) return;
+      const backend = context.getBackend();
+      const graphId = nextGraphId();
+      const { promise: gate, open: release } = createLatch();
+      let nested: Promise<string> | undefined;
+      let lateInsert = "not run";
+      const enclosingOutcome = await outcomeOf(
+        backend.transactionWithNative(async (_tx, native) => {
+          const enclosing =
+            PUBLIC_CONSTRUCTORS.createPostgresTransactionBackend(native);
+          const { promise: inside, open: entered } = createLatch();
+          nested = outcomeOf(
+            enclosing.transaction(async (savepoint) => {
+              entered();
+              await gate;
+              lateInsert = await outcomeOf(
+                savepoint.insertNode(node(graphId, "savepoint-late")),
+              );
+            }),
+          );
+          await inside;
+          throw new Error("callback failed");
+        }),
+      );
+      release();
+      // The savepoint's own end fails on every driver once its enclosing
+      // transaction is gone; what is pinned is the write before it.
+      await requireDefined(nested);
+      expect(enclosingOutcome).toBe("untyped: Error: callback failed");
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: { lateInsert, nodes: await nodeIds(backend, graphId) },
+        correct: { lateInsert: "TransactionClosedError", nodes: [] },
+        defects: [
+          {
+            label: "savepoint view outlives its enclosing transaction",
+            on: { driver: ["node-postgres", "postgres-js"] },
+            today: { lateInsert: "fulfilled", nodes: ["savepoint-late"] },
+          },
+          {
+            label: "savepoint view outlives its enclosing transaction (PGlite)",
+            on: { driver: ["pglite"] },
+            today: { lateInsert: "untyped: Error: Failed query:", nodes: [] },
           },
         ],
       });

@@ -253,7 +253,10 @@ async function escapedTransaction(
   return requireDefined(escaped);
 }
 
-/** Every carried member is routed, and nothing routed `absent` is carried. */
+/**
+ * Every carried member is routed, nothing routed `absent` is carried, and
+ * every member routed anything else is carried.
+ */
 function routeMismatches(
   tx: TransactionBackend,
   dialect: keyof Disposition,
@@ -262,11 +265,18 @@ function routeMismatches(
   const unrouted = carried
     .filter((key) => !isMember(key))
     .map((key) => `${key}: carried but not in the table`);
-  const misrouted = MEMBERS.filter((member) => {
+  const misrouted = MEMBERS.flatMap((member) => {
     const routedAbsent =
       TRANSACTION_BACKEND_MEMBER_ROUTES[member][dialect] === "absent";
-    return routedAbsent && carried.includes(member);
-  }).map((member) => `${member}: routed absent but carried`);
+    const isCarried = carried.includes(member);
+    if (routedAbsent && isCarried) {
+      return [`${member}: routed absent but carried`];
+    }
+    if (!routedAbsent && !isCarried) {
+      return [`${member}: routed but not carried`];
+    }
+    return [];
+  });
   return [...unrouted, ...misrouted];
 }
 
@@ -780,6 +790,132 @@ const EDGE_BETWEEN = {
   toId: "d2",
 } as const;
 
+/** The members PGlite routes through the view that better-sqlite3 does not carry. */
+type PostgresOnlyViewMember = {
+  [M in Member]: (typeof TRANSACTION_BACKEND_MEMBER_ROUTES)[M] extends (
+    typeof POSTGRES_ONLY_VIEW
+  ) ?
+    M
+  : never;
+}[Member];
+
+/** An edge postimage for the resolved edge updates. */
+const EDGE_ROW = {
+  graph_id: graph.id,
+  id: "e1",
+  kind: "auditLink",
+  from_kind: "AuditDoc",
+  from_id: "d1",
+  to_kind: "AuditDoc",
+  to_id: "d2",
+  props: {},
+  valid_from: undefined,
+  valid_to: undefined,
+  created_at: "2026-01-01T00:00:00.000Z",
+  updated_at: "2026-01-01T00:00:00.000Z",
+  deleted_at: undefined,
+} as const;
+
+/**
+ * For every member PGlite alone routes through the view, one call with valid
+ * arguments for the audit graph. A member added to the routes as PostgreSQL-only
+ * `view` does not compile here until it has a call.
+ */
+const POSTGRES_ONLY_MEMBER_CALLS = {
+  upsertHeterogeneousNodes: (tx) =>
+    requireDefined(tx.upsertHeterogeneousNodes)({
+      entries: [
+        {
+          kind: "AuditDoc",
+          id: "d1",
+          props: { title: "audit" },
+          updateProps: { title: "audit" },
+        },
+      ],
+      schemaFence: SCHEMA_FENCE,
+    }),
+  lockSchemaVersionAndGraphWrite: (tx) =>
+    requireDefined(tx.lockSchemaVersionAndGraphWrite)({
+      ...SCHEMA_FENCE,
+      fenceRow: "leave",
+    }),
+  executeAtomicNodeBatch: (tx) =>
+    requireDefined(tx.executeAtomicNodeBatch)({
+      entries: [{ idSource: "caller", params: NODE }],
+      resultMode: "count",
+      schemaFence: SCHEMA_FENCE,
+    }),
+  executeAtomicNodeDeleteBatch: (tx) =>
+    requireDefined(tx.executeAtomicNodeDeleteBatch)({
+      graphId: graph.id,
+      kind: "AuditDoc",
+      ids: ["d1"],
+      schemaFence: SCHEMA_FENCE,
+    }),
+  executeAtomicNodeReplacementBatch: (tx) =>
+    requireDefined(tx.executeAtomicNodeReplacementBatch)({
+      entries: [{ params: NODE }],
+      releaseClaims: false,
+      schemaFence: SCHEMA_FENCE,
+    }),
+  executeAtomicNodeResolvedMutationSet: (tx) =>
+    requireDefined(tx.executeAtomicNodeResolvedMutationSet)({
+      creates: [{ idSource: "caller", params: NODE }],
+      updates: [{ ...NODE, id: "d2", expectedVersion: 1 }],
+      schemaFence: SCHEMA_FENCE,
+    }),
+  executeAtomicNodeResolvedUpdateBatch: (tx) =>
+    requireDefined(tx.executeAtomicNodeResolvedUpdateBatch)({
+      entries: [{ ...NODE, expectedVersion: 1 }],
+      schemaFence: SCHEMA_FENCE,
+    }),
+  executeAtomicEdgeBatch: (tx) =>
+    requireDefined(tx.executeAtomicEdgeBatch)({
+      claims: [],
+      params: [EDGE],
+      resultMode: "count",
+      schemaFence: SCHEMA_FENCE,
+    }),
+  executeAtomicEdgeDeleteBatch: (tx) =>
+    requireDefined(tx.executeAtomicEdgeDeleteBatch)({
+      graphId: graph.id,
+      expectedKind: "auditLink",
+      ids: ["e1"],
+      schemaFence: SCHEMA_FENCE,
+    }),
+  executeAtomicEdgeMutationProgram: (tx) =>
+    requireDefined(tx.executeAtomicEdgeMutationProgram)({
+      kind: "resolved-set",
+      creates: [EDGE],
+      updates: [{ existing: { ...EDGE_ROW, id: "e2" }, props: {} }],
+      schemaFence: SCHEMA_FENCE,
+    }),
+  executeAtomicEdgeResolvedUpdateBatch: (tx) =>
+    requireDefined(tx.executeAtomicEdgeResolvedUpdateBatch)({
+      entries: [{ existing: EDGE_ROW, props: { note: "late" } }],
+      schemaFence: SCHEMA_FENCE,
+    }),
+} as const satisfies Record<PostgresOnlyViewMember, MemberCall>;
+
+/**
+ * Every call PGlite routes through the view: the shared calls for each member
+ * PGlite routes `view`, and the PostgreSQL-only ones.
+ */
+function labelledPostgresMemberCalls(): readonly (readonly [
+  string,
+  MemberCall,
+])[] {
+  return [
+    ...labelledMemberCalls().filter(([label]) => {
+      const member = label.split(".")[0] as Member;
+      return TRANSACTION_BACKEND_MEMBER_ROUTES[member].postgres === "view";
+    }),
+    ...Object.entries(POSTGRES_ONLY_MEMBER_CALLS).map(
+      ([label, call]) => [label, call as MemberCall] as const,
+    ),
+  ];
+}
+
 /** The audit graph's active schema document, read once before the cases. */
 let activeSchemaDocument: SerializedSchema | undefined;
 
@@ -805,6 +941,25 @@ function labelledMemberCalls(): readonly (readonly [string, MemberCall])[] {
  */
 const STATEMENT_FREE_ON_SQLITE_VEC: ReadonlySet<string> = new Set([
   "dropVectorIndex",
+  "catalog.dropInvalidIndex",
+]);
+
+/**
+ * How many calls the PGlite case makes, so a filter that drops calls cannot
+ * pass it vacuously: every shared call PGlite routes `view` (all but
+ * `executeRaw`, which it does not carry, and `createVectorIndex`, refused)
+ * plus the PostgreSQL-only ones.
+ */
+const EXPECTED_POSTGRES_VIEW_CALLS =
+  labelledMemberCalls().length -
+  1 +
+  Object.keys(POSTGRES_ONLY_MEMBER_CALLS).length;
+
+/**
+ * A call PGlite's transaction catalog refuses before any statement, open or
+ * ended: PostgreSQL refuses `DROP INDEX CONCURRENTLY` in a transaction block.
+ */
+const ROOT_ONLY_ON_POSTGRES: ReadonlySet<string> = new Set([
   "catalog.dropInvalidIndex",
 ]);
 
@@ -978,6 +1133,74 @@ describe("a better-sqlite3 transaction backend once its transaction ended", () =
         onceEnded: "fulfilled",
       })),
       reachedOnceEnded: [],
+    });
+  });
+});
+
+describe("a PGlite transaction backend once its transaction ended", () => {
+  let engine: SharedPgliteEngine;
+  let backend: GraphBackend;
+
+  beforeAll(async () => {
+    engine = await setupSharedPgliteEngine();
+    backend = engine.makeBackend();
+    await createStoreWithSchema(graph, backend);
+    const active = requireDefined(await backend.getActiveSchema(graph.id));
+    activeSchemaDocument = JSON.parse(active.schema_doc) as SerializedSchema;
+  });
+
+  afterAll(async () => {
+    await engine.dispose();
+  });
+
+  // Each call is first shown not to be refused on an open transaction (each
+  // in a transaction of its own, rolled back, since a failed statement aborts
+  // a PostgreSQL transaction), so its refusal after the end is the view's.
+  it("refuses every member routed through the view with TransactionClosedError, and only once its transaction ended", async () => {
+    const calls = labelledPostgresMemberCalls();
+    const refusedWhileOpen: string[] = [];
+    for (const [label, call] of calls) {
+      await backend
+        .transaction(async (tx) => {
+          if (
+            (await outcome(call(tx as unknown as AuditedTransaction))) ===
+            "closed"
+          ) {
+            refusedWhileOpen.push(label);
+          }
+          throw ROLLBACK_AFTER_CALL;
+        })
+        .catch(() => {
+          // Rolled back on purpose: nothing a call wrote outlives its case.
+        });
+    }
+
+    const ended = (await escapedTransaction(
+      backend,
+    )) as unknown as AuditedTransaction;
+    const notRefusedOnceEnded: string[] = [];
+    const rootOnce: Record<string, string> = {};
+    for (const [label, call] of calls) {
+      const result = await outcome(call(ended));
+      if (ROOT_ONLY_ON_POSTGRES.has(label)) rootOnce[label] = result;
+      else if (result !== "closed") {
+        notRefusedOnceEnded.push(`${label}: ${result}`);
+      }
+    }
+    expect({
+      calls: calls.length,
+      refusedWhileOpen,
+      notRefusedOnceEnded,
+      rootOnce,
+    }).toEqual({
+      calls: EXPECTED_POSTGRES_VIEW_CALLS,
+      refusedWhileOpen: [],
+      notRefusedOnceEnded: [],
+      rootOnce: {
+        "catalog.dropInvalidIndex": expect.stringContaining(
+          "dropInvalidIndex requires a root PostgreSQL backend",
+        ) as unknown,
+      },
     });
   });
 });
