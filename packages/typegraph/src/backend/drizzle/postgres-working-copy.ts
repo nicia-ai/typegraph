@@ -1231,10 +1231,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
   async function ensureLedger(): Promise<void> {
     await control.transaction((transaction) =>
       withUnitSettings(transaction, async (settings) => {
-      await settings.set(cleanupLockTimeout(cleanupLockTimeoutMs));
-      await rows(
-        transaction,
-        sql.raw(`CREATE TABLE IF NOT EXISTS ${quoteDdlIdentifier(LEDGER)} (
+        await settings.set(cleanupLockTimeout(cleanupLockTimeoutMs));
+        await rows(
+          transaction,
+          sql.raw(`CREATE TABLE IF NOT EXISTS ${quoteDdlIdentifier(LEDGER)} (
       allocation_id text PRIMARY KEY,
       physical_prefix text NOT NULL UNIQUE,
       ownership_token text NOT NULL,
@@ -1247,24 +1247,24 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       operation_evidence boolean NOT NULL DEFAULT false,
       created_at timestamptz NOT NULL DEFAULT now()
     )`),
-      );
-      const present = await rows<Readonly<{ name: string }>>(
-        transaction,
-        sql`SELECT attname::text AS name FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass(${LEDGER}) AND attname = ANY(${ADDITIVE_LEDGER_COLUMNS.map((column) => column.name)}::text[]) AND attnum > 0 AND NOT attisdropped`,
-      );
-      const presentNames = new Set(present.map((column) => column.name));
-      for (const column of ADDITIVE_LEDGER_COLUMNS) {
-        if (presentNames.has(column.name)) continue;
-        // Concurrent migrations may pass the catalog probe together. The
-        // guarded ALTER lets the later holder observe the first holder's DDL.
-        await rows(
-          transaction,
-          sql.raw(
-            `ALTER TABLE ${quoteDdlIdentifier(LEDGER)} ADD COLUMN IF NOT EXISTS ${quoteDdlIdentifier(column.name)} ${column.definition}`,
-          ),
         );
-      }
-    }),
+        const present = await rows<Readonly<{ name: string }>>(
+          transaction,
+          sql`SELECT attname::text AS name FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass(${LEDGER}) AND attname = ANY(${ADDITIVE_LEDGER_COLUMNS.map((column) => column.name)}::text[]) AND attnum > 0 AND NOT attisdropped`,
+        );
+        const presentNames = new Set(present.map((column) => column.name));
+        for (const column of ADDITIVE_LEDGER_COLUMNS) {
+          if (presentNames.has(column.name)) continue;
+          // Concurrent migrations may pass the catalog probe together. The
+          // guarded ALTER lets the later holder observe the first holder's DDL.
+          await rows(
+            transaction,
+            sql.raw(
+              `ALTER TABLE ${quoteDdlIdentifier(LEDGER)} ADD COLUMN IF NOT EXISTS ${quoteDdlIdentifier(column.name)} ${column.definition}`,
+            ),
+          );
+        }
+      }),
     );
   }
 
@@ -1273,112 +1273,115 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     expectedOrigin?: DurableBranchOrigin,
   ): Promise<void> {
     await ensureLedger();
-    await control.transaction((transaction) =>
-      withUnitSettings(transaction, async (settings) => {
-      await settings.set(cleanupLockTimeout(cleanupLockTimeoutMs));
-      // Waits behind an in-flight operate or delivery mark on this allocation,
-      // bounded by the lock timeout above, and refuses a session that is not
-      // READ COMMITTED before any fence read can rely on it. Everything below
-      // reads after that wait, so it sees the holder's commit.
-      await lockAllocation(transaction, allocationId);
-      const found = await rows<
-        AllocationRow & Readonly<{ session_schema: string | null }>
-      >(
-        transaction,
-        sql`SELECT ${ALLOCATION_COLUMNS}, current_schema() AS session_schema FROM ${sqlName(LEDGER)} AS l WHERE allocation_id = ${allocationId} FOR UPDATE`,
-      );
-      const row = found[0];
-      if (row === undefined)
-        throw new BranchError(
-          `Working-copy allocation ${allocationId} does not exist.`,
-        );
-      if (expectedOrigin === undefined && row.state === "sealed") {
-        throw new BranchError(
-          "A sealed working copy requires its attested origin for destroy.",
-        );
-      }
-      if (expectedOrigin !== undefined) {
-        assertSealedOrigin(
-          row,
-          expectedOrigin,
-          "Working-copy destroy origin does not match the sealed allocation.",
-        );
-      }
-      const names = await allocationNames(allocationId);
-      const physicalPrefix = assertAllocationPrefix(row, names);
-      assertVectorManifestOwned(
-        parseVectorManifest(row.vector_slots),
-        createPgvectorStrategyForAllocation(physicalPrefix),
-      );
-      // A row written before its schema was recorded is resolved through this
-      // session, as removal always resolved it.
-      const schema = row.schema_name ?? row.session_schema;
-      if (schema === null) {
-        throw new BranchError(
-          `Working-copy allocation ${allocationId} records no schema and this session has none to resolve it in.`,
-        );
-      }
-      const plan = planAllocationRemoval(
-        allocationId,
-        schema,
-        await discoverAllocationRelations(transaction, physicalPrefix),
-      );
-      if (plan.action === "refuse") {
-        throw new BranchError(plan.message, {
-          details: {
+    await control.transaction(
+      (transaction) =>
+        withUnitSettings(transaction, async (settings) => {
+          await settings.set(cleanupLockTimeout(cleanupLockTimeoutMs));
+          // Waits behind an in-flight operate or delivery mark on this allocation,
+          // bounded by the lock timeout above, and refuses a session that is not
+          // READ COMMITTED before any fence read can rely on it. Everything below
+          // reads after that wait, so it sees the holder's commit.
+          await lockAllocation(transaction, allocationId);
+          const found = await rows<
+            AllocationRow & Readonly<{ session_schema: string | null }>
+          >(
+            transaction,
+            sql`SELECT ${ALLOCATION_COLUMNS}, current_schema() AS session_schema FROM ${sqlName(LEDGER)} AS l WHERE allocation_id = ${allocationId} FOR UPDATE`,
+          );
+          const row = found[0];
+          if (row === undefined)
+            throw new BranchError(
+              `Working-copy allocation ${allocationId} does not exist.`,
+            );
+          if (expectedOrigin === undefined && row.state === "sealed") {
+            throw new BranchError(
+              "A sealed working copy requires its attested origin for destroy.",
+            );
+          }
+          if (expectedOrigin !== undefined) {
+            assertSealedOrigin(
+              row,
+              expectedOrigin,
+              "Working-copy destroy origin does not match the sealed allocation.",
+            );
+          }
+          const names = await allocationNames(allocationId);
+          const physicalPrefix = assertAllocationPrefix(row, names);
+          assertVectorManifestOwned(
+            parseVectorManifest(row.vector_slots),
+            createPgvectorStrategyForAllocation(physicalPrefix),
+          );
+          // A row written before its schema was recorded is resolved through this
+          // session, as removal always resolved it.
+          const schema = row.schema_name ?? row.session_schema;
+          if (schema === null) {
+            throw new BranchError(
+              `Working-copy allocation ${allocationId} records no schema and this session has none to resolve it in.`,
+            );
+          }
+          const plan = planAllocationRemoval(
             allocationId,
             schema,
-            foundIn: plan.foundIn,
-            schemas: plan.schemas,
-          },
-          suggestion: plan.suggestion,
-        });
-      }
-      // The allocation lock taken above serializes this fence with every
-      // operate and markDelivered on the allocation: either their commit is
-      // visible here and destroy refuses, or destroy commits first and they
-      // fail their own attestation. The fence runs only when the discovery
-      // found the evidence relation among the relations this removal drops.
-      // One that sits in another schema was refused above, and one that exists
-      // nowhere leaves no evidence to deliver and nothing to recover, as
-      // removal treats every relation that is gone.
-      if (
-        row.operation_evidence &&
-        plan.owned.includes(operationEvidenceTableName(physicalPrefix)) &&
-        (await hasUndeliveredEvidence(
-          transaction,
-          operationEvidenceRelation(schema, physicalPrefix),
-        ))
-      ) {
-        throw new DurableEvidenceUndeliveredError(
-          "Refusing to destroy the working copy: undelivered operation evidence remains.",
-          {
-            suggestion:
-              "Read the evidence with scanDurableOperations and mark it delivered with markDurableOperationDelivered, then destroy the branch. Both require a manager built with `operations`.",
-          },
-        );
-      }
-      // One statement, so the tables that reference each other go together. A
-      // failure aborts the transaction and keeps the ledger row: the
-      // allocation stays listed and recoverable.
-      if (plan.owned.length > 0) {
-        await rows(
-          transaction,
-          sql.raw(
-            `DROP TABLE ${plan.owned
-              .map(
-                (name) =>
-                  `${quoteDdlIdentifier(schema)}.${quoteDdlIdentifier(name)}`,
-              )
-              .join(", ")}`,
-          ),
-        );
-      }
-      await rows(
-        transaction,
-        sql`DELETE FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
-      );
-    }), ALLOCATION_LOCK_TRANSACTION_OPTIONS);
+            await discoverAllocationRelations(transaction, physicalPrefix),
+          );
+          if (plan.action === "refuse") {
+            throw new BranchError(plan.message, {
+              details: {
+                allocationId,
+                schema,
+                foundIn: plan.foundIn,
+                schemas: plan.schemas,
+              },
+              suggestion: plan.suggestion,
+            });
+          }
+          // The allocation lock taken above serializes this fence with every
+          // operate and markDelivered on the allocation: either their commit is
+          // visible here and destroy refuses, or destroy commits first and they
+          // fail their own attestation. The fence runs only when the discovery
+          // found the evidence relation among the relations this removal drops.
+          // One that sits in another schema was refused above, and one that exists
+          // nowhere leaves no evidence to deliver and nothing to recover, as
+          // removal treats every relation that is gone.
+          if (
+            row.operation_evidence &&
+            plan.owned.includes(operationEvidenceTableName(physicalPrefix)) &&
+            (await hasUndeliveredEvidence(
+              transaction,
+              operationEvidenceRelation(schema, physicalPrefix),
+            ))
+          ) {
+            throw new DurableEvidenceUndeliveredError(
+              "Refusing to destroy the working copy: undelivered operation evidence remains.",
+              {
+                suggestion:
+                  "Read the evidence with scanDurableOperations and mark it delivered with markDurableOperationDelivered, then destroy the branch. Both require a manager built with `operations`.",
+              },
+            );
+          }
+          // One statement, so the tables that reference each other go together. A
+          // failure aborts the transaction and keeps the ledger row: the
+          // allocation stays listed and recoverable.
+          if (plan.owned.length > 0) {
+            await rows(
+              transaction,
+              sql.raw(
+                `DROP TABLE ${plan.owned
+                  .map(
+                    (name) =>
+                      `${quoteDdlIdentifier(schema)}.${quoteDdlIdentifier(name)}`,
+                  )
+                  .join(", ")}`,
+              ),
+            );
+          }
+          await rows(
+            transaction,
+            sql`DELETE FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
+          );
+        }),
+      ALLOCATION_LOCK_TRANSACTION_OPTIONS,
+    );
   }
 
   type AllocationProvision = Readonly<{
@@ -1423,66 +1426,66 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     const ownershipToken = globalThis.crypto.randomUUID();
     const controlRole = await control.transaction((transaction) =>
       withUnitSettings(transaction, async (settings) => {
-      await settings.set(allocationSearchPath(schema));
-      // The unique ledger prefix is the ownership claim for both bundled
-      // tables and vector sidecars. Hold it through all provisioning DDL.
-      const claimed = await rows<
-        Readonly<{
-          allocation_id: string;
-          role: string;
-          schema_name: string | null;
-        }>
-      >(
-        transaction,
-        sql`INSERT INTO ${sqlName(LEDGER)} (allocation_id, physical_prefix, ownership_token, state, history, revision_tracking, vector_slots, schema_name, operation_evidence) VALUES (${allocationId}, ${physicalPrefix}, ${ownershipToken}, ${state}, ${provision.history}, ${provision.revisionTracking}, ${JSON.stringify(vectorManifest)}::jsonb, current_schema(), ${hasOperationEvidence}) ON CONFLICT DO NOTHING RETURNING allocation_id, current_user::text AS role, schema_name`,
-      );
-      const claim = claimed[0];
-      if (claimed.length !== 1 || claim === undefined) {
-        throw new BranchError(
-          "Working-copy allocation id or physical prefix is already owned.",
+        await settings.set(allocationSearchPath(schema));
+        // The unique ledger prefix is the ownership claim for both bundled
+        // tables and vector sidecars. Hold it through all provisioning DDL.
+        const claimed = await rows<
+          Readonly<{
+            allocation_id: string;
+            role: string;
+            schema_name: string | null;
+          }>
+        >(
+          transaction,
+          sql`INSERT INTO ${sqlName(LEDGER)} (allocation_id, physical_prefix, ownership_token, state, history, revision_tracking, vector_slots, schema_name, operation_evidence) VALUES (${allocationId}, ${physicalPrefix}, ${ownershipToken}, ${state}, ${provision.history}, ${provision.revisionTracking}, ${JSON.stringify(vectorManifest)}::jsonb, current_schema(), ${hasOperationEvidence}) ON CONFLICT DO NOTHING RETURNING allocation_id, current_user::text AS role, schema_name`,
         );
-      }
-      if (claim.schema_name !== schema) {
-        throw new BranchError(
-          `Working-copy allocation could not be fixed to schema "${schema}"; the provisioning session resolved "${claim.schema_name ?? ""}".`,
-        );
-      }
-      const existing = await rows<Readonly<{ name: string }>>(
-        transaction,
-        sql`SELECT c.relname::text AS name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${schema} AND c.relname = ANY(${[...new Set([...relationNamesForTables(targetTables), evidenceTable, ...indexNames.values(), ...vectorManifest.flatMap((slot) => slot.ownedTableNames)])]}::text[])`,
-      );
-      if (existing.length > 0) {
-        throw existing.some((relation) => relation.name === evidenceTable) ?
-            orphanedEvidenceError(evidenceTable)
-          : new BranchError(
-              "Working-copy allocation names already exist; recover their owner before retrying.",
-            );
-      }
-      for (const contribution of postgresContributions(targetTables)) {
-        for (const ddl of contribution.createDdl) {
-          await rows(transaction, sql.raw(strictCreateDdl(ddl)));
+        const claim = claimed[0];
+        if (claimed.length !== 1 || claim === undefined) {
+          throw new BranchError(
+            "Working-copy allocation id or physical prefix is already owned.",
+          );
         }
-      }
-      if (vectorStrategy !== undefined) {
-        for (const slot of provision.vectorSlots) {
-          for (const contribution of vectorStrategy.ownedTables(slot)) {
-            for (const ddl of contribution.createDdl) {
-              await rows(transaction, sql.raw(strictCreateDdl(ddl)));
+        if (claim.schema_name !== schema) {
+          throw new BranchError(
+            `Working-copy allocation could not be fixed to schema "${schema}"; the provisioning session resolved "${claim.schema_name ?? ""}".`,
+          );
+        }
+        const existing = await rows<Readonly<{ name: string }>>(
+          transaction,
+          sql`SELECT c.relname::text AS name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = ${schema} AND c.relname = ANY(${[...new Set([...relationNamesForTables(targetTables), evidenceTable, ...indexNames.values(), ...vectorManifest.flatMap((slot) => slot.ownedTableNames)])]}::text[])`,
+        );
+        if (existing.length > 0) {
+          throw existing.some((relation) => relation.name === evidenceTable) ?
+              orphanedEvidenceError(evidenceTable)
+            : new BranchError(
+                "Working-copy allocation names already exist; recover their owner before retrying.",
+              );
+        }
+        for (const contribution of postgresContributions(targetTables)) {
+          for (const ddl of contribution.createDdl) {
+            await rows(transaction, sql.raw(strictCreateDdl(ddl)));
+          }
+        }
+        if (vectorStrategy !== undefined) {
+          for (const slot of provision.vectorSlots) {
+            for (const contribution of vectorStrategy.ownedTables(slot)) {
+              for (const ddl of contribution.createDdl) {
+                await rows(transaction, sql.raw(strictCreateDdl(ddl)));
+              }
             }
           }
         }
-      }
-      if (hasOperationEvidence) {
-        for (const ddl of operationEvidenceCreateDdl(evidenceTable)) {
-          await rows(transaction, sql.raw(ddl));
+        if (hasOperationEvidence) {
+          for (const ddl of operationEvidenceCreateDdl(evidenceTable)) {
+            await rows(transaction, sql.raw(ddl));
+          }
         }
-      }
-      await rows(
-        transaction,
-        sql.raw(generatePostgresBaseSchemaMarkerSQL(targetTables)),
-      );
-      return claim.role;
-    }),
+        await rows(
+          transaction,
+          sql.raw(generatePostgresBaseSchemaMarkerSQL(targetTables)),
+        );
+        return claim.role;
+      }),
     );
     return { ownershipToken, controlRole };
   }

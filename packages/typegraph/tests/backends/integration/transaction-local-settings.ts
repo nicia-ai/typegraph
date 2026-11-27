@@ -45,6 +45,7 @@ import { BranchError } from "../../../src/graph-merge/errors";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
+import { expectObservation } from "../../helpers/known-defect";
 import type { IntegrationTestContext } from "./test-context";
 
 const SettingPerson = defineNode("SettingPerson", {
@@ -297,6 +298,59 @@ export function registerTransactionLocalSettingIntegrationTests(
         expect(observed.after).toEqual(observed.before);
       });
 
+      // Two algorithms started together on one caller transaction run their
+      // savepoint units on one session whose statements are serialized one at
+      // a time, not unit by unit, so their apply and restore statements can
+      // interleave. That is the session hazard of overlapping units on a
+      // caller transaction, which main has for every unit; it is pinned here
+      // at the value it produces, not fixed.
+      it("two algorithms started together on a caller transaction", async (ctx) => {
+        const root = requirePostgres(context, ctx);
+        const observed = await inCallerTransaction(
+          root,
+          async (caller, overCaller) => {
+            const store = await seededStore(overCaller(), buildGraph());
+            const outcomes = await Promise.allSettled([
+              store.algorithms.pageRank({
+                edges: ["settingKnows"],
+                workingMemory: "48MB",
+              }),
+              store.algorithms.pageRank({
+                edges: ["settingKnows"],
+                workingMemory: "64MB",
+              }),
+            ]);
+            return {
+              outcomes: outcomes.map((outcome) => outcome.status),
+              workMemRestored: await readSettings(caller).then(
+                (settings) => settings.work_mem === CALLER_WORK_MEM,
+              ),
+            };
+          },
+        );
+
+        expectObservation({
+          lane: { driver: context.driver },
+          observed,
+          correct: {
+            outcomes: ["fulfilled", "fulfilled"],
+            workMemRestored: true,
+          },
+          defects: [
+            {
+              label: "overlapping savepoint units on a caller transaction",
+              on: { driver: ["pglite", "node-postgres", "postgres-js"] },
+              // One unit reads the other's value as its prior and restores it
+              // last (on PGlite the first call's 48MB survives).
+              today: {
+                outcomes: ["fulfilled", "fulfilled"],
+                workMemRestored: false,
+              },
+            },
+          ],
+        });
+      });
+
       it("adds no statement on a transaction TypeGraph opens", async (ctx) => {
         const root = requirePostgres(context, ctx);
         const { backend, statements } = capturing(root);
@@ -431,6 +485,62 @@ export function registerTransactionLocalSettingIntegrationTests(
         expect(observed).toEqual({
           searchPath: `${later}, public`,
           createdIn: later,
+        });
+      });
+
+      // The ledger is addressed by its unqualified name, in the control
+      // session's current schema, so the manager documents that `control`
+      // runs with one consistent search_path. A caller that creates the schema
+      // leading its path while a copy is live moves its current schema, and
+      // the copy's removal then looks in a ledger that does not know it. Main
+      // hid that on this path only because provisioning's search_path pin
+      // stayed on the caller's transaction; any control session whose current
+      // schema changes has it. Pinned at the value it produces, not fixed.
+      it("closes a live copy after the caller creates the schema leading its path", async (ctx) => {
+        const root = requirePostgres(context, ctx);
+        const later = `tg_setting_live_${globalThis.crypto.randomUUID().slice(0, 8)}`;
+        const observed = await inCallerTransaction(
+          root,
+          async (caller, overCaller) => {
+            const [current] = await run(
+              caller,
+              sql`SELECT current_schema()::text AS schema`,
+            );
+            const allocationSchema = String(current?.["schema"]);
+            await run(
+              caller,
+              sql`SELECT set_config('search_path', ${`${later}, ${allocationSchema}`}, true)`,
+            );
+            const manager = managerOver(
+              overCaller({ vector: false }),
+              overCaller,
+            );
+            const working = await manager.makeBackend();
+            await run(caller, sql.raw(`CREATE SCHEMA "${later}"`));
+            const close = await failureOf(working.close());
+            const [ledger] = await run(
+              caller,
+              sql`SELECT count(*)::int AS live FROM ${sql.identifier(allocationSchema)}.typegraph_working_copy_allocations`,
+            );
+            return {
+              closed: close === undefined,
+              liveInAllocationLedger: Number(ledger?.["live"]),
+            };
+          },
+        );
+
+        expectObservation({
+          lane: { driver: context.driver },
+          observed,
+          correct: { closed: true, liveInAllocationLedger: 0 },
+          defects: [
+            {
+              label:
+                "working-copy ledger follows the control session's current schema",
+              on: { driver: ["pglite", "node-postgres", "postgres-js"] },
+              today: { closed: false, liveInAllocationLedger: 1 },
+            },
+          ],
         });
       });
 

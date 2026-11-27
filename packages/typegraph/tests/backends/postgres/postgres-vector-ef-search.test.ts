@@ -241,11 +241,14 @@ describe("Postgres efSearch — SET LOCAL transaction scoping", () => {
         ]);
       });
 
+      // In a transaction each override is applied by the statement that also
+      // reads the prior value, binding the name for both and the value last.
       function appliesEfSearch(statement: QueryConfig, value: string): boolean {
+        const values = statement.values ?? [];
         return (
           statement.text?.includes("set_config") === true &&
-          statement.values?.[0] === "hnsw.ef_search" &&
-          statement.values[1] === value
+          values.includes("hnsw.ef_search") &&
+          values.at(-1) === value
         );
       }
 
