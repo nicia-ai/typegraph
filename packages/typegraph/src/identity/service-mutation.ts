@@ -85,12 +85,15 @@ import {
 import {
   type IdentityAssertionResult,
   type IdentityNodeRefInput,
+  type IdentityPair,
   type IdentityRelation,
   type IdentityValidityWindow,
 } from "./types";
 import {
+  hasExplicitIdentityValidityWindow,
   type ResolvedIdentityValidityWindow,
   resolveIdentityValidityWindow,
+  validateIdentityValidityWindowBounds,
 } from "./validity-window";
 
 /** What every note of one write shares; {@link noteClassTransitions} adds the per-class ids. */
@@ -1330,22 +1333,98 @@ export async function applyPairRelationEffect(
   noteClassTransitions(ctx.graphId, noteTransition, transitions, common);
 }
 
+/**
+ * One identity assertion request that passed every refusal needing no
+ * statement: its endpoints, registered, distinct and in canonical order, and
+ * the window the caller stated (`undefined` when it stated no bound).
+ */
+export type IdentityAssertionRequest = Readonly<{
+  pair: readonly [PlainNodeRef, PlainNodeRef];
+  window: IdentityValidityWindow | undefined;
+}>;
+
+/**
+ * THE statement-free refusals of one identity assertion, for every assertion
+ * entry point (single and bulk, `same` and `different`): an unregistered kind,
+ * a self-assertion, a malformed window bound. A facade calls it before it
+ * enters its operation, so a refused assertion takes no lock and issues no
+ * statement; the write consumes the request it returns and re-derives none of
+ * these decisions. The request carries a snapshot of the bounds it validated,
+ * never the caller's object, so a bound read again under the lock is the bound
+ * that was checked. The window's clock-relative refusals (a future or inverted
+ * window) compare against the operation's own instant and stay inside it.
+ */
+export function identityAssertionRequest<G extends GraphDef>(
+  ctx: Pick<IdentityServiceContext<G>, "graphId" | "registry">,
+  relation: IdentityRelation,
+  firstInput: IdentityNodeRefInput<G>,
+  secondInput: IdentityNodeRefInput<G>,
+  window: IdentityValidityWindow | undefined,
+): IdentityAssertionRequest {
+  const first = registeredPlainRef(ctx, firstInput);
+  const second = registeredPlainRef(ctx, secondInput);
+  if (refKey(first) === refKey(second)) throw selfAssertionError(relation);
+  const bounds = validateIdentityValidityWindowBounds(window);
+  const stated: IdentityValidityWindow = {
+    ...(bounds.validFrom === undefined ? {} : { validFrom: bounds.validFrom }),
+    ...(bounds.validTo === undefined ? {} : { validTo: bounds.validTo }),
+  };
+  return {
+    pair: normalizePair(first, second),
+    window: hasExplicitIdentityValidityWindow(stated) ? stated : undefined,
+  };
+}
+
+/**
+ * THE snapshot of one bulk assertion call: the {@link identityAssertionRequest}
+ * of every pair, in index order. It reads `pairs.length` once and each index
+ * once, and refuses a hole or an entry that is not an object (with the
+ * `TypeError` reading a pair from it always raised) along with every other
+ * statement-free refusal, so a refused call enters nothing. A hole cannot slip
+ * past it the way `map` skips one and leave the write to meet it after earlier
+ * pairs were written. Everything after it (the plain-or-windowed choice, the
+ * write, the transaction receipt's count) reads the returned requests, never
+ * the caller's array.
+ */
+export function identityAssertionRequests<G extends GraphDef>(
+  ctx: Pick<IdentityServiceContext<G>, "graphId" | "registry">,
+  relation: IdentityRelation,
+  pairs: readonly IdentityPair<G>[],
+): readonly IdentityAssertionRequest[] {
+  if (!Array.isArray(pairs)) {
+    throw new TypeError(
+      `Identity bulk ${relation} assertions take an array of pairs.`,
+    );
+  }
+  const length = pairs.length;
+  const requests: IdentityAssertionRequest[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const entry: unknown = pairs[index];
+    if (typeof entry !== "object" || entry === null) {
+      throw new TypeError(
+        `Identity bulk ${relation} assertion pair ${index} is not a pair object.`,
+      );
+    }
+    const pair = entry as IdentityPair<G>;
+    requests.push(
+      identityAssertionRequest(ctx, relation, pair.a, pair.b, pair),
+    );
+  }
+  return requests;
+}
+
 export async function assertPair<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   target: Backend,
   relation: IdentityRelation,
-  firstInput: IdentityNodeRefInput<G>,
-  secondInput: IdentityNodeRefInput<G>,
+  request: IdentityAssertionRequest,
   touch: IdentityTouch,
   noteTransition: IdentityTransitionNoteFunction,
-  windowInput: IdentityValidityWindow | undefined,
   operationInstant: string,
   windowValidator?: IdentityWindowValidator,
 ): Promise<IdentityAssertionResult<G>> {
-  const first = registeredPlainRef(ctx, firstInput);
-  const second = registeredPlainRef(ctx, secondInput);
-  if (refKey(first) === refKey(second)) throw selfAssertionError(relation);
-  const [a, b] = normalizePair(first, second);
+  const [a, b] = request.pair;
+  const windowInput = request.window;
   if (windowInput === undefined) {
     const current = await currentAssertionForPair(
       target,

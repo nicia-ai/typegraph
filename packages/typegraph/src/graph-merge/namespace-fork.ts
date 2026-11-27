@@ -3,6 +3,7 @@
  * database. The destination remains caller-owned and unpublished throughout
  * this operation. No interchange representation is involved.
  */
+import { assertDateIndexExpressionsSupported } from "../backend/capabilities/date-index-expressions";
 import { backendDerivationRoot } from "../backend/derive-backend";
 import { defaultPostgresTableNames } from "../backend/drizzle/schema/postgres-table-names";
 import {
@@ -14,7 +15,7 @@ import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../backend/recorded-storage";
 import type { GraphBackend } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { resolveGraphVectorSlots } from "../core/embedding";
-import { generateIndexDDL } from "../indexes/ddl";
+import { compileIndexDDL } from "../indexes/ddl";
 import type { IndexDeclaration } from "../indexes/types";
 import { tsvectorStrategy } from "../query/dialect/fulltext-strategy";
 import {
@@ -847,6 +848,20 @@ export async function prepareNamespaceForkTarget<G extends GraphDef>(
     throw new BranchError(
       "Namespace fork target does not support owner-side provisioning.",
     );
+  // The replay set is fixed by what the source materialized, and the target
+  // must be able to build every entry of it: refused here, through the same
+  // gate `materializeIndexes` uses, before the target sees any DDL.
+  const recorded = await graphRows(
+    sourceBackend,
+    INDEX_MATERIALIZATIONS_TABLE,
+    source.graphId,
+  );
+  const replayed = materializedIndexes(source.graph, recorded);
+  assertDateIndexExpressionsSupported(
+    targetBackend.capabilities,
+    replayed.map(({ declaration }) => declaration),
+    "prepareNamespaceForkTarget()",
+  );
   await executeDdl(`CREATE TABLE IF NOT EXISTS ${FORK_LEDGER} (
     operation_key text PRIMARY KEY, graph_id text NOT NULL, source_base text NOT NULL,
     content_digest text NOT NULL, copied_at timestamptz NOT NULL DEFAULT now())`);
@@ -862,12 +877,7 @@ export async function prepareNamespaceForkTarget<G extends GraphDef>(
     }
   }
 
-  const recorded = await graphRows(
-    sourceBackend,
-    INDEX_MATERIALIZATIONS_TABLE,
-    source.graphId,
-  );
-  for (const { declaration } of materializedIndexes(source.graph, recorded)) {
+  for (const { declaration } of replayed) {
     if (declaration.entity === "vector") {
       const statement = pgvectorStrategy.buildCreateIndex?.(
         vectorIndexSlot(declaration, source.graphId),
@@ -878,7 +888,7 @@ export async function prepareNamespaceForkTarget<G extends GraphDef>(
     if (declaration.method === "trigram")
       await ensureTrigramExtension(targetBackend);
     await executeDdl(
-      generateIndexDDL(
+      compileIndexDDL(
         declaration,
         targetBackend.dialect,
         relationalIndexDdlOptions(targetBackend, false),

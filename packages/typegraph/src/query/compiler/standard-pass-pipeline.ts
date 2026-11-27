@@ -526,6 +526,21 @@ export function runStandardQueryPassPipeline(
   });
   state = fulltextPass.state;
 
+  // The emitter applies exactly these two predicates through its relevance
+  // CTE joins; recording them lets their WHERE positions compile to a neutral
+  // term while any other relevance predicate is refused.
+  state = {
+    ...state,
+    ctx: {
+      ...state.ctx,
+      appliedRelevancePredicates: new Set(
+        [state.vectorPredicate, state.fulltextPredicate].filter(
+          (predicate) => predicate !== undefined,
+        ),
+      ),
+    },
+  };
+
   assertRecordedQueryDoesNotUseCurrentIndexes(
     state.ast,
     state.vectorPredicate,

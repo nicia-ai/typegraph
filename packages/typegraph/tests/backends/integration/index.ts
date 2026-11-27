@@ -36,6 +36,7 @@ export { registerConstraintFenceVerificationIntegrationTests } from "./constrain
 export { registerContributionDiagnosticIntegrationTests } from "./contribution-diagnostics";
 export { registerCrossBackendConsistencyTests } from "./cross-backend";
 export { registerDatabaseExpressionQueryIntegrationTests } from "./database-expression-queries";
+export { registerDateIndexExpressionIntegrationTests } from "./date-index-expressions";
 export { registerDatePredicateIntegrationTests } from "./date-predicates";
 export { registerDatePropertyMergeIntegrationTests } from "./date-property-merges";
 export { registerDatePropertyReadIntegrationTests } from "./date-property-reads";
@@ -75,6 +76,7 @@ export { registerCurrentIdentityTraversalTests } from "./identity-current-traver
 export { registerHistoricalIdentityTraversalTests } from "./identity-historical-traversal";
 export { registerIdentityImportIntegrationTests } from "./identity-import";
 export { registerIdentityOperationRoutingIntegrationTests } from "./identity-operation-routing";
+export { registerIdentityRefusalBeforeEntryIntegrationTests } from "./identity-refusal-before-entry";
 export { registerIdentityReplayIntegrationTests } from "./identity-replay";
 export { registerIdentitySeparationIntegrationTests } from "./identity-separation";
 export { registerImportClaimKeyDefectIntegrationTests } from "./import-claim-key-defects";
@@ -125,6 +127,7 @@ export { registerRecordedReadBindingIntegrationTests } from "./recorded-read-bin
 export { registerRecordedTimeIntegrationTests } from "./recorded-time";
 export { registerRecursiveIntegrationTests } from "./recursive";
 export { registerRecursiveDelimiterIdIntegrationTests } from "./recursive-delimiter-ids";
+export { registerRecursiveRelevancePredicateIntegrationTests } from "./recursive-relevance-predicates";
 export { registerRecursiveSharedIdIntegrationTests } from "./recursive-shared-ids";
 export { registerRecursiveStopExpansionIntegrationTests } from "./recursive-stop-expansion";
 export { registerRefusedCreateClaimIntegrationTests } from "./refused-create-claims";
@@ -164,6 +167,7 @@ export { registerTrustedImportIntegrationTests } from "./trusted-import";
 export { registerUniquenessClaimGateIntegrationTests } from "./uniqueness-claim-gate";
 export { registerValidityEndClearingIntegrationTests } from "./validity-end-clearing";
 export { registerValidityLowerBoundIntegrationTests } from "./validity-lower-bound";
+export { registerVectorSearchFreshSessionIntegrationTests } from "./vector-search-fresh-session";
 export { registerVersionComparisonRecipeTests } from "./version-comparison-recipe";
 export { registerWeightedShortestPathExtractionIntegrationTests } from "./weighted-shortest-path-extraction";
 export { registerWriteFenceConformanceIntegrationTests } from "./write-fence-conformance";
