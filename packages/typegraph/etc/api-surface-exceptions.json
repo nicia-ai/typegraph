@@ -262,5 +262,13 @@
     "kind": "member-removed",
     "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
     "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "DialectAdapter",
+    "member": "setTransactionWorkingMemory",
+    "kind": "member-removed",
+    "reason": "The dialect seam returned a finished `set_config` statement, which cannot be restored on a caller's transaction. It is replaced by `transactionWorkingMemory`, which returns the setting (`DialectTransactionSetting`) so TypeGraph's one transaction-local settings owner builds the statements that apply it and restore the caller's value. A custom dialect adapter renames the member and returns `{ name, value }` (or `undefined`) instead of a statement; the changeset carries the upgrade note.",
+    "issue": "#1013"
   }
 ]
