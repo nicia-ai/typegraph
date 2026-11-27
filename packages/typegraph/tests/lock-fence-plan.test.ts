@@ -462,6 +462,19 @@ describe("T15 — J1 a lock-only decision reads the memo of the session its lock
         ).rejects.toBeInstanceOf(CompilerInvariantError);
         expect(logged.statements).toHaveLength(0);
         expect(otherSessionMemo.size).toBe(0);
+
+        // The same pairing with a lock whose fence row is already advanced,
+        // which the decision would otherwise hand back at no statement.
+        await expect(
+          lockRecordedGraphDecision(
+            target,
+            "graph-a",
+            decided,
+            otherSessionMemo,
+          ),
+        ).rejects.toBeInstanceOf(CompilerInvariantError);
+        expect(logged.statements).toHaveLength(0);
+        expect(otherSessionMemo.size).toBe(0);
       });
     } finally {
       await logged.close();

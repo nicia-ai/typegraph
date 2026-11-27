@@ -476,22 +476,19 @@ function advancedFenceRow(
 }
 
 /**
- * The single-flight memo a lock-only decision reads and updates: the memo of
- * the caller's session when it names one, otherwise the one `held` was taken
- * into. A lock carries the memo of the session that took it, so a held lock
- * and a session memo that disagree are a lock from one session handed to a
- * decision of another; that is refused, before any statement, rather than
- * resolved in favour of either. Whichever memo it is, it must be this
- * transaction's ({@link ownGraphLockMemo}): a memo filled on another
- * transaction, named on its own or carried by that transaction's lock, would
- * hand this one acquisitions it never made.
+ * THE refusal of a held lock paired with another session's memo. A lock
+ * carries the memo of the session that took it, so a held lock and a session
+ * memo that disagree are a lock from one session handed to a decision of
+ * another; that is refused, before any statement, rather than resolved in
+ * favour of either. It compares the two values and reads neither memo, so it
+ * runs before every return that hands `held` back, an already advanced fence
+ * included.
  */
-function decisionGraphLockMemo(
-  target: GraphWriteFenceTarget,
+function assertDecisionLockOfSession(
   graphId: string,
   held: GraphWriteLock | undefined,
   sessionGraphLocks: RecordedGraphLockMemo | undefined,
-): RecordedGraphLockMemo | undefined {
+): void {
   const heldGraphLocks = held?.graphLocks;
   if (
     heldGraphLocks !== undefined &&
@@ -503,7 +500,28 @@ function decisionGraphLockMemo(
       { graphId },
     );
   }
-  return ownGraphLockMemo(target, graphId, sessionGraphLocks ?? heldGraphLocks);
+}
+
+/**
+ * The single-flight memo a lock-only decision reads and updates: the memo of
+ * the caller's session when it names one, otherwise the one `held` was taken
+ * into ({@link assertDecisionLockOfSession} has already refused a pair that
+ * disagrees). Whichever memo it is, it must be this transaction's
+ * ({@link ownGraphLockMemo}): a memo filled on another transaction, named on
+ * its own or carried by that transaction's lock, would hand this one
+ * acquisitions it never made.
+ */
+function decisionGraphLockMemo(
+  target: GraphWriteFenceTarget,
+  graphId: string,
+  held: GraphWriteLock | undefined,
+  sessionGraphLocks: RecordedGraphLockMemo | undefined,
+): RecordedGraphLockMemo | undefined {
+  return ownGraphLockMemo(
+    target,
+    graphId,
+    sessionGraphLocks ?? held?.graphLocks,
+  );
 }
 
 /**
@@ -544,6 +562,7 @@ export async function lockRecordedGraphDecision(
   if (held !== undefined && held.coordination === undefined) return held;
   const fence = keyedRecordedGraphFence(target, "recorded graph write");
   if (fence === undefined) return held ?? uncapturedGraphWriteLock();
+  assertDecisionLockOfSession(graphId, held, sessionGraphLocks);
   if (held !== undefined && advancedFenceRow(target, graphId, held)) {
     return held;
   }
