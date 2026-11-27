@@ -691,6 +691,13 @@ in another key order). It names the claims by owner instead.
   it must execute on that transaction's connection so that it commits or rolls
   back with the row write it follows. Implement it on the root backend and on
   every transaction handle.
+- **Statement size.** A release names one constraint per bind plus two binds
+  per kept claim. When that exceeds what your engine binds in one statement,
+  split it by constraint, keeping each constraint's `keep` entries in the
+  statement that names it, so no statement releases a claim another keeps.
+  List the kept pairs flat (a row-value `NOT IN`, as below) rather than as one
+  nested condition per claim, which SQLite refuses past an expression depth of
+  1000. The bundled backends split by their declared `maxBindParameters`.
 - **What it returns.** Nothing. The store ignores the value. A release that matches no entry succeeds.
 - **Idempotence.** Calling it again with the same params changes nothing: an
   entry it already tombstoned is no longer live, and is left as it is. An
@@ -699,9 +706,10 @@ in another key order). It names the claims by owner instead.
 The store calls it after the row write it belongs to, never before it. A soft
 delete names every uniqueness and `disjointWith` constraint of the kind and
 keeps nothing. An update or a resurrection names the constraints it moves and
-keeps the keys it has just claimed or already holds. An update whose patch
-states no field that a constraint reads (neither its fields nor the field its
-`where` tests) leaves that constraint alone and calls nothing for it.
+keeps the keys it has just claimed or already holds. An update leaves a
+constraint whose key it does not move (the key of the row as stored equals
+the key of the props it writes, and the constraint applies to both or to
+neither) alone and calls nothing for it.
 
 A reference implementation, for a backend that stores entries in one SQL table
 with the bundled column names. Bind `execute` to the connection the member is
@@ -728,18 +736,21 @@ function releaseUniquesByOwnerOn(
     ];
     const bind = (value: unknown): string => {
       parameters.push(value);
-      return `${parameters.length}`;
+      return `$${parameters.length}`;
     };
     const constraints = params.constraintNames.map((name) => bind(name));
     const kept = params.keep.map(
-      (claim) =>
-        ` AND NOT (constraint_name = ${bind(claim.constraintName)} AND key = ${bind(claim.key)})`,
+      (claim) => `(${bind(claim.constraintName)}, ${bind(claim.key)})`,
     );
+    const keepTerm =
+      kept.length === 0 ? "" : (
+        ` AND (constraint_name, key) NOT IN (VALUES ${kept.join(", ")})`
+      );
     await execute(
       `UPDATE typegraph_node_uniques SET deleted_at = $1
         WHERE graph_id = $2 AND concrete_kind = $3 AND node_id = $4
           AND deleted_at IS NULL
-          AND constraint_name IN (${constraints.join(", ")})${kept.join("")}`,
+          AND constraint_name IN (${constraints.join(", ")})${keepTerm}`,
       parameters,
     );
   };

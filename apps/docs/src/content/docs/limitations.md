@@ -820,23 +820,35 @@ dedicated graph database.
 
 ## Uniqueness Claims Keyed in Another Form
 
-A unique value's claim is keyed from validated props and released by its
-owner (see [Uniqueness Constraints](/core-concepts#how-a-unique-value-is-claimed-and-released)).
-Two kinds of claim can still hold the same value under a different key, so
-neither collides with the other:
+A unique value's claim is keyed from the value the row stores and released by
+its owner (see [Uniqueness Constraints](/core-concepts#how-a-unique-value-is-claimed-and-released)).
+Some claims can still hold the same value under a different key, so neither
+collides with the other:
 
 - **Claims written before keys came from validated props.** An import under
   `onUnknownProperty: "allow"` or a provenance revival on an earlier release
   could key a date claim from its unquoted ISO text, where a create keys the
   JSON-quoted text of the `Date`. A create of the same date is admitted beside
-  such a claim. An update that states the constrained field, even with its
-  current value (for example `update(id, { at: node.at })`), re-keys the
-  holder's claim from validated props, and refuses with `UniquenessError`
-  when a duplicate was already admitted; resolve the duplicate (for example by
-  hard-deleting one of the two nodes) and update the holder again. An update
-  whose patch states no field the constraint reads leaves the claim as it is. Until then,
+  such a claim. An update that leaves the key where it was leaves the claim as
+  it is, even when it restates the field. To re-key it, move the holder's
+  value off and back with two updates: the update back claims the value as a
+  create does, and refuses with `UniquenessError` when a duplicate was already
+  admitted; resolve the duplicate (for example by hard-deleting one of the two
+  nodes) and update the holder again. Until then,
   `getOrCreateByConstraint()` does not resurrect a soft-deleted holder whose
   released claim has the other form, and creates a new node instead.
+- **Dates the stored-row reading cannot reach.** A date under `z.lazy()`, a
+  union, or a pipe such as `z.string().pipe(z.coerce.date())` is read from a
+  stored row as its ISO text, while a create keys the `Date`. Such a value
+  imported under `onUnknownProperty: "allow"`, or revived by a provenance
+  reopen, holds a text-keyed claim a create of the same date does not collide
+  with, and `getOrCreateByConstraint()` creates a new node rather than
+  resurrecting a soft-deleted holder of it. Releases are unaffected.
+- **Values imported verbatim.** An import under `onUnknownProperty: "allow"`
+  keys a node's claims and an edge's match identity from the document's text.
+  A value whose schema parse differs from that text, such as an object a
+  PostgreSQL export returns in `jsonb` key order or an identity field the
+  schema lower-cases, does not collide with a create of the same value.
 - **Values whose validated key order follows their input.** A `z.record()`
   value, or the extra keys of a `z.looseObject()`, keys in the order its keys
   were stated, so two writers stating them in different orders hold two

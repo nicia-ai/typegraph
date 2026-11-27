@@ -859,24 +859,24 @@ TypeScript requires both `scope` and `collation`. An untyped caller that omits
 
 ### How a unique value is claimed and released
 
-A node reserves each unique value it holds as a claim row keyed by the value.
-The key is computed from the props the write validated, by one function, on
-every path that claims or looks up a value: create, update, upsert, import,
-`updateWhere()`, graph merge, resurrection, `findByConstraint()` and
-`getOrCreateByConstraint()`. A date is keyed from its `Date`, never from the
-ISO text the row stores, and an object from its validated key order, never
-from the order PostgreSQL's `jsonb` returns. A path that starts from a stored
-row (a provenance reopen, for example) validates it through the kind's schema
-first.
+A node reserves each unique value it holds as a claim row keyed by the value
+the row stores, by one function, on every path that claims or looks up a
+value: create, update, upsert, import, `updateWhere()`, graph merge,
+resurrection, `findByConstraint()` and `getOrCreateByConstraint()`. A write
+keys the props it validated. A path that starts from a stored row (the row an
+update replaces, a tombstone a provenance reopen or `getOrCreateByConstraint()`
+revives, a merge's after-image) keys the stored props with their `z.date()`
+text read back as a `Date`, the one place a stored value and its validated
+form differ, and never parses them through the schema again.
 
 A claim is released by the node that holds it. An update gives back every
 claim the node holds under the constraint other than the key it now claims,
 and a delete gives back all of them, without recomputing the key an earlier
-write took. A claim keyed in an older form is released the same way. An
-`update()` whose patch states none of a constraint's fields, nor the field
-its `where` tests, cannot change that constraint's key, so it leaves the
-claim alone and issues no statement for it. Two
-cases this does not repair are described in
+write took. A claim keyed in an older form is released the same way. An update
+compares each constraint's key under the row as stored with its key under the
+props it writes, and leaves a constraint whose key, and whether it applies,
+are the same alone, issuing no statement for it. The cases this does not
+repair are described in
 [Limitations](/limitations#uniqueness-claims-keyed-in-another-form).
 
 ## Type Inference
