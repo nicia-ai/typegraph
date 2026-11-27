@@ -23,6 +23,7 @@ import { describe, expect, it } from "vitest";
 import type {
   GraphBackend,
   InsertNodeParams,
+  TransactionBackend,
 } from "../../../src/backend/types";
 import { TypeGraphError } from "../../../src/errors";
 import { sql } from "../../../src/query/sql-fragment";
@@ -560,6 +561,51 @@ export function registerTransactionStatementAdmissionTests(
         },
       );
     });
+  });
+
+  describe("a backend adopted over a transaction TypeGraph opened", () => {
+    it.each(["rolled back", "committed"] as const)(
+      "is refused once TypeGraph %s the transaction, and its late write is not saved",
+      async (end) => {
+        const backend = context.getBackend();
+        const graphId = nextGraphId();
+        let adopted: TransactionBackend | undefined;
+        let inFlight: Promise<string> | undefined;
+        const transaction = await outcomeOf(
+          backend.transactionWithNative(async (tx, native) => {
+            const adoption = backend.adoptTransaction(native);
+            adopted = adoption;
+            await adoption.insertNode(node(graphId, "adopted-inside"));
+            // Started, not awaited: the owner's boundary waits for it.
+            inFlight = outcomeOf(
+              adoption.insertNode(node(graphId, "adopted-in-flight")),
+            );
+            await tx.insertNode(node(graphId, "owner"));
+            if (end === "rolled back") throw new Error("callback failed");
+          }),
+        );
+        const late = await outcomeOf(
+          requireDefined(adopted).insertNode(node(graphId, "adopted-late")),
+        );
+        expect({
+          transaction,
+          inFlight: await requireDefined(inFlight),
+          late,
+          nodes: await nodeIds(backend, graphId),
+        }).toEqual({
+          transaction:
+            end === "rolled back" ?
+              "untyped: Error: callback failed"
+            : "fulfilled",
+          inFlight: "fulfilled",
+          late: "TransactionClosedError",
+          nodes:
+            end === "rolled back" ?
+              []
+            : ["adopted-in-flight", "adopted-inside", "owner"],
+        });
+      },
+    );
   });
 
   describe("two views of one transaction's connection", () => {

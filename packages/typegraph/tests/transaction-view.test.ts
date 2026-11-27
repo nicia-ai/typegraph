@@ -20,8 +20,14 @@ import type {
   SqliteExecutionAdapter,
 } from "../src/backend/drizzle/execution/sqlite-execution";
 import { createSqliteTransactionExecutionView } from "../src/backend/drizzle/execution/sqlite-execution";
-import { createTransactionView } from "../src/backend/drizzle/execution/transaction-view";
-import { resolveNativeTransactionHandle } from "../src/backend/native-transaction-handle";
+import {
+  createTransactionView,
+  openTransactionView,
+} from "../src/backend/drizzle/execution/transaction-view";
+import {
+  recordEngineSavepoint,
+  resolveNativeTransactionHandle,
+} from "../src/backend/native-transaction-handle";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import { TransactionClosedError } from "../src/errors";
 import { sql as portableSql } from "../src/query/sql-fragment";
@@ -91,6 +97,60 @@ describe("createTransactionView", () => {
     expect(ran).toBe(false);
     // Idempotent.
     await expect(view.drainAndClose()).resolves.toBeUndefined();
+  });
+});
+
+/** `view.admit` of a no-op, as its outcome: `"admitted"` or the error name. */
+function admitOutcome(view: ReturnType<typeof createTransactionView>) {
+  return view
+    .admit(() => Promise.resolve("admitted"))
+    .catch((error: unknown) =>
+      error instanceof Error ? error.name : String(error),
+    );
+}
+
+describe("openTransactionView", () => {
+  it("hands an adoption of a transaction its owner's view, closed by the owner", async () => {
+    const nativeTransaction = {};
+    const owner = openTransactionView("owner", nativeTransaction, {});
+    const adoption = openTransactionView("adoption", nativeTransaction, {});
+    const held = createGate();
+    const adopted = adoption.admit(() => held.opened.then(() => "adopted"));
+    const drained = owner.drainAndClose();
+    // The owner's drain waits for the adoption's statement.
+    expect(await hasSettled(drained)).toBe(false);
+    held.open();
+    await drained;
+    expect({
+      adopted: await adopted,
+      late: await admitOutcome(adoption),
+    }).toEqual({ adopted: "adopted", late: "TransactionClosedError" });
+  });
+
+  it("gives an adoption with no proven owner a view nothing closes", async () => {
+    const owner = openTransactionView("owner", {}, {});
+    await owner.drainAndClose();
+    expect({
+      unidentified: await admitOutcome(
+        openTransactionView("adoption", undefined, {}),
+      ),
+      unowned: await admitOutcome(openTransactionView("adoption", {}, {})),
+    }).toEqual({ unidentified: "admitted", unowned: "admitted" });
+  });
+
+  it("does not register an engine savepoint's view for the transaction it encloses", async () => {
+    const enclosing = {};
+    const savepoint = {};
+    recordEngineSavepoint(savepoint, {
+      kind: "transaction",
+      handle: enclosing,
+    });
+    // A caller's transaction TypeGraph opened a savepoint on, and one it
+    // opened itself.
+    const savepointView = openTransactionView("owner", enclosing, savepoint);
+    await savepointView.drainAndClose();
+    const callerAdoption = openTransactionView("adoption", enclosing, {});
+    expect(await admitOutcome(callerAdoption)).toBe("admitted");
   });
 });
 
@@ -176,7 +236,10 @@ describe("createSqliteTransactionExecutionView", () => {
     "waits for a held %s before it closes",
     async (member) => {
       const { adapter, release, ran } = heldAdapter();
-      const view = createSqliteTransactionExecutionView(adapter);
+      const view = createSqliteTransactionExecutionView(
+        adapter,
+        createTransactionView(),
+      );
       // Every other member is in flight too, and released first: the drain
       // must still wait on this one alone.
       const inFlight = STATEMENT_MEMBERS.map((each) =>
@@ -198,7 +261,10 @@ describe("createSqliteTransactionExecutionView", () => {
     "refuses %s after it closes without running it",
     async (member) => {
       const { adapter, ran } = heldAdapter();
-      const view = createSqliteTransactionExecutionView(adapter);
+      const view = createSqliteTransactionExecutionView(
+        adapter,
+        createTransactionView(),
+      );
       await view.drainAndClose();
       await expect(
         STATEMENT_MEMBER_CALLS[member](view.adapter),
@@ -209,7 +275,10 @@ describe("createSqliteTransactionExecutionView", () => {
 
   it("passes members that touch no connection through after it closes", async () => {
     const { adapter, ran } = heldAdapter();
-    const view = createSqliteTransactionExecutionView(adapter);
+    const view = createSqliteTransactionExecutionView(
+      adapter,
+      createTransactionView(),
+    );
     await view.drainAndClose();
     view.adapter.clearStatementCache();
     expect({

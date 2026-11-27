@@ -11,7 +11,7 @@ import {
 } from "../../types";
 import { isLibsqlClient, type LibsqlClient } from "../libsql-client";
 import { getOrCreateLru } from "./lru";
-import { createTransactionView, type TransactionView } from "./transaction-view";
+import type { TransactionView } from "./transaction-view";
 import {
   type CompiledSqlQuery,
   compileQueryWithDialect,
@@ -811,16 +811,17 @@ export type SqliteTransactionExecutionView = Readonly<{
 }>;
 
 /**
- * Wraps `adapter` in a fresh {@link TransactionView} for one transaction: every
- * statement it runs is admitted through the view, so once the transaction's
- * runner calls `drainAndClose` (before COMMIT / ROLLBACK) a late statement is
- * refused instead of running outside the transaction that issued it. The
- * runner's own frame statements go through the unwrapped adapter.
+ * Wraps `adapter` in `view`, the {@link TransactionView} of the transaction one
+ * bind runs on (`openTransactionView`): every statement it runs is admitted
+ * through the view, so once the transaction's runner calls `drainAndClose`
+ * (before COMMIT / ROLLBACK) a late statement is refused instead of running
+ * outside the transaction that issued it. The runner's own frame statements
+ * go through the unwrapped adapter.
  */
 export function createSqliteTransactionExecutionView(
   adapter: SqliteExecutionAdapter,
+  view: TransactionView,
 ): SqliteTransactionExecutionView {
-  const view = createTransactionView();
   function viewMember(
     role: (typeof SQLITE_ADAPTER_MEMBER_ROLES)[keyof SqliteExecutionAdapter],
     member: unknown,

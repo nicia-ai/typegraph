@@ -161,8 +161,14 @@ function liveIdentity(identity: object): object | undefined {
   return identity;
 }
 
-/** The native transaction `handle` runs in, by the proof its kind offers. */
-function identifyNativeTransaction(handle: NativeHandle): object | undefined {
+/**
+ * The native transaction `handle` runs in, by the proof its kind offers;
+ * `undefined` without proof. A bind identifies its transaction once, with
+ * this, and records what it found ({@link recordBoundNativeTransaction}).
+ */
+export function identifyNativeTransaction(
+  handle: NativeHandle,
+): object | undefined {
   // Proof 1: a savepoint the engine opened.
   const enclosing = ENGINE_SAVEPOINTS.get(handle.handle);
   if (enclosing !== undefined) return liveIdentity(enclosing);
@@ -196,10 +202,29 @@ export function recordNativeTransactionHandle(
   backend: object,
   handle: NativeHandle,
 ): void {
-  const nativeTransaction = identifyNativeTransaction(handle);
+  recordBoundNativeTransaction(backend, identifyNativeTransaction(handle));
+}
+
+/**
+ * Records that `backend` runs on `nativeTransaction`, the identity its bind
+ * found ({@link identifyNativeTransaction}) or the token its opener is
+ * opening. Records nothing for `undefined`.
+ */
+export function recordBoundNativeTransaction(
+  backend: object,
+  nativeTransaction: object | undefined,
+): void {
   if (nativeTransaction !== undefined) {
     BOUND_NATIVE_TRANSACTIONS.set(backend, nativeTransaction);
   }
+}
+
+/**
+ * Whether `handle` is a savepoint the engine opened: a bind on it runs in the
+ * transaction it encloses, which another bind opened.
+ */
+export function isEngineSavepoint(handle: object): boolean {
+  return ENGINE_SAVEPOINTS.has(handle);
 }
 
 /**
@@ -210,7 +235,7 @@ export function recordOpenedNativeTransaction(
   backend: object,
   token: object,
 ): void {
-  BOUND_NATIVE_TRANSACTIONS.set(backend, token);
+  recordBoundNativeTransaction(backend, token);
 }
 
 /**

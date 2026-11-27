@@ -25,7 +25,10 @@
  *
  * Edge-safe: no `node:*` imports (loaded on Workers via neon-serverless).
  */
-import { createTransactionView } from "./transaction-view";
+import {
+  createTransactionView,
+  type TransactionView,
+} from "./transaction-view";
 import {
   type CompiledSqlQuery,
   type ExecutableSql,
@@ -110,16 +113,21 @@ function queueForTransaction(owner: object): StatementQueue {
  *
  * The queue is a leaf: nothing it runs re-enters it, so a queued statement
  * can never wait on a statement queued behind it.
+ *
+ * Every statement is admitted through `view` before it queues: a
+ * transaction bind passes the view of its native transaction
+ * (`openTransactionView`), shared by the transaction's owner and every
+ * proven adoption of it; a root queue gets a view of its own.
  */
 export function createSerialExecutionAdapter(
   adapter: SqlExecutionAdapter,
   transactionOwner?: object,
+  view: TransactionView = createTransactionView(),
 ): SerialExecutionAdapter {
   const queue =
     transactionOwner === undefined ?
       createStatementQueue()
     : queueForTransaction(transactionOwner);
-  const view = createTransactionView();
   const { executeCompiled, prepare } = adapter;
 
   function enqueue<T>(task: () => Promise<T>): Promise<T> {
