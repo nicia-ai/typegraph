@@ -4,6 +4,7 @@ export {
 } from "./fulltext";
 export { type FusionConfigPassResult, runFusionConfigPass } from "./fusion";
 export {
+  refuseRelevancePredicatesInRecursiveStatement,
   runRecursiveTraversalSelectionPass,
   type VariableLengthTraversal,
 } from "./recursive";

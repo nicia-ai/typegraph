@@ -518,6 +518,24 @@ export type BackendCapabilities = Readonly<{
    */
   recursiveTraversal?: RecursiveTraversalCapability | undefined;
   /**
+   * Whether this engine can build a declared index whose key, covering
+   * column or partial-index predicate reads a date-typed property.
+   *
+   * A date property is stored as ISO text and compared as a timestamp, so its
+   * index expression casts the stored text. PostgreSQL refuses that cast in an
+   * index (`text` to `timestamptz` depends on the session time zone, so it is
+   * not immutable), and the bundled PostgreSQL backends declare `false`:
+   * `store.materializeIndexes()` (and eager `store.evolve()`, before its
+   * schema commit), `prepareNamespaceForkTarget()` against its target, and
+   * `createPostgresTables({ indexes })` refuse such a declaration with
+   * `UnsupportedBackendCapabilityError` before any DDL. `findDateIndexExpression` (`indexes/compiler.ts`) is the one
+   * classifier of which declarations read a date property.
+   *
+   * Absent means SUPPORTED, so a custom backend keeps materializing every
+   * declaration it materializes today.
+   */
+  dateIndexExpressions?: boolean | undefined;
+  /**
    * How this backend excludes concurrent writers: a keyed advisory lock, a
    * single writer slot the engine serializes by construction, or a
    * deployment-level promise that this process serializes its own writes and
@@ -5276,6 +5294,7 @@ export const SQLITE_CAPABILITIES: BackendCapabilities = Object.freeze({
   // better-sqlite3 factory overrides this flag for its bundled build contract.
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: false }),
   recursiveTraversal: Object.freeze({ supported: true }),
+  dateIndexExpressions: true,
   writeFence: Object.freeze({
     mechanism: "engine-serialized",
   }),
@@ -5303,6 +5322,9 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities = Object.freeze({
   maxBindParameters: POSTGRES_MAX_BIND_PARAMETERS,
   graphAnalytics: Object.freeze({ supported: true, mathFunctions: true }),
   recursiveTraversal: Object.freeze({ supported: true }),
+  // A date index expression casts stored text to timestamptz, which is not
+  // immutable, so PostgreSQL refuses it in an index key or predicate (42P17).
+  dateIndexExpressions: false,
   writeFence: Object.freeze({
     mechanism: "advisory",
     drain: "table-lock",
