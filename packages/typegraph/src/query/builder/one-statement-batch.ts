@@ -5,7 +5,7 @@ import type { QueryAst } from "../ast";
 import { selectionOrderColumn } from "../compiler";
 import { getDialect } from "../dialect";
 import { type DialectAdapter } from "../dialect/types";
-import { type DatabaseExpression } from "../expressions";
+import { type DatabaseExpression, yieldsStoredDate } from "../expressions";
 import { compileOrderTerm } from "../order";
 import {
   PORTABLE_COMPOUND_SELECT_TERMS_LIMIT,
@@ -90,9 +90,7 @@ export function storedDateOutputNames(
     Pick<DatabaseExpression, "dateOrigin" | "valueType">)[],
 ): readonly string[] {
   return columns
-    .filter(
-      (column) => column.valueType === "date" && column.dateOrigin !== "stated",
-    )
+    .filter((column) => yieldsStoredDate(column))
     .map((column) => column.outputName);
 }
 

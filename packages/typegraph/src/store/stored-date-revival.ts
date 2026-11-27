@@ -359,6 +359,45 @@ export type StoredReadPlan =
 
 const DATE_PLAN: StoredReadPlan = Object.freeze({ form: "date" });
 
+/**
+ * The date positions two read plans share: the plan of a value that may be
+ * read under either typing (a `coalesce()` or `when()` of two structured
+ * properties), so a position only one types as a date is returned as stored
+ * rather than decoded under the other branch's typing. `undefined` when they
+ * share none.
+ */
+export function sharedStoredReadPlan(
+  left: StoredReadPlan,
+  right: StoredReadPlan,
+): StoredReadPlan | undefined {
+  switch (left.form) {
+    case "date": {
+      return right.form === "date" ? DATE_PLAN : undefined;
+    }
+    case "array": {
+      if (right.form !== "array") return undefined;
+      const element = sharedStoredReadPlan(left.element, right.element);
+      return element === undefined ? undefined : { form: "array", element };
+    }
+    case "record": {
+      if (right.form !== "record") return undefined;
+      const value = sharedStoredReadPlan(left.value, right.value);
+      return value === undefined ? undefined : { form: "record", value };
+    }
+    case "object": {
+      if (right.form !== "object") return undefined;
+      const rightKeys = new Map(right.keys);
+      const keys = left.keys.flatMap(([key, plan]) => {
+        const other = rightKeys.get(key);
+        const shared =
+          other === undefined ? undefined : sharedStoredReadPlan(plan, other);
+        return shared === undefined ? [] : [[key, shared] as const];
+      });
+      return keys.length === 0 ? undefined : { form: "object", keys };
+    }
+  }
+}
+
 function compileStoredReadPlan(
   info: FieldTypeInfo,
 ): StoredReadPlan | undefined {

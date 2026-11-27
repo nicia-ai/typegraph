@@ -1,5 +1,8 @@
 import { UnsupportedPredicateError } from "../errors";
-import type { StoredReadPlan } from "../store/stored-date-revival";
+import {
+  sharedStoredReadPlan,
+  type StoredReadPlan,
+} from "../store/stored-date-revival";
 import { dateTimeValue } from "../utils/date";
 import {
   assertPortableCountDistinctValueType,
@@ -362,20 +365,23 @@ function sharedDateOrigins(
 }
 
 /**
- * The read plan a composed expression keeps: its operands' shared one, only
- * when every operand that yields its result reads a structured property with
- * date positions, so a branch reading anything else never has its text decoded.
+ * The read plan a composed expression keeps: the date positions every operand
+ * that yields its result shares (`sharedStoredReadPlan`), so a branch reading
+ * anything else, or typing a position differently, never has its text decoded
+ * under another branch's typing.
  */
 function sharedReadPlan(
   operands: readonly DatabaseExpression[],
 ): StoredReadPlan | undefined {
-  const [first] = operands;
-  return (
-      first !== undefined &&
-        operands.every((operand) => expressionReadPlan(operand) !== undefined)
-    ) ?
-      expressionReadPlan(first)
-    : undefined;
+  const plans = operands.map((operand) => expressionReadPlan(operand));
+  const [first, ...rest] = plans;
+  if (first === undefined) return undefined;
+  let shared: StoredReadPlan | undefined = first;
+  for (const plan of rest) {
+    if (plan === undefined || shared === undefined) return undefined;
+    shared = sharedStoredReadPlan(shared, plan);
+  }
+  return shared;
 }
 
 /**
@@ -661,7 +667,7 @@ export function createScalarSubqueryExpression<T, Scope extends string>(
     projected.elementValueType,
     projected.elementFields,
     projected.arrayElementType,
-    undefined,
+    expressionReadPlan(projected),
     carriedDateOrigins(projected),
   );
 }
@@ -1293,3 +1299,17 @@ export const expr = {
   toNumber,
   when,
 } as const;
+
+/**
+ * @internal Whether `expression` yields a date the compiler reads from stored
+ * props — a date-typed expression whose dates the caller did not state. Such a
+ * date is cast by the dialect (`DialectAdapter.jsonExtractDate`), so where the
+ * compiler builds it into JSON it emits the dialect's canonical date text
+ * (`DialectAdapter.jsonDateText`); a stated date binds as its canonical text
+ * and is never cast.
+ */
+export function yieldsStoredDate(
+  expression: Pick<DatabaseExpression, "dateOrigin" | "valueType">,
+): boolean {
+  return expression.valueType === "date" && expression.dateOrigin !== "stated";
+}

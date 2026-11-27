@@ -24,6 +24,7 @@ import {
   resolveCollectFilter,
   resolveCollectOrder,
   resolveCollectRecordFields,
+  yieldsStoredDate,
 } from "../expressions";
 import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -150,20 +151,28 @@ function aggregateFunction(operator: AggregateOperator): SqlFragment {
 }
 
 /**
- * A value as it enters a collected JSON array: a date as the canonical UTC
- * text the dialect renders for JSON (`jsonDateText`), collected as the string
- * it then is, so every backend emits the same bytes whatever its session time
- * zone; any other value as compiled.
+ * A value as it enters a collected JSON array: a date read from stored props as
+ * the canonical UTC text the dialect renders for JSON (`jsonDateText`),
+ * collected as the string it then is, so every backend emits the same bytes
+ * whatever its session time zone; a date the caller stated as the canonical
+ * text it is bound as, never cast (a valid `Date` may lie outside the engine's
+ * timestamp range); any other value as compiled.
  */
 function collectedValue(
   name: string,
   value: SqlFragment,
-  valueType: ValueType,
+  expression: Pick<DatabaseExpression, "dateOrigin" | "valueType">,
   context: DatabaseExpressionCompilerContext,
 ): Readonly<{ name: string; value: SqlFragment; valueType: ValueType }> {
-  return valueType === "date" ?
-      { name, value: context.dialect.jsonDateText(value), valueType: "string" }
-    : { name, value, valueType };
+  if (yieldsStoredDate(expression))
+    return {
+      name,
+      value: context.dialect.jsonDateText(value),
+      valueType: "string",
+    };
+  return expression.valueType === "date" ?
+      { name, value, valueType: "string" }
+    : { name, value, valueType: expression.valueType };
 }
 
 function compileNode(
@@ -302,7 +311,7 @@ function compileNode(
               collectedValue(
                 name,
                 compileNode(value, context, aggregateDepth + 1),
-                value.valueType,
+                value,
                 context,
               ),
           ),
@@ -314,7 +323,7 @@ function compileNode(
       const { value, valueType } = collectedValue(
         "",
         compileNode(operand, context, aggregateDepth + 1),
-        operand.valueType,
+        operand,
         context,
       );
       return context.dialect.orderedScalarJsonArray({

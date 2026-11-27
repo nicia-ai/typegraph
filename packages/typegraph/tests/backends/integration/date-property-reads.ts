@@ -67,6 +67,37 @@ const LATER = new Date("2025-06-01T00:00:00.000Z");
  */
 const NON_PORTABLE = "2024-01-02T03:04:05Z";
 
+/** A valid `Date` outside PostgreSQL's `timestamptz` range (there is no year 0). */
+const YEAR_ZERO = new Date("0000-06-01T00:00:00.000Z");
+
+/**
+ * Two structured properties that type their date positions differently: a
+ * `coalesce()` of them may yield either, so only a position both type as a
+ * date can be decoded.
+ */
+const Shaped = defineNode("Shaped", {
+  schema: z.object({
+    title: z.string(),
+    opened: z
+      .array(
+        z.object({ openedAt: z.date(), closedAt: z.string(), both: z.date() }),
+      )
+      .optional(),
+    closed: z
+      .array(
+        z.object({ openedAt: z.string(), closedAt: z.date(), both: z.date() }),
+      )
+      .optional(),
+    window: z.object({ at: z.date() }).optional(),
+  }),
+});
+
+const SHAPED_GRAPH = defineGraph({
+  id: "date_reads_shaped",
+  nodes: { Shaped: { type: Shaped } },
+  edges: {},
+});
+
 const DatedRead = defineNode("DatedRead", {
   schema: z.object({
     title: searchable({ language: "english" }),
@@ -1023,6 +1054,116 @@ export function registerDatePropertyReadIntegrationTests(
           },
         ],
       });
+    });
+  });
+
+  describe("a composed or nested date expression decodes only what it yields", () => {
+    it("collects a stated date as the Date stated, outside the engine's timestamp range too", async () => {
+      const { store } = await seed(context, "date_reads_stated_collect");
+      const [row] = await store
+        .query()
+        .from("DatedRead", "d")
+        .aggregate((fields) => ({
+          stated: expr.collect(expr.literal(YEAR_ZERO), {
+            orderBy: [{ expression: fields.d.title }],
+          }),
+          records: expr.collect(
+            { at: expr.literal(YEAR_ZERO), plain: fields.d.plain },
+            { orderBy: [{ expression: fields.d.title }] },
+          ),
+        }))
+        .asRelation()
+        .execute();
+      expect(row).toEqual({
+        stated: [YEAR_ZERO, YEAR_ZERO],
+        records: [
+          { at: YEAR_ZERO, plain: PLAIN },
+          { at: YEAR_ZERO, plain: LATER },
+        ],
+      });
+    });
+
+    it("a coalesce of structured properties decodes only the date positions every branch shares", async () => {
+      const store = await context.createStore(SHAPED_GRAPH);
+      await store.nodes.Shaped.create({
+        title: "closed only",
+        closed: [{ openedAt: ISO_TEXT, closedAt: PLAIN, both: OPT }],
+        window: { at: PLAIN },
+      });
+      const [row] = await store
+        .query()
+        .from("Shaped", "s")
+        .project((fields) => ({
+          // The public types refuse a structured operand; an untyped caller (a
+          // dynamic query) composes one all the same.
+          either: expr.coalesce(
+            fields.s.opened as never,
+            fields.s.closed as never,
+          ),
+        }))
+        .execute();
+      // `closed` is the branch the engine returns; `opened` types its
+      // `openedAt` as a date and `closedAt` as text, so only the position both
+      // type as a date is decoded and the rest is returned as stored.
+      expect(row?.either).toEqual([
+        { openedAt: ISO_TEXT, closedAt: PLAIN.toISOString(), both: OPT },
+      ]);
+
+      // An object property cannot be composed at all: its field proxy refuses
+      // the `arrayElementType` member a composition reads. Pinned as main has it.
+      const objectComposition = await (async () => {
+        try {
+          const rows = await store
+            .query()
+            .from("Shaped", "s")
+            .project((fields) => ({
+              // The types refuse an object field operand as well.
+              window: expr.coalesce(
+                fields.s.window as never,
+                fields.s.window as never,
+              ),
+            }))
+            .execute();
+          return { rows };
+        } catch (error) {
+          return {
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      })();
+      expectObservation({
+        lane: { dialect: store.backend.dialect },
+        observed: objectComposition,
+        correct: { rows: [{ window: { at: PLAIN } }] },
+        defects: [
+          {
+            label: "object field proxy refuses arrayElementType",
+            on: {},
+            today: {
+              error: 'Unknown expression field "s.window.arrayElementType"',
+            },
+          },
+        ],
+      });
+    });
+
+    it("$scalar() of a structured property decodes its date positions", async () => {
+      const { store } = await seed(context, "date_reads_scalar_structured");
+      const [row] = await store
+        .query()
+        .from("DatedRead", "d")
+        .whereNode("d", (d) => d.title.eq(FULL_INPUT.title))
+        .project((fields) => ({
+          arr: fields.$scalar((subquery) =>
+            subquery
+              .from("DatedRead", "x")
+              .whereNode("x", (x) => x.title.eq(FULL_INPUT.title))
+              .project((inner) => ({ arr: inner.x.arr }))
+              .limit(1),
+          ),
+        }))
+        .execute();
+      expect(row).toEqual({ arr: FULL_READ.arr });
     });
   });
 }
