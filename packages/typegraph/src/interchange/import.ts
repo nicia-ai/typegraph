@@ -71,7 +71,6 @@ import {
   snapshotExportContention,
 } from "../backend/transaction-resource";
 import {
-  type EdgeMatchIdentityStorage,
   type EdgeRow,
   type GraphBackend,
   type InsertEdgeParams,
@@ -195,6 +194,7 @@ import {
   storeRuntime,
 } from "../store/runtime-port";
 import { type Store } from "../store/store";
+import { storedNodeClaimProps } from "../store/stored-date-revival";
 import { type CompositionNodeRef } from "../store/types";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
@@ -2060,7 +2060,12 @@ type NodeImportCandidate = Readonly<{
   schemaEntry: NodeSchemaEntry;
   /** The props written: the parse, or the document's verbatim under "allow". */
   props: Record<string, unknown>;
-  /** The schema's parse of the props, which every claim is keyed from. */
+  /**
+   * The props every claim is keyed from: `props` through the stored-props key
+   * path (`storedNodeClaimProps`), so a claim is keyed from the value the row
+   * is written with — the document's own value under "allow", never the
+   * schema's parse of it — with stored date text revived.
+   */
   claimProps: Record<string, unknown>;
   draft: NodeCreateDraft;
 }>;
@@ -2148,11 +2153,15 @@ async function processNodeSlice(
       continue;
     }
     seenKeys.add(key);
+    const claimProps = storedNodeClaimProps(
+      schemaEntry.registration.type.schema,
+      propsResult.data,
+    );
     candidates.push({
       node,
       schemaEntry,
       props: propsResult.data,
-      claimProps: propsResult.parsed,
+      claimProps,
       draft: {
         kind: node.kind,
         id: node.id,
@@ -2160,8 +2169,8 @@ async function processNodeSlice(
         idProvided: true,
         nodeKind: schemaEntry.registration.type,
         uniqueConstraints: schemaEntry.registration.unique ?? [],
-        // The cache priming keys claims from it, so it is the parse.
-        validatedProps: propsResult.parsed,
+        // The cache priming keys claims from it.
+        validatedProps: claimProps,
         // NodeCreateDraft.validFrom is string | undefined (never null) — it
         // only feeds batch validation-cache priming, which never inspects
         // it, so normalizing the explicit-NULL sentinel away here is inert.
@@ -2264,6 +2273,10 @@ async function processNodeSlice(
             registerAppliedNodeUpdate(
               node.kind,
               node.id,
+              storedNodeClaimProps(
+                schemaEntry.registration.type.schema,
+                rowPropsToObject(existing.props),
+              ),
               claimProps,
               uniqueConstraints,
             );
@@ -2341,7 +2354,7 @@ async function processNodeSlice(
           registry,
           candidate.node,
           candidate.schemaEntry.registration,
-          { written: candidate.props, claimed: candidate.claimProps },
+          candidate.props,
         ),
       ),
     );
@@ -2397,28 +2410,23 @@ function importNodeCreateWork(
   registry: KindRegistry,
   node: InterchangeNode,
   registration: NodeRegistration,
-  props: Readonly<{
-    /** The props the row is written with. */
-    written: Record<string, unknown>;
-    /** The schema's parse of them, which the claims are keyed from. */
-    claimed: Record<string, unknown>;
-  }>,
+  props: Record<string, unknown>,
 ): NodeCreateWork {
   const claim = {
     kind: node.kind,
     id: node.id,
-    props: props.claimed,
+    props: storedNodeClaimProps(registration.type.schema, props),
     constraints: registration.unique ?? [],
   } satisfies NodeClaimItem;
   return {
-    params: buildImportInsertParams(graphId, node, props.written),
+    params: buildImportInsertParams(graphId, node, props),
     claim,
     claimPlan: planNodeCreateClaims({ graphId, registry }, claim),
     sideEffects: {
       kind: node.kind,
       id: node.id,
       schema: registration.type.schema,
-      props: props.written,
+      props,
       uniqueConstraints: registration.unique ?? [],
     },
     projections: [],
@@ -3252,7 +3260,10 @@ async function processNode(
           existing,
           schema: registration.type.schema,
           validatedProps: propsResult.data,
-          claimProps: propsResult.parsed,
+          claimProps: storedNodeClaimProps(
+            registration.type.schema,
+            propsResult.data,
+          ),
           uniqueConstraints,
           windowFence: updateWindow.value,
           windowEndFrame: frame,
@@ -3282,7 +3293,7 @@ async function processNode(
       { graphId, registry, backend: frame.target },
       node.kind,
       node.id,
-      propsResult.parsed,
+      storedNodeClaimProps(registration.type.schema, propsResult.data),
       uniqueConstraints,
     );
     await checkDisjointnessConstraint(
@@ -3298,10 +3309,13 @@ async function processNode(
   // The RETURNING single-insert shape, whose row this path discards, because
   // that is the statement this leg emitted before the migration.
   await frame.session.createNode(
-    importNodeCreateWork(graphId, registry, node, registration, {
-      written: propsResult.data,
-      claimed: propsResult.parsed,
-    }),
+    importNodeCreateWork(
+      graphId,
+      registry,
+      node,
+      registration,
+      propsResult.data,
+    ),
   );
 
   return { status: "created" };
@@ -3942,10 +3956,7 @@ function recordEdgeOutcome(
 
 type EdgeImportCandidate = Readonly<{
   edge: InterchangeEdge;
-  /** The props the row is written with. */
   props: Record<string, unknown>;
-  /** The schema's parse of them, which the match identity is keyed from. */
-  identityProps: Record<string, unknown>;
 }>;
 
 type PreparedEdgeImportCreate = Readonly<{
@@ -3969,11 +3980,16 @@ function prepareEdgeImportCreate(
   registration: EdgeRegistration,
 ): PreparedEdgeImportCreate {
   const { edge, props } = candidate;
-  const matchIdentity = importedEdgeMatchIdentity(
-    graphId,
-    edge,
-    registration,
-    candidate.identityProps,
+  const matchIdentity = resolveEdgeMatchIdentityStorage(
+    registration.matchIdentity,
+    {
+      fromKind: edge.from.kind,
+      fromId: edge.from.id,
+      toKind: edge.to.kind,
+      toId: edge.to.id,
+      props,
+    },
+    { graphId, edgeKind: edge.kind },
   );
   const params: InsertEdgeParams = {
     graphId,
@@ -3994,32 +4010,6 @@ function prepareEdgeImportCreate(
     declarations: registration,
     work: importEdgeInsertWork(registry, params, registration),
   };
-}
-
-/**
- * THE match identity an imported edge holds: keyed from the schema's parse of
- * its properties under every `onUnknownProperty` mode, as a create keys it
- * from the props it validated, so an edge imported under `"allow"` (written
- * verbatim) and a create of the same value hold the same identity. Graph
- * merge reads a candidate edge's identity through this same function.
- */
-export function importedEdgeMatchIdentity(
-  graphId: string,
-  edge: InterchangeEdge,
-  registration: EdgeRegistration,
-  parsedProps: Record<string, unknown>,
-): EdgeMatchIdentityStorage | undefined {
-  return resolveEdgeMatchIdentityStorage(
-    registration.matchIdentity,
-    {
-      fromKind: edge.from.kind,
-      fromId: edge.from.id,
-      toKind: edge.to.kind,
-      toId: edge.to.id,
-      props: parsedProps,
-    },
-    { graphId, edgeKind: edge.kind },
-  );
 }
 
 function pendingEdgeMatchIdentityOwnerKey(
@@ -4220,7 +4210,6 @@ type ClassifiedEdgeRow = Readonly<{
   index: number;
   edge: InterchangeEdge;
   props: Record<string, unknown>;
-  identityProps: Record<string, unknown>;
   registration: EdgeRegistration;
   /** The row the existence probe found under this id; `undefined` creates. */
   existing: EdgeRow | undefined;
@@ -4268,7 +4257,6 @@ function validateEdgeRow(
   | Readonly<{
       ok: true;
       props: Record<string, unknown>;
-      identityProps: Record<string, unknown>;
       registration: EdgeRegistration;
     }>
   | Readonly<{ ok: false; error: string }> {
@@ -4309,7 +4297,6 @@ function validateEdgeRow(
   return {
     ok: true,
     props: propsResult.data,
-    identityProps: propsResult.parsed,
     registration: schemaEntry.registration,
   };
 }
@@ -4394,7 +4381,6 @@ async function classifyEdges(
         index,
         edge,
         props: validation.props,
-        identityProps: validation.identityProps,
         registration: validation.registration,
       });
     }
@@ -5663,7 +5649,11 @@ async function createClassifiedEdge(
   frame: ImportWriteFrame,
   graphId: string,
   registry: KindRegistry,
-  row: EdgeImportCandidate & Readonly<{ registration: EdgeRegistration }>,
+  row: Readonly<{
+    edge: InterchangeEdge;
+    props: Record<string, unknown>;
+    registration: EdgeRegistration;
+  }>,
 ): Promise<ProcessResult> {
   const preparation = await catchEdgeCreateRefusal(() =>
     prepareEdgeImportCreate(registry, graphId, row, row.registration),
@@ -6103,7 +6093,6 @@ async function processEdge(
   const row = {
     edge,
     props: validation.props,
-    identityProps: validation.identityProps,
     registration: validation.registration,
   };
 
@@ -6171,40 +6160,25 @@ function importEdgeInsertWork(
  * `Date` stated in memory and one a coercing schema produces from text are
  * both refused. Once stored, such a value made every date predicate,
  * ordering or typed read of the property fail on PostgreSQL.
- *
- * Both are returned: `data` is written, and `parsed` is what a node's
- * uniqueness claims are keyed from. A claim's key is derived from validated
- * props only, so a value the document states as text (an exported date, an
- * object in another key order) claims the key a create of the same value
- * claims.
  */
 function storableImportProperties(
   persisted: Record<string, unknown>,
-  parsed: Record<string, unknown>,
-): ImportPropertiesResult {
+  parsed: unknown,
+):
+  | { success: true; data: Record<string, unknown> }
+  | { success: false; error: string } {
   const issue = unstorableDateIssue(persisted) ?? unstorableDateIssue(parsed);
-  if (issue === undefined) return { success: true, data: persisted, parsed };
+  if (issue === undefined) return { success: true, data: persisted };
   return { success: false, error: `${issue.path}: ${issue.message}` };
 }
-
-/**
- * An import strategy's verdict on one entity's properties: the props it
- * persists (`data`) and the schema's parse of them (`parsed`), or the
- * refusal.
- */
-type ImportPropertiesResult =
-  | Readonly<{
-      success: true;
-      data: Record<string, unknown>;
-      parsed: Record<string, unknown>;
-    }>
-  | Readonly<{ success: false; error: string }>;
 
 export function validateImportProperties(
   properties: Record<string, unknown>,
   schema: z.ZodObject<z.ZodRawShape>,
   unknownStrategy: UnknownPropertyStrategy,
-): ImportPropertiesResult {
+):
+  | { success: true; data: Record<string, unknown> }
+  | { success: false; error: string } {
   try {
     // Get the schema's known keys
     const knownKeys = new Set(Object.keys(schema.shape));

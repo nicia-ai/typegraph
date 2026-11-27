@@ -254,7 +254,7 @@ export function registerDurableEdgeMatchIdentityIntegrationTests(
       ).resolves.toEqual([]);
     });
 
-    it("an edge imported under onUnknownProperty allow holds the identity a create of the same value holds", async () => {
+    it("an edge imported under onUnknownProperty allow keys its identity from the text it writes", async () => {
       const store = await context.createStore(
         normalizingIdentityGraph("durable_identity_import_allow"),
       );
@@ -285,10 +285,26 @@ export function registerDurableEdgeMatchIdentityIntegrationTests(
       );
       expect(imported.errors).toEqual([]);
 
-      await expect(
+      // The row is written verbatim and its identity keyed from that text,
+      // `"REF"`; a create validates `"REF"` to `"ref"` and keys that, so it is
+      // admitted as a second edge with the same value. The same on main.
+      const duplicate = await writeOutcome(() =>
         store.edges.tagged.create(from, to, { label: "REF" }),
-      ).rejects.toBeInstanceOf(EdgeMatchIdentityConflictError);
-      const edges = await store.edges.tagged.find();
+      );
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: duplicate,
+        correct: "EdgeMatchIdentityConflictError",
+        defects: [
+          {
+            label: "verbatim edge identity keyed from its text",
+            on: {},
+            today: "written",
+          },
+        ],
+      });
+      const found = await store.edges.tagged.find();
+      const edges = found.filter((edge) => edge.id === "imported");
       expect(edges.map((edge) => [edge.id, edge.label])).toEqual([
         ["imported", "REF"],
       ]);
