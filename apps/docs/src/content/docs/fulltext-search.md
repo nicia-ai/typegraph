@@ -408,6 +408,10 @@ const results = await store
   .execute();
 ```
 
+On an `optionalTraverse()` target, `$fulltext.matches()` filters the optional side and keeps every
+start row: a start row with no matching target comes back once with that side absent, and sorts after
+every matched row. See [Optional Traversals](/queries/traverse#optional-traversals).
+
 ### Hybrid Search (Query Builder)
 
 Use `$fulltext.matches()` and `.similarTo()` in the same query and
