@@ -1507,7 +1507,10 @@ export type CompiledStatementSql = IntentSql<"statement">;
 export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
-export function compileRelevanceCandidateOrder(value: SqlFragment, direction: "asc" | "desc", nodeId: SqlFragment): SqlFragment;
+export function compileRelevanceCandidateOrder(value: SqlFragment, direction: "asc" | "desc", identity: Readonly<{
+    nodeKind: SqlFragment | undefined;
+    nodeId: SqlFragment;
+}>): SqlFragment;
 
 // @public
 export type CompositionClaimScope = Readonly<{
@@ -1974,9 +1977,10 @@ export interface DialectAdapter {
     readonly partitionedRowsJsonArrays?: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string, partitionColumn: string) => SqlFragment;
     readonly quoteIdentifier: (this: void, name: string) => string;
     readonly relevanceCursorKey: Readonly<{
-        value: (this: void, expression: SqlFragment) => SqlFragment;
-        select: (this: void, expression: SqlFragment) => SqlFragment;
-        bind: (this: void, text: string) => string | number | undefined;
+        value: (this: void, expression: SqlFragment, source: Exclude<RelevanceSortSource, "hybrid_node_id">) => SqlFragment;
+        select: (this: void, expression: SqlFragment, source: Exclude<RelevanceSortSource, "hybrid_node_id">) => SqlFragment;
+        bind: (this: void, text: string, source: Exclude<RelevanceSortSource, "hybrid_node_id">) => string | number | undefined;
+        operand: (this: void, bound: string | number) => SqlFragment;
     }>;
     readonly rowValueComparison?: (this: void, operator: ">" | "<", left: readonly SqlFragment[], right: readonly SqlFragment[]) => SqlFragment;
     readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
@@ -2000,6 +2004,7 @@ export type DialectCapabilities = Readonly<{
     subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
     maxRecursiveBatchPlans?: number;
     textIndexOrderIsBinary: boolean;
+    textAdmitsNul: boolean;
     transactionReadsShareOneSnapshot: boolean;
 }>;
 
@@ -3798,6 +3803,9 @@ export type ReleaseIndexMaterializationClaimParams = Readonly<{
     indexName: string;
     token: string;
 }>;
+
+// @public
+export type RelevanceSortSource = "fulltext_rank" | "vector_distance" | "hybrid_score" | "hybrid_node_id";
 
 // @public (undocumented)
 export type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable" | "getPendingKindRemovals" | "getAllKindRemovals" | "recordKindRemoval" | "ensureReconciliationMarkersTable" | "getReconciliationMarker" | "setReconciliationMarker">;

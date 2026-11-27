@@ -7,7 +7,7 @@
  */
 import { type VectorMetric } from "../../backend/types";
 import { type JsonScalar, type JsonValue } from "../../core/types";
-import { type NumericRelevanceSortSource, type ValueType } from "../ast";
+import { type RelevanceSortSource, type ValueType } from "../ast";
 import { type JsonPointer } from "../json-pointer";
 import { type SqlFragment } from "../sql-fragment";
 import { type FulltextStrategy } from "./fulltext-strategy";
@@ -243,7 +243,7 @@ export interface DialectAdapter {
     value: (
       this: void,
       expression: SqlFragment,
-      source: NumericRelevanceSortSource,
+      source: Exclude<RelevanceSortSource, "hybrid_node_id">,
     ) => SqlFragment;
     /**
      * The text of a non-NULL {@link value}; a NULL key is carried as NULL by
@@ -252,12 +252,12 @@ export interface DialectAdapter {
     select: (
       this: void,
       expression: SqlFragment,
-      source: NumericRelevanceSortSource,
+      source: Exclude<RelevanceSortSource, "hybrid_node_id">,
     ) => SqlFragment;
     bind: (
       this: void,
       text: string,
-      source: NumericRelevanceSortSource,
+      source: Exclude<RelevanceSortSource, "hybrid_node_id">,
     ) => string | number | undefined;
     /**
      * The SQL operand of a value {@link bind} returned, as the cursor's

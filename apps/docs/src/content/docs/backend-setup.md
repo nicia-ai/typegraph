@@ -3046,8 +3046,11 @@ A strategy should also declare `repeatableApproximateSearch`: `{ repeatable: tru
 search returns the same rows on every execution over an unchanged database, which cursor pagination of one needs, and
 `{ repeatable: false, reason }` makes paging an approximate search a typed refusal naming the reason. A strategy that
 declares nothing resolves to `repeatable: false` (`resolveRepeatableApproximateSearch`), so it is refused rather than
-assumed repeatable. A strategy's `buildSearch` must also break distance ties by node id wherever its engine takes an
-order (`compileRelevanceCandidateOrder`) and keep zero-norm embeddings out of a cosine search
+assumed repeatable. A strategy whose `buildSearch` is exact (`searchIsExact: true`) serves the exact and the
+approximate search through it and never retrieves approximately, so paging its searches is not refused whatever it
+declares. A strategy's `buildSearch` must also break distance ties by node id wherever its engine takes an order
+(`compileRelevanceCandidateOrder` with `{ nodeKind: undefined, nodeId }`: it scans one kind's table, so the kind the
+query compiler's own cuts also order by is constant there) and keep zero-norm embeddings out of a cosine search
 (`vectorDefinedDistanceConditions`), as the bundled strategies do.
 
 `searchFrontierTuning` is **required** on a vector strategy's capabilities, so a strategy must state whether it has a

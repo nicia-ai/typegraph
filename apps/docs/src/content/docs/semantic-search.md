@@ -554,8 +554,8 @@ execution over an unchanged database where
 `backend.capabilities.vector.repeatableApproximateSearch.repeatable` is
 `true`: pgvector's HNSW and IVFFlat scans and sqlite-vec's KNN are
 deterministic, and neighbors tied on distance at the `k` cut are taken in
-node-id order (pgvector, and every exact scan) or in the engine's storage
-order (sqlite-vec's KNN, whose cut takes no tiebreak). libSQL's DiskANN
+kind, then node-id order (pgvector, and every exact scan) or in the
+engine's storage order (sqlite-vec's KNN, whose cut takes no tiebreak). libSQL's DiskANN
 declares `repeatable: false`: `vector_top_k` starts each search from a
 randomly chosen node, so two `execute()` calls of one approximate search can
 return different neighbors. Cursor pagination needs a repeatable search, so
