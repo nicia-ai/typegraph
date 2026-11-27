@@ -209,6 +209,7 @@ import {
   refuseFulltextUnavailable,
   resolveNodeFulltextProjection,
 } from "../fulltext-sync";
+import { refuseReadOnlyTransactionWrite } from "../native-transaction-state";
 import { getNodeRowsByIds } from "../node-fetch";
 import {
   type OperationEntry,
@@ -361,7 +362,6 @@ import {
   hasLeasedSchemaFence,
   lockSchemaVersionForStoreWrite,
   memoizeLeasedSchemaFence,
-  refuseReadOnlyTransactionWrite,
   resolveWriteTransactionMode,
   runFrameWritesAsUnit,
   runOwnedMutationSetTransaction,

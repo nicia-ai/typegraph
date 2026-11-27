@@ -19,7 +19,11 @@ import {
 } from "../errors";
 import { recordedAnchorsTable, type SqlSchema } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
-import { asCompiledRowsSql, markForceCustomPlan } from "../query/sql-intent";
+import {
+  asCompiledRowsSql,
+  asCompiledWriteRowsSql,
+  markForceCustomPlan,
+} from "../query/sql-intent";
 import { validateCanonicalIsoDate } from "../utils/date";
 import { requireDefined } from "../utils/presence";
 import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
@@ -375,7 +379,7 @@ export async function pruneRecordedAnchors(
           };
           // Publish the logical coverage floor in the SAME commit as this bounded deletion.
           const written = await target.execute(
-            asCompiledRowsSql(sql`
+            asCompiledWriteRowsSql(sql`
               UPDATE ${schema.recordedClockTable} SET ${sql.identifier(RECORDED_ANCHOR_RETENTION_COLUMN)}=${JSON.stringify(state)} WHERE graph_id=${graphId}
                 AND revision>=${revision}
                 AND ${recordedAnchorOrigin(schema, graphId)}=${row.origin}
@@ -392,7 +396,7 @@ export async function pruneRecordedAnchors(
           const firstRevision = Number(batch.first_revision);
           const lastRevision = Number(batch.last_revision);
           const deleted = await target.execute(
-            asCompiledRowsSql(sql`
+            asCompiledWriteRowsSql(sql`
               DELETE FROM ${recordedAnchorsTable(schema)} AS anchors
               WHERE ${recordedAnchorScope(schema, graphId, row.origin)}
                 AND anchors.revision BETWEEN ${firstRevision} AND ${lastRevision}

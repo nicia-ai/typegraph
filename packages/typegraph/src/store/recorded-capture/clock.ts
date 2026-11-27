@@ -44,7 +44,7 @@ import {
   withRecordedRelationsPrecondition,
 } from "../../utils/sql-errors";
 import { isBackendNativeTransactionReadOnly } from "../native-transaction-state";
-import { refuseReadOnlyTransactionWrite } from "../operations/write-transaction";
+import { refuseReadOnlyTransactionWrite } from "../native-transaction-state";
 import { recordedAnchorOwner } from "../recorded-anchor-origin";
 import { executeStatement } from "./guards";
 

@@ -17,7 +17,7 @@ import {
   isNativeTransactionReadOnly,
   type NativeTransactionState,
 } from "./native-transaction-state";
-import { refuseReadOnlyTransactionWrite } from "./operations/write-transaction";
+import { refuseReadOnlyTransactionWrite } from "./native-transaction-state";
 import type {
   CompositionCascadedPart,
   EdgeWrites,

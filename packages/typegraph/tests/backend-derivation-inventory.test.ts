@@ -56,6 +56,7 @@ const SOURCE_ROOT = path.resolve(
 const SEAM_CONSTRUCTORS = [
   "decorateBackend",
   "deriveBackend",
+  "deriveBackendUnderConstruction",
   "deriveTransactionSessionBackend",
   "projectBackend",
   "projectBackendWithout",
@@ -67,6 +68,7 @@ const SEAM_QUERIES = [
   "backendDerivationChain",
   "backendDerivationRoot",
   "isBackendDerivedFrom",
+  "isGraphCommandPort",
 ] as const;
 
 type SeamConstructor = (typeof SEAM_CONSTRUCTORS)[number];
@@ -120,9 +122,15 @@ const INVENTORY: readonly InventoryEntry[] = [
   },
   {
     file: "backend/drizzle/contribution-materializations.ts",
-    line: "return deriveTransactionSessionBackend<TransactionBackend>(",
+    line: "deriveTransactionSessionBackend<TransactionBackend>(",
     reason:
       "Gates the fulltext members of a transaction-scoped backend until the graph's contributions are materialized while preserving the already-open session declaration; the PostgreSQL factory immediately binds fresh exact transport and semantic registrations to the wrapper.",
+  },
+  {
+    file: "backend/read-only-write-gate.ts",
+    line: "holder.gated = deriveBackendUnderConstruction(",
+    reason:
+      "The read-only write gate: overlays every write and raw-SQL member of a backend its factory is still assembling, so each refuses inside a read-only scope before any statement; the factory records the native transaction and registers atomic evidence on the gated object afterwards.",
   },
   {
     file: "backend/drizzle/postgres.ts",

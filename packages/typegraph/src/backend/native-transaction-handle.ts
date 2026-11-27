@@ -152,10 +152,10 @@ const PUBLISHED_TOKENS = new WeakMap<object, object>();
 const BOUND_CONNECTIONS = new WeakMap<object, object>();
 
 /**
- * Driver connection → how many read-only scopes the Store has open on
- * transactions running on it ({@link holdConnectionReadOnlyScope}).
+ * Driver connection → the graph of each read-only scope the Store has open
+ * on a transaction running on it, innermost last ({@link holdConnectionReadOnlyScope}).
  */
-const READ_ONLY_CONNECTIONS = new WeakMap<object, number>();
+const READ_ONLY_CONNECTIONS = new WeakMap<object, readonly string[]>();
 
 /**
  * Whether `token` still identifies the transaction open on its connection:
@@ -353,29 +353,51 @@ export function resolveNativeTransactionConnection(
 }
 
 /**
- * Holds a read-only scope on `connection` until the returned release is
- * called. The Store holds one for as long as a read-only scope it opened on a
- * transaction running on that connection is open: a connection runs one
- * transaction at a time, so meanwhile every statement on it runs in that
- * transaction ({@link isConnectionInReadOnlyScope}).
+ * Records the driver connection a backend that is not bound to one
+ * transaction runs every statement on: a root backend over a one-connection
+ * SQLite driver, whose statements run inside whatever transaction that
+ * connection has open. Never proof of a transaction: read only by
+ * {@link resolveNativeTransactionConnection}.
  */
-export function holdConnectionReadOnlyScope(connection: object): () => void {
-  READ_ONLY_CONNECTIONS.set(
-    connection,
-    (READ_ONLY_CONNECTIONS.get(connection) ?? 0) + 1,
-  );
+export function recordBackendConnection(
+  backend: object,
+  connection: object,
+): void {
+  BOUND_CONNECTIONS.set(backend, connection);
+}
+
+/**
+ * Holds a read-only scope the Store opened for the graph `graphId` on
+ * `connection` until the returned release is called. The Store holds one for
+ * as long as a read-only scope it opened on a transaction running on that
+ * connection is open: a connection runs one transaction at a time, so
+ * meanwhile every statement on it runs in that transaction
+ * ({@link connectionReadOnlyScopeGraph}).
+ */
+export function holdConnectionReadOnlyScope(
+  connection: object,
+  graphId: string,
+): () => void {
+  const held = READ_ONLY_CONNECTIONS.get(connection) ?? [];
+  READ_ONLY_CONNECTIONS.set(connection, [...held, graphId]);
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    READ_ONLY_CONNECTIONS.set(
-      connection,
-      (READ_ONLY_CONNECTIONS.get(connection) ?? 1) - 1,
-    );
+    const current = READ_ONLY_CONNECTIONS.get(connection) ?? [];
+    const index = current.lastIndexOf(graphId);
+    if (index !== -1) {
+      READ_ONLY_CONNECTIONS.set(connection, current.toSpliced(index, 1));
+    }
   };
 }
 
-/** Whether a read-only scope is held on `connection` right now. */
-export function isConnectionInReadOnlyScope(connection: object): boolean {
-  return (READ_ONLY_CONNECTIONS.get(connection) ?? 0) > 0;
+/**
+ * The graph of the innermost read-only scope held on `connection` right now,
+ * or `undefined` when none is.
+ */
+export function connectionReadOnlyScopeGraph(
+  connection: object,
+): string | undefined {
+  return READ_ONLY_CONNECTIONS.get(connection)?.at(-1);
 }

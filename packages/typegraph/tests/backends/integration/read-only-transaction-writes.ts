@@ -60,7 +60,6 @@ import type {
   IDENTITY_WRITE_NAMES,
   NODE_WRITE_NAMES,
 } from "../../../src/store/collection-surface";
-import { STORE_MEMBER_ACCESS } from "../../../src/store/store";
 import { requireDefined } from "../../../src/utils/presence";
 import { unwrap } from "../../../src/utils/result";
 import { type IntegrationTestContext } from "./test-context";
@@ -81,7 +80,7 @@ const PERSON_EMAIL = {
   collation: "binary",
 } as const;
 
-function buildGraph(id: string) {
+export function buildGraph(id: string) {
   return defineGraph({
     id,
     nodes: {
@@ -106,7 +105,7 @@ function buildGraph(id: string) {
   });
 }
 
-type RotGraph = ReturnType<typeof buildGraph>;
+export type RotGraph = ReturnType<typeof buildGraph>;
 
 let graphIdCounter = 0;
 function nextGraphId(): string {
@@ -124,11 +123,11 @@ type TransactionSurface = Readonly<{
   writeNodeUpsertBatch: (entries: readonly unknown[]) => Promise<unknown>;
 }>;
 
-function person(id: string): never {
+export function person(id: string): never {
   return { kind: "RotPerson", id } as never;
 }
 
-function team(id: string): never {
+export function team(id: string): never {
   return { kind: "RotTeam", id } as never;
 }
 
@@ -321,20 +320,30 @@ function countingAdoptionBackend(backend: AdapterBackend<unknown>): Readonly<{
 }
 
 /**
- * Every member a Store instance offers at runtime: its own properties and
- * those of every prototype it inherits from, the constructor aside.
+ * The Store members that refuse a write by their own name, before they read
+ * their arguments, on a Store over a transaction inside a read-only scope.
+ * An early, clearer refusal only: the backend over that transaction refuses
+ * every write member whatever reaches it (`read-only-backend-gate.ts`).
  */
-function storeMemberNames(store: object): readonly string[] {
-  const names = new Set<string>();
-  let level: object | null = store;
-  while (level !== null && level !== Object.prototype) {
-    for (const name of Object.getOwnPropertyNames(level)) {
-      if (name !== "constructor") names.add(name);
-    }
-    level = Object.getPrototypeOf(level) as object | null;
-  }
-  return [...names];
-}
+const EARLY_REFUSED_STORE_MEMBERS = [
+  "clear",
+  "deprecateKinds",
+  "evolve",
+  "materializeIndexes",
+  "materializeRemovals",
+  "materializeSystemIndexes",
+  "pruneRecordedInstants",
+  "rebuildContribution",
+  "rebuildIdentityClosure",
+  "reembedVectorField",
+  "refreshStatistics",
+  "removeKinds",
+  "repairContributions",
+  "rotateAllocationOwner",
+  "undeprecateKinds",
+  "transaction",
+  "transactionWithReceipt",
+] as const;
 
 /** A step that does nothing. */
 function settled(): Promise<void> {
@@ -342,7 +351,7 @@ function settled(): Promise<void> {
 }
 
 /** The native handle a transaction context exposes as `tx.sql`. */
-function nativeHandle(tx: object): unknown {
+export function nativeHandle(tx: object): unknown {
   return requireDefined((tx as Readonly<{ sql?: unknown }>).sql);
 }
 
@@ -408,7 +417,7 @@ function countingBackend(backend: GraphBackend): Readonly<{
 }
 
 /** Two people, a team, a link between the people and an identity assertion. */
-async function seed(
+export async function seed(
   store: ReturnType<typeof createStore<RotGraph>>,
 ): Promise<void> {
   await store.nodes.RotPerson.create(
@@ -439,7 +448,7 @@ async function seed(
   );
 }
 
-async function graphState(
+export async function graphState(
   store: ReturnType<typeof createStore<RotGraph>>,
 ): Promise<unknown> {
   const people = await store.nodes.RotPerson.find();
@@ -465,7 +474,7 @@ function unreadChunks(): AsyncIterable<GraphInterchangeChunk> {
 }
 
 /** What `pending` rejects with, or `undefined` when it resolves. */
-async function rejectionOf(pending: Promise<unknown>): Promise<unknown> {
+export async function rejectionOf(pending: Promise<unknown>): Promise<unknown> {
   try {
     await pending;
     return undefined;
@@ -480,7 +489,7 @@ async function rejectionOf(pending: Promise<unknown>): Promise<unknown> {
  * there (a driver code), else the innermost cause's message.
  * `"fulfilled"` when the write resolved.
  */
-function writeOutcome(write: unknown): string {
+export function writeOutcome(write: unknown): string {
   if (write === undefined) return "fulfilled";
   if (
     write instanceof UnsupportedBackendCapabilityError &&
@@ -1499,11 +1508,11 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
         );
       });
 
-      it("declares every member of a Store over the transaction, and refuses every gated one before any statement, whatever its arguments", async () => {
+      it("refuses every Store member that writes, on a Store over the transaction, by the member's own name before it reads its arguments", async () => {
         const graph = buildGraph(nextGraphId());
         const backend = context.getBackend();
-        // A history Store provisions the recorded relations, so the gated
-        // history members (pruning, owner rotation) reach their writes.
+        // A history Store provisions the recorded relations, so the history
+        // members (pruning, owner rotation) reach their writes.
         const [historyStore] = await createAdapterStoreWithSchema(
           graph,
           backend,
@@ -1517,7 +1526,6 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
         // same graph opens the read-only transaction.
         const opener = createAdapterStore(graph, backend);
 
-        const runtimeMembers = new Set<string>();
         const refusals: Record<string, unknown> = {};
         const committed = await opener.transaction(
           async (tx) => {
@@ -1529,14 +1537,8 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
               ) as unknown as Readonly<
                 Record<string, (...args: never[]) => unknown>
               >;
-              for (const name of storeMemberNames(overTransaction)) {
-                runtimeMembers.add(name);
-              }
-              for (const [name, access] of Object.entries(
-                STORE_MEMBER_ACCESS,
-              )) {
-                if (access !== "gated") continue;
-                // No arguments: the gate refuses before anything reads them.
+              for (const name of EARLY_REFUSED_STORE_MEMBERS) {
+                // No arguments: the refusal comes before anything reads them.
                 refusals[`${history ? "history" : "plain"} ${name}`] =
                   await rejectionOf(
                     Promise.resolve().then((): unknown =>
@@ -1553,34 +1555,13 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
           },
           { accessMode: "read_only" },
         );
-        expect([...runtimeMembers].toSorted()).toEqual(
-          Object.keys(STORE_MEMBER_ACCESS).toSorted(),
-        );
-        expect(
-          Object.fromEntries(
-            Object.entries(refusals).map(([label, refusal]) => [
-              label,
-              writeOutcome(refusal),
-            ]),
-          ),
-        ).toEqual(
-          Object.fromEntries(
-            Object.keys(refusals).map((label) => [
-              label,
-              "refused as read-only",
-            ]),
-          ),
+        expect(Object.keys(refusals)).toHaveLength(
+          2 * EARLY_REFUSED_STORE_MEMBERS.length,
         );
         for (const [label, refusal] of Object.entries(refusals)) {
           const member = requireDefined(label.split(" ")[1]);
           expectReadOnlyRefusal(refusal, `store.${member}()`, graph.id);
         }
-        expect(Object.keys(refusals)).toHaveLength(
-          2 *
-            Object.values(STORE_MEMBER_ACCESS).filter(
-              (access) => access === "gated",
-            ).length,
-        );
         // On PostgreSQL the transaction is the engine's read-only one, so a
         // write statement would have aborted it before this read.
         expect(committed?.id).toBe("p1");

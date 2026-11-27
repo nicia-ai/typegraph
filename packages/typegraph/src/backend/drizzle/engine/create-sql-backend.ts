@@ -24,6 +24,7 @@ import {
 } from "../../capabilities/write-fence";
 import { deriveBackend, type ExactBackendOverlay } from "../../derive-backend";
 import { GRAPH_BACKEND_MEMBER_CLASSES } from "../../member-classes";
+import { gateBackendUnderConstruction } from "../../read-only-write-gate";
 import {
   createSerializedExecutionQueue,
   runWithSerializedQueue,
@@ -776,7 +777,15 @@ export function createSqlBackend<TTx>(
   // changes nothing for either bundled backend.
   const queuedCapabilities = queuedBackend.capabilities;
 
-  applyEngineMarks(queuedBackend, {
+  // Every write member of the backend this factory returns refuses inside a
+  // read-only scope TypeGraph opened on what it runs in
+  // (`read-only-write-gate.ts`). The outermost decoration, so the object
+  // the gate asks is the one its builder records a native transaction or
+  // connection on, and the one `applyEngineMarks` registers atomic evidence
+  // on below: it keeps `queuedCapabilities` as they stand.
+  const gatedBackend = gateBackendUnderConstruction(queuedBackend);
+
+  applyEngineMarks(gatedBackend, {
     isFirstParty,
     capabilities: queuedCapabilities,
     fencePlan,
@@ -795,7 +804,7 @@ export function createSqlBackend<TTx>(
     },
   });
 
-  return queuedBackend;
+  return gatedBackend;
 }
 
 function assertNothingBeforeTransactionRefusal(): Promise<void> {

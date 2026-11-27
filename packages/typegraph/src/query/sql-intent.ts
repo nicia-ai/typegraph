@@ -55,6 +55,7 @@ type SqlIntentRegistry = Readonly<{
   columnReadNodes?: WeakMap<SqlFragment, ColumnReadNode>;
   annIndexScanQueries: WeakMap<SqlFragment, readonly string[]>;
   forceCustomPlanQueries: WeakSet<SqlFragment>;
+  writeIntentQueries?: WeakSet<SqlFragment>;
 }>;
 
 const SQL_INTENT_REGISTRY: unique symbol = typeGraphGlobalSymbol(
@@ -89,6 +90,48 @@ if (sqlIntentRegistry.recursivePlanCounts === undefined)
   Object.defineProperty(sqlIntentRegistry, "recursivePlanCounts", {
     value: recursivePlanCounts,
   });
+
+// Statements library code runs through a raw-SQL member to write. Extended
+// onto a registry another package instance initialized, as above.
+const writeIntentQueries =
+  sqlIntentRegistry.writeIntentQueries ?? new WeakSet<SqlFragment>();
+if (sqlIntentRegistry.writeIntentQueries === undefined)
+  Object.defineProperty(sqlIntentRegistry, "writeIntentQueries", {
+    value: writeIntentQueries,
+  });
+
+/**
+ * Marks a statement library code runs through a raw-SQL member
+ * (`executeStatement`) to write: the explicit write intent the read-only
+ * write gate (`src/backend/read-only-write-gate.ts`) refuses inside a
+ * read-only scope. Every library write that does not go through a
+ * write-classified backend member is compiled through this or
+ * {@link asCompiledWriteRowsSql}, at its one seam.
+ */
+export function asCompiledWriteStatementSql(
+  query: SqlFragment,
+): CompiledStatementSql {
+  writeIntentQueries.add(query);
+  return asCompiledStatementSql(query);
+}
+
+/**
+ * {@link asCompiledWriteStatementSql} for a write that returns rows
+ * (`UPDATE ... RETURNING`), run through `execute`.
+ */
+export function asCompiledWriteRowsSql(query: SqlFragment): CompiledRowsSql {
+  writeIntentQueries.add(query);
+  return asCompiledRowsSql(query);
+}
+
+/** Whether library code marked `query` as a write ({@link asCompiledWriteStatementSql}). */
+export function hasWriteIntent(query: unknown): boolean {
+  return (
+    typeof query === "object" &&
+    query !== null &&
+    writeIntentQueries.has(query as SqlFragment)
+  );
+}
 
 export function markForceCustomPlan(query: SqlFragment): void {
   sqlIntentRegistry.forceCustomPlanQueries.add(query);

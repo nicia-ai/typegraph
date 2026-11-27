@@ -33,11 +33,12 @@
  * the same connection whose state nothing proved to be this one.
  */
 import {
+  connectionReadOnlyScopeGraph,
   holdConnectionReadOnlyScope,
-  isConnectionInReadOnlyScope,
   resolveNativeTransactionConnection,
   resolveNativeTransactionHandle,
 } from "../backend/native-transaction-handle";
+import { UnsupportedBackendCapabilityError } from "../errors";
 
 // Module-private: only this module builds a state, so no other value (a
 // session, an operation, an empty literal) is assignable to one.
@@ -46,13 +47,13 @@ const NATIVE_TRANSACTION_STATE: unique symbol = Symbol(
 );
 
 // Module-private: only `openReadOnlyScope` writes it and only
-// `isNativeTransactionReadOnly` reads it.
+// `nativeTransactionReadOnlyScopeGraph` reads it.
 const READ_ONLY_SCOPES: unique symbol = Symbol(
   "typegraph.nativeTransactionReadOnlyScopes",
 );
 
 // Module-private: only `resolveNativeTransactionState` writes it, and only
-// `openReadOnlyScope` and `isNativeTransactionReadOnly` read it.
+// `openReadOnlyScope` and `nativeTransactionReadOnlyScopeGraph` read it.
 const CONNECTION: unique symbol = Symbol(
   "typegraph.nativeTransactionConnection",
 );
@@ -62,10 +63,10 @@ export type NativeTransactionState = Readonly<{
   [NATIVE_TRANSACTION_STATE]: true;
 }> & {
   /**
-   * How many read-only scopes TypeGraph has open on the transaction
-   * ({@link openReadOnlyScope}). Written only by this module.
+   * The graph of each read-only scope TypeGraph has open on the transaction,
+   * innermost last ({@link openReadOnlyScope}). Written only by this module.
    */
-  [READ_ONLY_SCOPES]: number;
+  [READ_ONLY_SCOPES]: readonly string[];
   /**
    * The driver connection the transaction's sessions run on, once a binding
    * that names one resolves the state. Written only by this module.
@@ -78,7 +79,7 @@ function createNativeTransactionState(
 ): NativeTransactionState {
   return {
     [NATIVE_TRANSACTION_STATE]: true,
-    [READ_ONLY_SCOPES]: 0,
+    [READ_ONLY_SCOPES]: [],
     [CONNECTION]: connection,
   };
 }
@@ -86,7 +87,11 @@ function createNativeTransactionState(
 /** The engine's identity of a native transaction → its sessions' state. */
 const nativeTransactionStates = new WeakMap<object, NativeTransactionState>();
 
-/** The state of the native transaction the engine identified, created once. */
+/**
+ * The state of the native transaction the engine identified, created once.
+ * A state first resolved by a binding that names no connection learns it from
+ * the first one that does, so a scope opened after that holds the connection.
+ */
 function stateOfNativeTransaction(
   nativeTransaction: object,
   connection: object | undefined,
@@ -123,8 +128,7 @@ export function resolveNativeTransactionState(
  * inside (a backend built over a transaction handle, such as
  * `createPostgresTransactionBackend(tx.sql)`), or `undefined` for a backend
  * the engine recorded no native transaction for (one over a database or a
- * pool). The Store asks it before a write of its own opens the savepoint its
- * session would run in, so the write is refused before any statement.
+ * pool).
  */
 export function resolveBackendNativeTransactionState(
   backend: object,
@@ -139,29 +143,47 @@ export function resolveBackendNativeTransactionState(
 }
 
 /**
- * Whether a Store's own backend runs inside a caller's native transaction
- * that is inside a read-only scope TypeGraph opened
- * ({@link resolveBackendNativeTransactionState},
- * {@link isNativeTransactionReadOnly}). `false` for a backend over a database
- * or a pool.
+ * THE read-only question of a backend object: the graph of the innermost
+ * read-only scope TypeGraph has open on what `backend` runs its statements
+ * in, or `undefined` when there is none. That is the native transaction the
+ * engine recorded for `backend` (a transaction backend, or a backend built
+ * over a caller's transaction handle), and otherwise the driver connection
+ * it runs on (a root backend over a one-connection SQLite driver), since a
+ * connection runs one transaction at a time. A backend over a pool names
+ * neither and is never read-only here.
  */
-export function isBackendNativeTransactionReadOnly(backend: object): boolean {
+export function backendReadOnlyScopeGraph(backend: object): string | undefined {
   const native = resolveBackendNativeTransactionState(backend);
-  return native !== undefined && isNativeTransactionReadOnly(native);
+  if (native !== undefined) return nativeTransactionReadOnlyScopeGraph(native);
+  const connection = resolveNativeTransactionConnection(backend);
+  return connection === undefined ? undefined : (
+      connectionReadOnlyScopeGraph(connection)
+    );
 }
 
 /**
- * Opens a read-only scope on the native transaction `state` belongs to, until
- * the returned release is called (a second call does nothing). The opener of
+ * Whether `backend` runs inside a read-only scope TypeGraph opened
+ * ({@link backendReadOnlyScopeGraph}).
+ */
+export function isBackendNativeTransactionReadOnly(backend: object): boolean {
+  return backendReadOnlyScopeGraph(backend) !== undefined;
+}
+
+/**
+ * Opens a read-only scope for the graph `graphId` on the native transaction
+ * `state` belongs to, until the returned release is called (a second call
+ * does nothing). The opener of
  * `store.transaction(fn, { accessMode: "read_only" })` opens one once its
  * attempt's session exists and releases it once the backend's transaction
  * call has settled, after its `COMMIT`, `ROLLBACK` or `RELEASE`, so every
  * session over the same native transaction (the opener's own context, a
  * context adopted over `tx.sql`, a Store over a backend built on that handle,
  * a savepoint the engine opened in it) reads the transaction as read-only
- * through {@link isNativeTransactionReadOnly} for as long as anything can
- * still reach it, a write left floating after the callback settled included.
- * The connection the transaction runs on holds the scope too, for as long.
+ * through {@link isNativeTransactionReadOnly}, and every backend object over
+ * it refuses its write members (`read-only-write-gate.ts`), for as long as
+ * anything can still reach it, a write left floating after the callback
+ * settled included. The connection the transaction runs on holds the scope
+ * too, for as long.
  *
  * The fact is a scope, not a property set for the transaction's life: a
  * read-only `store.transaction` on a backend built over a caller's
@@ -169,20 +191,42 @@ export function isBackendNativeTransactionReadOnly(backend: object): boolean {
  * again once the savepoint is released. Scopes nest; the transaction reads
  * as read-only until the last one is released.
  */
-export function openReadOnlyScope(state: NativeTransactionState): () => void {
+export function openReadOnlyScope(
+  state: NativeTransactionState,
+  graphId: string,
+): () => void {
   const connection = state[CONNECTION];
-  state[READ_ONLY_SCOPES] += 1;
+  state[READ_ONLY_SCOPES] = [...state[READ_ONLY_SCOPES], graphId];
   const releaseConnection =
     connection === undefined ? undefined : (
-      holdConnectionReadOnlyScope(connection)
+      holdConnectionReadOnlyScope(connection, graphId)
     );
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    state[READ_ONLY_SCOPES] -= 1;
+    const scopes = state[READ_ONLY_SCOPES];
+    const index = scopes.lastIndexOf(graphId);
+    if (index !== -1) state[READ_ONLY_SCOPES] = scopes.toSpliced(index, 1);
     releaseConnection?.();
   };
+}
+
+/**
+ * The graph of the innermost read-only scope TypeGraph opened on the native
+ * transaction `state` belongs to, or on the driver connection it runs on;
+ * `undefined` when there is none.
+ */
+function nativeTransactionReadOnlyScopeGraph(
+  state: NativeTransactionState,
+): string | undefined {
+  const connection = state[CONNECTION];
+  return (
+    state[READ_ONLY_SCOPES].at(-1) ??
+    (connection === undefined ? undefined : (
+      connectionReadOnlyScopeGraph(connection)
+    ))
+  );
 }
 
 /**
@@ -205,9 +249,24 @@ export function openReadOnlyScope(state: NativeTransactionState): () => void {
 export function isNativeTransactionReadOnly(
   state: NativeTransactionState,
 ): boolean {
-  const connection = state[CONNECTION];
-  return (
-    state[READ_ONLY_SCOPES] > 0 ||
-    (connection !== undefined && isConnectionInReadOnlyScope(connection))
+  return nativeTransactionReadOnlyScopeGraph(state) !== undefined;
+}
+
+/**
+ * The one refusal for an operation that needs write access inside
+ * `store.transaction(fn, { accessMode: "read_only" })`. Callers raise it
+ * before the operation issues any statement, so the engine never reports its
+ * own read-only error and the caller's transaction stays usable.
+ */
+export function refuseReadOnlyTransactionWrite(
+  operation: string,
+  graphId: string,
+  suggestion: string,
+): never {
+  throw new UnsupportedBackendCapabilityError(
+    operation,
+    "write transaction access",
+    { graphId, accessMode: "read_only" },
+    suggestion,
   );
 }

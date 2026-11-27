@@ -53,6 +53,7 @@ import {
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
 import { deriveTransactionSessionBackend } from "../derive-backend";
+import { gateBackendUnderConstruction } from "../read-only-write-gate";
 import { formatPostgresTimestamp, nowIso } from "../row-mappers";
 import {
   DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
@@ -588,15 +589,21 @@ export function gateFulltextMethods(
  * self-ensure); a transaction that never touches fulltext never
  * asserts, so non-fulltext transactions stay free of any fulltext-init
  * requirement.
+ *
+ * The read-only write gate (`read-only-write-gate.ts`) is applied again
+ * outside the marker assertions, so a write member refuses inside a read-only
+ * scope before the marker read runs, not after.
  */
 export function gateFulltext(
   tx: TransactionBackend,
   assert: (graphId: string) => Promise<void>,
   refuseUnavailable: RefuseUnavailableFulltext,
 ): TransactionBackend {
-  return deriveTransactionSessionBackend<TransactionBackend>(
-    tx,
-    gateFulltextMethods(tx, assert, refuseUnavailable),
+  return gateBackendUnderConstruction(
+    deriveTransactionSessionBackend<TransactionBackend>(
+      tx,
+      gateFulltextMethods(tx, assert, refuseUnavailable),
+    ),
   );
 }
 

@@ -27,7 +27,7 @@ import type { SqlDialect } from "../../query/dialect/types";
 import { type SqlFragment } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
-  asCompiledStatementSql,
+  asCompiledWriteStatementSql,
   type CompiledStatementSql,
 } from "../../query/sql-intent";
 import type { OperationBackend } from "../operation-scope";
@@ -87,12 +87,16 @@ export function requireCaptureStatements(
   }
 }
 
+/**
+ * Runs one recorded-capture write (a recorded row, the clock, an origin, an
+ * anchor) on `target`, marked as a write for the read-only write gate.
+ */
 export async function executeStatement(
   target: Pick<GraphBackend, "dialect" | "executeStatement">,
   query: SqlFragment,
 ): Promise<void> {
   requireCaptureStatements(target);
-  await target.executeStatement(asCompiledStatementSql(query));
+  await target.executeStatement(asCompiledWriteStatementSql(query));
 }
 
 function unsupportedPostgresIsolationError(

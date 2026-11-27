@@ -169,6 +169,7 @@ import {
   registerRawSqlReleasingView,
   resolveRawSqlReleasingView,
 } from "../raw-sql-release-view";
+import { gateBackendUnderConstruction } from "../read-only-write-gate";
 import {
   RECORDED_ANCHOR_RETENTION_COLUMN,
   recordedAnchorAdoptionTimeoutBudget,
@@ -4596,10 +4597,14 @@ function createTransactionBackend(
     lineage: options.lineage,
     recordedTime: options.recordedTime,
   });
-  const backend =
+  // Gated before anything is registered or recorded on it: every write
+  // member refuses inside a read-only scope on the native transaction
+  // recorded below (`read-only-write-gate.ts`).
+  const backend = gateBackendUnderConstruction(
     options.isFirstParty ?
       markFirstPartyFactory(txOperationBackend)
-    : txOperationBackend;
+    : txOperationBackend,
+  );
   if (enterDriverScope !== undefined) {
     registerDriverSavepointScope(backend, enterDriverScope);
   }

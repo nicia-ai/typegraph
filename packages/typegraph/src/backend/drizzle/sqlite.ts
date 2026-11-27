@@ -110,10 +110,12 @@ import {
   createNativeTransactionToken,
   type NativeHandle,
   publishConnectionNativeTransaction,
+  recordBackendConnection,
   recordEngineSavepoint,
   recordNativeTransactionHandle,
   recordOpenedNativeTransaction,
 } from "../native-transaction-handle";
+import { gateBackendUnderConstruction } from "../read-only-write-gate";
 import {
   REVISION_JOURNAL_ENTITY,
   type RevisionJournalEntity,
@@ -1323,9 +1325,14 @@ export function createSqliteBackend(
   // transaction: recorded as for a bind, so a Store over this backend reaches
   // that transaction's state before a write of its own opens a savepoint. A
   // database handle names a connection, which runs many transactions over
-  // its life, so nothing is recorded for one.
+  // its life, so no transaction is recorded for one, only the connection:
+  // while a read-only scope is open on a transaction running on it, every
+  // statement of this backend runs in that transaction, and its write
+  // members refuse (`read-only-write-gate.ts`).
   if (isSqliteTransactionHandle(db)) {
     recordNativeTransactionHandle(backend, sqliteNativeHandle(db));
+  } else {
+    recordBackendConnection(backend, nativeTransactionConnection(db));
   }
   return backend;
 }
@@ -2724,7 +2731,11 @@ function createTransactionBackend(
   // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
   // anything on rollback. The shared per-instance cache means a slot
   // confirmed once stays a pure `Set.has` inside every later transaction.
-  const txBackend = createSqliteOperationBackend({
+  // Gated before anything is recorded on it: every write member refuses
+  // inside a read-only scope on the native transaction recorded below
+  // (`read-only-write-gate.ts`).
+  const txBackend = gateBackendUnderConstruction(
+    createSqliteOperationBackend({
     capabilities: downgradeAtomicBatch(options.capabilities),
     db: options.db,
     executionAdapter: txExecutionAdapter,
@@ -2737,7 +2748,8 @@ function createTransactionBackend(
     fenceTarget: options.fenceTarget,
     lineage: options.lineage,
     recordedTime: options.recordedTime,
-  });
+    }),
+  );
   recordSqliteNativeTransaction(txBackend, options);
   return options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
 }

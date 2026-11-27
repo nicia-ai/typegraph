@@ -152,6 +152,7 @@ import {
   edgeMatchIdentityUpdateRefusal,
   resolveEdgeMatchIdentityStorage,
 } from "../store/edge-match-key";
+import { refuseReadOnlyTransactionWrite } from "../store/native-transaction-state";
 import { isBackendNativeTransactionReadOnly } from "../store/native-transaction-state";
 import { compositionRowEndpoints } from "../store/operations/composition-cascade";
 import {
@@ -185,7 +186,6 @@ import {
 } from "../store/operations/write-session";
 import {
   constraintFenceRefusal,
-  refuseReadOnlyTransactionWrite,
   type WriteTransactionMode,
 } from "../store/operations/write-transaction";
 import { runRecordedTransactionSavepoint } from "../store/recorded-capture";
