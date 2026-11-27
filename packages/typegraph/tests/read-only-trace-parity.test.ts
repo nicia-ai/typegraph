@@ -2,28 +2,29 @@
  * Statement-trace parity with main for the read-only write gate.
  *
  * A read-only `store.transaction` opens a read-only scope, and the backend
- * objects over its transaction or its connection refuse their write members
- * inside it (`src/backend/read-only-write-gate.ts`). That gate may change
- * nothing else: not what runs outside a read-only scope, and not work that
- * other flows issue while a read-only transaction is open and that is
- * admitted to the database only once it has ended. This file proves it with a
- * fixed script of interleavings (cells): owned read-only and read-write
- * transactions, root writes and reads issued concurrently from other flows,
- * a second Store on the same backend, every root write member called from
- * another flow, and backends adopted over the transaction's native handle,
- * on each driver lane this repository runs in process (better-sqlite3,
- * libSQL with the current client and with 0.17, PGlite). Each cell records
- * every statement the driver was asked to run, the caller's own markers, the
- * outcome of every call and the rows left behind.
+ * objects over its transaction refuse their write members inside it
+ * (`src/backend/read-only-write-gate.ts`): the transaction's own backend and
+ * everything derived from it, and every adoption of its native handle. That
+ * gate may change nothing else: not what runs outside a read-only scope, and
+ * not any call another flow makes on the root backend, or on a Store over it,
+ * while a read-only transaction is open, whatever the root's connection runs
+ * meanwhile. This file proves it with a fixed script of interleavings
+ * (cells): owned read-only and read-write transactions, root writes and reads
+ * issued concurrently from other flows, a second Store on the same backend,
+ * Store members called from another flow on an untracked and a tracked Store,
+ * every root write member called from another flow, and backends adopted or
+ * built over the transaction's native handle, on each driver lane this
+ * repository runs in process (better-sqlite3, libSQL with the current client
+ * and with 0.17, PGlite). Each cell records every statement the driver was
+ * asked to run, the caller's own markers, the outcome of every call and the
+ * rows left behind.
  *
  * `__fixtures__/read-only-trace-parity.main.json` is that record taken on
  * main's `src` (rerun with `TRACE_PARITY_RECORD=1` on main's sources to
  * refresh it; `TRACE_PARITY_OUT` redirects a recording elsewhere). Every cell
  * must equal it, except the cells {@link DIVERGENT_CELLS} names: each is a
- * refusal of work that, on main, ran inside the read-only transaction, and
- * must differ from main in exactly the outcomes stated there. For a root
- * member called from another flow, main's own trace is checked to show the
- * member's statements inside the transaction's span.
+ * refusal on one of the two routes above, and must differ from main in
+ * exactly the outcomes stated there.
  */
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -70,6 +71,13 @@ type Lane = (typeof LANES)[number];
 
 const GRAPH_ID = "ro_parity";
 const OTHER_GRAPH_ID = "ro_parity_other";
+const TRACKED_GRAPH_ID = "ro_parity_tracked";
+
+/**
+ * The row count at which a Store's bulk write refreshes planner statistics
+ * in these cells: small, so a `bulkCreate` cell reaches the refresh.
+ */
+const AUTO_REFRESH_STATISTICS = 3;
 
 /** What one cell observed: the driver trace, each call's outcome, the rows. */
 type CellRecord = Readonly<{
@@ -94,6 +102,8 @@ type Harness = Readonly<{
   backend: AdapterBackend<unknown>;
   store: RotStore;
   otherStore: RotStore;
+  /** A Store with `revisionTracking: true` on a graph of its own. */
+  trackedStore: RotStore;
   /** Records a caller-side event (`-- caller …`) in the trace. */
   mark: (label: string) => void;
   /** Every statement the driver ran since recording began, normalized. */
@@ -202,18 +212,29 @@ async function openHarness(lane: Lane): Promise<Harness> {
   const [store] = await createAdapterStoreWithSchema(
     buildGraph(GRAPH_ID),
     backend,
+    { autoRefreshStatistics: AUTO_REFRESH_STATISTICS },
   );
   const [otherStore] = await createAdapterStoreWithSchema(
     buildGraph(OTHER_GRAPH_ID),
     backend,
   );
+  const [trackedStore] = await createAdapterStoreWithSchema(
+    buildGraph(TRACKED_GRAPH_ID),
+    backend,
+    {
+      revisionTracking: true,
+      autoRefreshStatistics: AUTO_REFRESH_STATISTICS,
+    },
+  );
   await seed(store);
+  await seed(trackedStore);
   log.start();
   return {
     lane,
     backend,
     store,
     otherStore,
+    trackedStore: trackedStore as unknown as RotStore,
     mark: log.mark,
     trace: log.trace,
     close,
@@ -437,6 +458,59 @@ function rootMemberCell(member: string): Cell {
   };
 }
 
+/**
+ * A backend built over the native handle `handle` a transaction hands its
+ * callback: `createPostgresBackend` (a transaction backend over a
+ * transaction object) on PGlite, `createSqliteBackend` elsewhere (over
+ * libSQL's transaction object, or over the database handle better-sqlite3 and
+ * libSQL 0.17 hand the callback).
+ */
+function backendBuiltOver(
+  lane: Lane,
+  handle: unknown,
+): AdapterBackend<unknown> {
+  switch (lane) {
+    case "pglite": {
+      return createPostgresBackend(handle as never) as AdapterBackend<unknown>;
+    }
+    case "better-sqlite3": {
+      return createSqliteBackend(handle as never) as AdapterBackend<unknown>;
+    }
+    case "libsql":
+    case "libsql-0.17": {
+      return createSqliteBackend(handle as never, {
+        executionProfile: { isSync: false, transactionMode: "drizzle" },
+      }) as AdapterBackend<unknown>;
+    }
+  }
+}
+
+/** Prefix of a cell that calls one Store member from another flow. */
+const STORE_CALL_CELL = "read-only held: ";
+
+/**
+ * The Store members a caller reaches the root backend through from another
+ * flow, each called on an untracked and on a tracked Store while a
+ * read-only transaction is held. None is this gate's: each must equal main.
+ */
+const STORE_CALLS: readonly (readonly [
+  string,
+  (store: RotStore) => Promise<unknown>,
+])[] = [
+  ["allocationOwner()", (store) => store.allocationOwner()],
+  ["clear()", (store) => store.clear()],
+  ["create()", (store) => store.nodes.RotTeam.create(team("s"), { id: "s" })],
+  [
+    "bulkCreate()",
+    (store) =>
+      store.nodes.RotTeam.bulkCreate(
+        ["b1", "b2", "b3", "b4"].map((id) => ({ props: team(id), id })),
+      ),
+  ],
+  ["refreshStatistics()", (store) => store.refreshStatistics()],
+  ["materializeIndexes()", (store) => store.materializeIndexes()],
+];
+
 /** The fixed script. Every cell runs on a fresh connection. */
 const CELLS: Readonly<Record<string, Cell>> = {
   "read-write: two writes through the context, commit": ({ harness, track }) =>
@@ -641,6 +715,76 @@ const CELLS: Readonly<Record<string, Cell>> = {
       ),
     ]),
 
+  "read-only: a write through a backend adopted over tx.sql": ({
+    harness,
+    track,
+  }) =>
+    track(
+      "transaction",
+      harness.store.transaction(
+        async (tx) => {
+          const adopted: TransactionBackend = harness.backend.adoptTransaction(
+            (tx as Readonly<{ sql?: unknown }>).sql,
+          );
+          await track(
+            "adopted insertNode",
+            adopted.insertNode({
+              graphId: GRAPH_ID,
+              kind: "RotTeam",
+              id: "w",
+              props: team("w"),
+            }),
+          );
+        },
+        { accessMode: "read_only" },
+      ),
+    ),
+
+  "read-only: a write through a backend built over tx.sql": ({
+    harness,
+    track,
+  }) =>
+    track(
+      "transaction",
+      harness.store.transaction(
+        async (tx) => {
+          const built = backendBuiltOver(
+            harness.lane,
+            (tx as Readonly<{ sql?: unknown }>).sql,
+          );
+          await track(
+            "built insertNode",
+            built.insertNode({
+              graphId: GRAPH_ID,
+              kind: "RotTeam",
+              id: "w",
+              props: team("w"),
+            }),
+          );
+        },
+        { accessMode: "read_only" },
+      ),
+    ),
+
+  ...Object.fromEntries(
+    STORE_CALLS.flatMap(([call, invoke]) =>
+      (["untracked", "tracked"] as const).map((label): [string, Cell] => [
+        `${STORE_CALL_CELL}${label} store.${call} from another flow`,
+        (context) =>
+          whileHeld(context, "read_only", () => [
+            context.track(
+              `${label} ${call}`,
+              invoke(
+                label === "tracked" ?
+                  context.harness.trackedStore
+                : context.harness.store,
+              ),
+            ),
+          ]),
+      ]),
+    ),
+  ),
+
   ...Object.fromEntries(
     WRITE_MEMBERS.map((member) => [
       `${ROOT_MEMBER_CELL}${member}() from another flow`,
@@ -652,82 +796,55 @@ const CELLS: Readonly<Record<string, Cell>> = {
 /** What the gate refuses: the read-only refusal's outcome. */
 const REFUSED = "UnsupportedBackendCapabilityError";
 
-/**
- * The root write members of a SQLite backend that run their statements on
- * the connection as they are called, inside whatever transaction it has
- * open (`SQLITE_ROOT_QUEUED_WRITE_MEMBERS` in `src/backend/drizzle/sqlite.ts`
- * names every other one). Called from another flow while a read-only
- * transaction holds the connection, they ran inside it on main.
- */
-const DIRECT_ROOT_MEMBERS = [
-  "adoptBaseSchema",
-  "adoptSchemaWriteTransaction",
-  "bootstrapTables",
-  "createVectorIndex",
-  "deleteVectorSlotContribution",
-  "ensureContributionMaterializationsTable",
-  "ensureEdgeMatchIdentityStorage",
-  "ensureFulltextTable",
-  "ensureIdentityTables",
-  "ensureIndexMaterializationsTable",
-  "ensureKindRemovalsTable",
-  "ensureReconciliationMarkersTable",
-  "ensureRevisionChangesJournal",
-  "ensureRevisionOriginsTable",
-  "ensureRuntimeContributions",
-  "ensureVectorSlotContribution",
-  "ensureVectorSlotContributions",
-  "executeDdl",
-  "rebuildContribution",
-  "recordContributionMaterialization",
-  "recordIndexMaterialization",
-  "recordKindRemoval",
-  "refreshStatistics",
-  "registerGraphTemplate",
-  "repairContributions",
-  "setReconciliationMarker",
-] as const;
-
-/** The lanes whose root backend shares the read-only transaction's connection. */
-const ONE_CONNECTION_LANES: readonly Lane[] = ["better-sqlite3", "libsql-0.17"];
+/** The route a claimed refusal is on. */
+type Route =
+  | "the transaction's own backend, or one derived from it"
+  | "an adoption of the transaction's native handle";
 
 type Divergence = Readonly<{
-  rule: string;
+  route: Route;
   lanes: readonly Lane[];
   /** The outcomes this branch produces; main's are in the fixture. */
   branch: Readonly<Record<string, string>>;
 }>;
 
 /**
- * The cells that differ from main, each a refusal this change claims. Every
- * other cell equals main's record exactly.
+ * The cells that differ from main, each a refusal on one of the two routes
+ * this change claims. Every other cell equals main's record exactly: every
+ * call another flow makes on the root backend or a Store over it, whatever
+ * its connection runs meanwhile, included.
  */
 const DIVERGENT_CELLS: Readonly<Record<string, Divergence>> = {
   "read-only: a write through a Store adopted over tx.sql": {
-    rule: "a Store adopted over the read-only transaction's native handle refuses its write before any statement",
+    route: "an adoption of the transaction's native handle",
     lanes: ["better-sqlite3", "libsql", "libsql-0.17", "pglite"],
     branch: { "adopted write": REFUSED, transaction: "fulfilled" },
   },
-  "read-only: root refreshStatistics() from inside the callback": {
-    rule: "the root backend on the read-only transaction's one connection refuses a member that runs on it at once",
-    lanes: ONE_CONNECTION_LANES,
-    branch: { refreshStatistics: REFUSED, transaction: "fulfilled" },
+  "read-only: a write through a backend adopted over tx.sql": {
+    route: "an adoption of the transaction's native handle",
+    lanes: ["better-sqlite3", "libsql", "libsql-0.17", "pglite"],
+    branch: { "adopted insertNode": REFUSED, transaction: "fulfilled" },
   },
-  "read-only held: root store.refreshStatistics() from another flow": {
-    rule: "a root member that runs on the connection at once runs inside the read-only transaction, and is refused",
-    lanes: ONE_CONNECTION_LANES,
-    branch: { "held transaction": "fulfilled", refreshStatistics: REFUSED },
+  // The root member adopts the handle it is given, the transaction's own:
+  // an adoption, refused before its first statement. On main better-sqlite3
+  // ran its fence inside the read-only transaction and PGlite's engine
+  // refused it, aborting the transaction. libSQL's root has no such member.
+  [`${ROOT_MEMBER_CELL}adoptSchemaWriteTransaction() from another flow`]: {
+    route: "an adoption of the transaction's native handle",
+    lanes: ["better-sqlite3", "pglite"],
+    branch: {
+      adoptSchemaWriteTransaction: REFUSED,
+      "held transaction": "fulfilled",
+    },
   },
-  ...Object.fromEntries(
-    DIRECT_ROOT_MEMBERS.map((member): [string, Divergence] => [
-      `${ROOT_MEMBER_CELL}${member}() from another flow`,
-      {
-        rule: "a root member that runs on the connection at once runs inside the read-only transaction, and is refused",
-        lanes: ONE_CONNECTION_LANES,
-        branch: { "held transaction": "fulfilled", [member]: REFUSED },
-      },
-    ]),
-  ),
+  // libSQL 0.17 hands the callback its one connection's database handle and
+  // reports no transaction state, so nothing proves a backend built over it
+  // runs in the transaction: it is a root backend there, as on main.
+  "read-only: a write through a backend built over tx.sql": {
+    route: "an adoption of the transaction's native handle",
+    lanes: ["better-sqlite3", "libsql", "pglite"],
+    branch: { "built insertNode": REFUSED, transaction: "fulfilled" },
+  },
 };
 
 async function runCell(
@@ -742,10 +859,15 @@ async function runCell(
     if (done === undefined) return undefined;
     await done;
     const trace = harness.trace();
-    const rows = await harness.store.nodes.RotTeam.find().then(
-      (teams) => teams.map((node) => node.id).toSorted(),
-      (error: unknown) => [`unreadable: ${describeOutcome(error)}`],
-    );
+    const rowsOf = (store: RotStore, prefix: string) =>
+      store.nodes.RotTeam.find().then(
+        (teams) => teams.map((node) => `${prefix}${node.id}`).toSorted(),
+        (error: unknown) => [`${prefix}unreadable: ${describeOutcome(error)}`],
+      );
+    const rows = [
+      ...(await rowsOf(harness.store, "")),
+      ...(await rowsOf(harness.trackedStore, "tracked:")),
+    ];
     return {
       trace,
       outcomes: outcomes.record(),
@@ -764,22 +886,6 @@ async function recordLane(lane: Lane): Promise<LaneRecord> {
     if (cellRecord !== undefined) record[name] = cellRecord;
   }
   return record;
-}
-
-/**
- * Whether `member`'s call in a root-member cell was admitted inside the held
- * transaction's span: a statement between the callback beginning and its
- * release, or the call settling before the release.
- */
-function admittedInsideSpan(record: CellRecord, member: string): boolean {
-  const begun = record.trace.indexOf(`-- caller ${BEGUN}`);
-  const released = record.trace.indexOf(`-- caller ${RELEASED}`);
-  const statementsInside = record.trace
-    .slice(begun + 1, released)
-    .filter((entry) => !entry.startsWith("--"));
-  return (
-    statementsInside.length > 0 || record.settledInsideSpan.includes(member)
-  );
 }
 
 const FIXTURE_PATH = path.join(
@@ -848,25 +954,6 @@ describe("read-only gate: statement traces match main outside the refusals it cl
         ]),
       );
       expect(observed).toEqual(expected);
-      // Each refused root member is one main admitted inside the read-only
-      // transaction: it ran a statement, or settled, before the release.
-      const rootMemberDivergences = [...divergent].filter(
-        (name) => name.startsWith(ROOT_MEMBER_CELL) && name in main,
-      );
-      expect(
-        Object.fromEntries(
-          rootMemberDivergences.map((name) => {
-            const member =
-              name.slice(ROOT_MEMBER_CELL.length).split("(")[0] ?? "";
-            return [
-              name,
-              admittedInsideSpan(requireDefined(main[name]), member),
-            ];
-          }),
-        ),
-      ).toEqual(
-        Object.fromEntries(rootMemberDivergences.map((name) => [name, true])),
-      );
     },
     900_000,
   );
