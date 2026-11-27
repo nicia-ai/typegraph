@@ -348,11 +348,23 @@ the `0`/`1` that SQLite's and libSQL's `store.batchOnce()` issue it as, and a ti
 the text with the session's UTC offset (`2024-01-01T19:04:05.678-08:00`, or an offset with
 seconds such as `+00:09:21`, which a zone's local mean time gives a date before the zone adopted
 standard time) that PostgreSQL's `store.batchOnce()` issues it as, or the rendering a PostgreSQL
-driver returns, compared as the instant it names. On PostgreSQL, whose text
+driver returns, compared as the instant it names. The year is the instant's in UTC, not the text's: a
+session zone east of UTC renders the last hours of 9999 in year 10000
+(`10000-01-01T10:00:00+14:00` in `Pacific/Kiritimati`), and one west of it renders the first hours of
+year 1 as `0001 BC`, and both are accepted. On PostgreSQL, whose text
 cannot hold a NUL character, a cursor whose text holds one (in an `orderBy()` value, an id or a
 hybrid search's node-id tiebreak) is refused the same way; SQLite's text can hold one, so it pages
 there. A cursor whose text holds a lone UTF-16 surrogate, which no database stores or returns, is
 refused on every dialect.
+
+**A property of unknown type.** A property whose type is neither a string, a number, a Boolean nor a
+date (a `z.union([z.string(), z.number()])`, say) is ordered by the value a comparison reads: its text
+on PostgreSQL, and its JSON value (numbers before text) on SQLite. Every page of a query ordered by
+one sorts its rows as `execute()` does, whichever fields the query selects. A search's cursor carries
+the key as the statement sorts it. A query without a search keeps the cursor it always issued, which
+holds the row's JSON value, so on PostgreSQL a number whose JSON form is not its text (`1e21`, whose
+text is `1000000000000000000000`) resumes from the JSON form and can skip a row whose text sorts
+between the two.
 
 ### Recursive traversals are not paginated
 

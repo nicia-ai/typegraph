@@ -3055,7 +3055,11 @@ declares. A strategy's `buildSearch` must also break distance ties by node id, i
 takes an order (`compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId }, dialect)`, which
 compares the id through `dialect.binaryText`: it scans one kind's table, so the kind the query compiler's own cuts
 also order by is constant there) and keep zero-norm embeddings out of a cosine search
-(`vectorDefinedDistanceConditions`), as the bundled strategies do.
+(`vectorDefinedDistanceConditions`), as the bundled strategies do. A read an ANN index serves should order by the
+distance alone and keep every row tied with the last one it needs, breaking the tie in a sort over those candidates:
+a second key on the index scan's own ORDER BY, or a range condition on the distance, can cost the planner off the
+index. pgvector's bundled strategy reads `ORDER BY distance FETCH FIRST n ROWS WITH TIES` and applies the tiebreak
+and the defined-distance condition in a materialized wrapper.
 
 `searchFrontierTuning` is **required** on a vector strategy's capabilities, so a strategy must state whether it has a
 per-search ANN frontier knob rather than inheriting silence. It is a discriminated union: `{ tunable: true, parameter,
