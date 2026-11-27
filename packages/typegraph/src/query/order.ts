@@ -67,14 +67,25 @@ export const RELEVANCE_NULL_ORDERING = "last";
 /**
  * The total order a top-k cut of search candidates takes its rows in: by
  * `value` in `direction`, NULLs last ({@link RELEVANCE_NULL_ORDERING}), then
- * by `nodeId`. A cut inside a tie then keeps the same rows in every
+ * by the candidate's identity, `nodeKind` and `nodeId` (a node id is unique
+ * only within its kind, so a search over several kinds can tie two nodes
+ * with one id). A cut inside a tie then keeps the same rows in every
  * statement, so every execution and every cursor page of one search ranks
  * the same candidates.
+ *
+ * `nodeKind` is `undefined` only for a cut over one kind's candidates (a
+ * vector strategy's scan of one kind's table), where it is the same for
+ * every row and orders nothing.
  */
 export function compileRelevanceCandidateOrder(
   value: SqlFragment,
   direction: "asc" | "desc",
-  nodeId: SqlFragment,
+  identity: Readonly<{
+    nodeKind: SqlFragment | undefined;
+    nodeId: SqlFragment;
+  }>,
 ): SqlFragment {
-  return sql`${compileOrderTerm(value, direction, RELEVANCE_NULL_ORDERING)}, ${nodeId} ASC`;
+  const kindTerm =
+    identity.nodeKind === undefined ? sql`` : sql`${identity.nodeKind} ASC, `;
+  return sql`${compileOrderTerm(value, direction, RELEVANCE_NULL_ORDERING)}, ${kindTerm}${identity.nodeId} ASC`;
 }

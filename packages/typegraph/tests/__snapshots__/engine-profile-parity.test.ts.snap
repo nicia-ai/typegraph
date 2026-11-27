@@ -2421,7 +2421,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
         
         SELECT node_id, $5 AS node_kind, (1.0 - score) AS distance, score
@@ -2433,7 +2433,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       LIMIT $11
     ) AS tg_ann_src
       
-        ORDER BY distance ASC NULLS LAST, node_id ASC
+        ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC
         LIMIT $12
       ) AS vec_inner
     )
@@ -4905,7 +4905,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
         
         SELECT node_id, ? AS node_kind, (1.0 - score) AS distance, score
@@ -4916,7 +4916,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
         ORDER BY distance ASC
       ) AS tg_ann_src
       
-        ORDER BY distance ASC NULLS LAST, node_id ASC
+        ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC
         LIMIT ?
       ) AS vec_inner
     )

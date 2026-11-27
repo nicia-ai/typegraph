@@ -10,8 +10,18 @@
  */
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import { ConfigurationError, createStore, ValidationError } from "../../../src";
+import {
+  ConfigurationError,
+  createStore,
+  defineGraph,
+  defineNode,
+  embedding,
+  searchable,
+  subClassOf,
+  ValidationError,
+} from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import { UnsupportedBackendCapabilityError } from "../../../src/errors";
 import type { PaginatedResult } from "../../../src/query/builder/types";
@@ -26,6 +36,29 @@ import type { IntegrationTestContext } from "./test-context";
 
 /** A store the search helpers read through: the lane's, or one over a derived backend. */
 type SearchStore = Store<typeof integrationTestGraph>;
+
+/**
+ * Two searchable, embedded kinds, one a subclass of the other, for a search
+ * whose alias spans both. The subclass's kind sorts first.
+ */
+const SearchMedia = defineNode("SpMedia", {
+  schema: z.object({
+    title: searchable({ language: "english" }),
+    embedding: embedding(4),
+  }),
+});
+const SearchClip = defineNode("SpClip", {
+  schema: z.object({
+    title: searchable({ language: "english" }),
+    embedding: embedding(4),
+  }),
+});
+const polymorphicSearchGraph = defineGraph({
+  id: "search_pagination_polymorphic",
+  nodes: { SpMedia: { type: SearchMedia }, SpClip: { type: SearchClip } },
+  edges: {},
+  ontology: [subClassOf(SearchClip, SearchMedia)],
+});
 
 type SearchKind = "fulltext" | "vector" | "hybrid";
 const SEARCH_KINDS: readonly SearchKind[] = ["fulltext", "vector", "hybrid"];
@@ -871,6 +904,85 @@ export function registerSearchPaginationIntegrationTests(
         });
       }
     });
+
+    for (const kind of SEARCH_KINDS) {
+      it(`${kind}: a k cut inside a tie between two kinds' nodes with one id takes them in kind order, on execute() and every page`, async (ctx) => {
+        storeWith(context, ctx, kind);
+        const store = await context.createStore(polymorphicSearchGraph);
+        // One id in both kinds, tied on every leg: only the kind decides
+        // which of the two the k = 1 cut keeps.
+        for (const create of [
+          () =>
+            store.nodes.SpMedia.create(
+              { title: "climate", embedding: embeddingAt(0.3) },
+              { id: "x" },
+            ),
+          () =>
+            store.nodes.SpClip.create(
+              { title: "climate", embedding: embeddingAt(0.3) },
+              { id: "x" },
+            ),
+          () =>
+            store.nodes.SpMedia.create(
+              { title: "climate climate", embedding: embeddingAt(0) },
+              { id: "w" },
+            ),
+        ]) {
+          await create();
+        }
+        const search = (k: number) =>
+          store
+            .query()
+            .from("SpMedia", "m", { expansion: "subclasses" })
+            .whereNode("m", (m) => {
+              switch (kind) {
+                case "fulltext": {
+                  return m.$fulltext.matches("climate", k);
+                }
+                case "vector": {
+                  return m.embedding.similarTo(QUERY_VECTOR, k);
+                }
+                case "hybrid": {
+                  return m.$fulltext
+                    .matches("climate", k)
+                    .and(m.embedding.similarTo(QUERY_VECTOR, k));
+                }
+              }
+            })
+            .select((row) => ({ id: `${row.m.kind}:${row.m.id}` }));
+        // The walk helpers are typed for the shared graph; they only read the
+        // terminals and `batchOnce`, which every store and query here has.
+        const pager = store as unknown as SearchStore;
+        const query = (k: number) => () => search(k) as unknown as SearchQuery;
+        const executions = new Set<string>();
+        for (let run = 0; run < 10; run += 1) {
+          const executed = await executedIds(query(2)());
+          executions.add(executed.join(","));
+        }
+        expect({ kind, executions: [...executions] }).toEqual({
+          kind,
+          executions: ["SpMedia:w,SpClip:x"],
+        });
+        for (const k of [2, 3]) {
+          const executed = await executedIds(query(k)());
+          expect({
+            kind,
+            k,
+            forward: await walk(pager, query(k), "paginate", "forward", 1),
+            backward: await walk(pager, query(k), "page", "backward", 1),
+            batched: await walk(pager, query(k), "batchOnce", "forward", 1),
+            stream: await walk(pager, query(k), "stream", "forward", 1),
+          }).toEqual({
+            kind,
+            k,
+            forward: executed,
+            backward: executed,
+            batched: executed,
+            stream: executed,
+          });
+        }
+      });
+    }
 
     it("pages a search through a custom strategy whose engine form is exact, approximate or not, even when it declares no approximate repeatability", async (ctx) => {
       const laneStore = storeWith(context, ctx, "vector");

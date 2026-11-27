@@ -407,7 +407,7 @@ export const sqliteVecStrategy: VectorStrategy = {
       SELECT ${table}."node_id" AS node_id, ${score} AS score
       FROM ${table}
       WHERE ${sql.join(conditions, sql` AND `)}
-      ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", sql`${table}."node_id"`)}
+      ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${table}."node_id"` })}
       ${pageClause}
     `;
   },
