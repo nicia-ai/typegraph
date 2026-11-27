@@ -6535,6 +6535,7 @@ type ProjectedField = Readonly<{
     outputName: string;
     source: AggregateExpr | DatabaseExpression | FieldRef;
     cteAlias?: string;
+    batchExactNumber?: true;
 }>;
 
 // @public (undocumented)

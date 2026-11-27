@@ -1924,6 +1924,7 @@ export const DEPLOYMENT_CONTRIBUTION_GRAPH_ID = "__typegraph_deployment__";
 export interface DialectAdapter {
     readonly analyzeTemporaryTable: (this: void, table: SqlFragment) => SqlFragment | undefined;
     readonly appendTextJsonArray: (this: void, array: SqlFragment, values: readonly SqlFragment[]) => SqlFragment;
+    readonly batchExactNumber: (this: void, expression: SqlFragment) => SqlFragment;
     readonly binaryText: (this: void, expression: SqlFragment) => SqlFragment;
     readonly bindValue: (this: void, value: unknown) => unknown;
     readonly booleanLiteral: (this: void, value: boolean) => SqlFragment;
