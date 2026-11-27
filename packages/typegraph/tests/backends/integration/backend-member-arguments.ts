@@ -44,7 +44,7 @@ type MemberOf<M extends BackendMemberName> =
   : never;
 
 /** The arguments of a callable member; a command port's are its `execute`'s. */
-export type MemberArguments<M extends BackendMemberName> =
+type MemberArguments<M extends BackendMemberName> =
   MemberOf<M> extends (...args: infer A) => unknown ? A
   : MemberOf<M> extends Readonly<{ execute: (...args: infer A) => unknown }> ? A
   : readonly [];

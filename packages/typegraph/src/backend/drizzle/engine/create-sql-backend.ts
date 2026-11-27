@@ -630,7 +630,7 @@ export function createSqlBackend<TTx>(
     // TypeGraph-opened handle the identical way, instead of marking every
     // handle unconditionally regardless of whether this profile earned it.
     isFirstParty,
-    self: () => backend,
+    self: () => gatedBackend,
   };
 
   const late = lateMembers(ctx);
@@ -757,10 +757,19 @@ export function createSqlBackend<TTx>(
   // function actually returns, instead of always to the pre-queue `backend`
   // nothing outside this function can still reach, is what keeps every mark
   // and registration attached to the backend a caller actually holds.
+  // Every write member refuses inside a read-only scope TypeGraph opened on
+  // what this backend runs in (`read-only-write-gate.ts`). The gate is
+  // applied first, so `ctx.self()` (the gated object) keeps reaching every
+  // member unqueued, as before; it asks the object this factory returns,
+  // the one its builder records a native transaction or connection on.
+  const gatedBackend = gateBackendUnderConstruction(
+    backend,
+    () => queuedBackend,
+  );
   const queuedBackend: AdapterBackend<TTx> =
     fencePlan.kind === "caller-serialized" ?
-      buildCallerSerializedBackend(backend)
-    : backend;
+      buildCallerSerializedBackend(gatedBackend)
+    : gatedBackend;
 
   // Read off `queuedBackend`, not the `capabilities` local above: a root
   // atomic SQL/mutation program dispatches its whole multi-statement batch
@@ -773,19 +782,12 @@ export function createSqlBackend<TTx>(
   // never selectively — so `queuedBackend.capabilities.execution.atomicBatch`
   // already reads the correct, downgraded value for the object this factory
   // is about to return; the plain pass-through case (`queuedBackend ===
-  // backend`) reads the identical object `capabilities` names, so this
-  // changes nothing for either bundled backend.
+  // gatedBackend`) reads the identical declaration `capabilities` names (the
+  // gate keeps it as it stands), so this changes nothing for either bundled
+  // backend.
   const queuedCapabilities = queuedBackend.capabilities;
 
-  // Every write member of the backend this factory returns refuses inside a
-  // read-only scope TypeGraph opened on what it runs in
-  // (`read-only-write-gate.ts`). The outermost decoration, so the object
-  // the gate asks is the one its builder records a native transaction or
-  // connection on, and the one `applyEngineMarks` registers atomic evidence
-  // on below: it keeps `queuedCapabilities` as they stand.
-  const gatedBackend = gateBackendUnderConstruction(queuedBackend);
-
-  applyEngineMarks(gatedBackend, {
+  applyEngineMarks(queuedBackend, {
     isFirstParty,
     capabilities: queuedCapabilities,
     fencePlan,
@@ -804,7 +806,7 @@ export function createSqlBackend<TTx>(
     },
   });
 
-  return gatedBackend;
+  return queuedBackend;
 }
 
 function assertNothingBeforeTransactionRefusal(): Promise<void> {

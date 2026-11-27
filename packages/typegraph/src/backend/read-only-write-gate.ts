@@ -72,6 +72,10 @@ function refusalOf(
   }
 }
 
+/** The members the gate wraps, read once from the classification. */
+const WRITE_MEMBERS = backendMembersWithAccess("write");
+const RAW_MEMBERS = backendMembersWithAccess("raw");
+
 type BackendFunction = (...args: readonly unknown[]) => unknown;
 
 function gateWriteMember(
@@ -144,7 +148,7 @@ function readOnlyGateOverlay<T extends object>(
   base: T,
   self: () => object,
 ): ExactBackendOverlay<T, Partial<T>> {
-  const writes = backendMembersWithAccess("write").flatMap(
+  const writes = WRITE_MEMBERS.flatMap(
     (member): readonly (readonly [string, unknown])[] => {
       const value: unknown = Reflect.get(base, member);
       if (member === "commands") {
@@ -164,7 +168,7 @@ function readOnlyGateOverlay<T extends object>(
       ];
     },
   );
-  const raws = backendMembersWithAccess("raw").flatMap(
+  const raws = RAW_MEMBERS.flatMap(
     (member): readonly (readonly [string, unknown])[] => {
       const value: unknown = Reflect.get(base, member);
       return typeof value === "function" ?
@@ -184,13 +188,18 @@ function readOnlyGateOverlay<T extends object>(
 
 /**
  * `base`, with every write member refusing inside a read-only scope on the
- * object this returns. For a factory still assembling `base`: it records the
- * native transaction or connection, and registers atomic evidence, on the
- * returned object (`deriveBackendUnderConstruction`).
+ * object the factory hands out: the returned one, or `exposed()` when the
+ * factory decorates the result further (a caller-serialized queue). For a
+ * factory still assembling `base`: it records the native transaction or
+ * connection, and registers atomic evidence, on that object
+ * (`deriveBackendUnderConstruction`).
  */
-export function gateBackendUnderConstruction<T extends object>(base: T): T {
-  const holder: { gated?: T } = {};
-  const self = (): object => requireDefined(holder.gated);
+export function gateBackendUnderConstruction<T extends object>(
+  base: T,
+  exposed?: () => object,
+): T {
+  const holder: { gated: T | undefined } = { gated: undefined };
+  const self = (): object => exposed?.() ?? requireDefined(holder.gated);
   holder.gated = deriveBackendUnderConstruction(
     base,
     readOnlyGateOverlay(base, self),

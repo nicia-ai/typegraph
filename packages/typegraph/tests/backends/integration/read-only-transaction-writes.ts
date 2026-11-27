@@ -123,11 +123,11 @@ type TransactionSurface = Readonly<{
   writeNodeUpsertBatch: (entries: readonly unknown[]) => Promise<unknown>;
 }>;
 
-export function person(id: string): never {
+function person(id: string): never {
   return { kind: "RotPerson", id } as never;
 }
 
-export function team(id: string): never {
+function team(id: string): never {
   return { kind: "RotTeam", id } as never;
 }
 

@@ -97,10 +97,7 @@ function evolvedGraph(id: string) {
  * Asserts `error` is the backend gate's read-only refusal for the graph
  * `graphId`: the typed refusal, naming a backend member or an atomic program.
  */
-export function expectBackendReadOnlyRefusal(
-  error: unknown,
-  graphId: string,
-): void {
+function expectBackendReadOnlyRefusal(error: unknown, graphId: string): void {
   expect(writeOutcome(error)).toBe("refused as read-only");
   const details = (error as UnsupportedBackendCapabilityError).details;
   expect({

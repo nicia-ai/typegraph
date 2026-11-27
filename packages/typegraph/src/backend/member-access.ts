@@ -38,7 +38,7 @@ export type BackendMemberAccess = "read" | "write" | "raw";
 export type BackendMemberName =
   keyof AdapterBackend<unknown> | keyof SchemaWriteTransactionBackend;
 
-export const BACKEND_MEMBER_ACCESS = {
+const BACKEND_MEMBER_ACCESS = {
   // Static description of the backend.
   dialect: "read",
   capabilities: "read",

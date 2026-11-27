@@ -84,6 +84,14 @@ function createNativeTransactionState(
   };
 }
 
+/**
+ * How many read-only scopes are open in this process, on any transaction
+ * ({@link openReadOnlyScope}): while none is, no backend or session is
+ * read-only, and {@link backendReadOnlyScopeGraph} answers without resolving
+ * anything. The read-only write gate asks it on every write member call.
+ */
+const openScopes = { count: 0 };
+
 /** The engine's identity of a native transaction → its sessions' state. */
 const nativeTransactionStates = new WeakMap<object, NativeTransactionState>();
 
@@ -153,6 +161,7 @@ export function resolveBackendNativeTransactionState(
  * neither and is never read-only here.
  */
 export function backendReadOnlyScopeGraph(backend: object): string | undefined {
+  if (openScopes.count === 0) return undefined;
   const native = resolveBackendNativeTransactionState(backend);
   if (native !== undefined) return nativeTransactionReadOnlyScopeGraph(native);
   const connection = resolveNativeTransactionConnection(backend);
@@ -197,6 +206,7 @@ export function openReadOnlyScope(
 ): () => void {
   const connection = state[CONNECTION];
   state[READ_ONLY_SCOPES] = [...state[READ_ONLY_SCOPES], graphId];
+  openScopes.count += 1;
   const releaseConnection =
     connection === undefined ? undefined : (
       holdConnectionReadOnlyScope(connection, graphId)
@@ -205,6 +215,7 @@ export function openReadOnlyScope(
   return () => {
     if (released) return;
     released = true;
+    openScopes.count -= 1;
     const scopes = state[READ_ONLY_SCOPES];
     const index = scopes.lastIndexOf(graphId);
     if (index !== -1) state[READ_ONLY_SCOPES] = scopes.toSpliced(index, 1);
