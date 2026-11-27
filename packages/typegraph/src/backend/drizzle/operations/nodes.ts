@@ -1375,12 +1375,16 @@ export function buildPreviewNodeSetUpdate(
  * token, so the statement binds a constant number of parameters however many
  * rows it writes. The key CTE carries both: the id drives a keyed lookup of
  * each row, as in the dry-run, and the token, compared on the row that lookup
- * found, makes the match exact (see {@link setRowToken}).
+ * found, makes the match exact (see {@link setRowToken}). The token is
+ * compared with the null-safe equality, which no engine hashes or merges on:
+ * it stays a filter on the rows the key matched, so the planner joins on the
+ * key alone and computes no token for a row the key does not name — even when,
+ * on a table with no statistics, it hashes the whole table.
  *
  * All or nothing: the `tg_set_locked` CTE first locks every keyed row that
  * still carries its token (`rowLock`, as the dry-run did; a no-op when the
- * dry-run's locks are held), and the write runs only when that count equals
- * the number of rows validated. Locking before counting is what makes the
+ * dry-run's locks are held), the UPDATE writes exactly those rows by key, and
+ * only when their count equals the number of rows validated. Locking before counting is what makes the
  * count exact on PostgreSQL READ COMMITTED: an unlocked count could include a
  * row a concurrent writer is changing, which the UPDATE's own recheck would
  * then skip while writing the rest. When any row was changed, deleted or
@@ -1420,22 +1424,26 @@ export function buildUpdateNodeSet(
     portableSql`${keyRows}.${portableSql.identifier("key")}`,
     portableSql`${keyRows}.${portableSql.identifier("value")}`,
   );
-  const targetToken = toDrizzleSql(setRowToken(adapter, nodes), dialect);
-  const selectedToken = toDrizzleSql(
-    setRowToken(adapter, nodes, selected),
+  const tokenMatches = toDrizzleSql(
+    adapter.nullSafeEquals(
+      setRowToken(adapter, nodes, selected),
+      portableSql`${portableSql.identifier(relationNames[SET_KEYS])}.${portableSql.identifier(SET_KEY_TOKEN)}`,
+    ),
     dialect,
   );
   return sql`
     ${keysCte},
-    ${locked} AS (
-      SELECT ${qualifiedColumn(selected, nodes.id)}
+    ${locked} AS MATERIALIZED (
+      SELECT ${qualifiedColumn(selected, nodes.graphId)},
+             ${qualifiedColumn(selected, nodes.kind)},
+             ${qualifiedColumn(selected, nodes.id)}
       FROM ${key.keys}
       JOIN ${nodes} AS ${sql.identifier(selected)}
         ON ${qualifiedColumn(selected, nodes.graphId)} = ${key.graphId}
        AND ${qualifiedColumn(selected, nodes.kind)} = ${key.kind}
        AND ${qualifiedColumn(selected, nodes.id)} = ${key.id}
       WHERE ${qualifiedColumn(selected, nodes.deletedAt)} IS NULL
-        AND ${selectedToken} = ${key.token}
+        AND ${tokenMatches}
       ${rowLock([selected])}
     )
     UPDATE ${nodes}
@@ -1443,9 +1451,9 @@ export function buildUpdateNodeSet(
         ${quotedColumn(nodes.updatedAt)} = ${timestamp},
         ${quotedColumn(nodes.version)} = ${quotedColumn(nodes.version)} + ${sql.raw(String(NODE_VERSION_INCREMENT))}
     WHERE ${nodes.deletedAt} IS NULL
-      AND (${nodes.graphId}, ${nodes.kind}, ${nodes.id}, ${targetToken}) IN (
-            SELECT ${key.graphId}, ${key.kind}, ${key.id}, ${key.token}
-            FROM ${key.keys}
+      AND (${nodes.graphId}, ${nodes.kind}, ${nodes.id}) IN (
+            SELECT ${quotedColumn(nodes.graphId)}, ${quotedColumn(nodes.kind)}, ${quotedColumn(nodes.id)}
+            FROM ${locked}
           )
       AND (SELECT COUNT(*) FROM ${locked}) = ${params.rows.length}
     RETURNING *
