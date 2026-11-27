@@ -10,6 +10,7 @@ import {
   SQLITE_MAX_BIND_PARAMETERS,
 } from "../../types";
 import { isLibsqlClient, type LibsqlClient } from "../libsql-client";
+import { admitHandleStatementDirectly } from "./handle-statement";
 import { getOrCreateLru } from "./lru";
 import type { TransactionView } from "./transaction-view";
 import {
@@ -162,6 +163,15 @@ export type SqliteExecutionAdapter = Readonly<
      * so a transaction view (`createSqliteTransactionExecutionView`) sees it.
      */
     executeRun: (query: ExecutableSql) => Promise<void>;
+    /**
+     * Admits a statement composed on the Drizzle handle: directly on a root
+     * connection, through the view on a transaction's
+     * (`createSqliteTransactionExecutionView`). Required here, so a view
+     * always has a member to admit through.
+     */
+    admitHandleStatement: NonNullable<
+      SqlExecutionAdapter["admitHandleStatement"]
+    >;
     /** Rebinds one cached non-reader statement for every parameter row. */
     executePreparedRunBatch?: (
       sqlText: string,
@@ -723,6 +733,7 @@ export function createSqliteExecutionAdapter(
     }
 
     return {
+      admitHandleStatement: admitHandleStatementDirectly,
       clearStatementCache() {
         statementCache.clear();
       },
@@ -751,6 +762,7 @@ export function createSqliteExecutionAdapter(
   }
 
   return {
+    admitHandleStatement: admitHandleStatementDirectly,
     clearStatementCache() {
       // No-op: no statement cache in async/D1 mode
     },
@@ -781,6 +793,7 @@ export function createSqliteExecutionAdapter(
  * admitted, `local` members touch no connection.
  */
 const SQLITE_ADAPTER_MEMBER_ROLES = {
+  admitHandleStatement: "statement",
   clearStatementCache: "local",
   compile: "local",
   execute: "statement",

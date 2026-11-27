@@ -154,6 +154,7 @@ import {
   type TrustedImportSession,
   type VectorSearchParams,
 } from "../types";
+import { runHandleStatement } from "./execution/handle-statement";
 import {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,
@@ -1531,7 +1532,7 @@ export function buildSqliteEngineProfile(
   // contribution members' `ensureTable` dep and `provisioning.ensureTable`
   // below.
   const runDdlStatement = async (ddl: string): Promise<void> => {
-    await db.run(sql.raw(ddl));
+    await runHandleStatement(executionAdapter, () => db.run(sql.raw(ddl)));
   };
 
   // Deps for `createContributionMembers` (`./engine/members/contribution-members`),
@@ -1549,45 +1550,56 @@ export function buildSqliteEngineProfile(
     timestamps: SQLITE_CONTRIBUTION_MAT_TIMESTAMPS,
     contributionMarkerColumns: matTable,
     contributionMarkerRows: {
-      selectWhere: (condition) => db.select().from(matTable).where(condition),
+      selectWhere: (condition) =>
+        runHandleStatement(executionAdapter, () =>
+          db.select().from(matTable).where(condition),
+        ),
       async upsert(params) {
-        await db
-          .insert(matTable)
-          .values(
-            buildContributionInsertValues(
-              params,
-              SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.encode,
-            ),
-          )
-          .onConflictDoUpdate({
-            target: [
-              matTable.graphId,
-              matTable.logicalName,
-              matTable.owner,
-              matTable.tableName,
-            ],
-            set: buildContributionOnConflictSet(
-              matTable.materializedAt,
-              params.materializedAt,
-            ),
-          });
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(matTable)
+            .values(
+              buildContributionInsertValues(
+                params,
+                SQLITE_CONTRIBUTION_MAT_TIMESTAMPS.encode,
+              ),
+            )
+            .onConflictDoUpdate({
+              target: [
+                matTable.graphId,
+                matTable.logicalName,
+                matTable.owner,
+                matTable.tableName,
+              ],
+              set: buildContributionOnConflictSet(
+                matTable.materializedAt,
+                params.materializedAt,
+              ),
+            }),
+        );
       },
       async deleteWhere(condition) {
-        await db.delete(matTable).where(condition);
+        await runHandleStatement(executionAdapter, () =>
+          db.delete(matTable).where(condition),
+        );
       },
     },
     reconciliationMarkerColumns: tables.reconciliationMarkers,
     reconciliationMarkerRows: {
       selectWhere: (condition) =>
-        db.select().from(tables.reconciliationMarkers).where(condition),
+        runHandleStatement(executionAdapter, () =>
+          db.select().from(tables.reconciliationMarkers).where(condition),
+        ),
       async upsert(graphId, version) {
-        await db
-          .insert(tables.reconciliationMarkers)
-          .values({ graphId, reconciledToVersion: version })
-          .onConflictDoUpdate({
-            target: tables.reconciliationMarkers.graphId,
-            set: { reconciledToVersion: version },
-          });
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(tables.reconciliationMarkers)
+            .values({ graphId, reconciledToVersion: version })
+            .onConflictDoUpdate({
+              target: tables.reconciliationMarkers.graphId,
+              set: { reconciledToVersion: version },
+            }),
+        );
       },
     },
   };
@@ -1693,7 +1705,9 @@ export function buildSqliteEngineProfile(
           sql`PRAGMA table_info(${sql.identifier(tableName)})`,
         ),
       execute: async (statement: string) => {
-        await db.run(sql.raw(statement));
+        await runHandleStatement(executionAdapter, () =>
+          db.run(sql.raw(statement)),
+        );
       },
     };
   }
@@ -1721,17 +1735,26 @@ export function buildSqliteEngineProfile(
   }
 
   /**
-   * Reads the base-schema marker on `session`: the root connection by
-   * default, or a caller-owned transaction a schema-write adoption checks on.
+   * Reads the base-schema marker on this backend's handle by default, or on
+   * `callerSession`, a caller-owned transaction a schema-write adoption
+   * checks on (not this backend's handle, so not admitted through its view).
    */
   async function readBaseSchemaVersion(
-    session: Pick<AnySqliteDatabase, "select"> = db,
+    callerSession?: Pick<AnySqliteDatabase, "select">,
   ): Promise<number | undefined> {
+    const marker = tables.baseSchemaVersions;
     try {
-      const rows = await session
-        .select({ version: tables.baseSchemaVersions.version })
-        .from(tables.baseSchemaVersions)
-        .where(eq(tables.baseSchemaVersions.installation, 1));
+      const rows = await (callerSession === undefined ?
+        runHandleStatement(executionAdapter, () =>
+          db
+            .select({ version: marker.version })
+            .from(marker)
+            .where(eq(marker.installation, 1)),
+        )
+      : callerSession
+          .select({ version: marker.version })
+          .from(marker)
+          .where(eq(marker.installation, 1)));
       return rows.at(0)?.version;
     } catch (error) {
       if (isMissingTableError(error)) return undefined;
@@ -1744,14 +1767,16 @@ export function buildSqliteEngineProfile(
   ): Promise<number | undefined> {
     const marker = tables.baseSchemaVersions;
     const timestamp = nowIso();
-    await db
-      .insert(marker)
-      .values({ installation: 1, version, updatedAt: timestamp })
-      .onConflictDoUpdate({
-        target: marker.installation,
-        set: { version, updatedAt: timestamp },
-        setWhere: lte(marker.version, version),
-      });
+    await runHandleStatement(executionAdapter, () =>
+      db
+        .insert(marker)
+        .values({ installation: 1, version, updatedAt: timestamp })
+        .onConflictDoUpdate({
+          target: marker.installation,
+          set: { version, updatedAt: timestamp },
+          setWhere: lte(marker.version, version),
+        }),
+    );
     // Read back on this backend's primary connection: remote adapters do not
     // all support RETURNING. The monotonic upsert plus same-primary read makes
     // this two-statement observation safe when a concurrent adopter is ahead.
@@ -1760,7 +1785,7 @@ export function buildSqliteEngineProfile(
 
   const provisioning: EngineProvisioning = {
     executeDdl: async (ddl) => {
-      await db.run(sql.raw(ddl));
+      await runHandleStatement(executionAdapter, () => db.run(sql.raw(ddl)));
     },
     ensureTable: runDdlStatement,
     generateDdl: () => generateSqliteDDL(tables, fulltextStrategy ?? false),
@@ -1792,22 +1817,23 @@ export function buildSqliteEngineProfile(
     rowAccess: {
       async insertIgnoringConflict(params) {
         const t = tables.graphTemplates;
-        await db
-          .insert(t)
-          .values({
-            templateId: params.templateId,
-            schemaHash: params.schemaHash,
-            schemaDoc: JSON.stringify(params.schemaDoc),
-            createdAt: nowIso(),
-          })
-          .onConflictDoNothing();
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(t)
+            .values({
+              templateId: params.templateId,
+              schemaHash: params.schemaHash,
+              schemaDoc: JSON.stringify(params.schemaDoc),
+              createdAt: nowIso(),
+            })
+            .onConflictDoNothing(),
+        );
       },
       async selectByTemplateId(templateId) {
         const t = tables.graphTemplates;
-        const templateRows = await db
-          .select()
-          .from(t)
-          .where(eq(t.templateId, templateId));
+        const templateRows = await runHandleStatement(executionAdapter, () =>
+          db.select().from(t).where(eq(t.templateId, templateId)),
+        );
         const row = templateRows.at(0);
         if (row === undefined) return;
         return {
@@ -1897,29 +1923,35 @@ export function buildSqliteEngineProfile(
     rowAccess: {
       async selectByIndexName(indexName) {
         const t = tables.indexMaterializations;
-        return db.select().from(t).where(eq(t.indexName, indexName));
+        return runHandleStatement(executionAdapter, () =>
+          db.select().from(t).where(eq(t.indexName, indexName)),
+        );
       },
       async selectByIndexNames(indexNames) {
         const t = tables.indexMaterializations;
-        return db
-          .select()
-          .from(t)
-          .where(inArray(t.indexName, [...indexNames]));
+        return runHandleStatement(executionAdapter, () =>
+          db
+            .select()
+            .from(t)
+            .where(inArray(t.indexName, [...indexNames])),
+        );
       },
       async upsert(params) {
         const t = tables.indexMaterializations;
-        await db
-          .insert(t)
-          .values(
-            buildMaterializationInsertValues(
-              params,
-              SQLITE_INDEX_MAT_TIMESTAMPS.encode,
-            ),
-          )
-          .onConflictDoUpdate({
-            target: t.indexName,
-            set: buildMaterializationOnConflictSet(params.materializedAt),
-          });
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(t)
+            .values(
+              buildMaterializationInsertValues(
+                params,
+                SQLITE_INDEX_MAT_TIMESTAMPS.encode,
+              ),
+            )
+            .onConflictDoUpdate({
+              target: t.indexName,
+              set: buildMaterializationOnConflictSet(params.materializedAt),
+            }),
+        );
       },
     },
   };
@@ -1931,29 +1963,35 @@ export function buildSqliteEngineProfile(
     rowAccess: {
       async selectPending(graphId) {
         const t = tables.kindRemovals;
-        return db
-          .select()
-          .from(t)
-          .where(and(eq(t.graphId, graphId), isNull(t.removedAt)));
+        return runHandleStatement(executionAdapter, () =>
+          db
+            .select()
+            .from(t)
+            .where(and(eq(t.graphId, graphId), isNull(t.removedAt))),
+        );
       },
       async selectAll(graphId) {
         const t = tables.kindRemovals;
-        return db.select().from(t).where(eq(t.graphId, graphId));
+        return runHandleStatement(executionAdapter, () =>
+          db.select().from(t).where(eq(t.graphId, graphId)),
+        );
       },
       async upsert(params: RecordKindRemovalParams) {
         const t = tables.kindRemovals;
-        await db
-          .insert(t)
-          .values(
-            buildKindRemovalInsertValues(
-              params,
-              SQLITE_KIND_REMOVAL_TIMESTAMPS.encode,
-            ),
-          )
-          .onConflictDoUpdate({
-            target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
-            set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
-          });
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(t)
+            .values(
+              buildKindRemovalInsertValues(
+                params,
+                SQLITE_KIND_REMOVAL_TIMESTAMPS.encode,
+              ),
+            )
+            .onConflictDoUpdate({
+              target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
+              set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
+            }),
+        );
       },
     },
   };
@@ -2718,10 +2756,12 @@ export function buildSqliteEngineProfile(
           // `sql.raw` is safe; SQLite's `PRAGMA` does not accept bound
           // parameters for its value.
           try {
-            await db.run(
-              toDrizzleSql(
-                portableSql`PRAGMA analysis_limit = ${portableSql.raw(String(SQLITE_ANALYZE_ROW_LIMIT))}`,
-                "sqlite",
+            await runHandleStatement(executionAdapter, () =>
+              db.run(
+                toDrizzleSql(
+                  portableSql`PRAGMA analysis_limit = ${portableSql.raw(String(SQLITE_ANALYZE_ROW_LIMIT))}`,
+                  "sqlite",
+                ),
               ),
             );
           } catch (error) {
@@ -2731,10 +2771,12 @@ export function buildSqliteEngineProfile(
             if (!isSqliteNotAuthorizedError(error)) throw error;
           }
           for (const tableName of coreAnalyzeTables) {
-            await db.run(
-              toDrizzleSql(
-                portableSql`ANALYZE ${portableSql.identifier(tableName)}`,
-                "sqlite",
+            await runHandleStatement(executionAdapter, () =>
+              db.run(
+                toDrizzleSql(
+                  portableSql`ANALYZE ${portableSql.identifier(tableName)}`,
+                  "sqlite",
+                ),
               ),
             );
           }
@@ -2744,10 +2786,12 @@ export function buildSqliteEngineProfile(
           // table errors, so skip those.
           for (const tableName of guardedAnalyzeTables) {
             try {
-              await db.run(
-                toDrizzleSql(
-                  portableSql`ANALYZE ${portableSql.identifier(tableName)}`,
-                  "sqlite",
+              await runHandleStatement(executionAdapter, () =>
+                db.run(
+                  toDrizzleSql(
+                    portableSql`ANALYZE ${portableSql.identifier(tableName)}`,
+                    "sqlite",
+                  ),
                 ),
               );
             } catch (error) {

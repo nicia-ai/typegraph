@@ -10548,6 +10548,7 @@ type SqlExecutionAdapter = Readonly<{
     executeAtomicBatch?: AtomicSqlBatchExecutor;
     prepare?: (sqlText: string) => PreparedSqlStatement;
     runExclusive?: <T>(critical: (connection: SqlExecutionAdapter) => Promise<T>) => Promise<T>;
+    admitHandleStatement?: <T>(statement: () => Promise<T>) => Promise<T>;
     serializationFailure?: (error: unknown) => boolean;
 }>;
 

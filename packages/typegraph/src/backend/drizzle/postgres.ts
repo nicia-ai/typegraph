@@ -278,6 +278,7 @@ import {
   type EngineOperationsContext,
   resolveSchemaProvisioning,
 } from "./engine/profile";
+import { runHandleStatement } from "./execution/handle-statement";
 import { runMarkedPostgresTransaction } from "./execution/postgres-commit-outcome";
 import {
   type AnyPgDatabase,
@@ -1600,7 +1601,7 @@ function buildPostgresEngineProfileInternal(
     statement: ReturnType<typeof sql.raw>,
   ): Promise<void> {
     if (allocationPin === undefined || allocationSchema === undefined) {
-      await db.execute(statement);
+      await runHandleStatement(executionAdapter, () => db.execute(statement));
       return;
     }
     if (isPostgresTransactionHandle(db)) {
@@ -1609,7 +1610,7 @@ function buildPostgresEngineProfileInternal(
         allocationSchema,
         "Lazy DDL",
       );
-      await db.execute(statement);
+      await runHandleStatement(executionAdapter, () => db.execute(statement));
       return;
     }
     await db.transaction(async (transaction) => {
@@ -1716,16 +1717,20 @@ function buildPostgresEngineProfileInternal(
       await executeConcurrentCreateDdl(ddl);
       return;
     }
+    // The whole transaction is one admission: on a transaction-scoped
+    // backend it is a savepoint, whose statements run on `tx` directly.
     await withConcurrentCreateRetry(async () => {
-      await db.transaction(async (tx) => {
-        await tx.execute(
-          toDrizzleSql(
-            fencePlan.sql.acquireKeyed(extensionDdlLockKey(validated), 0),
-            "postgres",
-          ),
-        );
-        await tx.execute(sql.raw(ddl));
-      });
+      await runHandleStatement(executionAdapter, () =>
+        db.transaction(async (tx) => {
+          await tx.execute(
+            toDrizzleSql(
+              fencePlan.sql.acquireKeyed(extensionDdlLockKey(validated), 0),
+              "postgres",
+            ),
+          );
+          await tx.execute(sql.raw(ddl));
+        }),
+      );
     });
   }
 
@@ -1744,45 +1749,56 @@ function buildPostgresEngineProfileInternal(
     timestamps: POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
     contributionMarkerColumns: matTable,
     contributionMarkerRows: {
-      selectWhere: (condition) => db.select().from(matTable).where(condition),
+      selectWhere: (condition) =>
+        runHandleStatement(executionAdapter, () =>
+          db.select().from(matTable).where(condition),
+        ),
       async upsert(params) {
-        await db
-          .insert(matTable)
-          .values(
-            buildContributionInsertValues(
-              params,
-              POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.encode,
-            ),
-          )
-          .onConflictDoUpdate({
-            target: [
-              matTable.graphId,
-              matTable.logicalName,
-              matTable.owner,
-              matTable.tableName,
-            ],
-            set: buildContributionOnConflictSet(
-              matTable.materializedAt,
-              params.materializedAt,
-            ),
-          });
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(matTable)
+            .values(
+              buildContributionInsertValues(
+                params,
+                POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.encode,
+              ),
+            )
+            .onConflictDoUpdate({
+              target: [
+                matTable.graphId,
+                matTable.logicalName,
+                matTable.owner,
+                matTable.tableName,
+              ],
+              set: buildContributionOnConflictSet(
+                matTable.materializedAt,
+                params.materializedAt,
+              ),
+            }),
+        );
       },
       async deleteWhere(condition) {
-        await db.delete(matTable).where(condition);
+        await runHandleStatement(executionAdapter, () =>
+          db.delete(matTable).where(condition),
+        );
       },
     },
     reconciliationMarkerColumns: tables.reconciliationMarkers,
     reconciliationMarkerRows: {
       selectWhere: (condition) =>
-        db.select().from(tables.reconciliationMarkers).where(condition),
+        runHandleStatement(executionAdapter, () =>
+          db.select().from(tables.reconciliationMarkers).where(condition),
+        ),
       async upsert(graphId, version) {
-        await db
-          .insert(tables.reconciliationMarkers)
-          .values({ graphId, reconciledToVersion: version })
-          .onConflictDoUpdate({
-            target: tables.reconciliationMarkers.graphId,
-            set: { reconciledToVersion: version },
-          });
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(tables.reconciliationMarkers)
+            .values({ graphId, reconciledToVersion: version })
+            .onConflictDoUpdate({
+              target: tables.reconciliationMarkers.graphId,
+              set: { reconciledToVersion: version },
+            }),
+        );
       },
     },
   };
@@ -1912,17 +1928,26 @@ function buildPostgresEngineProfileInternal(
   }
 
   /**
-   * Reads the base-schema marker on `session`: the root connection by
-   * default, or a caller-owned transaction a schema-write adoption checks on.
+   * Reads the base-schema marker on this backend's handle by default, or on
+   * `callerSession`, a caller-owned transaction a schema-write adoption
+   * checks on (not this backend's handle, so not admitted through its view).
    */
   async function readBaseSchemaVersion(
-    session: Pick<AnyPgDatabase, "select"> = db,
+    callerSession?: Pick<AnyPgDatabase, "select">,
   ): Promise<number | undefined> {
+    const marker = tables.baseSchemaVersions;
     try {
-      const rows = await session
-        .select({ version: tables.baseSchemaVersions.version })
-        .from(tables.baseSchemaVersions)
-        .where(eq(tables.baseSchemaVersions.installation, 1));
+      const rows = await (callerSession === undefined ?
+        runHandleStatement(executionAdapter, () =>
+          db
+            .select({ version: marker.version })
+            .from(marker)
+            .where(eq(marker.installation, 1)),
+        )
+      : callerSession
+          .select({ version: marker.version })
+          .from(marker)
+          .where(eq(marker.installation, 1)));
       return rows.at(0)?.version;
     } catch (error) {
       if (isMissingTableError(error)) return undefined;
@@ -1935,14 +1960,16 @@ function buildPostgresEngineProfileInternal(
   ): Promise<number | undefined> {
     const marker = tables.baseSchemaVersions;
     const timestamp = new Date();
-    await db
-      .insert(marker)
-      .values({ installation: 1, version, updatedAt: timestamp })
-      .onConflictDoUpdate({
-        target: marker.installation,
-        set: { version, updatedAt: timestamp },
-        setWhere: lte(marker.version, version),
-      });
+    await runHandleStatement(executionAdapter, () =>
+      db
+        .insert(marker)
+        .values({ installation: 1, version, updatedAt: timestamp })
+        .onConflictDoUpdate({
+          target: marker.installation,
+          set: { version, updatedAt: timestamp },
+          setWhere: lte(marker.version, version),
+        }),
+    );
     // Read back on this backend's primary connection: remote adapters do not
     // all support RETURNING. The monotonic upsert plus same-primary read makes
     // this two-statement observation safe when a concurrent adopter is ahead.
@@ -2032,21 +2059,28 @@ function buildPostgresEngineProfileInternal(
       // Fresh `tx`/`txAdapter` every call, so a replayed attempt never
       // reuses a rolled-back attempt's connection state (the attempt-factory
       // contract `runRetriedUnit` requires of `attempt`).
+      // One admission per attempt: on a transaction-scoped backend the
+      // transaction is a savepoint, whose statements run on `tx` directly.
       const attempt = (): Promise<readonly Record<string, unknown>[]> =>
-        db.transaction(async (tx) => {
-          const txAdapter = createPostgresExecutionAdapter(tx, adapterOptions);
-          await txAdapter.execute(
-            fencePlan.sql.acquireKeyed(
-              SCHEMA_COMMIT_FENCE_NAMESPACE,
-              params.graphId,
-            ),
-          );
-          return txAdapter.execute<Record<string, unknown>>(
-            asCompiledRowsSql(
-              postgresInstantiateGraphTemplateStatement(params, fencePlan),
-            ),
-          );
-        });
+        runHandleStatement(executionAdapter, () =>
+          db.transaction(async (tx) => {
+            const txAdapter = createPostgresExecutionAdapter(
+              tx,
+              adapterOptions,
+            );
+            await txAdapter.execute(
+              fencePlan.sql.acquireKeyed(
+                SCHEMA_COMMIT_FENCE_NAMESPACE,
+                params.graphId,
+              ),
+            );
+            return txAdapter.execute<Record<string, unknown>>(
+              asCompiledRowsSql(
+                postgresInstantiateGraphTemplateStatement(params, fencePlan),
+              ),
+            );
+          }),
+        );
       // Under `conflict: "commit-time"` (the `"optimistic-retry"` tier) two
       // concurrent instantiations can both acquire the fence row and only one
       // COMMITs; the other's whole attempt — open, fence-row acquisition, CTE
@@ -2067,22 +2101,23 @@ function buildPostgresEngineProfileInternal(
     rowAccess: {
       async insertIgnoringConflict(params) {
         const t = tables.graphTemplates;
-        await db
-          .insert(t)
-          .values({
-            templateId: params.templateId,
-            schemaHash: params.schemaHash,
-            schemaDoc: params.schemaDoc,
-            createdAt: new Date(),
-          })
-          .onConflictDoNothing();
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(t)
+            .values({
+              templateId: params.templateId,
+              schemaHash: params.schemaHash,
+              schemaDoc: params.schemaDoc,
+              createdAt: new Date(),
+            })
+            .onConflictDoNothing(),
+        );
       },
       async selectByTemplateId(templateId) {
         const t = tables.graphTemplates;
-        const templateRows = await db
-          .select()
-          .from(t)
-          .where(eq(t.templateId, templateId));
+        const templateRows = await runHandleStatement(executionAdapter, () =>
+          db.select().from(t).where(eq(t.templateId, templateId)),
+        );
         const row = templateRows.at(0);
         if (row === undefined) return;
         return {
@@ -2144,10 +2179,12 @@ function buildPostgresEngineProfileInternal(
         if (isPostgresTransactionHandle(db)) {
           // Savepoint rollback restores both the caller's session and GUC after a timeout.
           await withConcurrentCreateRetry(() =>
-            db.transaction(async (transaction: AnyPgTransaction) => {
-              await bindSchemaWriteSessionToAllocation(transaction);
-              await transaction.execute(sql.raw(ddl));
-            }),
+            runHandleStatement(executionAdapter, () =>
+              db.transaction(async (transaction: AnyPgTransaction) => {
+                await bindSchemaWriteSessionToAllocation(transaction);
+                await transaction.execute(sql.raw(ddl));
+              }),
+            ),
           );
         } else {
           await executeConcurrentCreateDdl(ddl);
@@ -2210,29 +2247,35 @@ function buildPostgresEngineProfileInternal(
     rowAccess: {
       async selectByIndexName(indexName) {
         const t = tables.indexMaterializations;
-        return db.select().from(t).where(eq(t.indexName, indexName));
+        return runHandleStatement(executionAdapter, () =>
+          db.select().from(t).where(eq(t.indexName, indexName)),
+        );
       },
       async selectByIndexNames(indexNames) {
         const t = tables.indexMaterializations;
-        return db
-          .select()
-          .from(t)
-          .where(inArray(t.indexName, [...indexNames]));
+        return runHandleStatement(executionAdapter, () =>
+          db
+            .select()
+            .from(t)
+            .where(inArray(t.indexName, [...indexNames])),
+        );
       },
       async upsert(params) {
         const t = tables.indexMaterializations;
-        await db
-          .insert(t)
-          .values(
-            buildMaterializationInsertValues(
-              params,
-              POSTGRES_INDEX_MAT_TIMESTAMPS.encode,
-            ),
-          )
-          .onConflictDoUpdate({
-            target: t.indexName,
-            set: buildMaterializationOnConflictSet(params.materializedAt),
-          });
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(t)
+            .values(
+              buildMaterializationInsertValues(
+                params,
+                POSTGRES_INDEX_MAT_TIMESTAMPS.encode,
+              ),
+            )
+            .onConflictDoUpdate({
+              target: t.indexName,
+              set: buildMaterializationOnConflictSet(params.materializedAt),
+            }),
+        );
       },
     },
   };
@@ -2244,29 +2287,35 @@ function buildPostgresEngineProfileInternal(
     rowAccess: {
       async selectPending(graphId) {
         const t = tables.kindRemovals;
-        return db
-          .select()
-          .from(t)
-          .where(and(eq(t.graphId, graphId), isNull(t.removedAt)));
+        return runHandleStatement(executionAdapter, () =>
+          db
+            .select()
+            .from(t)
+            .where(and(eq(t.graphId, graphId), isNull(t.removedAt))),
+        );
       },
       async selectAll(graphId) {
         const t = tables.kindRemovals;
-        return db.select().from(t).where(eq(t.graphId, graphId));
+        return runHandleStatement(executionAdapter, () =>
+          db.select().from(t).where(eq(t.graphId, graphId)),
+        );
       },
       async upsert(params: RecordKindRemovalParams) {
         const t = tables.kindRemovals;
-        await db
-          .insert(t)
-          .values(
-            buildKindRemovalInsertValues(
-              params,
-              POSTGRES_KIND_REMOVAL_TIMESTAMPS.encode,
-            ),
-          )
-          .onConflictDoUpdate({
-            target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
-            set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
-          });
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(t)
+            .values(
+              buildKindRemovalInsertValues(
+                params,
+                POSTGRES_KIND_REMOVAL_TIMESTAMPS.encode,
+              ),
+            )
+            .onConflictDoUpdate({
+              target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
+              set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
+            }),
+        );
       },
     },
   };
@@ -3158,7 +3207,9 @@ function buildPostgresEngineProfileInternal(
           // autovacuum catches up. Sequential per-table statements — see
           // coreAnalyzeStatements for why they are never combined.
           for (const statement of coreAnalyzeStatements) {
-            await db.execute(statement);
+            await runHandleStatement(executionAdapter, () =>
+              db.execute(statement),
+            );
           }
           // The recorded and identity relations may be absent on a schema created
           // before recorded-time history or Operational Identity landed
@@ -3174,10 +3225,12 @@ function buildPostgresEngineProfileInternal(
             .filter((entry) => entry.exists)
             .map((entry) => entry.tableName);
           for (const tableName of presentGuardedTables) {
-            await db.execute(
-              toDrizzleSql(
-                portableSql`ANALYZE (SKIP_LOCKED) ${portableSql.identifier(tableName)}`,
-                "postgres",
+            await runHandleStatement(executionAdapter, () =>
+              db.execute(
+                toDrizzleSql(
+                  portableSql`ANALYZE (SKIP_LOCKED) ${portableSql.identifier(tableName)}`,
+                  "postgres",
+                ),
               ),
             );
           }
@@ -3258,24 +3311,26 @@ function buildPostgresEngineProfileInternal(
           // mutex, so this works identically through pools and across
           // processes (unlike session advisory locks, which pin a
           // connection).
-          const rows = await db.execute(sql`
-            INSERT INTO ${t} (
-              "index_name", "graph_id", "entity", "kind", "signature",
-              "schema_version", "last_attempted_at", "building_since",
-              "claim_token"
-            )
-            VALUES (
-              ${params.indexName}, ${params.graphId}, ${params.entity},
-              ${params.kind}, ${params.signature}, ${params.schemaVersion},
-              now(), now(), ${params.token}
-            )
-            ON CONFLICT ("index_name") DO UPDATE SET
-              "building_since" = now(),
-              "claim_token" = EXCLUDED."claim_token"
-            WHERE ${t}."building_since" IS NULL
-               OR ${t}."building_since" < now() - (${params.leaseMs} * interval '1 millisecond')
-            RETURNING "index_name"
-          `);
+          const rows = await runHandleStatement(executionAdapter, () =>
+            db.execute(sql`
+              INSERT INTO ${t} (
+                "index_name", "graph_id", "entity", "kind", "signature",
+                "schema_version", "last_attempted_at", "building_since",
+                "claim_token"
+              )
+              VALUES (
+                ${params.indexName}, ${params.graphId}, ${params.entity},
+                ${params.kind}, ${params.signature}, ${params.schemaVersion},
+                now(), now(), ${params.token}
+              )
+              ON CONFLICT ("index_name") DO UPDATE SET
+                "building_since" = now(),
+                "claim_token" = EXCLUDED."claim_token"
+              WHERE ${t}."building_since" IS NULL
+                 OR ${t}."building_since" < now() - (${params.leaseMs} * interval '1 millisecond')
+              RETURNING "index_name"
+            `),
+          );
           const result = rows;
           const returned =
             Array.isArray(result) ? result : (
@@ -3290,12 +3345,14 @@ function buildPostgresEngineProfileInternal(
           const t = tables.indexMaterializations;
           // Token-guarded: a lease-expired claim taken over by another
           // materializer must not be released by the original holder.
-          await db.execute(sql`
-            UPDATE ${t}
-            SET "building_since" = NULL, "claim_token" = NULL
-            WHERE "index_name" = ${params.indexName}
-              AND "claim_token" = ${params.token}
-          `);
+          await runHandleStatement(executionAdapter, () =>
+            db.execute(sql`
+              UPDATE ${t}
+              SET "building_since" = NULL, "claim_token" = NULL
+              WHERE "index_name" = ${params.indexName}
+                AND "claim_token" = ${params.token}
+            `),
+          );
         },
 
         ensureEdgeMatchIdentityStorage,

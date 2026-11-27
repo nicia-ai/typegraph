@@ -160,6 +160,12 @@ export function createSerialExecutionAdapter(
       return enqueue(() => critical(adapter));
     },
 
+    admitHandleStatement<T>(statement: () => Promise<T>): Promise<T> {
+      // A statement on the Drizzle handle runs on the same connection, so it
+      // takes a queue slot of its own and is admitted through the view.
+      return enqueue(statement);
+    },
+
     ...(executeCompiled === undefined ?
       {}
     : {
