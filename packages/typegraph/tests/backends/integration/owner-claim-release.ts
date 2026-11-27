@@ -551,6 +551,7 @@ export function registerOwnerClaimReleaseIntegrationTests(
     });
   }
   registerPatchStatementCases(context);
+  registerInterleavedUpdateCases(context);
 }
 
 function registerOwnerClaimReleaseCases(
@@ -1287,5 +1288,180 @@ function registerPatchStatementCases(context: IntegrationTestContext): void {
       ]);
       expect(await store.verifyConstraintFences()).toEqual([]);
     });
+  });
+}
+
+/**
+ * A backend whose next `getNode` read, once armed, runs `intervene` on the
+ * same target right after the read returns: a write committed by another
+ * session between an update's read of the row and its own row write, as
+ * READ COMMITTED allows on a server PostgreSQL.
+ */
+function createReadInterleaver(
+  backend: GraphBackend,
+  intervene: (target: GraphBackend | TransactionBackend) => Promise<void>,
+) {
+  let armed = false;
+  function interleaved<B extends GraphBackend | TransactionBackend>(target: B) {
+    return deriveBackend(target, {
+      getNode: async (graphId: string, kind: string, id: string) => {
+        const row = await target.getNode(graphId, kind, id);
+        if (armed) {
+          armed = false;
+          await intervene(target);
+        }
+        return row;
+      },
+    } as never);
+  }
+  return {
+    backend: deriveBackend(interleaved(backend), {
+      transaction: (fn, options) =>
+        backend.transaction((tx) => fn(interleaved(tx)), options),
+    }),
+    arm: () => {
+      armed = true;
+    },
+  };
+}
+
+type InterleavedField = Readonly<{
+  name: string;
+  kind: "OcrEvent" | "OcrPair";
+  constraintName: string;
+  field: string;
+  /** The props the row is created with, and the props the racing move writes. */
+  created: Record<string, unknown>;
+  moved: Record<string, unknown>;
+  /** The constrained value before and after the racing move, as validated. */
+  before: unknown;
+  after: unknown;
+  /** The stored constrained value, as text. */
+  storedText: (props: Record<string, unknown>) => string;
+}>;
+
+const INTERLEAVED_FIELDS: readonly InterleavedField[] = [
+  {
+    name: "a z.date() field",
+    kind: "OcrEvent",
+    constraintName: "OcrEvent_at",
+    field: "at",
+    created: { name: "row", at: A },
+    moved: { name: "row", at: B.toISOString() },
+    before: A,
+    after: B,
+    storedText: (props) => new Date(String(props["at"])).toISOString(),
+  },
+  {
+    name: "a z.string() field",
+    kind: "OcrPair",
+    constraintName: "OcrPair_left",
+    field: "left",
+    created: { name: "row", left: "l1", right: "r1" },
+    moved: { name: "row", left: "l2", right: "r1" },
+    before: "l1",
+    after: "l2",
+    storedText: (props) => String(props["left"]),
+  },
+];
+
+function registerInterleavedUpdateCases(context: IntegrationTestContext): void {
+  describe("an update racing another update of the same row (READ COMMITTED)", () => {
+    // The row holds `before`. Update 1 patches an unrelated field and reads
+    // `before`; update 2 then moves the row to `after`, claims it, releases
+    // `before` and commits; update 1 writes its whole props back, `before`
+    // included. Its claim decision compared `before` with `before`, so it
+    // claims nothing, and its row write carries no version predicate: the row
+    // holds `before`, its claim is `after`, and `before` is unclaimed. Main
+    // has the same lost update — its claim diff skips an unchanged key in
+    // memory too. For a string field main ends in exactly this state; for a
+    // date field main re-claims the date on every update (it keyed the stored
+    // date text and the validated `Date` differently, so every date looked
+    // moved), which leaves both claims live and the duplicate refused.
+    for (const shape of INTERLEAVED_FIELDS) {
+      it(`a patch of an unrelated field that read the row before a concurrent move writes the stale value back unclaimed (${shape.name})`, async () => {
+        const graphId = nextGraphId();
+        const claimOf = (value: unknown) => ({
+          graphId,
+          nodeKind: shape.kind,
+          constraintName: shape.constraintName,
+          key: keyOf(shape.field, value),
+          concreteKind: shape.kind,
+          nodeId: "row",
+        });
+        const interleaver = createReadInterleaver(
+          context.getBackend(),
+          async (target) => {
+            await target.updateNode({
+              graphId,
+              kind: shape.kind,
+              id: "row",
+              props: shape.moved,
+            });
+            await target.insertUnique(claimOf(shape.after));
+            await target.deleteUnique(claimOf(shape.before));
+          },
+        );
+        const [store] = await createStoreWithSchema(
+          buildGraph(graphId),
+          interleaver.backend,
+        );
+        const nodes = store.nodes[shape.kind] as unknown as EventCollection;
+        await nodes.create(shape.created as never, { id: "row" });
+
+        interleaver.arm();
+        const updated = await nodes.update("row" as EventId, {
+          name: "renamed",
+        });
+
+        expectObservation({
+          lane: { driver: context.driver },
+          observed: {
+            stored: shape.storedText(updated as Record<string, unknown>),
+            claims: await liveClaims(
+              interleaver.backend,
+              graphId,
+              shape.constraintName,
+            ),
+            duplicate: await outcome(() =>
+              nodes.create({
+                ...shape.created,
+                name: "dup",
+                ...(shape.kind === "OcrPair" && { right: "r9" }),
+              } as never),
+            ),
+          },
+          correct: {
+            stored: shape.storedText(shape.created),
+            claims: [
+              claim(
+                shape.constraintName,
+                keyOf(shape.field, shape.before),
+                "row",
+              ),
+            ],
+            duplicate: "UniquenessError",
+          },
+          defects: [
+            {
+              label:
+                "update lost update: stale props written without a version predicate",
+              on: {},
+              today: {
+                stored: shape.storedText(shape.created),
+                claims: [
+                  claim(
+                    shape.constraintName,
+                    keyOf(shape.field, shape.after),
+                    "row",
+                  ),
+                ],
+                duplicate: "written",
+              },
+            },
+          ],
+        });
+      });
+    }
   });
 }
