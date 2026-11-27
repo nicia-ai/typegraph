@@ -54,7 +54,6 @@ import {
   kindSetsHaveDisjointKinds,
   mergeDifferentAssertionRoots,
   requireLiveEndpoints,
-  selfAssertionError,
   UnionFind,
 } from "./service-components";
 import {
@@ -64,6 +63,9 @@ import {
   createIdentityWindowValidator,
   currentAssertionForPair,
   currentClassKey,
+  type IdentityAssertionRequest,
+  identityAssertionRequest,
+  identityAssertionRequests,
   insertAssertionRows,
   noteClassTransitions,
   replaceAffectedClosure,
@@ -107,22 +109,11 @@ import {
   type IdentityClassPage,
   type IdentityClassPageOptions,
   type IdentityFacade,
-  type IdentityNodeRefInput,
   type IdentityReadFacade,
   type IdentityRelation,
   type IdentitySamePathStep,
-  type IdentityValidityWindow,
 } from "./types";
-import {
-  hasExplicitIdentityValidityWindow,
-  resolveIdentityValidityWindow,
-} from "./validity-window";
-
-type WindowedIdentityPair<G extends GraphDef> = Readonly<{
-  a: IdentityNodeRefInput<G>;
-  b: IdentityNodeRefInput<G>;
-}> &
-  IdentityValidityWindow;
+import { resolveIdentityValidityWindow } from "./validity-window";
 
 function assertionSemanticKey(
   relation: IdentityRelation,
@@ -136,20 +127,12 @@ async function bulkAssertPairs<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   target: Backend,
   relation: IdentityRelation,
-  pairs: readonly Readonly<{
-    a: IdentityNodeRefInput<G>;
-    b: IdentityNodeRefInput<G>;
-  }>[],
+  requests: readonly IdentityAssertionRequest[],
   touch: IdentityTouch,
   noteTransition: IdentityTransitionNoteFunction,
 ): Promise<readonly IdentityAssertionResult<G>[]> {
-  if (pairs.length === 0) return [];
-  const normalizedPairs = pairs.map((pair) => {
-    const first = registeredPlainRef(ctx, pair.a);
-    const second = registeredPlainRef(ctx, pair.b);
-    if (refKey(first) === refKey(second)) throw selfAssertionError(relation);
-    return normalizePair(first, second);
-  });
+  if (requests.length === 0) return [];
+  const normalizedPairs = requests.map((request) => request.pair);
   const endpoints = normalizedPairs.flatMap(([a, b]) => [a, b]);
   await requireLiveEndpoints(target, ctx.schema, ctx.graphId, endpoints);
 
@@ -347,19 +330,15 @@ async function bulkAssertWindowedPairs<G extends GraphDef>(
   ctx: IdentityServiceContext<G>,
   target: Backend,
   relation: IdentityRelation,
-  pairs: readonly WindowedIdentityPair<G>[],
+  requests: readonly IdentityAssertionRequest[],
   touch: IdentityTouch,
   noteTransition: IdentityTransitionNoteFunction,
   operationInstant: string,
 ): Promise<readonly IdentityAssertionResult<G>[]> {
-  const windowRequests = pairs.map((pair) => {
-    const first = registeredPlainRef(ctx, pair.a);
-    const second = registeredPlainRef(ctx, pair.b);
-    return {
-      references: normalizePair(first, second),
-      window: resolveIdentityValidityWindow(pair, operationInstant),
-    };
-  });
+  const windowRequests = requests.map((request) => ({
+    references: request.pair,
+    window: resolveIdentityValidityWindow(request.window, operationInstant),
+  }));
   const windowValidator = await createIdentityWindowValidator(
     ctx,
     target,
@@ -367,18 +346,15 @@ async function bulkAssertWindowedPairs<G extends GraphDef>(
     operationInstant,
   );
   const results: IdentityAssertionResult<G>[] = [];
-  for (const pair of pairs) {
-    const window = hasExplicitIdentityValidityWindow(pair) ? pair : undefined;
+  for (const request of requests) {
     results.push(
       await assertPair(
         ctx,
         target,
         relation,
-        pair.a,
-        pair.b,
+        request,
         touch,
         noteTransition,
-        window,
         operationInstant,
         windowValidator,
       ),
@@ -1413,48 +1389,47 @@ export function createIdentityFacade<G extends GraphDef>(
   return {
     ...createIdentityReadFacade(source),
 
-    assertSame(a, b, window) {
+    async assertSame(a, b, window) {
+      const request = identityAssertionRequest(ctx, "same", a, b, window);
       return mutate((target, touch, _markWritten, noteTransition) => {
         const operationInstant = nowIso();
         return assertPair(
           ctx,
           target,
           "same",
-          a,
-          b,
+          request,
           touch,
           noteTransition,
-          hasExplicitIdentityValidityWindow(window) ? window : undefined,
           operationInstant,
         );
       });
     },
 
-    assertDifferent(a, b, window) {
+    async assertDifferent(a, b, window) {
+      const request = identityAssertionRequest(ctx, "different", a, b, window);
       return mutate((target, touch, _markWritten, noteTransition) => {
         const operationInstant = nowIso();
         return assertPair(
           ctx,
           target,
           "different",
-          a,
-          b,
+          request,
           touch,
           noteTransition,
-          hasExplicitIdentityValidityWindow(window) ? window : undefined,
           operationInstant,
         );
       });
     },
 
-    bulkAssertSame(pairs) {
+    async bulkAssertSame(pairs) {
+      const requests = identityAssertionRequests(ctx, "same", pairs);
       return mutate((target, touch, _markWritten, noteTransition) => {
-        if (!pairs.some((pair) => hasExplicitIdentityValidityWindow(pair))) {
+        if (requests.every((request) => request.window === undefined)) {
           return bulkAssertPairs(
             ctx,
             target,
             "same",
-            pairs,
+            requests,
             touch,
             noteTransition,
           );
@@ -1463,7 +1438,7 @@ export function createIdentityFacade<G extends GraphDef>(
           ctx,
           target,
           "same",
-          pairs,
+          requests,
           touch,
           noteTransition,
           nowIso(),
@@ -1471,14 +1446,15 @@ export function createIdentityFacade<G extends GraphDef>(
       });
     },
 
-    bulkAssertDifferent(pairs) {
+    async bulkAssertDifferent(pairs) {
+      const requests = identityAssertionRequests(ctx, "different", pairs);
       return mutate((target, touch, _markWritten, noteTransition) => {
-        if (!pairs.some((pair) => hasExplicitIdentityValidityWindow(pair))) {
+        if (requests.every((request) => request.window === undefined)) {
           return bulkAssertPairs(
             ctx,
             target,
             "different",
-            pairs,
+            requests,
             touch,
             noteTransition,
           );
@@ -1487,7 +1463,7 @@ export function createIdentityFacade<G extends GraphDef>(
           ctx,
           target,
           "different",
-          pairs,
+          requests,
           touch,
           noteTransition,
           nowIso(),
@@ -1508,13 +1484,14 @@ export function createIdentityFacade<G extends GraphDef>(
       });
     },
 
-    retractSameAssertion(firstInput, secondInput) {
+    async retractSameAssertion(firstInput, secondInput) {
+      // Statement-free refusals first: a refused retraction enters nothing.
+      const [a, b] = normalizePair(
+        registeredPlainRef(ctx, firstInput),
+        registeredPlainRef(ctx, secondInput),
+      );
       return mutate(async (target, touch, _markWritten, noteTransition) => {
         const operationInstant = nowIso();
-        const [a, b] = normalizePair(
-          registeredPlainRef(ctx, firstInput),
-          registeredPlainRef(ctx, secondInput),
-        );
         const existing = await currentAssertionForPair(
           target,
           ctx.schema,
@@ -1539,13 +1516,14 @@ export function createIdentityFacade<G extends GraphDef>(
       });
     },
 
-    retractDifferentAssertion(firstInput, secondInput) {
+    async retractDifferentAssertion(firstInput, secondInput) {
+      // Statement-free refusals first: a refused retraction enters nothing.
+      const [a, b] = normalizePair(
+        registeredPlainRef(ctx, firstInput),
+        registeredPlainRef(ctx, secondInput),
+      );
       return mutate(async (target, touch, _markWritten, noteTransition) => {
         const operationInstant = nowIso();
-        const [a, b] = normalizePair(
-          registeredPlainRef(ctx, firstInput),
-          registeredPlainRef(ctx, secondInput),
-        );
         const existing = await currentAssertionForPair(
           target,
           ctx.schema,

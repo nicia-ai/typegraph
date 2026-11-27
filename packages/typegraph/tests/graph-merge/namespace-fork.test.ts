@@ -19,6 +19,7 @@ import { createLocalPgliteBackend } from "../../src/backend/postgres/pglite";
 import { RECORDED_ANCHOR_RETENTION_COLUMN } from "../../src/backend/recorded-storage";
 import { installRevisionChangesJournal } from "../../src/backend/revision-journal";
 import type { GraphBackend } from "../../src/backend/types";
+import { UnsupportedBackendCapabilityError } from "../../src/errors";
 import {
   forkGraphNamespace,
   prepareNamespaceForkTarget,
@@ -27,6 +28,7 @@ import { defineNodeIndex } from "../../src/indexes";
 import { sql } from "../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../src/query/sql-intent";
 import { sha256Hex } from "../../src/utils/hash";
+import { requireDefined } from "../../src/utils/presence";
 
 const Item = defineNode("Item", { schema: z.object({ name: z.string() }) });
 const graph = defineGraph({
@@ -764,5 +766,82 @@ describe("forkGraphNamespace with an IVFFlat index", () => {
     const secondIndex = await ivfflatOid();
     expect(secondIndex).toBeDefined();
     expect(secondIndex).not.toBe(firstIndex);
+  });
+});
+
+async function rejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+}
+
+describe("prepareNamespaceForkTarget and the target's capabilities", () => {
+  const Event = defineNode("Event", { schema: z.object({ at: z.date() }) });
+  const dateIndexGraph = defineGraph({
+    id: "namespace-fork-date-index",
+    nodes: { Event: { type: Event } },
+    edges: {},
+    indexes: [defineNodeIndex(Event, { name: "event_at_idx", fields: ["at"] })],
+  });
+
+  it("refuses to replay a date-typed index the target cannot build, before any target DDL", async () => {
+    const sourceFixture = await createLocalPgliteBackend({ vector: false });
+    const targetFixture = await createLocalPgliteBackend({ vector: false });
+    cleanups.push(sourceFixture.backend.close, targetFixture.backend.close);
+    const [source] = await createStoreWithSchema(
+      dateIndexGraph,
+      sourceFixture.backend,
+      { history: true },
+    );
+    // The status row a source whose engine can build a date-typed index
+    // records once it has built one.
+    const now = new Date().toISOString();
+    await requireDefined(sourceFixture.backend.recordIndexMaterialization)({
+      indexName: "event_at_idx",
+      graphId: dateIndexGraph.id,
+      entity: "node",
+      kind: "Event",
+      signature: "0000000000000000",
+      schemaVersion: 1,
+      attemptedAt: now,
+      materializedAt: now,
+      error: undefined,
+    });
+
+    const refused = await rejection(
+      prepareNamespaceForkTarget(source, targetFixture.backend),
+    );
+    const ledger = await targetFixture.client.query<{
+      relation: string | null;
+    }>(
+      "SELECT to_regclass('typegraph_namespace_fork_operations')::text AS relation",
+    );
+
+    expect({
+      type:
+        refused instanceof UnsupportedBackendCapabilityError ?
+          refused.name
+        : refused,
+      details:
+        refused instanceof UnsupportedBackendCapabilityError ?
+          refused.details
+        : undefined,
+      ledger: ledger.rows[0]?.relation,
+    }).toEqual({
+      type: "UnsupportedBackendCapabilityError",
+      details: {
+        operation: "prepareNamespaceForkTarget()",
+        capability: "dateIndexExpressions",
+        entity: "node",
+        kind: "Event",
+        indexName: "event_at_idx",
+        field: "/at",
+        position: "key",
+      },
+      ledger: null,
+    });
   });
 });

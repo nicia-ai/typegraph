@@ -8,6 +8,7 @@
 import { createSqliteTables } from "../../../src/backend/drizzle/schema/sqlite";
 import { createSqliteBackend } from "../../../src/backend/sqlite";
 import { createLocalSqliteBackend } from "../../../src/backend/sqlite/local";
+import { openReopenableSqliteStorage } from "../../helpers/reopenable-storage";
 import { openTracedSqliteConnection } from "../../helpers/traced-connection";
 import { createTestDatabase } from "../../test-utils";
 import { refuseUnsupportedSerializedBackendCapabilities } from "../integration/test-context";
@@ -45,6 +46,7 @@ export function registerSqliteIntegrationLane(
       slice: params.slice,
       driver: "better-sqlite3",
       openTracedConnection: openTracedSqliteConnection,
+      openReopenableStorage: openReopenableSqliteStorage,
     },
   );
 }
