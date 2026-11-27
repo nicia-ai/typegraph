@@ -506,8 +506,9 @@ export function kindShapeTypeInfo(
 ): Readonly<Record<string, FieldTypeInfo>> | undefined {
   const shape = objectSchemaShape(schema);
   if (shape === undefined) return undefined;
+  const enclosing: EnclosingSchemas = new Set([schema]);
   const entries = Object.entries(shape).map(
-    ([key, value]) => [key, resolveFieldTypeInfo(value)] as const,
+    ([key, value]) => [key, resolveFieldTypeInfo(value, enclosing)] as const,
   );
   return Object.freeze(Object.fromEntries(entries));
 }
@@ -592,12 +593,37 @@ function schemaAllowsAbsence(schema: z.ZodType): boolean {
   return false;
 }
 
-function resolveFieldTypeInfo(schema: z.ZodType): FieldTypeInfo {
-  const info = resolveFieldTypeInfoValue(schema);
+/**
+ * The schemas whose field typing is being resolved around a position: the
+ * kind's schema and every schema between it and the position.
+ */
+type EnclosingSchemas = ReadonlySet<z.ZodType>;
+
+/**
+ * The typing of a position reached again through a cycle: a getter-recursive
+ * object (`get children() { return z.array(Tree) }`), or objects recursive
+ * through each other. Its schema encloses it, so resolving it would never
+ * end. It is typed `unknown`, like every shape the introspector cannot follow:
+ * it is queried as an untyped value and read exactly as stored, since the read
+ * plan decodes nothing at or below it.
+ */
+const RECURSIVE_POSITION: FieldTypeInfo = Object.freeze({
+  valueType: "unknown",
+});
+
+function resolveFieldTypeInfo(
+  schema: z.ZodType,
+  enclosing: EnclosingSchemas,
+): FieldTypeInfo {
+  if (enclosing.has(schema)) return RECURSIVE_POSITION;
+  const info = resolveFieldTypeInfoValue(schema, enclosing);
   return schemaAllowsAbsence(schema) ? { ...info, nullable: true } : info;
 }
 
-function resolveFieldTypeInfoValue(schema: z.ZodType): FieldTypeInfo {
+function resolveFieldTypeInfoValue(
+  schema: z.ZodType,
+  outer: EnclosingSchemas,
+): FieldTypeInfo {
   // Check for embedding type before unwrapping
   // (embedding metadata is attached to the outer schema)
   const embeddingDimensions = getEmbeddingDimensions(schema);
@@ -618,6 +644,8 @@ function resolveFieldTypeInfoValue(schema: z.ZodType): FieldTypeInfo {
   }
 
   const unwrapped = unwrapSchema(schema);
+  if (outer.has(unwrapped)) return RECURSIVE_POSITION;
+  const enclosing: EnclosingSchemas = new Set([...outer, schema, unwrapped]);
 
   // Check embedding on unwrapped schema too (for z.optional(embedding(...)))
   const unwrappedEmbeddingDimensions = getEmbeddingDimensions(unwrapped);
@@ -666,7 +694,9 @@ function resolveFieldTypeInfoValue(schema: z.ZodType): FieldTypeInfo {
   if (schemaType === "array") {
     const elementSchema = (unwrapped.def as { element?: z.ZodType }).element;
     const elementInfo =
-      elementSchema ? resolveFieldTypeInfo(elementSchema) : undefined;
+      elementSchema ?
+        resolveFieldTypeInfo(elementSchema, enclosing)
+      : undefined;
     return {
       valueType: "array",
       elementType: elementInfo?.valueType,
@@ -685,7 +715,7 @@ function resolveFieldTypeInfoValue(schema: z.ZodType): FieldTypeInfo {
       return { valueType: "object" };
     }
     const entries = Object.entries(shape).map(
-      ([key, value]) => [key, resolveFieldTypeInfo(value)] as const,
+      ([key, value]) => [key, resolveFieldTypeInfo(value, enclosing)] as const,
     );
     const resolved = Object.freeze(Object.fromEntries(entries));
     return {
@@ -696,7 +726,7 @@ function resolveFieldTypeInfoValue(schema: z.ZodType): FieldTypeInfo {
   if (schemaType === "record") {
     const valueSchema = (unwrapped.def as { valueType?: z.ZodType }).valueType;
     const valueInfo =
-      valueSchema ? resolveFieldTypeInfo(valueSchema) : undefined;
+      valueSchema ? resolveFieldTypeInfo(valueSchema, enclosing) : undefined;
     return {
       valueType: "object",
       recordValueType: valueInfo,
@@ -709,7 +739,7 @@ function resolveFieldTypeInfoValue(schema: z.ZodType): FieldTypeInfo {
       return { valueType: "unknown" };
     }
     const optionInfos = unionOptions.map((option) =>
-      resolveFieldTypeInfo(option),
+      resolveFieldTypeInfo(option, enclosing),
     );
     return mergeFieldTypeInfos(optionInfos) ?? { valueType: "unknown" };
   }
@@ -720,8 +750,8 @@ function resolveFieldTypeInfoValue(schema: z.ZodType): FieldTypeInfo {
   if (!left || !right) {
     return { valueType: "unknown" };
   }
-  const leftInfo = resolveFieldTypeInfo(left);
-  const rightInfo = resolveFieldTypeInfo(right);
+  const leftInfo = resolveFieldTypeInfo(left, enclosing);
+  const rightInfo = resolveFieldTypeInfo(right, enclosing);
   return mergeFieldTypeInfos([leftInfo, rightInfo]) ?? { valueType: "unknown" };
 }
 
@@ -769,6 +799,26 @@ function mergeFieldTypeInfos(
     : merged;
 }
 
+/**
+ * The typing every one of several positions agrees on — the element of each
+ * array, or the value of each record, that a union's branches or a polymorphic
+ * alias's kinds declare — or `undefined` when one declares none or they
+ * disagree. Merged position by position ({@link mergeFieldTypeInfos}), never
+ * taken from the first: a position one branch types as a date and another as
+ * text is typed by neither, so a read returns it as stored whichever branch
+ * comes first.
+ */
+function mergeNestedFieldTypeInfos(
+  infos: readonly (FieldTypeInfo | undefined)[],
+): FieldTypeInfo | undefined {
+  const declared = infos.filter(
+    (info): info is FieldTypeInfo => info !== undefined,
+  );
+  return declared.length === infos.length ?
+      mergeFieldTypeInfos(declared)
+    : undefined;
+}
+
 function mergeFieldTypeInfoValues(
   infos: readonly FieldTypeInfo[],
 ): FieldTypeInfo | undefined {
@@ -789,20 +839,12 @@ function mergeFieldTypeInfoValues(
       rest.every((info) => info.elementType === first.elementType) ?
         first.elementType
       : "unknown";
-    const elementTypeInfo =
-      (
-        rest.every(
-          (info) =>
-            info.elementTypeInfo?.valueType ===
-            first.elementTypeInfo?.valueType,
-        )
-      ) ?
-        first.elementTypeInfo
-      : undefined;
     return {
       valueType: "array",
       elementType,
-      elementTypeInfo,
+      elementTypeInfo: mergeNestedFieldTypeInfos(
+        infos.map((info) => info.elementTypeInfo),
+      ),
     };
   }
 
@@ -817,21 +859,12 @@ function mergeFieldTypeInfoValues(
     const shape =
       shapes.length === infos.length ? intersectShapes(shapes) : undefined;
 
-    const recordValueType =
-      (
-        rest.every(
-          (info) =>
-            info.recordValueType?.valueType ===
-            first.recordValueType?.valueType,
-        )
-      ) ?
-        first.recordValueType
-      : undefined;
-
     return {
       valueType: "object",
       shape,
-      recordValueType,
+      recordValueType: mergeNestedFieldTypeInfos(
+        infos.map((info) => info.recordValueType),
+      ),
     };
   }
 

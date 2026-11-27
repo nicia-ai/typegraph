@@ -40,6 +40,7 @@ export { registerDatePredicateIntegrationTests } from "./date-predicates";
 export { registerDatePropertyMergeIntegrationTests } from "./date-property-merges";
 export { registerDatePropertyReadIntegrationTests } from "./date-property-reads";
 export { registerDatePropertyWriteIntegrationTests } from "./date-property-writes";
+export { registerDateReadPositionIntegrationTests } from "./date-read-positions";
 export { registerDateSessionZoneIntegrationTests } from "./date-session-zone";
 export { registerDurableEdgeMatchIdentityIntegrationTests } from "./durable-edge-match-identity";
 export { registerEdgeAcyclicityIntegrationTests } from "./edge-acyclicity";
