@@ -129,6 +129,14 @@ export type DialectCapabilities = Readonly<{
   textIndexOrderIsBinary: boolean;
 
   /**
+   * Whether the engine's text (and the strings inside its JSON) can hold a
+   * NUL character. SQLite's can; PostgreSQL's `text` and `jsonb` cannot, and
+   * binding one is a database error, so a value carrying one (a forged
+   * cursor's) is refused before it is bound.
+   */
+  textAdmitsNul: boolean;
+
+  /**
    * Whether every read inside one interactive transaction sees one snapshot
    * whatever isolation level was requested, so a multi-statement read needs no
    * evidence beyond running inside the transaction. SQLite does: its readers

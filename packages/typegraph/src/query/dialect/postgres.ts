@@ -201,6 +201,7 @@ export const postgresDialect: BuiltinDialectAdapter = {
     maxRecursiveBatchPlans: 25,
     subgraphMembershipStrategy: "materialized-ids",
     textIndexOrderIsBinary: false,
+    textAdmitsNul: false,
     transactionReadsShareOneSnapshot: false,
   },
 

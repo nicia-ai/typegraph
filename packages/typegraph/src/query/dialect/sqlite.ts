@@ -181,6 +181,7 @@ export const sqliteDialect: BuiltinDialectAdapter = {
     supportsFulltext: true,
     subgraphMembershipStrategy: "inline-cte",
     textIndexOrderIsBinary: true,
+    textAdmitsNul: true,
     transactionReadsShareOneSnapshot: true,
   },
 

@@ -32,6 +32,7 @@ import { requireCursorField } from "../cursor";
 import {
   buildCursorFromRow,
   type CursorData,
+  type CursorTextBinding,
   decodeCursor,
   type KeysetKey,
   validateCursorColumns,
@@ -67,9 +68,10 @@ export function parsePaginateOptions(options: PaginateOptions): {
 export function validateCursor(
   cursorData: CursorData | undefined,
   orderBy: readonly OrderSpec[],
+  text: CursorTextBinding,
 ): CursorData | undefined {
   return cursorData === undefined ? undefined : (
-      validateCursorColumns(cursorData, orderBy)
+      validateCursorColumns(cursorData, orderBy, text)
     );
 }
 

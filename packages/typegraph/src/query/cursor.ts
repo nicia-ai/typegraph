@@ -319,6 +319,7 @@ export function buildCursorFromValues(
 export function validateCursorColumns(
   cursorData: CursorData,
   orderSpecs: readonly OrderSpec[],
+  text: CursorTextBinding,
 ): CursorData {
   validateCursorColumnIds(
     cursorData,
@@ -331,9 +332,37 @@ export function validateCursorColumns(
         cursorData.vals[index],
         spec,
         buildColumnId(spec),
+        text,
       ),
     ),
   };
+}
+
+/**
+ * What a dialect's text can hold (`DialectCapabilities.textAdmitsNul`): the
+ * text a cursor carries is bound only when the database can hold it.
+ */
+export type CursorTextBinding = Readonly<{ textAdmitsNul: boolean }>;
+
+/**
+ * Whether every string in `value` (itself, or one inside an array or object
+ * a key of unknown type carries) is text the database binds unchanged. The
+ * one owner of a cursor's text bindability, for field and relevance keys.
+ */
+function isBindableCursorText(
+  value: unknown,
+  text: CursorTextBinding,
+): boolean {
+  if (typeof value === "string")
+    return text.textAdmitsNul || !value.includes("\u0000");
+  if (Array.isArray(value))
+    return value.every((entry: unknown) => isBindableCursorText(entry, text));
+  if (typeof value === "object" && value !== null)
+    return Object.entries(value).every(
+      ([key, entry]) =>
+        isBindableCursorText(key, text) && isBindableCursorText(entry, text),
+    );
+  return true;
 }
 
 /**
@@ -383,9 +412,11 @@ function requireCursorFieldValue(
   value: unknown,
   spec: OrderSpec,
   columnId: string,
+  text: CursorTextBinding,
 ): unknown {
   const canonical = canonicalCursorFieldValue(value, spec);
-  if (canonical !== undefined) return canonical.value;
+  if (canonical !== undefined && isBindableCursorText(canonical.value, text))
+    return canonical.value;
   throw new ValidationError(
     `Cursor value for column ${columnId} is not a value of its field`,
     {
@@ -488,13 +519,14 @@ export type KeysetKey =
  * text a numeric relevance key is carried as
  * (`DialectAdapter.relevanceCursorKey.bind`).
  */
-export type SearchCursorBinding = Readonly<{
-  fingerprint: string;
-  bindRelevanceKey: (
-    text: string,
-    source: NumericRelevanceSortSource,
-  ) => string | number | undefined;
-}>;
+export type SearchCursorBinding = CursorTextBinding &
+  Readonly<{
+    fingerprint: string;
+    bindRelevanceKey: (
+      text: string,
+      source: NumericRelevanceSortSource,
+    ) => string | number | undefined;
+  }>;
 
 /**
  * The length of a search cursor's fingerprint: a 128-bit SHA-256 prefix, so
@@ -630,7 +662,8 @@ function relevanceKeyBinding(
   // eslint-disable-next-line unicorn/no-null -- a cursor's JSON carries a NULL key as null
   if (value === null) return null;
   if (typeof value !== "string") return undefined;
-  if (key.source === "hybrid_node_id") return value;
+  if (key.source === "hybrid_node_id")
+    return isBindableCursorText(value, search) ? value : undefined;
   return search.bindRelevanceKey(value, key.source);
 }
 
@@ -687,6 +720,7 @@ export function validateKeysetCursor(
   cursorData: CursorData,
   keys: readonly KeysetKey[],
   search: SearchCursorBinding | undefined,
+  text: CursorTextBinding,
 ): CursorData {
   if (search === undefined) {
     if (cursorData.s !== undefined)
@@ -714,6 +748,7 @@ export function validateKeysetCursor(
           cursorData.vals[index],
           key.spec,
           keysetColumnId(key),
+          text,
         )
       : cursorData.vals[index],
     ),

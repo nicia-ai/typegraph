@@ -330,7 +330,7 @@ describe("validateCursorColumns", () => {
 
     // Should not throw
     expect(() => {
-      validateCursorColumns(cursorData, orderSpecs);
+      validateCursorColumns(cursorData, orderSpecs, { textAdmitsNul: true });
     }).not.toThrow();
   });
 
@@ -354,7 +354,7 @@ describe("validateCursorColumns", () => {
     ];
 
     expect(() => {
-      validateCursorColumns(cursorData, orderSpecs);
+      validateCursorColumns(cursorData, orderSpecs, { textAdmitsNul: true });
     }).toThrow(ValidationError);
   });
 
@@ -378,7 +378,7 @@ describe("validateCursorColumns", () => {
     ];
 
     expect(() => {
-      validateCursorColumns(cursorData, orderSpecs);
+      validateCursorColumns(cursorData, orderSpecs, { textAdmitsNul: true });
     }).toThrow(ValidationError);
   });
 });

@@ -1672,6 +1672,8 @@ export class ExecutableQuery<
         : {
             binding: {
               fingerprint: searchCursorFingerprint(ast, this.#dialect()),
+              textAdmitsNul: getDialect(this.#dialect()).capabilities
+                .textAdmitsNul,
               bindRelevanceKey: getDialect(this.#dialect()).relevanceCursorKey
                 .bind,
             },
@@ -1820,6 +1822,7 @@ export class ExecutableQuery<
       decodeCursor(cursor),
       this.#keyset(),
       this.#searchCursorBinding(),
+      getDialect(this.#dialect()).capabilities,
     );
   }
 

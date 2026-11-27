@@ -29,6 +29,7 @@ import {
   SEARCH_CURSOR_MISMATCH,
   searchCursorFingerprint,
 } from "../../../src/query/cursor";
+import { getDialect } from "../../../src/query/dialect";
 import type { Store } from "../../../src/store/store";
 import { propertyRuns } from "../../property/run-budget";
 import { type IntegrationStore, integrationTestGraph } from "./fixtures";
@@ -283,9 +284,17 @@ function decodeCursorJson(cursor: string): Record<string, unknown> {
   ) as Record<string, unknown>;
 }
 
-/** Encodes cursor JSON as the library does. */
+/**
+ * Encodes cursor JSON as the library does: a UTF-16 code unit above U+00FF
+ * as its JSON escape (a lone surrogate is one already), then base64.
+ */
 function encodeCursorJson(json: unknown): string {
-  return btoa(JSON.stringify(json))
+  const escaped = JSON.stringify(json).replaceAll(
+    /[\u0100-\uFFFF]/g,
+    (unit) =>
+      String.raw`\u${(unit.codePointAt(0) ?? 0).toString(16).padStart(4, "0")}`,
+  );
+  return btoa(escaped)
     .replaceAll("+", "-")
     .replaceAll("/", "_")
     .replace(/=+$/, "");
@@ -699,6 +708,85 @@ export function registerSearchPaginationIntegrationTests(
         after: requireCursor(first.nextCursor),
       });
       expect([...first.data, ...second.data]).toEqual(plainRows);
+    });
+
+    it("refuses a cursor whose text its database cannot hold (a NUL on PostgreSQL) before it reaches the database, and pages it where the text can hold it", async () => {
+      const store = context.getStore();
+      await seedRanked(store);
+      const kinds = SEARCH_KINDS.filter((kind) =>
+        capabilitiesOf(kind).every(
+          (capability) =>
+            store.backend.capabilities[capability]?.supported === true,
+        ),
+      );
+      const { textAdmitsNul } = getDialect(store.backend.dialect).capabilities;
+      const issued: (readonly [string, () => SearchQuery])[] = [
+        [
+          "plain",
+          () =>
+            store
+              .query()
+              .from("Article", "a")
+              .orderBy("a", "category", "asc")
+              .select((row) => ({ id: row.a.id })),
+        ],
+        ...kinds.map(
+          (kind) =>
+            [
+              kind,
+              () => orderedSearch(store, { kind }, "category asc"),
+            ] as const,
+        ),
+      ];
+      for (const [name, query] of issued) {
+        const first = await query().paginate({ first: 2 });
+        const json = decodeCursorJson(requireCursor(first.nextCursor));
+        const vals = json["vals"] as readonly unknown[];
+        // Every text key (the category, the hybrid node-id tiebreak, the
+        // row's id) in turn carries a NUL.
+        for (const [index, value] of vals.entries()) {
+          const column = (json["cols"] as readonly string[])[index];
+          if (
+            typeof value !== "string" ||
+            (String(column).startsWith("@relevance.") &&
+              column !== "@relevance.hybrid_node_id")
+          )
+            continue;
+          const forged = encodeCursorJson({
+            ...json,
+            vals: vals.map((entry, position) =>
+              position === index ? `${value}\u0000x` : entry,
+            ),
+          });
+          const outcomes = [
+            await Promise.resolve()
+              .then(() => query().paginate({ first: 2, after: forged }))
+              .then(
+                () => "page",
+                (error: unknown) => error,
+              ),
+            await Promise.resolve()
+              .then(() => query().page({ last: 2, before: forged }).execute())
+              .then(
+                () => "page",
+                (error: unknown) => error,
+              ),
+          ].map((outcome) =>
+            outcome === "page" ? "page"
+            : (
+              outcome instanceof ValidationError &&
+              outcome.details.issues.every((issue) => issue.path === "cursor")
+            ) ?
+              "refused"
+            : outcome,
+          );
+          expect({ name, column, outcomes }).toEqual({
+            name,
+            column,
+            outcomes: textAdmitsNul ? ["page", "page"] : ["refused", "refused"],
+          });
+        }
+      }
     });
 
     it("refuses to page a search whose rows are groups, with GROUPED_SEARCH_PAGINATION_UNSUPPORTED", async (ctx) => {
@@ -1366,8 +1454,21 @@ export function registerSearchPaginationIntegrationTests(
         ).paginate({ first: 2 });
         issued.set(kind, decodeCursorJson(requireCursor(first.nextCursor)));
       }
+      // Control characters (NUL among them) and lone surrogates, which a
+      // database's text may not hold or a driver re-encodes.
+      const awkwardText = fc.string({
+        unit: fc
+          .oneof(
+            fc.integer({ min: 0, max: 0x1f }),
+            fc.integer({ min: 0xd8_00, max: 0xdf_ff }),
+            fc.integer({ min: 0x20, max: 0x7e }),
+          )
+          .map((code) => String.fromCodePoint(code)),
+        maxLength: 6,
+      });
       const scalar = fc.oneof(
         fc.string(),
+        awkwardText,
         fc.double(),
         fc.integer(),
         fc.boolean(),
