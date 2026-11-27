@@ -314,7 +314,170 @@ export function registerPlainCursorCompatibilityIntegrationTests(
         if (lane === "pglite") await executeRaw?.("RESET TIME ZONE", []);
       }
     });
+
+    it("resumes a batched timestamp cursor whose offset has seconds (a zone's local mean time) on every PostgreSQL lane", async (ctx) => {
+      const store = context.getStore();
+      // PostgreSQL issued these cursors; SQLite never renders an offset.
+      if (store.backend.dialect !== "postgres") ctx.skip();
+      await seedLocalMeanTime(store);
+      const query = () => localMeanTimeQuery(store);
+      const outcomes = [];
+      for (const fixture of LOCAL_MEAN_TIME_FIXTURES) {
+        const options =
+          fixture.position === "after" ?
+            { first: 10, after: fixture.cursor }
+          : { last: 10, before: fixture.cursor };
+        const [batched] = await store.batchOnce(
+          () => [query().page(options)] as const,
+        );
+        outcomes.push({
+          position: fixture.position,
+          paginate: ids(await query().paginate(options)),
+          page: ids(await query().page(options).execute()),
+          batchOnce: ids(batched),
+        });
+      }
+      expect(outcomes).toEqual(
+        LOCAL_MEAN_TIME_FIXTURES.map((fixture) => ({
+          position: fixture.position,
+          paginate: fixture.resumes,
+          page: fixture.resumes,
+          batchOnce: fixture.resumes,
+        })),
+      );
+    });
+
+    it("walks a timestamp key once through batched pages in a session zone whose offset has seconds", async (ctx) => {
+      // One connection whose session zone the case can hold: PGlite's.
+      if (context.driver !== "pglite") ctx.skip();
+      const store = context.getStore();
+      const executeRaw = store.backend.executeRaw;
+      if (executeRaw === undefined)
+        throw new Error("The PGlite lane must expose raw SQL.");
+      await seedLocalMeanTime(store);
+      const query = () => localMeanTimeQuery(store);
+      await executeRaw("SET TIME ZONE 'Europe/Paris'", []);
+      try {
+        const executed = ids({ data: await query().execute() });
+        const walked = [];
+        for (const terminal of ["batchOnce", "paginate"] as const) {
+          for (const direction of ["forward", "backward"] as const) {
+            walked.push({
+              terminal,
+              direction,
+              ids: await walkLocalMeanTime(store, terminal, direction).then(
+                (read) => read,
+                (error: unknown) =>
+                  error instanceof RangeError ? "RangeError" : error,
+              ),
+            });
+          }
+        }
+        expectObservation({
+          lane: { driver: context.driver },
+          observed: { executed, walked },
+          correct: {
+            executed: ["t1", "t2", "t3"],
+            walked: walked.map(({ terminal, direction }) => ({
+              terminal,
+              direction,
+              ids: ["t1", "t2", "t3"],
+            })),
+          },
+          defects: [
+            {
+              label:
+                "known defect fix4-lmt-date (PGlite reads a local-mean-time timestamp as an invalid Date)",
+              on: { driver: ["pglite"] },
+              today: {
+                executed: ["t1", "t2", "t3"],
+                walked: walked.map(({ terminal, direction }) => ({
+                  terminal,
+                  direction,
+                  ids:
+                    terminal === "paginate" ? "RangeError" : ["t1", "t2", "t3"],
+                })),
+              },
+            },
+          ],
+        });
+      } finally {
+        await executeRaw("RESET TIME ZONE", []);
+      }
+    });
   });
+}
+
+/**
+ * Cursors the release before relevance-ordered cursors issued through
+ * `store.batchOnce()` on PGlite in the session zone `Europe/Paris`, over
+ * {@link seedLocalMeanTime} sorted by `publishedAt` ascending, two rows a
+ * page: forward (`first: 2`) and backward (`last: 2`). The boundary row is
+ * dated 1900-01-01T00:00:00.000Z, before Paris kept standard time, so the
+ * session renders it with the zone's local mean time offset, which has
+ * seconds: `1900-01-01T00:09:21+00:09:21`.
+ */
+const LOCAL_MEAN_TIME_FIXTURES = [
+  {
+    position: "after",
+    cursor:
+      "eyJ2IjoxLCJkIjoiZiIsInZhbHMiOlsiMTkwMC0wMS0wMVQwMDowOToyMSswMDowOToyMSIsInQyIl0sImNvbHMiOlsibi5wdWJsaXNoZWRBdCIsIm4uaWQiXX0",
+    resumes: ["t3"],
+  },
+  {
+    position: "before",
+    cursor:
+      "eyJ2IjoxLCJkIjoiYiIsInZhbHMiOlsiMTkwMC0wMS0wMVQwMDowOToyMSswMDowOToyMSIsInQyIl0sImNvbHMiOlsibi5wdWJsaXNoZWRBdCIsIm4uaWQiXX0",
+    resumes: ["t1"],
+  },
+] as const;
+
+async function seedLocalMeanTime(store: IntegrationStore): Promise<void> {
+  for (const [id, publishedAt] of [
+    ["t1", "1899-06-01T00:00:00.000Z"],
+    ["t2", "1900-01-01T00:00:00.000Z"],
+    ["t3", "1900-06-01T12:00:00.000Z"],
+  ] as const) {
+    await store.nodes.Document.create(
+      { title: id, publishedAt: new Date(publishedAt) },
+      { id },
+    );
+  }
+}
+
+function localMeanTimeQuery(store: IntegrationStore) {
+  return store
+    .query()
+    .from("Document", "n")
+    .orderBy("n", "publishedAt", "asc")
+    .select((ctx) => ({ id: ctx.n.id }));
+}
+
+/** Walks {@link localMeanTimeQuery} one row a page, in reading order. */
+async function walkLocalMeanTime(
+  store: IntegrationStore,
+  terminal: "batchOnce" | "paginate",
+  direction: "forward" | "backward",
+): Promise<readonly string[]> {
+  const pages: (readonly string[])[] = [];
+  let cursor: string | undefined;
+  for (let guard = 0; guard < 10; guard += 1) {
+    const options =
+      direction === "forward" ?
+        { first: 1, ...(cursor === undefined ? {} : { after: cursor }) }
+      : { last: 1, ...(cursor === undefined ? {} : { before: cursor }) };
+    const [page] =
+      terminal === "paginate" ?
+        [await localMeanTimeQuery(store).paginate(options)]
+      : await store.batchOnce(
+          () => [localMeanTimeQuery(store).page(options)] as const,
+        );
+    pages.push(ids(page));
+    cursor = direction === "forward" ? page.nextCursor : page.prevCursor;
+    const more = direction === "forward" ? page.hasNextPage : page.hasPrevPage;
+    if (!more || cursor === undefined) break;
+  }
+  return direction === "forward" ? pages.flat() : pages.toReversed().flat();
 }
 
 /** The JSON a cursor encodes. */

@@ -42,6 +42,28 @@ describe("date utilities", () => {
       );
     });
 
+    it("normalizes an offset with seconds, a zone's local mean time", () => {
+      // PostgreSQL in Europe/Paris renders 1900-01-01T00:00:00Z this way.
+      expect(
+        canonicalizeDatabaseTimestamp("1900-01-01 00:09:21+00:09:21"),
+      ).toBe("1900-01-01T00:00:00.000Z");
+      expect(
+        canonicalizeDatabaseTimestamp("1900-01-01T00:09:21.500+00:09:21"),
+      ).toBe("1900-01-01T00:00:00.500Z");
+      expect(
+        canonicalizeDatabaseTimestamp("1880-06-01 23:58:45-00:01:15"),
+      ).toBe("1880-06-02T00:00:00.000Z");
+      expect(
+        canonicalDatabaseTimestampText("1900-01-01T00:09:21+00:09:21"),
+      ).toBe("1900-01-01T00:00:00.000Z");
+      expect(
+        canonicalizeDatabaseTimestamp("1900-01-01 00:09:21+00:09:60"),
+      ).toBeUndefined();
+      expect(
+        canonicalizeDatabaseTimestamp("1900-01-01 00:09:21+0009:21"),
+      ).toBeUndefined();
+    });
+
     it("rejects unsupported and unrepresentable values", () => {
       expect(
         canonicalizeDatabaseTimestamp(new Date("not a date")),

@@ -81,7 +81,13 @@ const CANONICAL_ISO_DATE_PATTERN =
 const ZONELESS_DATETIME_PATTERN =
   /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
 const OFFSET_DATETIME_PATTERN =
-  /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}(?::?\d{2})?)$/i;
+  /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}(?::?\d{2})?|[+-]\d{2}:\d{2}:\d{2})$/i;
+/**
+ * An offset with seconds, which PostgreSQL renders for a zone's local mean
+ * time (Europe/Paris before 1911 is `+00:09:21`) and `Date.parse` does not
+ * read: its hours and minutes, and its seconds.
+ */
+const OFFSET_WITH_SECONDS_PATTERN = /^([+-]\d{2}:\d{2}):([0-5]\d)$/;
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 function normalizedOffset(offset: string): string {
@@ -104,6 +110,15 @@ function databaseTimestampMilliseconds(value: string): number {
     const offset = offsetMatch[3];
     if (date === undefined || time === undefined || offset === undefined) {
       return Number.NaN;
+    }
+    const withSeconds = OFFSET_WITH_SECONDS_PATTERN.exec(offset);
+    if (withSeconds !== null) {
+      const [, hoursAndMinutes = "", seconds = ""] = withSeconds;
+      const sign = offset.startsWith("-") ? -1 : 1;
+      return (
+        Date.parse(`${date}T${time}${hoursAndMinutes}`) -
+        sign * Number(seconds) * 1000
+      );
     }
     return Date.parse(`${date}T${time}${normalizedOffset(offset)}`);
   }
