@@ -1,0 +1,661 @@
+{
+  "better-sqlite3": {
+    "owned: two writes, commit": {
+      "trace": [
+        "BEGIN IMMEDIATE",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "COMMIT"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "a2": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["a1", "a2"]
+    },
+    "owned: a write, then the callback rejects": {
+      "trace": [
+        "BEGIN IMMEDIATE",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "ROLLBACK"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "transaction": "Error"
+      },
+      "rows": []
+    },
+    "owned: two writes submitted in one turn, commit": {
+      "trace": [
+        "BEGIN IMMEDIATE",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "COMMIT"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "a2": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["a1", "a2"]
+    },
+    "owned: a write the callback leaves running, commit": {
+      "trace": [
+        "BEGIN IMMEDIATE",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "COMMIT"
+      ],
+      "outcomes": {
+        "left running": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["a1"]
+    },
+    "owned: a Promise.all whose sibling rejects leaves a write running": {
+      "trace": [
+        "BEGIN IMMEDIATE",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "ROLLBACK"
+      ],
+      "outcomes": {
+        "orphan": "fulfilled",
+        "transaction": "DatabaseOperationError"
+      },
+      "rows": []
+    },
+    "owned: a kept backend writes after commit": {
+      "trace": [
+        "BEGIN IMMEDIATE",
+        "COMMIT",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *"
+      ],
+      "outcomes": {
+        "late": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["late"]
+    },
+    "owned: a kept backend writes inside the next transaction": {
+      "trace": [
+        "BEGIN IMMEDIATE",
+        "COMMIT",
+        "BEGIN IMMEDIATE",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "ROLLBACK"
+      ],
+      "outcomes": {
+        "b1": "fulfilled",
+        "first": "fulfilled",
+        "late": "fulfilled",
+        "second": "Error"
+      },
+      "rows": []
+    },
+    "owned: the callback keeps its backend and throws synchronously": {
+      "trace": [
+        "BEGIN IMMEDIATE",
+        "ROLLBACK",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *"
+      ],
+      "outcomes": {
+        "late": "fulfilled",
+        "transaction": "Error"
+      },
+      "rows": ["late"]
+    },
+    "two views: A1, A2 through the transaction, B1 through an adoption of its native handle": {
+      "trace": [
+        "BEGIN IMMEDIATE",
+        "PRAGMA compile_options",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "SELECT COUNT(*) AS count FROM \"typegraph_nodes\" WHERE graph_id = ?",
+        "-- caller B1 counted 2",
+        "COMMIT"
+      ],
+      "outcomes": {
+        "A1": "fulfilled",
+        "A2": "fulfilled",
+        "B1": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["a1", "a2"]
+    },
+    "adopted: two writes in one turn, the caller commits": {
+      "trace": [
+        "-- caller BEGIN",
+        "BEGIN IMMEDIATE",
+        "PRAGMA compile_options",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- caller COMMIT",
+        "COMMIT"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "a2": "fulfilled",
+        "caller transaction": "fulfilled"
+      },
+      "rows": ["a1", "a2"]
+    },
+    "adopted: a write, then the caller rolls back": {
+      "trace": [
+        "-- caller BEGIN",
+        "BEGIN IMMEDIATE",
+        "PRAGMA compile_options",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- caller ROLLBACK",
+        "ROLLBACK"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "caller transaction": "Error"
+      },
+      "rows": []
+    },
+    "adopted: a kept adoption writes after the caller committed": {
+      "trace": [
+        "-- caller BEGIN",
+        "BEGIN IMMEDIATE",
+        "PRAGMA compile_options",
+        "-- caller COMMIT",
+        "COMMIT",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *"
+      ],
+      "outcomes": {
+        "caller transaction": "fulfilled",
+        "late": "fulfilled"
+      },
+      "rows": ["late"]
+    },
+    "synchronous caller transaction: two adopted writes, then the callback throws": {
+      "trace": [
+        "-- caller transaction callback starts",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- caller transaction callback exits",
+        "-- caller transaction threw: untyped: Error: the callback fails"
+      ],
+      "outcomes": {
+        "w1": "fulfilled",
+        "w2": "fulfilled"
+      },
+      "rows": []
+    },
+    "synchronous caller transaction: two adopted writes, then the callback returns": {
+      "trace": [
+        "-- caller transaction callback starts",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- caller transaction callback exits"
+      ],
+      "outcomes": {
+        "w1": "fulfilled",
+        "w2": "fulfilled"
+      },
+      "rows": ["w1", "w2"]
+    },
+    "trusted import: a kept session's batches after the import committed": {
+      "trace": [
+        "BEGIN IMMEDIATE",
+        "SELECT ( EXISTS (SELECT 1 FROM \"typegraph_nodes\" LIMIT 1) OR EXISTS (SELECT 1 FROM \"typegraph_edges\" LIMIT 1) ) AS has_rows",
+        "SELECT name AS index_name, sql AS index_definition FROM sqlite_schema WHERE type = 'index' AND tbl_name IN (?, ?) AND sql IS NOT NULL ORDER BY name",
+        "DROP INDEX \"typegraph_edges_cardinality_idx\"",
+        "DROP INDEX \"typegraph_edges_deleted_idx\"",
+        "DROP INDEX \"typegraph_edges_from_idx\"",
+        "DROP INDEX \"typegraph_edges_kind_created_idx\"",
+        "DROP INDEX \"typegraph_edges_match_identity_uq\"",
+        "DROP INDEX \"typegraph_edges_to_idx\"",
+        "DROP INDEX \"typegraph_edges_valid_idx\"",
+        "DROP INDEX \"typegraph_nodes_deleted_idx\"",
+        "DROP INDEX \"typegraph_nodes_id_idx\"",
+        "DROP INDEX \"typegraph_nodes_kind_created_idx\"",
+        "DROP INDEX \"typegraph_nodes_valid_idx\"",
+        "INSERT INTO \"typegraph_nodes\" (graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)",
+        "CREATE INDEX \"typegraph_edges_cardinality_idx\" ON \"typegraph_edges\" (\"graph_id\", \"kind\", \"from_kind\", \"from_id\", \"valid_to\")",
+        "CREATE INDEX \"typegraph_edges_deleted_idx\" ON \"typegraph_edges\" (\"graph_id\", \"deleted_at\")",
+        "CREATE INDEX \"typegraph_edges_from_idx\" ON \"typegraph_edges\" (\"graph_id\", \"from_kind\", \"from_id\", \"kind\", \"to_kind\", \"deleted_at\", \"valid_from\", \"valid_to\", \"to_id\")",
+        "CREATE INDEX \"typegraph_edges_kind_created_idx\" ON \"typegraph_edges\" (\"graph_id\", \"kind\", \"deleted_at\", \"created_at\")",
+        "CREATE UNIQUE INDEX \"typegraph_edges_match_identity_uq\" ON \"typegraph_edges\" (\"graph_id\", \"kind\", \"match_identity_name\", \"match_identity_key\")",
+        "CREATE INDEX \"typegraph_edges_to_idx\" ON \"typegraph_edges\" (\"graph_id\", \"to_kind\", \"to_id\", \"kind\", \"from_kind\", \"deleted_at\", \"valid_from\", \"valid_to\", \"from_id\")",
+        "CREATE INDEX \"typegraph_edges_valid_idx\" ON \"typegraph_edges\" (\"graph_id\", \"valid_from\", \"valid_to\")",
+        "CREATE INDEX \"typegraph_nodes_deleted_idx\" ON \"typegraph_nodes\" (\"graph_id\", \"deleted_at\")",
+        "CREATE INDEX \"typegraph_nodes_id_idx\" ON \"typegraph_nodes\" (\"graph_id\", \"id\")",
+        "CREATE INDEX \"typegraph_nodes_kind_created_idx\" ON \"typegraph_nodes\" (\"graph_id\", \"kind\", \"deleted_at\", \"created_at\")",
+        "CREATE INDEX \"typegraph_nodes_valid_idx\" ON \"typegraph_nodes\" (\"graph_id\", \"valid_from\", \"valid_to\")",
+        "ANALYZE \"typegraph_nodes\"",
+        "ANALYZE \"typegraph_edges\"",
+        "COMMIT",
+        "INSERT INTO \"typegraph_nodes\" (graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)"
+      ],
+      "outcomes": {
+        "i1": "fulfilled",
+        "import": "fulfilled",
+        "late batch": "fulfilled",
+        "late empty batch": "fulfilled"
+      },
+      "rows": ["i1", "late"]
+    },
+    "engine: a statement's trigger ends the transaction, the callback writes on": {
+      "trace": [
+        "CREATE TRIGGER tg_parity_rollback BEFORE INSERT ON \"typegraph_nodes\" WHEN NEW.id = 'engine-rollback' BEGIN SELECT RAISE(ROLLBACK, 'engine ended the transaction'); END",
+        "BEGIN IMMEDIATE",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "COMMIT",
+        "ROLLBACK"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "failing": "untyped: SqliteError: engine ended the transaction",
+        "later": "fulfilled",
+        "transaction": "untyped: SqliteError: cannot commit - no transaction is active"
+      },
+      "rows": ["later"]
+    }
+  },
+  "libsql": {
+    "owned: two writes, commit": {
+      "trace": [
+        "-- libsql transaction default",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- libsql commit"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "a2": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["a1", "a2"]
+    },
+    "owned: a write, then the callback rejects": {
+      "trace": [
+        "-- libsql transaction default",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- libsql rollback"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "transaction": "Error"
+      },
+      "rows": []
+    },
+    "owned: two writes submitted in one turn, commit": {
+      "trace": [
+        "-- libsql transaction default",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- libsql commit"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "a2": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["a1", "a2"]
+    },
+    "owned: a write the callback leaves running, commit": {
+      "trace": [
+        "-- libsql transaction default",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- libsql commit"
+      ],
+      "outcomes": {
+        "left running": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["a1"]
+    },
+    "owned: a Promise.all whose sibling rejects leaves a write running": {
+      "trace": [
+        "-- libsql transaction default",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- libsql rollback"
+      ],
+      "outcomes": {
+        "orphan": "fulfilled",
+        "transaction": "DatabaseOperationError"
+      },
+      "rows": []
+    },
+    "owned: a kept backend writes after commit": {
+      "trace": [
+        "-- libsql transaction default",
+        "-- libsql commit",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *"
+      ],
+      "outcomes": {
+        "late": "untyped: Error: Failed query:",
+        "transaction": "fulfilled"
+      },
+      "rows": []
+    },
+    "owned: a kept backend writes inside the next transaction": {
+      "trace": [
+        "-- libsql transaction default",
+        "-- libsql commit",
+        "-- libsql transaction default",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- libsql rollback"
+      ],
+      "outcomes": {
+        "b1": "fulfilled",
+        "first": "fulfilled",
+        "late": "untyped: Error: Failed query:",
+        "second": "Error"
+      },
+      "rows": []
+    },
+    "owned: the callback keeps its backend and throws synchronously": {
+      "trace": [
+        "-- libsql transaction default",
+        "-- libsql rollback",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *"
+      ],
+      "outcomes": {
+        "late": "untyped: Error: Failed query:",
+        "transaction": "Error"
+      },
+      "rows": []
+    },
+    "two views: A1, A2 through the transaction, B1 through an adoption of its native handle": {
+      "trace": [
+        "-- libsql transaction default",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "SELECT COUNT(*) AS count FROM \"typegraph_nodes\" WHERE graph_id = ?",
+        "-- caller B1 counted 2",
+        "-- libsql commit"
+      ],
+      "outcomes": {
+        "A1": "fulfilled",
+        "A2": "fulfilled",
+        "B1": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["a1", "a2"]
+    },
+    "adopted: two writes in one turn, the caller commits": {
+      "trace": [
+        "-- caller BEGIN",
+        "-- libsql transaction default",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- caller callback returns",
+        "-- libsql commit"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "a2": "fulfilled",
+        "caller transaction": "fulfilled"
+      },
+      "rows": ["a1", "a2"]
+    },
+    "adopted: a write, then the caller rolls back": {
+      "trace": [
+        "-- caller BEGIN",
+        "-- libsql transaction default",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- libsql rollback"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "caller transaction": "Error"
+      },
+      "rows": []
+    },
+    "adopted: a kept adoption writes after the caller committed": {
+      "trace": [
+        "-- caller BEGIN",
+        "-- libsql transaction default",
+        "-- caller callback returns",
+        "-- libsql commit",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *"
+      ],
+      "outcomes": {
+        "caller transaction": "fulfilled",
+        "late": "untyped: Error: Failed query:"
+      },
+      "rows": []
+    },
+    "engine: a statement's trigger ends the transaction, the callback writes on": {
+      "trace": [
+        "CREATE TRIGGER tg_parity_rollback BEFORE INSERT ON \"typegraph_nodes\" WHEN NEW.id = 'engine-rollback' BEGIN SELECT RAISE(ROLLBACK, 'engine ended the transaction'); END",
+        "-- libsql transaction default",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( ?, ?, ?, ?, 1, ?, NULL, ?, ? ) RETURNING *",
+        "-- libsql commit",
+        "-- libsql rollback"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "failing": "untyped: Error: Failed query:",
+        "later": "untyped: Error: Failed query:",
+        "transaction": "untyped: LibsqlError: TRANSACTION_CLOSED: The transaction is closed"
+      },
+      "rows": []
+    }
+  },
+  "pglite": {
+    "owned: two writes, commit": {
+      "trace": [
+        "BEGIN",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "COMMIT"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "a2": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["a1", "a2"]
+    },
+    "owned: a write, then the callback rejects": {
+      "trace": [
+        "BEGIN",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "ROLLBACK"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "transaction": "Error"
+      },
+      "rows": []
+    },
+    "owned: two writes submitted in one turn, commit": {
+      "trace": [
+        "BEGIN",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "COMMIT"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "a2": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["a1", "a2"]
+    },
+    "owned: a write the callback leaves running, commit": {
+      "trace": [
+        "BEGIN",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "COMMIT"
+      ],
+      "outcomes": {
+        "left running": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["a1"]
+    },
+    "owned: a Promise.all whose sibling rejects leaves a write running": {
+      "trace": [
+        "BEGIN",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "ROLLBACK"
+      ],
+      "outcomes": {
+        "orphan": "fulfilled",
+        "transaction": "DatabaseOperationError"
+      },
+      "rows": []
+    },
+    "owned: a kept backend writes after commit": {
+      "trace": ["BEGIN", "COMMIT"],
+      "outcomes": {
+        "late": "TransactionClosedError",
+        "transaction": "fulfilled"
+      },
+      "rows": []
+    },
+    "owned: a kept backend writes inside the next transaction": {
+      "trace": [
+        "BEGIN",
+        "COMMIT",
+        "BEGIN",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "ROLLBACK"
+      ],
+      "outcomes": {
+        "b1": "fulfilled",
+        "first": "fulfilled",
+        "late": "TransactionClosedError",
+        "second": "Error"
+      },
+      "rows": []
+    },
+    "owned: the callback keeps its backend and throws synchronously": {
+      "trace": ["BEGIN", "ROLLBACK"],
+      "outcomes": {
+        "late": "TransactionClosedError",
+        "transaction": "Error"
+      },
+      "rows": []
+    },
+    "two views: A1, A2 through the transaction, B1 through an adoption of its native handle": {
+      "trace": [
+        "BEGIN",
+        "SET LOCAL typegraph.transaction_marker = '<marker>'",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "SELECT COUNT(*) AS count FROM \"typegraph_nodes\" WHERE graph_id = $1",
+        "-- caller B1 counted 2",
+        "SELECT current_setting('typegraph.transaction_marker', true) AS marker",
+        "COMMIT"
+      ],
+      "outcomes": {
+        "A1": "fulfilled",
+        "A2": "fulfilled",
+        "B1": "fulfilled",
+        "transaction": "fulfilled"
+      },
+      "rows": ["a1", "a2"]
+    },
+    "adopted: two writes in one turn, the caller commits": {
+      "trace": [
+        "-- caller BEGIN",
+        "BEGIN",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "-- caller callback returns",
+        "COMMIT"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "a2": "fulfilled",
+        "caller transaction": "fulfilled"
+      },
+      "rows": ["a1", "a2"]
+    },
+    "adopted: a write, then the caller rolls back": {
+      "trace": [
+        "-- caller BEGIN",
+        "BEGIN",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *",
+        "ROLLBACK"
+      ],
+      "outcomes": {
+        "a1": "fulfilled",
+        "caller transaction": "Error"
+      },
+      "rows": []
+    },
+    "adopted: a kept adoption writes after the caller committed": {
+      "trace": [
+        "-- caller BEGIN",
+        "BEGIN",
+        "-- caller callback returns",
+        "COMMIT",
+        "INSERT INTO \"typegraph_nodes\" (\"graph_id\", \"kind\", \"id\", \"props\", \"version\", \"valid_from\", \"valid_to\", \"created_at\", \"updated_at\") VALUES ( $1, $2, $3, $4, 1, $5, NULL, $6, $7 ) RETURNING *"
+      ],
+      "outcomes": {
+        "caller transaction": "fulfilled",
+        "late": "untyped: Error: Failed query:"
+      },
+      "rows": []
+    },
+    "trusted import: a kept session's batches after the import committed": {
+      "trace": [
+        "BEGIN",
+        "LOCK TABLE \"typegraph_nodes\", \"typegraph_edges\" IN ACCESS EXCLUSIVE MODE",
+        "SELECT ( EXISTS (SELECT 1 FROM \"typegraph_nodes\" LIMIT 1) OR EXISTS (SELECT 1 FROM \"typegraph_edges\" LIMIT 1) ) AS has_rows",
+        "SELECT namespace.nspname AS index_schema, index_class.relname AS index_name, pg_get_indexdef(index_class.oid) AS index_definition FROM pg_class AS table_class JOIN pg_namespace AS namespace ON namespace.oid = table_class.relnamespace JOIN pg_index AS index_metadata ON index_metadata.indrelid = table_class.oid JOIN pg_class AS index_class ON index_class.oid = index_metadata.indexrelid LEFT JOIN pg_constraint AS table_constraint ON table_constraint.conindid = index_class.oid WHERE namespace.nspname = current_schema() AND table_class.relname IN ($1, $2) AND table_constraint.oid IS NULL AND NOT index_metadata.indisprimary ORDER BY index_class.relname",
+        "DROP INDEX \"public\".\"typegraph_edges_cardinality_idx\"",
+        "DROP INDEX \"public\".\"typegraph_edges_deleted_idx\"",
+        "DROP INDEX \"public\".\"typegraph_edges_from_idx\"",
+        "DROP INDEX \"public\".\"typegraph_edges_graph_id_bytes_idx\"",
+        "DROP INDEX \"public\".\"typegraph_edges_kind_created_idx\"",
+        "DROP INDEX \"public\".\"typegraph_edges_live_created_idx\"",
+        "DROP INDEX \"public\".\"typegraph_edges_match_identity_uq\"",
+        "DROP INDEX \"public\".\"typegraph_edges_to_idx\"",
+        "DROP INDEX \"public\".\"typegraph_edges_valid_idx\"",
+        "DROP INDEX \"public\".\"typegraph_nodes_deleted_idx\"",
+        "DROP INDEX \"public\".\"typegraph_nodes_graph_id_bytes_idx\"",
+        "DROP INDEX \"public\".\"typegraph_nodes_id_idx\"",
+        "DROP INDEX \"public\".\"typegraph_nodes_kind_created_idx\"",
+        "DROP INDEX \"public\".\"typegraph_nodes_live_created_idx\"",
+        "DROP INDEX \"public\".\"typegraph_nodes_valid_idx\"",
+        "INSERT INTO \"typegraph_nodes\" (graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at) SELECT graph_id, kind, id, props::jsonb, 1, valid_from, valid_to, created_at, created_at FROM UNNEST( $1::text[], $2::text[], $3::text[], $4::text[], $5::timestamptz[], $6::timestamptz[], $7::timestamptz[] ) AS imported(graph_id, kind, id, props, valid_from, valid_to, created_at)",
+        "CREATE INDEX typegraph_edges_cardinality_idx ON public.typegraph_edges USING btree (graph_id, kind, from_kind, from_id, valid_to)",
+        "CREATE INDEX typegraph_edges_deleted_idx ON public.typegraph_edges USING btree (graph_id, deleted_at)",
+        "CREATE INDEX typegraph_edges_from_idx ON public.typegraph_edges USING btree (graph_id, from_kind, from_id, kind, to_kind, deleted_at, valid_from, valid_to, to_id)",
+        "CREATE INDEX typegraph_edges_graph_id_bytes_idx ON public.typegraph_edges USING btree (graph_id COLLATE \"C\")",
+        "CREATE INDEX typegraph_edges_kind_created_idx ON public.typegraph_edges USING btree (graph_id, kind, deleted_at, created_at)",
+        "CREATE INDEX typegraph_edges_live_created_idx ON public.typegraph_edges USING btree (graph_id, kind, created_at, id) WHERE (deleted_at IS NULL)",
+        "CREATE UNIQUE INDEX typegraph_edges_match_identity_uq ON public.typegraph_edges USING btree (graph_id, kind, match_identity_name, match_identity_key)",
+        "CREATE INDEX typegraph_edges_to_idx ON public.typegraph_edges USING btree (graph_id, to_kind, to_id, kind, from_kind, deleted_at, valid_from, valid_to, from_id)",
+        "CREATE INDEX typegraph_edges_valid_idx ON public.typegraph_edges USING btree (graph_id, valid_from, valid_to)",
+        "CREATE INDEX typegraph_nodes_deleted_idx ON public.typegraph_nodes USING btree (graph_id, deleted_at)",
+        "CREATE INDEX typegraph_nodes_graph_id_bytes_idx ON public.typegraph_nodes USING btree (graph_id COLLATE \"C\")",
+        "CREATE INDEX typegraph_nodes_id_idx ON public.typegraph_nodes USING btree (graph_id, id)",
+        "CREATE INDEX typegraph_nodes_kind_created_idx ON public.typegraph_nodes USING btree (graph_id, kind, deleted_at, created_at)",
+        "CREATE INDEX typegraph_nodes_live_created_idx ON public.typegraph_nodes USING btree (graph_id, kind, created_at, id) WHERE (deleted_at IS NULL)",
+        "CREATE INDEX typegraph_nodes_valid_idx ON public.typegraph_nodes USING btree (graph_id, valid_from, valid_to)",
+        "ANALYZE \"typegraph_nodes\"",
+        "ANALYZE \"typegraph_edges\"",
+        "COMMIT",
+        "INSERT INTO \"typegraph_nodes\" (graph_id, kind, id, props, version, valid_from, valid_to, created_at, updated_at) SELECT graph_id, kind, id, props::jsonb, 1, valid_from, valid_to, created_at, created_at FROM UNNEST( $1::text[], $2::text[], $3::text[], $4::text[], $5::timestamptz[], $6::timestamptz[], $7::timestamptz[] ) AS imported(graph_id, kind, id, props, valid_from, valid_to, created_at)"
+      ],
+      "outcomes": {
+        "i1": "fulfilled",
+        "import": "fulfilled",
+        "late batch": "untyped: Error: Transaction is closed",
+        "late empty batch": "fulfilled"
+      },
+      "rows": ["i1"]
+    }
+  }
+}

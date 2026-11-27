@@ -75,6 +75,7 @@ export const PGLITE_TEST_FILES = [
   "tests/transaction-backend-view-audit.test.ts",
   "tests/transaction-retry.test.ts",
   "tests/transaction-session-write-locks-pglite.test.ts",
+  "tests/transaction-view-trace-parity.test.ts",
   "tests/write-plan-fence-threading.test.ts",
   "tests/write-plan-statement-order.test.ts",
   "tests/write-shape-golden-pglite.test.ts",
