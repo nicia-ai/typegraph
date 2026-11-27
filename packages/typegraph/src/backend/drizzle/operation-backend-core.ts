@@ -160,6 +160,7 @@ import type {
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
   ReadConstraintFenceViolationsParams,
+  ReleaseUniquesByOwnerParams,
   ResolvedNodeUpdateBatchParams,
   SchemaGraphWriteFenceParams,
   SchemaKindEmptinessProbe,
@@ -659,6 +660,7 @@ export type CommonOperationBackend = Pick<
   | "deleteEdgesBatch"
   | "deleteNode"
   | "deleteUnique"
+  | "releaseUniquesByOwner"
   | "edgeExistsBetween"
   | "executeTemporaryStatement"
   | "findEdgesByKind"
@@ -5981,6 +5983,17 @@ export function createCommonOperationBackend(
     async deleteUnique(params: DeleteUniqueParams): Promise<void> {
       const timestamp = nowIso();
       const query = operationStrategy.buildDeleteUnique(params, timestamp);
+      await execution.execRun(query);
+    },
+
+    async releaseUniquesByOwner(
+      params: ReleaseUniquesByOwnerParams,
+    ): Promise<void> {
+      if (params.constraintNames.length === 0) return;
+      const query = operationStrategy.buildReleaseUniquesByOwner(
+        params,
+        nowIso(),
+      );
       await execution.execRun(query);
     },
 

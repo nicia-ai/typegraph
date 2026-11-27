@@ -10,6 +10,7 @@ import type {
   DeleteUniqueParams,
   HardDeleteUniquesByNodeIdsParams,
   InsertUniqueParams,
+  ReleaseUniquesByOwnerParams,
   SqlDialect,
 } from "../../types";
 import {
@@ -453,6 +454,42 @@ export function buildDeleteUnique(
       AND ${uniques.constraintName} = ${params.constraintName}
       AND ${uniques.key} = ${params.key}${axisTerm}
       AND ${uniques.deletedAt} IS NULL
+  `;
+}
+
+/**
+ * Builds the soft DELETE that releases the live claims one node holds, by
+ * owner rather than by key — see {@link ReleaseUniquesByOwnerParams}.
+ *
+ * An empty `constraintNames` releases nothing; the backend issues no statement
+ * for it. The owner predicate is served by the
+ * `(graph_id, concrete_kind, node_id)` owner index.
+ */
+export function buildReleaseUniquesByOwner(
+  tables: Tables,
+  params: ReleaseUniquesByOwnerParams,
+  timestamp: string,
+): SQL {
+  const { uniques } = tables;
+  const constraintTerm =
+    params.constraintNames.length === 0 ?
+      sql` AND 1 = 0`
+    : sql` AND ${uniques.constraintName} IN (${sql.join(
+        params.constraintNames.map((name) => sql`${name}`),
+        sql`, `,
+      )})`;
+  const keepTerms = params.keep.map(
+    (kept) =>
+      sql` AND NOT (${uniques.constraintName} = ${kept.constraintName} AND ${uniques.key} = ${kept.key})`,
+  );
+
+  return sql`
+    UPDATE ${uniques}
+    SET ${quotedColumn(uniques.deletedAt)} = ${timestamp}
+    WHERE ${uniques.graphId} = ${params.graphId}
+      AND ${uniques.concreteKind} = ${params.concreteKind}
+      AND ${uniques.nodeId} = ${params.nodeId}
+      AND ${uniques.deletedAt} IS NULL${constraintTerm}${sql.join(keepTerms, sql``)}
   `;
 }
 
