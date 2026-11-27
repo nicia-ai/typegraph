@@ -12,6 +12,15 @@
  * captured on PGlite, whose collation is byte order.
  */
 
+/**
+ * The session time zone the PGlite fixtures were captured in. PostgreSQL's
+ * `store.batchOnce()` renders a timestamp key with the session's UTC offset,
+ * so a cursor it issues depends on the zone; the capture and the suite that
+ * compares issued cursors with the fixtures both set this one (UTC-8, which
+ * POSIX spells `Etc/GMT+8`).
+ */
+export const PLAIN_CURSOR_PGLITE_TIME_ZONE = "Etc/GMT+8";
+
 export type PlainCursorSort = Readonly<{
   kind: "Product" | "Document";
   field: string;

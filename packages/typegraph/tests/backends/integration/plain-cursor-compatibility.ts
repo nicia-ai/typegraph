@@ -17,6 +17,7 @@ import { expectObservation } from "../../helpers/known-defect";
 import type { IntegrationStore } from "./fixtures";
 import { PLAIN_CURSOR_FIXTURES } from "./plain-cursor-fixtures";
 import {
+  PLAIN_CURSOR_PGLITE_TIME_ZONE,
   PLAIN_CURSOR_SEED,
   PLAIN_CURSOR_SORTS,
   type PlainCursorFixture,
@@ -102,6 +103,138 @@ async function resume(
   }
 }
 
+/** The fixture lane a shared-suite lane captured on, if it is one. */
+function fixtureLaneOf(
+  driver: IntegrationTestContext["driver"],
+): PlainCursorFixture["lane"] | undefined {
+  switch (driver) {
+    case "better-sqlite3": {
+      return "sqlite";
+    }
+    case "libsql": {
+      return "libsql";
+    }
+    case "pglite": {
+      return "pglite";
+    }
+    case "node-postgres":
+    case "postgres-js": {
+      return undefined;
+    }
+  }
+}
+
+/**
+ * The query the capture pages for `sort`, selecting as it does: the whole
+ * node, or the id and the sorted field.
+ */
+function capturedQuery(
+  store: IntegrationStore,
+  sort: PlainCursorSort,
+  selection: "node" | "fields",
+) {
+  const query = store
+    .query()
+    .from(sort.kind, "n")
+    .orderBy("n", sort.field as never, sort.direction);
+  return selection === "node" ?
+      query.select((ctx) => ({ node: ctx.n }))
+    : query.select((ctx) => ({
+        id: ctx.n.id,
+        value: (ctx.n as unknown as Record<string, unknown>)[sort.field],
+      }));
+}
+
+type IssuedPage = Readonly<{
+  hasNextPage: boolean;
+  hasPrevPage: boolean;
+  nextCursor?: string | undefined;
+  prevCursor?: string | undefined;
+}>;
+
+async function readCapturedPage(
+  store: IntegrationStore,
+  sort: PlainCursorSort,
+  selection: "node" | "fields",
+  terminal: "paginate" | "page" | "batchOnce",
+  options: Readonly<{
+    first?: number;
+    last?: number;
+    after?: string;
+    before?: string;
+  }>,
+): Promise<IssuedPage> {
+  const query = () => capturedQuery(store, sort, selection);
+  switch (terminal) {
+    case "paginate": {
+      return query().paginate(options);
+    }
+    case "page": {
+      return query().page(options).execute();
+    }
+    case "batchOnce": {
+      const [page] = await store.batchOnce(
+        () => [query().page(options)] as const,
+      );
+      return page;
+    }
+  }
+}
+
+/**
+ * Every cursor the terminals issue over the seed, walked as the capture walks
+ * it (one row a page, forward and backward, through every terminal and
+ * selection), as `sort:cursor` keys with their sorted issuers.
+ */
+async function issuedCursors(
+  store: IntegrationStore,
+): Promise<Readonly<Record<string, readonly string[]>>> {
+  const issued = new Map<string, Set<string>>();
+  for (const sort of PLAIN_CURSOR_SORTS) {
+    for (const selection of ["node", "fields"] as const) {
+      for (const terminal of ["paginate", "page", "batchOnce"] as const) {
+        for (const direction of ["forward", "backward"] as const) {
+          let cursor: string | undefined;
+          for (let guard = 0; guard < 20; guard += 1) {
+            const options =
+              direction === "forward" ?
+                { first: 1, ...(cursor === undefined ? {} : { after: cursor }) }
+              : {
+                  last: 1,
+                  ...(cursor === undefined ? {} : { before: cursor }),
+                };
+            const page = await readCapturedPage(
+              store,
+              sort,
+              selection,
+              terminal,
+              options,
+            );
+            for (const cursorIssued of [page.nextCursor, page.prevCursor]) {
+              if (cursorIssued === undefined) continue;
+              const key = `${JSON.stringify(sort)}:${cursorIssued}`;
+              const issuers = issued.get(key) ?? new Set<string>();
+              issuers.add(`${terminal}/${selection}`);
+              issued.set(key, issuers);
+            }
+            const more =
+              direction === "forward" ? page.hasNextPage : page.hasPrevPage;
+            cursor =
+              direction === "forward" ? page.nextCursor : page.prevCursor;
+            if (!more || cursor === undefined) break;
+          }
+        }
+      }
+    }
+  }
+  return Object.fromEntries(
+    [...issued.entries()].map(([key, issuers]) => [
+      key,
+      [...issuers].toSorted(),
+    ]),
+  );
+}
+
 export function registerPlainCursorCompatibilityIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -148,6 +281,37 @@ export function registerPlainCursorCompatibilityIntegrationTests(
             });
           }
         }
+      }
+    });
+
+    it("issues every recorded cursor byte for byte, through exactly the terminals and selections that recorded it", async (ctx) => {
+      const lane = fixtureLaneOf(context.driver);
+      // The server PostgreSQL lanes resume the PGlite fixtures but issue
+      // through a pool whose sessions' zone this case cannot hold fixed.
+      if (lane === undefined) ctx.skip();
+      const store = context.getStore();
+      await seed(store);
+      const executeRaw = store.backend.executeRaw;
+      if (lane === "pglite") {
+        if (executeRaw === undefined)
+          throw new Error("The PGlite lane must expose raw SQL.");
+        await executeRaw(
+          `SET TIME ZONE '${PLAIN_CURSOR_PGLITE_TIME_ZONE}'`,
+          [],
+        );
+      }
+      try {
+        const recorded = Object.fromEntries(
+          PLAIN_CURSOR_FIXTURES.filter((fixture) => fixture.lane === lane).map(
+            (fixture) => [
+              `${JSON.stringify(fixture.sort)}:${fixture.cursor}`,
+              fixture.issuedBy.toSorted(),
+            ],
+          ),
+        );
+        expect(await issuedCursors(store)).toEqual(recorded);
+      } finally {
+        if (lane === "pglite") await executeRaw?.("RESET TIME ZONE", []);
       }
     });
   });

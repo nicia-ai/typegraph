@@ -31,6 +31,7 @@ import { createClient } from "@libsql/client";
 import { z } from "zod";
 
 import {
+  PLAIN_CURSOR_PGLITE_TIME_ZONE,
   PLAIN_CURSOR_SEED,
   PLAIN_CURSOR_SORTS,
   type PlainCursorFixture,
@@ -83,6 +84,12 @@ async function openBackend(
       );
       // The backend owns the client it created: closing it closes both.
       const { backend } = await createLocalPgliteBackend();
+      // A batched timestamp key carries the session's offset: capture in a
+      // fixed zone, so the fixtures do not depend on the capturing host.
+      await backend.executeRaw(
+        `SET TIME ZONE '${PLAIN_CURSOR_PGLITE_TIME_ZONE}'`,
+        [],
+      );
       return { backend, close: () => backend.close() };
     }
   }
