@@ -1928,13 +1928,13 @@ function compileRelevancePerMatchValue(
   const { value } = input.dialect.relevanceCursorKey;
   switch (source) {
     case "fulltext_rank": {
-      return value(readColumn(FULLTEXT_CTE_ALIAS, "rank"));
+      return value(readColumn(FULLTEXT_CTE_ALIAS, "rank"), source);
     }
     case "vector_distance": {
-      return value(readColumn(EMBEDDINGS_CTE_ALIAS, "distance"));
+      return value(readColumn(EMBEDDINGS_CTE_ALIAS, "distance"), source);
     }
     case "hybrid_score": {
-      return value(compileHybridRrfScore(input.fusion));
+      return value(compileHybridRrfScore(input.fusion), source);
     }
     case "hybrid_node_id": {
       // Deterministic tiebreak on the CTE-projected node_id. At least one of
@@ -2069,7 +2069,7 @@ function compileRelevanceCursorKeyValue(
 ): SqlFragment {
   const value = compileRelevancePerMatchValue(source, input);
   return source === "hybrid_node_id" ? value : (
-      sql`CASE WHEN ${value} IS NULL THEN NULL ELSE ${input.dialect.relevanceCursorKey.select(value)} END`
+      sql`CASE WHEN ${value} IS NULL THEN NULL ELSE ${input.dialect.relevanceCursorKey.select(value, source)} END`
     );
 }
 
@@ -2102,9 +2102,10 @@ export function buildStandardRelevanceCursorKeyColumns(
 
 /**
  * Compiles a keyset cursor's comparison of a match row's relevance sort key
- * with the value the cursor carries. The value is bound as the cursor carries
- * it, which is what {@link compileRelevanceCursorKeyValue} rendered, so it
- * compares exactly against the same per-match value the ORDER BY sorts by.
+ * with the value the cursor carries. The value is what
+ * {@link compileRelevanceCursorKeyValue} rendered, written as the dialect's
+ * operand for it (`relevanceCursorKey.operand`), so it compares exactly
+ * against the same per-match value the ORDER BY sorts by.
  */
 export function compileRelevanceComparison(
   predicate: RelevanceComparisonPredicate,
@@ -2130,7 +2131,7 @@ export function compileRelevanceComparison(
         predicate.op === "eq" ? "="
         : predicate.op === "gt" ? ">"
         : "<";
-      return sql`${value} ${sql.raw(operator)} ${predicate.value}`;
+      return sql`${value} ${sql.raw(operator)} ${input.dialect.relevanceCursorKey.operand(predicate.value)}`;
     }
   }
 }

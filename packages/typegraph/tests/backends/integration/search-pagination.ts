@@ -284,6 +284,30 @@ async function expectApproximatePagingRefusal(
   }
 }
 
+/**
+ * The ids `read` pages, or {@link SEARCH_CURSOR_MISMATCH} when it refuses the
+ * cursor with that code; any other failure is thrown.
+ */
+async function readOrRefusal(
+  read: () => Promise<PaginatedResult<Row>>,
+): Promise<readonly string[] | typeof SEARCH_CURSOR_MISMATCH> {
+  try {
+    const page = await read();
+    return page.data.map((row) => row.id);
+  } catch (error) {
+    if (
+      error instanceof ValidationError &&
+      error.details.issues.some(
+        (issue) =>
+          (issue as Readonly<{ code?: string }>).code ===
+          SEARCH_CURSOR_MISMATCH,
+      )
+    )
+      return SEARCH_CURSOR_MISMATCH;
+    throw error;
+  }
+}
+
 async function expectSearchCursorRefusal(
   read: () => Promise<unknown>,
 ): Promise<void> {
@@ -1037,6 +1061,85 @@ export function registerSearchPaginationIntegrationTests(
       });
     });
 
+    it("pages a hybrid search whose fused score is past the largest double exactly as execute() orders it", async (ctx) => {
+      const store = storeWith(context, ctx, "hybrid");
+      await seedRanked(store);
+      // Valid fusion options whose fused score, weight / (k + rank) summed
+      // over both legs, exceeds the largest double: PostgreSQL computes it as
+      // NUMERIC, SQLite as REAL, where it is an infinity.
+      const query = () =>
+        searchArticles(store, { kind: "hybrid" })
+          .fuseWith({
+            k: 0.5,
+            weights: { vector: Number.MAX_VALUE, fulltext: Number.MAX_VALUE },
+          })
+          .select((row) => ({ id: row.a.id }));
+      const executed = await executedIds(query());
+      expect(executed.toSorted()).toEqual(["r1", "r2", "r3", "r4", "r5"]);
+      expect({
+        forward: await walk(store, query, "paginate", "forward", 1),
+        backward: await walk(store, query, "page", "backward", 2),
+        batched: await walk(store, query, "batchOnce", "forward", 2),
+        stream: await walk(store, query, "stream", "forward", 1),
+      }).toEqual({
+        forward: executed,
+        backward: executed,
+        batched: executed,
+        stream: executed,
+      });
+    });
+
+    it("pages a vector search whose distance is infinite exactly as execute() orders it", async (ctx) => {
+      const store = storeWith(context, ctx, "vector");
+      await seedRanked(store);
+      // Finite single-precision components whose squared L2 distance from
+      // the query overflows: the engine returns an infinite distance.
+      for (const [id, sign] of [
+        ["i1", 1],
+        ["i2", -1],
+      ] as const) {
+        await store.nodes.Article.create(
+          {
+            title: "climate",
+            body: "notes",
+            category: "inf",
+            published: true,
+            embedding: [sign * 3e38, sign * 3e38, sign * 3e38, sign * 3e38],
+          },
+          { id },
+        );
+      }
+      const query = () =>
+        store
+          .query()
+          .from("Article", "a")
+          .whereNode("a", (a) =>
+            a.embedding.similarTo(QUERY_VECTOR, 10, { metric: "l2" }),
+          )
+          .select((row) => ({ id: row.a.id }));
+      const executed = await executedIds(query());
+      expect(executed.toSorted()).toEqual([
+        "i1",
+        "i2",
+        "r1",
+        "r2",
+        "r3",
+        "r4",
+        "r5",
+      ]);
+      expect({
+        forward: await walk(store, query, "paginate", "forward", 1),
+        backward: await walk(store, query, "page", "backward", 1),
+        batched: await walk(store, query, "batchOnce", "forward", 2),
+        stream: await walk(store, query, "stream", "forward", 1),
+      }).toEqual({
+        forward: executed,
+        backward: executed,
+        batched: executed,
+        stream: executed,
+      });
+    });
+
     it("refuses a relevance key outside what its database can represent before it reaches the database", async (ctx) => {
       const store = context.getStore();
       const kinds = SEARCH_KINDS.filter((kind) =>
@@ -1052,20 +1155,70 @@ export function registerSearchPaginationIntegrationTests(
         const first = await query().paginate({ first: 2 });
         const json = decodeCursorJson(requireCursor(first.nextCursor));
         const vals = json["vals"] as unknown[];
-        // Out of range for a double (and so for every narrower type) on
-        // every engine: overflow, underflow to zero, and their negatives.
-        for (const forged of ["1e9999", "-1e9999", "1e-400", "-1e-400"]) {
-          const tampered = encodeCursorJson({
-            ...json,
-            vals: [forged, ...vals.slice(1)],
-          });
+        const forge = (value: string) =>
+          encodeCursorJson({ ...json, vals: [value, ...vals.slice(1)] });
+        // A key is compared in the type its source computes: a double for a
+        // rank or distance on every engine and for SQLite's fused score, a
+        // NUMERIC for PostgreSQL's fused score.
+        const keyIsNumeric =
+          kind === "hybrid" && store.backend.dialect === "postgres";
+        // Out of range for a NUMERIC (and so for a double): more integer or
+        // fraction digits than it holds, and their negatives.
+        const outsideEveryKey = [
+          "1e200000",
+          "-1e200000",
+          "1e-20000",
+          "-1e-20000",
+        ];
+        for (const forged of outsideEveryKey) {
           await expectSearchCursorRefusal(() =>
-            query().paginate({ first: 2, after: tampered }),
+            query().paginate({ first: 2, after: forge(forged) }),
           );
           await expectSearchCursorRefusal(() =>
-            query().page({ last: 2, before: tampered }).execute(),
+            query()
+              .page({ last: 2, before: forge(forged) })
+              .execute(),
           );
         }
+        // Out of range for a double (and so for every narrower type):
+        // overflow, underflow to zero, and their negatives. Refused where
+        // the key is a double; where it is a NUMERIC, positions above every
+        // fused score (the score sorts descending, so every row follows it)
+        // and below every one.
+        const outsideDouble = ["1e9999", "-1e9999", "1e-400", "-1e-400"];
+        const executed = await executedIds(query());
+        const outcomes = [];
+        for (const forged of outsideDouble) {
+          outcomes.push(
+            await readOrRefusal(() =>
+              query().paginate({ first: 2, after: forge(forged) }),
+            ),
+            await readOrRefusal(() =>
+              query()
+                .page({ last: 2, before: forge(forged) })
+                .execute(),
+            ),
+          );
+        }
+        expect({ kind, outcomes }).toEqual({
+          kind,
+          outcomes:
+            keyIsNumeric ?
+              [
+                executed.slice(0, 2),
+                [],
+                [],
+                executed.slice(-2),
+                [],
+                executed.slice(-2),
+                [],
+                executed.slice(-2),
+              ]
+            : outsideDouble.flatMap(() => [
+                SEARCH_CURSOR_MISMATCH,
+                SEARCH_CURSOR_MISMATCH,
+              ]),
+        });
         // Representable as a double but not as PostgreSQL's `real` (the type
         // `ts_rank_cd` returns): a valid position past every row.
         const large = encodeCursorJson({

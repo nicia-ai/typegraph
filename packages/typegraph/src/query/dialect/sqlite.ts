@@ -127,6 +127,15 @@ function mergeJsonObjects(parts: readonly SqlFragment[]): SqlFragment {
 /**
  * SQLite dialect adapter implementation.
  */
+/**
+ * The text SQLite's `printf('%!.17g')` renders a REAL infinity as, and the
+ * literal SQLite reads as that infinity (a decimal past the largest double).
+ */
+const SQLITE_INFINITY_LITERALS: ReadonlyMap<string, string> = new Map([
+  ["Inf", "9e999"],
+  ["-Inf", "-9e999"],
+]);
+
 export const sqliteDialect: BuiltinDialectAdapter = {
   dateValue(value) {
     return value;
@@ -181,8 +190,22 @@ export const sqliteDialect: BuiltinDialectAdapter = {
 
   relevanceCursorKey: {
     value: (expression) => expression,
+    // `%!.17g` renders an infinity (an L2 distance or a fused score past the
+    // largest double) as `Inf` / `-Inf`. No driver binds an infinite
+    // parameter, so that text stays the bound value and `operand` writes it
+    // as a literal SQLite reads as the infinity.
     select: (expression) => sql`printf('%!.17g', ${expression})`,
-    bind: (text) => parseRepresentableDouble(text),
+    bind: (text) =>
+      SQLITE_INFINITY_LITERALS.has(text) ? text : (
+        parseRepresentableDouble(text)
+      ),
+    operand: (bound) => {
+      const literal =
+        typeof bound === "string" ?
+          SQLITE_INFINITY_LITERALS.get(bound)
+        : undefined;
+      return literal === undefined ? sql`${bound}` : sql.raw(literal);
+    },
   },
 
   keyText(expression) {

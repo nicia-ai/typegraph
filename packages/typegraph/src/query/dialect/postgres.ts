@@ -16,6 +16,7 @@ import { tsvectorStrategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
 import {
   DOUBLE_OVERFLOW_BOUNDARY,
+  isRepresentableNumericText,
   parseRepresentableDouble,
 } from "./numeric-conversion";
 import {
@@ -208,25 +209,37 @@ export const postgresDialect: BuiltinDialectAdapter = {
   },
 
   relevanceCursorKey: {
-    // One type for every relevance key, whatever its source computes (a
-    // `real` ts_rank_cd, a `double precision` distance, a `numeric` fused
-    // score): widening a `real` is exact, and the cursor's bound text then
-    // has one type whose range `bind` can check before the database sees it.
-    value: (expression) => sql`CAST(${expression} AS DOUBLE PRECISION)`,
-    // Float text is exact only at `extra_float_digits` >= 1 (the default):
-    // below it the key renders text the cursor refuses, rather than a
-    // rounded value that would skip or repeat nearly tied rows.
-    select: (expression) =>
-      sql`CASE WHEN current_setting('extra_float_digits')::integer >= 1 THEN CAST(${expression} AS TEXT) ELSE ${INEXACT_FLOAT_OUTPUT} END`,
-    // The text of a `double precision` value: any other text, or a value out
+    // A `real` ts_rank_cd and a `double precision` distance are compared as
+    // `double precision` (widening a `real` is exact), so their bound text
+    // has one type whose range `bind` can check before the database sees
+    // it. The fused score stays the `numeric` it is computed in: a double
+    // cannot hold every score valid fusion options produce, and would round
+    // apart scores `execute()` orders apart.
+    value: (expression, source) =>
+      source === "hybrid_score" ?
+        sql`CAST(${expression} AS NUMERIC)`
+      : sql`CAST(${expression} AS DOUBLE PRECISION)`,
+    // `numeric` text is exact. Float text is exact only at
+    // `extra_float_digits` >= 1 (the default): below it the key renders text
+    // the cursor refuses, rather than a rounded value that would skip or
+    // repeat nearly tied rows.
+    select: (expression, source) =>
+      source === "hybrid_score" ?
+        sql`CAST(${expression} AS TEXT)`
+      : sql`CASE WHEN current_setting('extra_float_digits')::integer >= 1 THEN CAST(${expression} AS TEXT) ELSE ${INEXACT_FLOAT_OUTPUT} END`,
+    // The text of a value of the key's type: any other text, or a value out
     // of its range, would be a database error, not a refused cursor.
-    bind: (text) =>
-      (
-        POSTGRES_SPECIAL_DOUBLES.has(text) ||
-        parseRepresentableDouble(text) !== undefined
-      ) ?
-        text
-      : undefined,
+    bind: (text, source) => {
+      if (source === "hybrid_score")
+        return isRepresentableNumericText(text) ? text : undefined;
+      return (
+          POSTGRES_SPECIAL_DOUBLES.has(text) ||
+            parseRepresentableDouble(text) !== undefined
+        ) ?
+          text
+        : undefined;
+    },
+    operand: (bound) => sql`${bound}`,
   },
 
   keyText(expression) {

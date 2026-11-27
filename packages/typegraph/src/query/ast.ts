@@ -119,6 +119,12 @@ export type TupleComparisonPredicate = Readonly<{
 export type RelevanceSortSource =
   "fulltext_rank" | "vector_distance" | "hybrid_score" | "hybrid_node_id";
 
+/** The relevance sort keys whose value is a number a cursor carries as text. */
+export type NumericRelevanceSortSource = Exclude<
+  RelevanceSortSource,
+  "hybrid_node_id"
+>;
+
 /**
  * Compares a completed match row's value of one relevance sort key with the
  * value a keyset cursor carries for it. Cursor pagination builds it, into the

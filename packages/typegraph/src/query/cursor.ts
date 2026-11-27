@@ -9,7 +9,12 @@
 
 import { ConfigurationError, ValidationError } from "../errors";
 import { sha256HexSync } from "../utils/hash";
-import { type FieldRef, type OrderSpec, type QueryAst } from "./ast";
+import {
+  type FieldRef,
+  type NumericRelevanceSortSource,
+  type OrderSpec,
+  type QueryAst,
+} from "./ast";
 import { systemColumnSelectedPath } from "./builder/order-by-field";
 import { getNodeKindsForAlias } from "./compiler/predicate-utils";
 import {
@@ -485,7 +490,10 @@ export type KeysetKey =
  */
 export type SearchCursorBinding = Readonly<{
   fingerprint: string;
-  bindRelevanceKey: (text: string) => string | number | undefined;
+  bindRelevanceKey: (
+    text: string,
+    source: NumericRelevanceSortSource,
+  ) => string | number | undefined;
 }>;
 
 /**
@@ -623,7 +631,7 @@ function relevanceKeyBinding(
   if (value === null) return null;
   if (typeof value !== "string") return undefined;
   if (key.source === "hybrid_node_id") return value;
-  return search.bindRelevanceKey(value);
+  return search.bindRelevanceKey(value, key.source);
 }
 
 /**

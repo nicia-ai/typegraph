@@ -7,7 +7,7 @@
  */
 import { type VectorMetric } from "../../backend/types";
 import { type JsonScalar, type JsonValue } from "../../core/types";
-import { type ValueType } from "../ast";
+import { type NumericRelevanceSortSource, type ValueType } from "../ast";
 import { type JsonPointer } from "../json-pointer";
 import { type SqlFragment } from "../sql-fragment";
 import { type FulltextStrategy } from "./fulltext-strategy";
@@ -209,29 +209,54 @@ export interface DialectAdapter {
    * a value its key type cannot hold, which the cursor then refuses before
    * the database sees it.
    *
-   * PostgreSQL compares every key as `double precision` (`value`), whose
-   * output is the shortest text that reads back as the same value at the
-   * default `extra_float_digits` of 1 or above (below it the key renders
-   * text the cursor refuses), so the text is bound as it is: an untyped
-   * parameter compared with the key takes the key's type. SQLite renders the REAL
-   * with 17 significant digits, which identify every double, and binds the
-   * double that text denotes: before SQLite 3.43, which libSQL builds on,
-   * neither `CAST(x AS TEXT)` nor a REAL's JSON text is exact, and neither is
+   * Every member takes the key's source, because a key is compared in the
+   * type its source computes on that engine. PostgreSQL compares a rank and
+   * a distance as `double precision` (`value`), whose output is the
+   * shortest text that reads back as the same value at the default
+   * `extra_float_digits` of 1 or above (below it the key renders text the
+   * cursor refuses), and the fused hybrid score as the `numeric` it is
+   * computed in, whose text is exact and whose range holds every score valid
+   * fusion options produce (a double does not: weights near the largest
+   * double overflow it); in both, the text is bound as it is: an untyped
+   * parameter compared with the key takes the key's type. SQLite's keys are
+   * REAL: it renders them with 17 significant digits, which identify every
+   * double, an infinity as `Inf` / `-Inf`, and binds the double that text
+   * denotes: before SQLite 3.43, which libSQL builds on, neither
+   * `CAST(x AS TEXT)` nor a REAL's JSON text is exact, and neither is
    * `CAST(text AS REAL)`.
    */
   readonly relevanceCursorKey: Readonly<{
     /**
      * The value of a numeric relevance key that the statement sorts by and a
-     * cursor carries and compares, in one SQL type per dialect. PostgreSQL
-     * casts every key to `double precision`; SQLite's keys are REAL already.
+     * cursor carries and compares, in one SQL type per dialect and source.
+     * PostgreSQL casts a rank or distance to `double precision` and a fused
+     * score to `numeric`; SQLite's keys are REAL already.
      */
-    value: (this: void, expression: SqlFragment) => SqlFragment;
+    value: (
+      this: void,
+      expression: SqlFragment,
+      source: NumericRelevanceSortSource,
+    ) => SqlFragment;
     /**
      * The text of a non-NULL {@link value}; a NULL key is carried as NULL by
      * the shared compiler and never reaches this.
      */
-    select: (this: void, expression: SqlFragment) => SqlFragment;
-    bind: (this: void, text: string) => string | number | undefined;
+    select: (
+      this: void,
+      expression: SqlFragment,
+      source: NumericRelevanceSortSource,
+    ) => SqlFragment;
+    bind: (
+      this: void,
+      text: string,
+      source: NumericRelevanceSortSource,
+    ) => string | number | undefined;
+    /**
+     * The SQL operand of a value {@link bind} returned, as the cursor's
+     * comparison reads it: a bound parameter, or a literal where no driver
+     * binds the value (SQLite's infinities).
+     */
+    operand: (this: void, bound: string | number) => SqlFragment;
   }>;
 
   /**
