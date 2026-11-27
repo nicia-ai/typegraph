@@ -436,7 +436,7 @@ describe("Postgres iterative scan — hnsw.iterative_scan on filtered searches",
     // The IVFFlat SQL re-sorts the relaxed candidate set in a
     // MATERIALIZED wrapper so relaxed_order cannot leak misordered rows.
     const ivfflatSelect = statements.find((statement) =>
-      statement.query.includes("tg_vec_relaxed"),
+      statement.query.includes("tg_vec_index_candidates"),
     );
     expect(
       ivfflatSelect?.query,

@@ -42,6 +42,7 @@ import {
   asForeignTransaction,
   ForeignPgTransaction,
 } from "../../helpers/foreign-drizzle-handles";
+import { expectFilteredHnswPlansUseIndex } from "./hnsw-filtered-plan";
 import { expectIvfflatPlansResort } from "./ivfflat-resort-plan";
 import {
   setupSharedPgliteEngine,
@@ -302,10 +303,9 @@ describe("pgvectorStrategy under PGlite (executed against bundled pgvector)", ()
       const planText = plan.rows
         .map((row) => row["QUERY PLAN"] ?? "")
         .join("\n");
-      // The tiebreak sorts on top of the ordered index scan, not instead of
-      // it.
+      // The candidates are read from the ordered index scan, and the tie is
+      // broken over every tied row it returns.
       expect(planText).toMatch(/Index Scan using \S+ on/);
-      expect(planText).toMatch(/Incremental Sort/);
       const runs = new Set<string>();
       for (let run_ = 0; run_ < 10; run_ += 1) {
         const rows = await run(search);
@@ -316,6 +316,22 @@ describe("pgvectorStrategy under PGlite (executed against bundled pgvector)", ()
       await engine.client.exec("RESET enable_seqscan");
     }
   });
+
+  it("reads a filtered HNSW search's candidates from the HNSW index, whatever a tiebreak would cost", async () => {
+    const s = slot("hnsw");
+    await createStorage(s);
+    await expectFilteredHnswPlansUseIndex(
+      {
+        query: (text, params) =>
+          engine.client.query(
+            text,
+            params === undefined ? undefined : [...params],
+          ),
+      },
+      s,
+      (overrides) => searchParams([1, 0, 0], overrides),
+    );
+  }, 120_000);
 
   it("re-sorts an IVFFlat relaxed-order scan above the materialized scan, for every candidate form", async () => {
     const s = slot("ivfflat");

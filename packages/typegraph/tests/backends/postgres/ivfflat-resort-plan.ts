@@ -27,7 +27,7 @@ export type PlanSession = Readonly<{
 }>;
 
 const RESORT_ABOVE_CTE_SCAN =
-  /\n\s*->\s+Sort\n\s+Sort Key: \(\(?tg_vec_relaxed\.distance \+ '?0'?(?:::double precision)?\)?\)?, tg_vec_relaxed\.node_id COLLATE "C"\n\s+->\s+CTE Scan on tg_vec_relaxed/;
+  /\n\s*->\s+Sort\n\s+Sort Key: \(\(?tg_vec_index_candidates\.distance \+ '?0'?(?:::double precision)?\)?\)?, tg_vec_index_candidates\.node_id COLLATE "C"\n\s+->\s+CTE Scan on tg_vec_index_candidates/;
 
 /**
  * The plan's text from the materialized wrapper on: the relaxed scan the
@@ -35,7 +35,7 @@ const RESORT_ABOVE_CTE_SCAN =
  * table's primary-key scan.
  */
 function relaxedCtePlan(planText: string): string {
-  const start = planText.indexOf("CTE tg_vec_relaxed");
+  const start = planText.indexOf("CTE tg_vec_index_candidates");
   return start === -1 ? "" : planText.slice(start);
 }
 
