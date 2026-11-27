@@ -3924,6 +3924,9 @@ export type ResolvedSqlTableNames = Readonly<{
 export function resolveRecursiveTraversal(capabilities: BackendCapabilities): RecursiveTraversalVerdict;
 
 // @public
+export function resolveRepeatableApproximateSearch(capabilities: VectorCapabilities): RepeatableApproximateSearch;
+
+// @public
 export function resolveStampedValidityLowerBound(statedValidFrom: string | null | undefined, validTo: string | undefined, writeInstant: string): string | undefined;
 
 // @public
@@ -5216,7 +5219,7 @@ export type VectorCapabilities = Readonly<{
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
     searchFrontierTuning: VectorSearchFrontierTuning;
-    repeatableApproximateSearch: RepeatableApproximateSearch;
+    repeatableApproximateSearch?: RepeatableApproximateSearch;
 }>;
 
 // @public

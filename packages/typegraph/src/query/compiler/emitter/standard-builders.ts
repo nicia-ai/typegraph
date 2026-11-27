@@ -21,6 +21,7 @@ import {
 import { type DialectAdapter } from "../../dialect/types";
 import {
   assertApproximateMetricSupported,
+  resolveRepeatableApproximateSearch,
   vectorDefinedDistanceConditions,
   vectorMinScoreCondition,
   vectorScoreExpression,
@@ -1569,7 +1570,9 @@ export function buildStandardEmbeddingsCte(
       assertRepeatableApproximateSearch({
         cursorPaged: input.cursorPaged,
         indexType: annSlot.indexType,
-        repeatability: vectorStrategy.capabilities.repeatableApproximateSearch,
+        repeatability: resolveRepeatableApproximateSearch(
+          vectorStrategy.capabilities,
+        ),
         engine: vectorStrategy.name,
         nodeKind: kind,
         fieldPath,

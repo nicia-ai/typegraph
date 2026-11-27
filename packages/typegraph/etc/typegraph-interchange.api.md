@@ -8865,7 +8865,7 @@ type VectorCapabilities = Readonly<{
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
     searchFrontierTuning: VectorSearchFrontierTuning;
-    repeatableApproximateSearch: RepeatableApproximateSearch;
+    repeatableApproximateSearch?: RepeatableApproximateSearch;
 }>;
 
 // @public

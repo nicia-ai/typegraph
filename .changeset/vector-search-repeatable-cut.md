@@ -2,7 +2,7 @@
 "@nicia-ai/typegraph": minor
 ---
 
-Vector capabilities declare a new required `repeatableApproximateSearch` field: `{ repeatable: true }` when an approximate search returns the same rows on every execution over an unchanged database, or `{ repeatable: false, reason }`. pgvector and sqlite-vec declare it repeatable. libSQL declares it not repeatable, because DiskANN's `vector_top_k` starts each search from a randomly chosen node, and paging an approximate search there is refused. A custom vector strategy must now state the field.
+Vector capabilities gain a `repeatableApproximateSearch` declaration: `{ repeatable: true }` when an approximate search returns the same rows on every execution over an unchanged database, or `{ repeatable: false, reason }`. pgvector and sqlite-vec declare it repeatable. libSQL declares it not repeatable, because DiskANN's `vector_top_k` starts each search from a randomly chosen node, and paging an approximate search there is refused. A custom vector strategy that does not state it resolves to not repeatable (`resolveRepeatableApproximateSearch`, exported from `./backend`), so paging an approximate search on it is refused until it declares `{ repeatable: true }`.
 
 Every vector search form, in the query builder and in `store.search.vector` and `store.search.hybrid`, now breaks distance ties by node id inside the engine's own top-`k` where the engine takes an order: pgvector keeps its HNSW or IVFFlat index scan and adds an incremental sort on the node id; libSQL and sqlite-vec scans add the same order. sqlite-vec's KNN cut takes no tiebreak and keeps its deterministic storage order. Which tied neighbors make the top `k` therefore no longer varies with the plan.
 

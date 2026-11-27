@@ -32,6 +32,7 @@
 import { type StrategyTableContribution } from "../../backend/table-contribution";
 import {
   type DeleteEmbeddingParams,
+  type RepeatableApproximateSearch,
   type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
   type VectorCapabilities,
@@ -321,6 +322,23 @@ export function vectorScoreExpression(
       throw new Error(`Unsupported vector metric: ${String(_exhaustive)}`);
     }
   }
+}
+
+/**
+ * THE one reader of `capabilities.repeatableApproximateSearch`: the strategy's
+ * declaration, or `repeatable: false` naming the missing declaration when it
+ * states none.
+ */
+export function resolveRepeatableApproximateSearch(
+  capabilities: VectorCapabilities,
+): RepeatableApproximateSearch {
+  return (
+    capabilities.repeatableApproximateSearch ?? {
+      repeatable: false,
+      reason:
+        "the vector strategy does not declare capabilities.repeatableApproximateSearch",
+    }
+  );
 }
 
 /**

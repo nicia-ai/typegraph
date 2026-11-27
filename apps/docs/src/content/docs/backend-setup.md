@@ -3042,9 +3042,9 @@ bundled strategies (`sqlite-vec`/`libsql-native`/`pgvector`, `fts5`/`tsvector`).
 different `metrics`/`indexTypes`/`filteredApproximateSearch`/`searchFrontierTuning` shifts these rows accordingly —
 always check `backend.capabilities` at runtime rather than hard-coding the dialect.
 
-`repeatableApproximateSearch` is **required** too: `{ repeatable: true }` promises that an approximate search returns the
+A strategy should also declare `repeatableApproximateSearch`: `{ repeatable: true }` promises that an approximate search returns the
 same rows on every execution over an unchanged database, which cursor pagination of one needs, and
-`{ repeatable: false, reason }` makes paging an approximate search a typed refusal naming the reason. A strategy's
+`{ repeatable: false, reason }` makes paging an approximate search a typed refusal naming the reason. A strategy that declares nothing resolves to `repeatable: false` (`resolveRepeatableApproximateSearch`), so it is refused rather than assumed repeatable. A strategy's
 `buildSearch` must also break distance ties by node id wherever its engine takes an order (`compileRelevanceCandidateOrder`)
 and keep zero-norm embeddings out of a cosine search (`vectorDefinedDistanceConditions`), as the bundled strategies do.
 

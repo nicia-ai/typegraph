@@ -37,6 +37,7 @@ export {
   assertVectorSearchLimit,
   buildVectorCapabilities,
   quoteIdentifier,
+  resolveRepeatableApproximateSearch,
   VECTOR_CONTRIBUTION_PREFIX,
   vectorDefinedDistanceConditions,
   vectorMinScoreCondition,

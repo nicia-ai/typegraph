@@ -156,7 +156,8 @@ export type VectorSearchFrontierTuning =
  * Cursor pagination needs it: every page of a search re-runs the search and
  * positions itself among the candidates that run returns, so a search whose
  * candidates change between runs skips and repeats rows. An approximate
- * search on an engine that declares `repeatable: false` is refused by
+ * search on an engine that declares `repeatable: false`, or declares
+ * nothing, is refused by
  * `paginate()`, `page()` and `stream()` with an
  * `UnsupportedBackendCapabilityError` on
  * `vector.repeatableApproximateSearch`; its `execute()` still runs, and two
@@ -214,10 +215,12 @@ export type VectorCapabilities = Readonly<{
    * over an unchanged database, which cursor pagination of one requires. See
    * {@link RepeatableApproximateSearch}.
    *
-   * Required, so a new vector strategy must state it rather than inherit a
-   * promise its engine does not keep.
+   * Optional so an existing strategy keeps compiling, but never assumed: a
+   * strategy that does not state it resolves to `repeatable: false`
+   * (`resolveRepeatableApproximateSearch`), so it does not inherit a promise
+   * its engine may not keep.
    */
-  repeatableApproximateSearch: RepeatableApproximateSearch;
+  repeatableApproximateSearch?: RepeatableApproximateSearch;
 }>;
 
 // ============================================================
