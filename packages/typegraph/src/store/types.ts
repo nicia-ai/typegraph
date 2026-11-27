@@ -3106,6 +3106,11 @@ export type TransactionRuntime = Readonly<{
    * later rolls back. A caller already inside a `store.transaction` callback
    * — today, merge apply — reaches this transaction-scoped variant instead,
    * via {@link file://./runtime-port.ts transactionDeleteNodeWithPolicy}.
+   *
+   * On resolution it counts one node write of `work.kind` in every receipt
+   * this context's writes count in (its transaction's and each enclosing
+   * `tx.measure` scope's), as a collection `delete` would; a rejected
+   * delete counts 0.
    */
   deleteNodeWithPolicy: (
     work: Readonly<{ kind: string; id: string }>,
@@ -3114,7 +3119,8 @@ export type TransactionRuntime = Readonly<{
   /**
    * Revives one soft-deleted node with its stored props through this SAME
    * transaction's node-operation context — the inverse of a soft delete via
-   * {@link file://./runtime-port.ts transactionReviveNode}.
+   * {@link file://./runtime-port.ts transactionReviveNode}. Counted in this
+   * context's receipts exactly as {@link deleteNodeWithPolicy} is.
    */
   reviveNode: (work: Readonly<{ kind: string; id: string }>) => Promise<void>;
   /**
@@ -3129,6 +3135,15 @@ export type TransactionRuntime = Readonly<{
    * A transaction opened with `accessMode: "read_only"` cannot hold the schema
    * fence, so it is refused before any statement, naming `refusal.operation`
    * and offering `refusal.suggestion`.
+   *
+   * The caller decides from what it reads under these fences, so the graph
+   * lock's own acquisition must also prove that every read after it observes
+   * every earlier holder of the lock (a serialized engine, or a keyed
+   * acquisition that observed read committed on this session). A session that
+   * cannot — a PostgreSQL transaction at repeatable read or serializable,
+   * whose snapshot can predate a writer the lock waited for — is refused with
+   * `UnsupportedBackendCapabilityError` (`observedReadCommittedIsolation`),
+   * naming `refusal.operation`, before the caller's first read.
    */
   acquireWriteFences: (
     refusal: Readonly<{ operation: string; suggestion: string }>,
@@ -3140,11 +3155,19 @@ export type TransactionRuntime = Readonly<{
    * fences, in their order, so a write that follows the read cannot take the
    * schema-version fence after the graph lock. In a transaction opened with
    * `accessMode: "read_only"`, which never writes and cannot hold the schema
-   * fence, it is the per-graph write lock alone. The transaction's own
+   * fence, it is the per-graph write lock alone; under a `row` write fence
+   * that lock is a fence-row upsert, so it is refused there, naming
+   * `operation`, before any statement (`recordedGraphWriteLockWrites`). The transaction's own
    * read-only flag decides, so no caller re-derives it — today's caller is
    * provenance's `holding(tx)`.
+   *
+   * A transaction that can write may decide a write from the read, so it
+   * carries {@link acquireWriteFences}'s proof that the read observes every
+   * earlier holder of the graph lock, refused naming `operation` otherwise.
+   * A read-only transaction decides no write: at a snapshot isolation its
+   * statements share one snapshot, which is already a consistent view.
    */
-  acquireReadFences: () => Promise<void>;
+  acquireReadFences: (operation: string) => Promise<void>;
   /**
    * The write gate every write on this transaction's collections and
    * identity facade passes first (the receipt recorder's `assertWritable`),

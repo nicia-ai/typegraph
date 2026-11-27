@@ -1,0 +1,5 @@
+---
+"@nicia-ai/typegraph": minor
+---
+
+A read-only `provenance.holding(tx)` (in a transaction opened with `accessMode: "read_only"`) on a backend that declares a `row` write fence is now refused with `UnsupportedBackendCapabilityError` (capability `write transaction access`, `accessMode: "read_only"`) before any statement, on SQLite and PostgreSQL alike, and the transaction stays usable. Under a `row` fence the graph write lock the call takes is an upsert of the graph's fence row: SQLite used to run that write inside the read-only Store transaction, and PostgreSQL rejected it with the driver's own error (`25006`). **Behaviour change:** a read-only `holding(tx)` that answered on a SQLite backend declaring a `row` fence now throws; call `holding()`. On PostgreSQL `holding(tx)` in a transaction that can write also answers; on SQLite that form is refused for its snapshot freshness (`observedReadCommittedIsolation`), because a SQLite `row` fence acquisition cannot report the session's isolation. The bundled backends' default fences (SQLite's writer slot, PostgreSQL's advisory lock) write no row and are unaffected.

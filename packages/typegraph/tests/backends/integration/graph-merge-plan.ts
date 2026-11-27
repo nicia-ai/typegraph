@@ -392,6 +392,37 @@ export function registerGraphMergePlanIntegrationTests(
       ).resolves.toMatchObject({ name: "Ada" });
     });
 
+    // Load-bearing: a node deletion merge apply runs through the transaction's
+    // internal delete port, which the collection wrappers never see. Revert
+    // check: drop `recordPortNodeWrite` from that port in store.ts and the
+    // receipt counts no write at all.
+    it("counts a node deletion applied in a caller-owned transaction in its receipt", async () => {
+      const backend = context.getBackend();
+      const [target] = await createAdapterStoreWithSchema(graph, backend, {
+        history: true,
+      });
+      await target.nodes.Person.create(
+        { name: "Ada", email: "ada@example.test" },
+        { id: "ada" },
+      );
+      const source = await makeBranch(context, target, "adopted-delete");
+      await source.store.nodes.Person.delete(asNodeId("ada"));
+      const artifact = unwrap(await planMerge(target, [source]));
+
+      const outcome = await backend.transactionWithNative(
+        async (_txBackend, nativeTransaction) =>
+          target.withRecordedTransaction(nativeTransaction, async (tx) =>
+            applyMergePlanInTransaction(target, tx, artifact),
+          ),
+      );
+
+      expect(outcome.receipt.writes.nodes).toEqual({ Person: 1 });
+      expect(outcome.receipt.writes.total).toBe(1);
+      await expect(
+        target.nodes.Person.getById(asNodeId("ada")),
+      ).resolves.toBeUndefined();
+    });
+
     it("prepares a resulting-schema merge and applies it after evolution in the same caller transaction", async () => {
       const backend = context.getBackend();
       const [target] = await createAdapterStoreWithSchema(graph, backend, {

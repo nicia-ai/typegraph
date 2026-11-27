@@ -39,6 +39,7 @@ import {
   asNodeId,
   createAdapterStoreWithSchema,
   createStoreWithSchema,
+  defineEdge,
   defineGraph,
   defineNode,
 } from "../../../src";
@@ -62,6 +63,7 @@ import {
   planMerge,
 } from "../../../src/graph-merge/merge";
 import { asBranchId } from "../../../src/graph-merge/types";
+import { createRetractionCapability } from "../../../src/provenance";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import {
@@ -114,6 +116,98 @@ function buildGraph() {
     },
     edges: {},
   });
+}
+
+const HzSource = defineNode("HzSource", {
+  schema: z.object({
+    label: z.string(),
+    retracted: z.boolean().default(false),
+  }),
+});
+const HzJustification = defineNode("HzJustification", {
+  schema: z.object({ label: z.string() }),
+});
+const hzPremiseOf = defineEdge("hzPremiseOf");
+const hzDerives = defineEdge("hzDerives");
+
+/**
+ * A fresh provenance graph per case: `HzItem` is the fact kind, its unique
+ * `label` a claim. Sources `keep` and `drop` each hold a fact of their own,
+ * and both hold `shared`.
+ */
+function buildProvenanceGraph() {
+  graphCounter += 1;
+  return defineGraph({
+    id: `transaction_session_hazards_provenance_${graphCounter}`,
+    nodes: {
+      HzSource: { type: HzSource },
+      HzJustification: { type: HzJustification },
+      HzItem: {
+        type: HzItem,
+        unique: [
+          {
+            name: "hz_item_label",
+            fields: ["label"],
+            scope: "kind",
+            collation: "binary",
+          },
+        ],
+      },
+    },
+    edges: {
+      hzPremiseOf: {
+        type: hzPremiseOf,
+        from: [HzSource],
+        to: [HzJustification],
+      },
+      hzDerives: { type: hzDerives, from: [HzJustification], to: [HzItem] },
+    },
+  });
+}
+
+const HZ_PROVENANCE_CONFIG = {
+  source: { kind: "HzSource" },
+  justification: { kind: "HzJustification" },
+  fact: { kinds: ["HzItem"] },
+  premiseOf: { kind: "hzPremiseOf" },
+  derives: { kind: "hzDerives" },
+} as const;
+
+async function seedProvenanceStore(backend: GraphBackend) {
+  const [store] = await createStoreWithSchema(buildProvenanceGraph(), backend, {
+    history: true,
+  });
+  for (const id of ["keep", "drop"]) {
+    await store.nodes.HzSource.create({ label: id, retracted: false }, { id });
+  }
+  for (const [fact, sources] of [
+    ["keep-fact", ["keep"]],
+    ["drop-fact", ["drop"]],
+    ["shared", ["keep", "drop"]],
+  ] as const) {
+    await store.nodes.HzItem.create({ label: fact }, { id: fact });
+    for (const source of sources) {
+      const justification = `${fact}-${source}-j`;
+      await store.nodes.HzJustification.create(
+        { label: justification },
+        { id: justification },
+      );
+      await store.edges.hzPremiseOf.create(
+        { kind: "HzSource", id: source },
+        { kind: "HzJustification", id: justification },
+        {},
+      );
+      await store.edges.hzDerives.create(
+        { kind: "HzJustification", id: justification },
+        { kind: "HzItem", id: fact },
+        {},
+      );
+    }
+  }
+  return {
+    store,
+    provenance: createRetractionCapability(store, HZ_PROVENANCE_CONFIG),
+  };
 }
 
 const ALL_DRIVERS: readonly IntegrationLaneDriver[] = [
@@ -393,6 +487,25 @@ function gatedBackend(
         ),
     }),
   };
+}
+
+/**
+ * `backend`, whose next `deleteNode` after `armed.on` is set rejects as soon
+ * as its tombstone statement resolved: a failure inside one node delete,
+ * between its tombstone and the release of its uniqueness claims.
+ */
+function failingAfterTombstone(backend: GraphBackend) {
+  const armed = { on: false };
+  const gated = gatedBackend(backend, {
+    after: {
+      deleteNode: () => {
+        if (!armed.on) return Promise.resolve();
+        armed.on = false;
+        return Promise.reject(new Error("fails after the tombstone"));
+      },
+    },
+  });
+  return { armed, backend: gated.backend };
 }
 
 /** Rejections no handler claimed while `run` was in flight. */
@@ -861,6 +974,174 @@ export function registerTransactionSessionHazardTests(
               },
             },
           ],
+        );
+      });
+    });
+
+    describe("a retraction verb on a transaction that rolls back under it", () => {
+      // `Promise.all` over two verbs on one transaction: the second is
+      // refused at once (`PROVENANCE_TRANSITION_OVERLAPPING`), the callback
+      // rejects and the transaction rolls back while the first verb is still
+      // running. Held after its first statement until the callback returned,
+      // the first verb then reads support and closes `drop-fact` through the
+      // store's internal delete port. On better-sqlite3 the transaction
+      // backend still runs statements once its transaction ended, so the
+      // close lands on the connection in autocommit and commits: the fact is
+      // tombstoned with its source never flagged (the flag write is refused as
+      // sealed). The other drivers refuse a statement on an ended transaction.
+      // PR #998 (a transaction's view closes when its transaction ends, on
+      // every driver) makes better-sqlite3 refuse it too and flips this
+      // marker.
+      it("writes nothing after the rollback when an overlap refusal rejects the callback", async () => {
+        const armed = { on: false };
+        const callbackReturned = createGate();
+        const gated = gatedBackend(context.getBackend(), {
+          after: {
+            getNode: async () => {
+              if (!armed.on) return;
+              armed.on = false;
+              await callbackReturned.opened;
+            },
+          },
+        });
+        const { store, provenance } = await seedProvenanceStore(gated.backend);
+        let first: Promise<Status> = Promise.resolve("rejected");
+        let refusal: unknown;
+        const unhandled = await unhandledRejectionsDuring(async () => {
+          refusal = await store
+            .transaction(
+              openingOnReturn(callbackReturned, async (tx) => {
+                armed.on = true;
+                const running = provenance.retract(
+                  { kind: "HzSource", id: "drop" },
+                  tx,
+                );
+                first = statusOf(running);
+                await Promise.all([
+                  running,
+                  provenance.retract({ kind: "HzSource", id: "keep" }, tx),
+                ]);
+              }),
+            )
+            .then(
+              () => "committed",
+              (error: unknown) =>
+                error instanceof TypeGraphError ?
+                  String(error.details["code"])
+                : String(error),
+            );
+          await first;
+        });
+        const dropSource = await store.nodes.HzSource.getById(
+          asNodeId<typeof HzSource>("drop"),
+        );
+        expectOnLane(
+          context,
+          {
+            refusal,
+            first: await first,
+            items: await ids(() => store.nodes.HzItem.find()),
+            dropRetracted: dropSource?.retracted,
+            unhandled,
+          },
+          {
+            refusal: "PROVENANCE_TRANSITION_OVERLAPPING",
+            first: "rejected",
+            items: ["drop-fact", "keep-fact", "shared"],
+            dropRetracted: false,
+            unhandled: [],
+          },
+          [
+            {
+              label: "#998",
+              on: { driver: ["better-sqlite3"] },
+              today: {
+                refusal: "PROVENANCE_TRANSITION_OVERLAPPING",
+                first: "rejected",
+                items: ["keep-fact", "shared"],
+                dropRetracted: false,
+                unhandled: [],
+              },
+            },
+          ],
+        );
+      });
+    });
+
+    describe("a caught failure inside one multi-statement write", () => {
+      // A node delete tombstones the row and then releases its uniqueness
+      // claims. A failure between the two (here: thrown as soon as the
+      // tombstone statement resolves), caught inside `store.transaction()`
+      // so the transaction commits, keeps the tombstone and the claim: the
+      // label stays taken by a deleted node, no re-run of the delete reaches
+      // the claim because the row is already tombstoned, and
+      // `verifyConstraintFences()`
+      // reports nothing. No savepoint brackets the write, so its prefix
+      // commits. The plain delete is the control: a retraction verb's fact
+      // close runs the same delete and ends in the same state.
+      const CORRECT = {
+        caught: true,
+        items: [],
+        labelFree: true,
+        fenceViolations: [],
+      };
+      const TODAY = { ...CORRECT, labelFree: false };
+
+      it("a plain node delete leaves no claim behind (control)", async () => {
+        const failing = failingAfterTombstone(context.getBackend());
+        const [store] = await createStoreWithSchema(
+          buildGraph(),
+          failing.backend,
+        );
+        await store.nodes.HzItem.create({ label: "u1" }, { id: "u1" });
+        const caught = await store.transaction(async (tx) => {
+          failing.armed.on = true;
+          return (
+            (await statusOf(
+              tx.nodes.HzItem.delete(asNodeId<typeof HzItem>("u1")),
+            )) === "rejected"
+          );
+        });
+        expectOnLane(
+          context,
+          {
+            caught,
+            items: await ids(() => store.nodes.HzItem.find()),
+            labelFree: await labelIsFree(store, "u1"),
+            fenceViolations: await store.verifyConstraintFences(),
+          },
+          CORRECT,
+          [{ label: "hazard 8", on: ON_EVERY_DRIVER, today: TODAY }],
+        );
+      });
+
+      it("a retraction verb's fact close leaves no claim behind", async () => {
+        const failing = failingAfterTombstone(context.getBackend());
+        const { store, provenance } = await seedProvenanceStore(
+          failing.backend,
+        );
+        const caught = await store.transaction(async (tx) => {
+          failing.armed.on = true;
+          return (
+            (await statusOf(
+              provenance.retract({ kind: "HzSource", id: "drop" }, tx),
+            )) === "rejected"
+          );
+        });
+        // Re-running the verb completes the transition but cannot release
+        // the claim of a fact it finds already closed.
+        await provenance.retract({ kind: "HzSource", id: "drop" });
+        const liveItems = await ids(() => store.nodes.HzItem.find());
+        expectOnLane(
+          context,
+          {
+            caught,
+            items: liveItems.filter((id) => id === "drop-fact"),
+            labelFree: await labelIsFree(store, "drop-fact"),
+            fenceViolations: await store.verifyConstraintFences(),
+          },
+          CORRECT,
+          [{ label: "hazard 8", on: ON_EVERY_DRIVER, today: TODAY }],
         );
       });
     });

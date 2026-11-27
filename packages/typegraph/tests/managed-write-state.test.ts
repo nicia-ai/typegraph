@@ -263,7 +263,7 @@ describe("managed write state on the transaction session", () => {
     expect([...readers]).toEqual(
       expect.arrayContaining([
         "frame",
-        "ensureAdoptedConstraintWriterSlot",
+        "ensureAdoptedWriterSlot",
         "hasPendingWriteTransactionRevision",
         "forceWriteTransactionRevision",
       ]),
@@ -289,7 +289,7 @@ describe("managed write state on the transaction session", () => {
  */
 function readerOf(stack: string): string {
   const named = [
-    "ensureAdoptedConstraintWriterSlot",
+    "ensureAdoptedWriterSlot",
     "markWriteTransactionAborted",
     "hasPendingWriteTransactionRevision",
     "forceWriteTransactionRevision",

@@ -113,6 +113,7 @@ export {
   readRevisionOrigin,
   recordedClockAdvisoryLockSql,
   recordedGraphWriteAdvisoryLockSql,
+  recordedGraphWriteLockWrites,
   registeredRecordedGraphLockMemo,
   resetRevisionOrigin,
 } from "./recorded-capture/clock";

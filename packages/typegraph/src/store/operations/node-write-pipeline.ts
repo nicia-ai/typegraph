@@ -1008,9 +1008,10 @@ export async function applyNodeHardDelete(
 }
 
 /**
- * Reopens a soft-deleted node with its stored props (no merge, no
- * re-validation): re-checks and re-inserts uniqueness entries (the delete
- * removed them), clears the tombstone, then re-syncs embeddings and fulltext.
+ * Reopens a soft-deleted node with its stored props and validity window (no
+ * merge, no re-validation): re-checks and re-inserts uniqueness entries (the
+ * delete removed them), clears the tombstone, then re-syncs embeddings and
+ * fulltext.
  * Used by provenance to reinstate a fact whose currency is restored. Returns
  * the reopened row.
  *
@@ -1054,6 +1055,17 @@ export async function applyNodeResurrect(
         props,
         incrementVersion: true,
         clearDeleted: true,
+        // A currency reopen restores the row as it was, window included: the
+        // backend's resurrection leg rewrites `valid_from` and `valid_to`
+        // from what it is given, so the stored bounds are given back (`null`
+        // spells "no lower bound"). Left to its defaults it would stamp the
+        // reopen instant and drop the upper bound, making a fact whose window
+        // has ended or not begun current again.
+        // eslint-disable-next-line unicorn/no-null -- `validFrom: null` means "store NULL"; omitting the key means "stamp the reopen instant". See UpdateNodeParams.validFrom.
+        validFrom: args.existing.valid_from ?? null,
+        ...(args.existing.valid_to === undefined ?
+          {}
+        : { validTo: args.existing.valid_to }),
       }),
   );
   const syncContext = nodeSyncContext(ctx, kind, id, backend);

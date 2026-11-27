@@ -79,6 +79,50 @@ const FACT_ROW_AT_INSTANT: RowCurrencyRule = {
     validityWindowContainsInstant(row.valid_from, row.valid_to, asOf),
 };
 
+/**
+ * Where a row of a fact kind goes in a support read: `"fact"` when
+ * {@link FACT_ROW_AT_INSTANT} keeps it, `"partOutsideWindow"` when it does not
+ * and its kind is a required composition part (see `ProvenanceRows`), and
+ * nowhere otherwise. THE one classification both loaders apply, so the
+ * whole-graph and closure reads keep the same rows in the same roles.
+ */
+function factRowRole(
+  registry: KindRegistry,
+  row: NodeRow,
+  asOf: string,
+): "fact" | "partOutsideWindow" | undefined {
+  if (FACT_ROW_AT_INSTANT.holds(row, asOf)) return "fact";
+  if (registry.compositionExistence(row.kind) === "required") {
+    return "partOutsideWindow";
+  }
+  return undefined;
+}
+
+/** Fact-kind rows split by {@link factRowRole}, each keyed by provenance key. */
+type FactRowsByRole = Readonly<{
+  facts: Map<string, NodeRow>;
+  partsOutsideWindow: Map<string, NodeRow>;
+}>;
+
+function splitFactRows(
+  registry: KindRegistry,
+  rows: Iterable<NodeRow>,
+  asOf: string,
+): FactRowsByRole {
+  const split: FactRowsByRole = {
+    facts: new Map(),
+    partsOutsideWindow: new Map(),
+  };
+  for (const row of rows) {
+    const role = factRowRole(registry, row, asOf);
+    if (role === "fact") split.facts.set(rowKey(row), row);
+    if (role === "partOutsideWindow") {
+      split.partsOutsideWindow.set(rowKey(row), row);
+    }
+  }
+  return split;
+}
+
 async function findNodeRows(
   backend: GraphReadBackend,
   graphId: string,
@@ -112,6 +156,7 @@ async function findEdgeRows(
 
 async function readRoles(
   backend: GraphReadBackend,
+  registry: KindRegistry,
   graphId: string,
   config: NormalizedConfig,
   asOf: string,
@@ -127,17 +172,27 @@ async function readRoles(
       ),
       Promise.all(
         config.factKinds.map((kind) =>
-          findNodeRows(backend, graphId, kind, FACT_ROW_AT_INSTANT, asOf),
+          backend.findNodesByKind({
+            graphId,
+            kind,
+            ...FACT_ROW_AT_INSTANT.scan(asOf),
+            orderBy: "id",
+          }),
         ),
       ),
       findEdgeRows(backend, graphId, config.premiseOfKind, asOf),
       findEdgeRows(backend, graphId, config.derivesKind, asOf),
     ]);
-  const factRows = factRowsByKind.flat();
+  const { facts, partsOutsideWindow } = splitFactRows(
+    registry,
+    factRowsByKind.flat(),
+    asOf,
+  );
 
   return {
     justifications: rowsByKey(justificationRows),
-    facts: rowsByKey(factRows),
+    facts,
+    partsOutsideWindow,
     premiseEdges,
     deriveEdges,
   };
@@ -165,28 +220,51 @@ export async function loadSupportGraph(
   // One read instant for every role read, so the whole snapshot shares a
   // single "currently valid" coordinate.
   const asOf = nowIso();
-  const roles = await readRoles(backend, graphId, config, asOf);
+  const roles = await readRoles(backend, registry, graphId, config, asOf);
   const supportEdges = buildSupportEdges(config, roles);
-  const [compositionDependencies, sourceRowsByKind] = await Promise.all([
+  const [compositionDependencies, sourceRows] = await Promise.all([
     readCompositionExistenceDependencies(
       backend,
       registry,
       graphId,
-      roles.facts,
+      currencyRowsOf(roles),
       batchPointRead,
     ),
-    Promise.all(
-      config.sourceKinds.map((kind) =>
-        findNodeRows(backend, graphId, kind, CURRENT_ROLE_ROW, asOf),
-      ),
-    ),
+    readCurrentSourceRows(backend, graphId, config, asOf),
   ]);
   return {
     roles,
     supportEdges,
     compositionDependencies,
-    sourceRows: sourceRowsByKind.flat(),
+    sourceRows,
   };
+}
+
+/** The rows a transition may move the currency of: both fact-row roles. */
+function currencyRowsOf(
+  roles: Pick<ProvenanceRows, "facts" | "partsOutsideWindow">,
+): ReadonlyMap<string, NodeRow> {
+  return new Map([...roles.facts, ...roles.partsOutsideWindow]);
+}
+
+/**
+ * The current row of every source of every configured source kind at
+ * `asOf`: THE one read of which sources exist and what their retraction
+ * flags say, shared by {@link loadSupportGraph} and a transition's re-read of
+ * the availability it decided from.
+ */
+export async function readCurrentSourceRows(
+  backend: GraphReadBackend,
+  graphId: string,
+  config: NormalizedConfig,
+  asOf: string = nowIso(),
+): Promise<NodeRow[]> {
+  const sourceRowsByKind = await Promise.all(
+    config.sourceKinds.map((kind) =>
+      findNodeRows(backend, graphId, kind, CURRENT_ROLE_ROW, asOf),
+    ),
+  );
+  return sourceRowsByKind.flat();
 }
 
 /**
@@ -247,22 +325,25 @@ async function readRequiredPartAttachments(
 }
 
 /**
- * Turns the attachments of a loaded set of fact rows into the support
+ * Turns the attachments of a loaded set of currency rows (the in-window facts
+ * and the required parts outside their window) into the support
  * computation's existence dependencies.
  *
- * A whole that is itself a fact carries a belief status, so its support decides
- * its parts'. Any other whole (a plain node, or a source — whose retraction is
- * a property flip, not a liveness change) is judged by `readLiveCompositionWholes`,
- * the whole-endpoint liveness owner: present and not tombstoned. Deliberately
- * NOT a validity-window question. A whole whose window has closed is still a
- * live row that the write path would accept as a whole, so treating it as dead
+ * A whole that is itself a currency row is judged by the snapshot: a fact by
+ * its support, a required part outside its window by its own whole. Any
+ * other whole (a plain node, a fact outside its window that is no required
+ * part, or a source — whose retraction is a property flip, not a liveness
+ * change) is judged by `readLiveCompositionWholes`, the whole-endpoint
+ * liveness owner: present and not tombstoned. Deliberately NOT a
+ * validity-window question. A whole whose window has closed is still a live
+ * row that the write path would accept as a whole, so treating it as dead
  * here would make a part unbelieved before a transition and tombstoned by it —
  * a close the report could not even name, since the fact was never believed.
  */
 async function resolveCompositionExistenceDependencies(
   backend: GraphReadBackend,
   graphId: string,
-  facts: ReadonlyMap<string, NodeRow>,
+  currencyRows: ReadonlyMap<string, NodeRow>,
   attachments: RequiredPartAttachments,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
 ): Promise<CompositionExistenceDependencies> {
@@ -275,7 +356,7 @@ async function resolveCompositionExistenceDependencies(
   }
 
   const nonFactWholeKeys = [...partKeysByWholeKey.keys()].filter(
-    (wholeKey) => !facts.has(wholeKey),
+    (wholeKey) => !currencyRows.has(wholeKey),
   );
   const liveWholes = await readLiveCompositionWholes(
     backend,
@@ -342,6 +423,7 @@ type SupportClosureRead = Readonly<{
 /** The rows a closure load has accumulated, and what it has already asked for. */
 type SupportClosureState = Readonly<{
   facts: Map<string, NodeRow>;
+  partsOutsideWindow: Map<string, NodeRow>;
   justifications: Map<string, NodeRow>;
   premiseEdges: EdgeRow[];
   deriveEdges: EdgeRow[];
@@ -354,21 +436,29 @@ type SupportClosureState = Readonly<{
   frontier: string[];
 }>;
 
-/** The by-reference rows a rule keeps, keyed by provenance key. */
-async function readRowsHolding(
+/** Every row these keys name, tombstones included, in no particular order. */
+async function readRowsByKey(
   read: SupportClosureRead,
   keys: readonly string[],
-  rule: RowCurrencyRule,
-): Promise<ReadonlyMap<string, NodeRow>> {
+): Promise<readonly NodeRow[]> {
   const rowsByRef = await readNodeRowsByRef(
     read.backend,
     read.graphId,
     keys.map((key) => keyToRef(key)),
     read.batchPointRead,
   );
+  return [...rowsByRef.values()].filter((row) => row !== undefined);
+}
+
+/** The by-reference rows a rule keeps, keyed by provenance key. */
+async function readRowsHolding(
+  read: SupportClosureRead,
+  keys: readonly string[],
+  rule: RowCurrencyRule,
+): Promise<ReadonlyMap<string, NodeRow>> {
   const kept = new Map<string, NodeRow>();
-  for (const row of rowsByRef.values()) {
-    if (row === undefined || !rule.holds(row, read.asOf)) continue;
+  for (const row of await readRowsByKey(read, keys)) {
+    if (!rule.holds(row, read.asOf)) continue;
     kept.set(rowKey(row), row);
   }
   return kept;
@@ -405,16 +495,43 @@ function enqueueFact(state: SupportClosureState, factKey: string): void {
  *
  * A fact with no row at the read instant is not expanded. It cannot be
  * supported, so nothing behind it can change any verdict, and as a premise it
- * simply fails to be in the supported set.
+ * simply fails to be in the supported set. A required part outside its window
+ * is kept and only its whole is followed ({@link factRowRole}).
  */
 async function expandSupportClosureRound(
   read: SupportClosureRead,
   state: SupportClosureState,
   factKeys: readonly string[],
 ): Promise<void> {
-  const { config } = read;
-  const factRows = await readRowsHolding(read, factKeys, FACT_ROW_AT_INSTANT);
+  const { facts: factRows, partsOutsideWindow } = splitFactRows(
+    read.registry,
+    await readRowsByKey(read, factKeys),
+    read.asOf,
+  );
   for (const [factKey, row] of factRows) state.facts.set(factKey, row);
+  for (const [partKey, row] of partsOutsideWindow) {
+    state.partsOutsideWindow.set(partKey, row);
+  }
+  await expandJustificationsOf(read, state, factRows);
+  await expandCompositionWholes(
+    read,
+    state,
+    currencyRowsOf({ facts: factRows, partsOutsideWindow }),
+  );
+}
+
+/**
+ * The step behind a round's in-window facts: the `derives` edges into them,
+ * the justifications those name, the `premiseOf` edges into those and the
+ * premise sources, queueing the premise facts. A required part outside its
+ * window has no justification to expand: it stands on its whole alone.
+ */
+async function expandJustificationsOf(
+  read: SupportClosureRead,
+  state: SupportClosureState,
+  factRows: ReadonlyMap<string, NodeRow>,
+): Promise<void> {
+  const { config } = read;
   if (factRows.size === 0) return;
 
   const deriveEdges = await currentEdgesInto(
@@ -465,21 +582,32 @@ async function expandSupportClosureRound(
     CURRENT_ROLE_ROW,
   );
   state.sourceRows.push(...sourceRows.values());
+}
 
+/**
+ * Records which of a round's currency rows are required parts and the whole
+ * each hangs from, and queues every whole of a fact kind: it is judged by the
+ * snapshot (its support, or its own whole for a required part outside its
+ * window), so it is part of what is behind the part. Any other whole is
+ * judged by its liveness.
+ */
+async function expandCompositionWholes(
+  read: SupportClosureRead,
+  state: SupportClosureState,
+  rows: ReadonlyMap<string, NodeRow>,
+): Promise<void> {
   const attachments = await readRequiredPartAttachments(
     read.backend,
     read.registry,
     read.graphId,
-    factRows,
+    rows,
   );
   for (const partKey of attachments.requiredPartFactKeys) {
     state.requiredPartFactKeys.add(partKey);
   }
   for (const [partKey, wholeKey] of attachments.wholeKeyByPartKey) {
     state.wholeKeyByPartKey.set(partKey, wholeKey);
-    // A whole of a fact kind is judged by its own support, so it is part of
-    // what is behind this fact. Any other whole is judged by its liveness.
-    if (config.factKinds.includes(keyToRef(wholeKey).kind)) {
+    if (read.config.factKinds.includes(keyToRef(wholeKey).kind)) {
       enqueueFact(state, wholeKey);
     }
   }
@@ -500,7 +628,8 @@ async function expandSupportClosureRound(
  * `premiseOf` edges, and every loaded required part its whole.
  *
  * It reads at one instant and keeps exactly the rows the whole-graph loader
- * keeps (the {@link RowCurrencyRule}s above), in rounds of at most
+ * keeps (the {@link RowCurrencyRule}s above, and {@link factRowRole} for fact
+ * rows), in rounds of at most
  * {@link SUPPORT_CLOSURE_ROUND_SIZE} facts. Only the sources that are premises
  * inside the closure are read, so only their retracted state is ever parsed. A
  * named fact with no row at the read instant is absent from `roles.facts`.
@@ -526,6 +655,7 @@ export async function loadSupportClosure(
   };
   const state: SupportClosureState = {
     facts: new Map(),
+    partsOutsideWindow: new Map(),
     justifications: new Map(),
     premiseEdges: [],
     deriveEdges: [],
@@ -550,6 +680,7 @@ export async function loadSupportClosure(
   const roles: ProvenanceRows = {
     justifications: state.justifications,
     facts: state.facts,
+    partsOutsideWindow: state.partsOutsideWindow,
     premiseEdges: state.premiseEdges,
     deriveEdges: state.deriveEdges,
   };
@@ -559,7 +690,7 @@ export async function loadSupportClosure(
     compositionDependencies: await resolveCompositionExistenceDependencies(
       backend,
       graphId,
-      state.facts,
+      currencyRowsOf(roles),
       state,
       verdicts.batchPointRead,
     ),

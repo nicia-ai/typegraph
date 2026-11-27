@@ -989,6 +989,33 @@ adopt a caller-owned transaction:
   fence, and the two transactions can both commit a constraint violation, such
   as a cycle in an `acyclic` relation. Let the error propagate and roll back the
   whole transaction instead.
+- **A rejected `withRecordedTransaction` or `withEvolvedTransaction` callback
+  needs a native rollback.** If the callback rejects and you catch the error
+  and commit the native transaction, the graph writes it made before failing
+  commit to the live rows. Under TypeGraph-owned history capture, which records
+  time only when the callback resolves, they are also left unrecorded, so
+  recorded-time reads do not show them (tracked as issue #930 in the TypeGraph
+  repository). A backend with engine-native recorded time records committed
+  writes itself, so there they are recorded. Either way, roll back the native
+  transaction instead. Operation hooks in these callbacks
+  run as each write completes, before the native commit, so treat an
+  `onOperationEnd` there as provisional until that commit succeeds.
+- **Two recorded adoptions of one better-sqlite3 transaction cannot write at
+  once.** A transaction you begin yourself on a better-sqlite3 connection is
+  identified only by that connection, so each `withRecordedTransaction`
+  adoption of it captures recorded time on its own. Two adoptions writing at
+  the same time allocate the same recorded revision, and the second fails with
+  the driver's `UNIQUE constraint failed: typegraph_recorded_anchors…` error.
+  Run the adoptions one after another, or roll back after that failure.
+- **Provenance calls on two such adoptions must not overlap.** Verbs and
+  provenance reads on one native transaction must be sequenced: overlap is
+  refused where the adoptions are provably the same transaction and is
+  unsupported, with an undefined result, where they are not. Two
+  `withRecordedTransaction` adoptions of a transaction you began on a
+  better-sqlite3 connection are not provably the same, so a `retract` on one
+  and an `unRetract` on the other started together can commit a fact live with
+  no support. Await each call before starting the next. See
+  [Provenance](/provenance#retracting-inside-your-own-transaction).
 - **Reconstruction cost.** Recorded reads rebuild from the history relations and
   are slower than live reads, most noticeably for full-graph subgraph /
   algorithm reconstructions on PostgreSQL.

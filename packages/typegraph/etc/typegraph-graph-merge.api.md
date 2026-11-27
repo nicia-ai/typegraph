@@ -6439,6 +6439,10 @@ const NATIVE_TRANSACTION_STATE: unique symbol;
 // @public
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
+    sections: Map<string, Readonly<{
+        mode: "exclusive" | "shared";
+        operations: string[];
+    }>>;
 }>;
 
 // @public
@@ -9893,7 +9897,7 @@ type TransactionRuntime = Readonly<{
         operation: string;
         suggestion: string;
     }>) => Promise<void>;
-    acquireReadFences: () => Promise<void>;
+    acquireReadFences: (operation: string) => Promise<void>;
     assertWritable: (operation: string) => void;
 }>;
 

@@ -744,6 +744,21 @@ export function bindEvolvedTransactionStore<TStore extends object>(
 }
 
 /**
+ * Whether `value` is a transaction context some Store built — active or
+ * expired, this Store's or another's. Ownership and liveness are
+ * {@link activeTransactionStore}'s decision; this one only tells a context
+ * apart from a value that never was one (a number, `null`, a plain object),
+ * so a consumer can name that mistake instead of reporting it as a foreign
+ * transaction.
+ */
+export function isTransactionContext(
+  value: unknown,
+): value is TransactionRuntimePort {
+  if (typeof value !== "object" || value === null) return false;
+  return (value as TransactionRuntimePort)[TRANSACTION_RUNTIME] !== undefined;
+}
+
+/**
  * THE ownership decision for a transaction context handed to something built
  * on `store`: the Store whose graph owns the context's callback, or
  * `undefined` when the context is not one of `store`'s.
@@ -861,9 +876,12 @@ export function transactionReviveNode(
  * fence, then the per-graph write lock — through THIS transaction's own
  * node-operation context, so the acquisition is the managed write path's and
  * not a second spelling of its order. A read-only transaction is refused
- * before any statement, naming `refusal.operation`. Today's callers are
- * provenance's retraction transitions and its commit-time assert, which read
- * under those fences before, or without, a write of their own.
+ * before any statement, naming `refusal.operation`, and a session that
+ * cannot prove its later reads observe every earlier holder of the graph lock
+ * (a PostgreSQL snapshot isolation) is refused before the caller's first
+ * read. Today's callers are provenance's retraction transitions and its
+ * commit-time assert, which read under those fences before, or without, a
+ * write of their own.
  */
 export function transactionAcquireWriteFences(
   transaction: TransactionRuntimePort,
@@ -889,10 +907,13 @@ export function transactionAssertWritable(
  * writing: {@link transactionAcquireWriteFences}'s schema-version fence and
  * per-graph write lock in a transaction that can write, or the per-graph write
  * lock alone in one opened with `accessMode: "read_only"`. The transaction's
- * own read-only flag decides. Today's caller is provenance's `holding(tx)`.
+ * own read-only flag decides. In a transaction that can write, a session that
+ * cannot prove its reads observe every earlier holder of the graph lock is
+ * refused, naming `operation`. Today's caller is provenance's `holding(tx)`.
  */
 export function transactionAcquireReadFences(
   transaction: TransactionRuntimePort,
+  operation: string,
 ): Promise<void> {
-  return requireTransactionRuntime(transaction).acquireReadFences();
+  return requireTransactionRuntime(transaction).acquireReadFences(operation);
 }

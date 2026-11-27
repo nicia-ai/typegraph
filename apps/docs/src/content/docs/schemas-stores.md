@@ -2511,7 +2511,13 @@ recorded commit instant allocated for this store's graph by this transaction. It
 is `undefined` when history capture is off, the transaction is read-only, or no
 captured writes or revision request were flushed. Writes
 that bypass the transaction collection surface — direct backend writes, raw SQL,
-and import helpers — are not counted. `store.withRecordedTransaction()` — the
+and import helpers — are not counted. The node deletions and revivals TypeGraph
+itself makes on the transaction outside the collections are counted, each as one
+write of its node kind: a node that graph-merge apply deletes, including the
+delete half of a recreation, through `applyMergePlan()` (in the receipt its
+report carries) or `applyMergePlanInTransaction()` (in the caller's receipt),
+and a fact that a [provenance retraction verb](/provenance) closes or reopens
+on the transaction. `store.withRecordedTransaction()` — the
 adopted-commit path for history stores — returns the same `TransactionOutcome`,
 so the exactly-once cursor pattern gets a receipt too (see
 [Recorded time](/queries/temporal/#raw-sql-under-history-capture)); only

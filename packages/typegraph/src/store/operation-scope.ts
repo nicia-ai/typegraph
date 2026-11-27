@@ -412,8 +412,8 @@ function isRootBackend(
 // ---------------------------------------------------------------------------
 
 // Module-private: only `transactionRuntimeSession` puts a session on a
-// transaction context's runtime, and only `enterTransactionOperation` reads
-// one back.
+// transaction context's runtime, and only `enterTransactionOperation` and
+// `transactionContextNativeState` read one back.
 const RUNTIME_SESSION: unique symbol = Symbol("typegraph.runtimeSession");
 
 /**
@@ -476,6 +476,25 @@ export function enterTransactionOperation(
   const runtime = requireTransactionRuntime(transaction);
   return enterOperation(
     runtime[RUNTIME_SESSION] ?? openTransactionSession(runtime.backend),
+  );
+}
+
+/**
+ * The native transaction state of the session a transaction context's runtime
+ * carries, read WITHOUT entering an operation: for a call whose refusal is
+ * decided on that state (provenance's section, `src/provenance/section.ts`)
+ * and which, per {@link enterTransactionOperation}, enters its operation only
+ * after its refusals. A runtime without a session resolves the state its
+ * transaction's engine record gives, which is the state the session
+ * `enterTransactionOperation` would open for it carries.
+ */
+export function transactionContextNativeState(
+  transaction: SessionCarryingContext,
+): NativeTransactionState {
+  const runtime = requireTransactionRuntime(transaction);
+  return (
+    runtime[RUNTIME_SESSION]?.native ??
+    resolveNativeTransactionState(runtime.backend)
   );
 }
 
