@@ -76,7 +76,7 @@ import {
  * observed (a statement through the native handle, a caller's own
  * `COMMIT` / `ROLLBACK`).
  */
-export type TransactionViewEndedOutcome =
+type TransactionViewEndedOutcome =
   TransactionRolledBackError | TransactionOutcomeUnknownError;
 
 export type TransactionView = Readonly<{
@@ -146,7 +146,7 @@ export type TransactionViewOptions = Readonly<{
  * that succeeded, a statement refused before it ran). THE one classification
  * the view's failure probing uses.
  */
-export function isSqlExecutionFailure(error: unknown): boolean {
+function isSqlExecutionFailure(error: unknown): boolean {
   return !(error instanceof TypeGraphError);
 }
 
