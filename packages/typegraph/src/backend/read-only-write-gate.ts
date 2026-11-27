@@ -206,3 +206,19 @@ export function gateBackendUnderConstruction<T extends object>(
   );
   return holder.gated;
 }
+
+/**
+ * `members`, an overlay a factory decorates an already-built backend with,
+ * with each of its write members refusing inside a read-only scope on
+ * `self()` before it runs: for an overlay whose own work comes before the
+ * member it wraps (a marker read, say), so that work does not run first.
+ * Members it does not classify as writes stay as they are.
+ */
+export function gateOverlayMembers<T extends object>(
+  members: T,
+  self: () => object,
+): T {
+  // The gated entries replace exactly the write and raw members `members`
+  // carries, each with that member's own signature.
+  return { ...members, ...readOnlyGateOverlay(members, self) };
+}

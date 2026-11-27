@@ -122,9 +122,9 @@ const INVENTORY: readonly InventoryEntry[] = [
   },
   {
     file: "backend/drizzle/contribution-materializations.ts",
-    line: "deriveTransactionSessionBackend<TransactionBackend>(",
+    line: "holder.gated = deriveTransactionSessionBackend<TransactionBackend>(",
     reason:
-      "Gates the fulltext members of a transaction-scoped backend until the graph's contributions are materialized while preserving the already-open session declaration; the PostgreSQL factory immediately binds fresh exact transport and semantic registrations to the wrapper.",
+      "Gates the fulltext members of a transaction-scoped backend until the graph's contributions are materialized, each write member asking the read-only write gate first, while preserving the already-open session declaration; the PostgreSQL factory immediately binds fresh exact transport and semantic registrations to the wrapper.",
   },
   {
     file: "backend/read-only-write-gate.ts",

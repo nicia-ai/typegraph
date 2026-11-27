@@ -282,7 +282,10 @@ function deriveBackendInternal<
   carrySchemaFencedInsertEligibility(decoratedBackend, base);
   carrySerializationFailureClassifier(decoratedBackend, base);
   carryDerivedCommandPortMetadata(base, overrides);
-  recordBackendDerivation(decoratedBackend, base);
+  // A backend still under construction is never handed out: the derived
+  // object stands in for it, so it is the root of its own derivation chain,
+  // as the source would have been (`deriveBackendUnderConstruction`).
+  if (carry !== "declaration") recordBackendDerivation(decoratedBackend, base);
   return decoratedBackend;
 }
 
@@ -316,8 +319,11 @@ export function deriveTransactionSessionBackend<
  * object keeps the source's atomic-batch declaration, root or session, as it
  * stands: the factory registers the evidence that backs the declaration on
  * the returned object, never on the source, so the declaration and its
- * evidence stay on one object. Only a factory that does exactly that may call
- * this; every other decoration goes through {@link deriveBackend}.
+ * evidence stay on one object. The source is never handed out, so the derived
+ * object is not recorded as derived from it: it is the root of its own
+ * derivation chain ({@link backendDerivationRoot}), as the source would have
+ * been. Only a factory that does exactly that may call this; every other
+ * decoration goes through {@link deriveBackend}.
  *
  * @internal
  */

@@ -40,6 +40,7 @@ import {
 } from "../../query/sql-intent";
 import { sortedReplacer } from "../../schema/canonical";
 import { sha256Hex } from "../../utils/hash";
+import { requireDefined } from "../../utils/presence";
 import { errorChain, isMissingTableError } from "../../utils/sql-errors";
 import {
   isOptimisticRetryTier,
@@ -53,7 +54,7 @@ import {
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
 import { deriveTransactionSessionBackend } from "../derive-backend";
-import { gateBackendUnderConstruction } from "../read-only-write-gate";
+import { gateOverlayMembers } from "../read-only-write-gate";
 import { formatPostgresTimestamp, nowIso } from "../row-mappers";
 import {
   DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
@@ -590,21 +591,26 @@ export function gateFulltextMethods(
  * asserts, so non-fulltext transactions stay free of any fulltext-init
  * requirement.
  *
- * The read-only write gate (`read-only-write-gate.ts`) is applied again
- * outside the marker assertions, so a write member refuses inside a read-only
- * scope before the marker read runs, not after.
+ * Its write members ask the read-only write gate (`read-only-write-gate.ts`)
+ * before the marker assertion, so inside a read-only scope they refuse before
+ * the marker read runs, not after it.
  */
 export function gateFulltext(
   tx: TransactionBackend,
   assert: (graphId: string) => Promise<void>,
   refuseUnavailable: RefuseUnavailableFulltext,
 ): TransactionBackend {
-  return gateBackendUnderConstruction(
-    deriveTransactionSessionBackend<TransactionBackend>(
-      tx,
+  const holder: { gated: TransactionBackend | undefined } = {
+    gated: undefined,
+  };
+  holder.gated = deriveTransactionSessionBackend<TransactionBackend>(
+    tx,
+    gateOverlayMembers(
       gateFulltextMethods(tx, assert, refuseUnavailable),
+      () => requireDefined(holder.gated),
     ),
   );
+  return holder.gated;
 }
 
 // ============================================================
