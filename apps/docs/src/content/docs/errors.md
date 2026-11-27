@@ -2447,9 +2447,16 @@ callback, a `backend.trustedImport()` session kept past its import, and the
 contribution-marker reads a transaction backend's vector and fulltext
 operations make, as well as an orphaned write.
 
-The rule covers transactions TypeGraph opens and ends. A transaction the
-caller ends (one adopted with `withTransaction` or `adoptTransaction`) is
-not closed by TypeGraph, and an end SQLite makes on its own (a trigger's
+The rule covers transactions TypeGraph opens and ends, and every backend
+bound to one: a backend adopted with `adoptTransaction(native)` over the
+native handle `transactionWithNative()` passes its callback is refused after
+the end too, on every driver that can identify the transaction behind the
+handle (better-sqlite3, bun:sqlite, libSQL 0.18 and later, PGlite,
+node-postgres, postgres-js). On sql.js, libSQL before 0.18 and Durable Object
+storage, which report no transaction state, such an adoption is not closed. A
+transaction the caller ends (one adopted with `withTransaction` or
+`adoptTransaction`) is not closed by TypeGraph, and an end SQLite makes on
+its own (a trigger's
 `RAISE(ROLLBACK)`, an `ON CONFLICT ROLLBACK` constraint, `SQLITE_FULL`, or a
 `COMMIT` / `ROLLBACK` sent through the native handle or as raw SQL) is not
 observed yet: a later statement of the callback still reaches the driver, as
@@ -2475,9 +2482,10 @@ the original failure and discards the orphan's. It surfaces only if you await
 the orphaned promise yourself. To avoid orphaning writes at all, use
 `Promise.allSettled` and inspect the results, or await the writes in sequence.
 
-`adoptTransaction()` never closes its queue — only the caller knows when their
-transaction ends — so this error cannot arise there. It remains the caller's
-job to await every graph write before committing.
+On a transaction the caller opened, `adoptTransaction()` never closes its
+queue — only the caller knows when their transaction ends — so this error
+arises there only for an adoption of a transaction TypeGraph opened (above).
+It remains the caller's job to await every graph write before committing.
 
 ### `TransactionConflictError`
 
