@@ -243,6 +243,8 @@ export const postgresDialect: BuiltinDialectAdapter = {
     operand: (bound) => sql`${bound}`,
   },
 
+  batchExactNumber: (expression) => expression,
+
   keyText(expression) {
     return sql`${expression} COLLATE "default"`;
   },

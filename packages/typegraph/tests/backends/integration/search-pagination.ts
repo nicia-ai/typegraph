@@ -54,6 +54,31 @@ const SearchClip = defineNode("SpClip", {
     embedding: embedding(4),
   }),
 });
+/**
+ * A searchable kind with a numeric field an `orderBy()` can break relevance
+ * ties with.
+ */
+const SearchScored = defineNode("SpScored", {
+  schema: z.object({
+    title: searchable({ language: "english" }),
+    embedding: embedding(4),
+    weight: z.number(),
+  }),
+});
+const scoredSearchGraph = defineGraph({
+  id: "search_pagination_scored",
+  nodes: { SpScored: { type: SearchScored } },
+  edges: {},
+});
+
+/**
+ * Doubles 15 significant digits render alike: a key that reached a cursor
+ * through such text puts two rows at one position.
+ */
+const NEARLY_EQUAL_WEIGHTS = [
+  0.29999999999999993, 0.3, 0.30000000000000004,
+];
+
 const polymorphicSearchGraph = defineGraph({
   id: "search_pagination_polymorphic",
   nodes: { SpMedia: { type: SearchMedia }, SpClip: { type: SearchClip } },
@@ -990,6 +1015,64 @@ export function registerSearchPaginationIntegrationTests(
       );
       expect(batched.nextCursor).toBe(golden);
     });
+
+    // A hybrid score is fused from per-leg ranks, which never tie, so only
+    // the full-text and vector legs leave an orderBy() key to decide.
+    for (const kind of ["fulltext", "vector"] as const) {
+      it(`${kind}: a batched page carries a numeric orderBy() key exactly, so rows tied on relevance whose keys differ in the last bits are each read once`, async (ctx) => {
+        storeWith(context, ctx, kind);
+        const store = await context.createStore(scoredSearchGraph);
+        // Tied on every relevance key; only the weight orders them, and the
+        // weights differ past 15 significant digits.
+        for (const [index, weight] of NEARLY_EQUAL_WEIGHTS.entries()) {
+          await store.nodes.SpScored.create(
+            { title: "climate report", embedding: embeddingAt(0.4), weight },
+            { id: `w${index}` },
+          );
+        }
+        const query = () =>
+          store
+            .query()
+            .from("SpScored", "s")
+            .whereNode("s", (s) => {
+              switch (kind) {
+                case "fulltext": {
+                  return s.$fulltext.matches("climate", 10);
+                }
+                case "vector": {
+                  return s.embedding.similarTo(QUERY_VECTOR, 10);
+                }
+              }
+            })
+            .orderBy("s", "weight", "desc")
+            .select((row) => ({ id: row.s.id }));
+        const rows = await query().execute();
+        const executed = rows.map((row) => row.id);
+        expect(executed).toEqual(["w2", "w1", "w0"]);
+        const read: string[] = [];
+        const cursors: string[] = [];
+        let cursor: string | undefined;
+        for (let guard = 0; guard < 6; guard += 1) {
+          const options = {
+            first: 1,
+            ...(cursor === undefined ? {} : { after: cursor }),
+          };
+          const [batched] = await store.batchOnce(
+            () => [query().page(options)] as const,
+          );
+          const page = await query().paginate(options);
+          read.push(...batched.data.map((row) => row.id));
+          // The batched page issues the cursor paginate() issues.
+          cursors.push(String(batched.nextCursor === page.nextCursor));
+          cursor = batched.nextCursor;
+          if (!batched.hasNextPage || cursor === undefined) break;
+        }
+        expect({ read, cursors }).toEqual({
+          read: executed,
+          cursors: executed.map(() => "true"),
+        });
+      });
+    }
 
     it("a vector search whose k cut falls inside a tie returns the same rows on every execution, and its pages read exactly them", async (ctx) => {
       const store = storeWith(context, ctx, "vector");

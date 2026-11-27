@@ -665,6 +665,7 @@ function compileAggregateExprFromSource(
 function compileProjectedSource(
   field: {
     cteAlias?: string;
+    batchExactNumber?: true;
     source: DatabaseExpression | FieldRef | AggregateExpr;
   },
   ast: QueryAst,
@@ -679,12 +680,15 @@ function compileProjectedSource(
   if (isAggregateExpr(field.source)) {
     return compileAggregateExprFromSource(field.source, dialect, cteAlias);
   }
-  return compileFieldValue(
+  const value = compileFieldValue(
     field.source,
     dialect,
     field.source.valueType,
     cteAlias ?? aliasCteName(field.source.alias),
   );
+  return field.batchExactNumber === true ?
+      dialect.batchExactNumber(value)
+    : value;
 }
 
 type BuildStandardProjectionInput = Readonly<{

@@ -612,6 +612,13 @@ export type ProjectedField = Readonly<{
   source: AggregateExpr | DatabaseExpression | FieldRef;
   /** Override the CTE alias for this field (used for edge fields in node CTEs) */
   cteAlias?: string;
+  /**
+   * Set on a hidden numeric keyset column of a `store.batchOnce()` page of a
+   * full-text, vector or hybrid query: the column is projected as
+   * `DialectAdapter.batchExactNumber` renders it, so the batch envelope
+   * carries it exactly.
+   */
+  batchExactNumber?: true;
 }>;
 
 /**

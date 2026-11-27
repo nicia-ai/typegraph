@@ -60,6 +60,7 @@ import {
   validateKeysetCursor,
 } from "../cursor";
 import { getDialect } from "../dialect";
+import { parseRepresentableDouble } from "../dialect/numeric-conversion";
 import { type SqlDialect } from "../dialect/types";
 import {
   adjustOrderByForDirection,
@@ -176,6 +177,44 @@ type QueryBatchItem<R> = Readonly<{
   }>[];
   mapRows: (rows: readonly Record<string, unknown>[]) => readonly R[];
 }>;
+
+/**
+ * Whether a hidden keyset column of a `store.batchOnce()` item carries its
+ * key as `DialectAdapter.batchExactNumber` renders it: a numeric field key
+ * of a full-text, vector or hybrid page (the `cursor-keyed` shape). The one
+ * decision the projection and the cursor that reads it back both make.
+ */
+function carriesBatchExactNumber(
+  order: OrderSpec,
+  shape: "selection-ordered" | "cursor-keyed",
+): boolean {
+  return (
+    shape === "cursor-keyed" &&
+    order.field.__type === "field_ref" &&
+    order.field.valueType === "number"
+  );
+}
+
+/**
+ * A hidden keyset column's value as the page's cursor carries it: the
+ * double the text `batchExactNumber` rendered denotes, where the column
+ * carries one, and the value itself otherwise.
+ */
+function readBatchKeyValue(
+  value: unknown,
+  order: OrderSpec,
+  shape: "selection-ordered" | "cursor-keyed",
+): unknown {
+  if (!carriesBatchExactNumber(order, shape) || typeof value !== "string")
+    return value;
+  const parsed = parseRepresentableDouble(value);
+  if (parsed === undefined)
+    throw new CompilerInvariantError(
+      `A batched page's numeric keyset key came back as text that is not a double: ${value}`,
+      { phase: "relevance-cursor-key" },
+    );
+  return parsed;
+}
 
 export class ExecutableQuery<
   G extends GraphDef,
@@ -1097,6 +1136,9 @@ export class ExecutableQuery<
                   ...(edgeTraversal === undefined ?
                     {}
                   : { cteAlias: `cte_${edgeTraversal.nodeAlias}` }),
+                  ...(carriesBatchExactNumber(order, shape) ?
+                    { batchExactNumber: true as const }
+                  : {}),
                 };
               }),
             ],
@@ -1974,9 +2016,8 @@ export class ExecutableQuery<
     return {
       execute: () => this.paginate(pageOptions),
       compileOneStatementBatchItem: () => {
-        const item = pagedQuery.#compileOneStatementBatchItem(
-          search ? "cursor-keyed" : "selection-ordered",
-        );
+        const batchShape = search ? "cursor-keyed" : "selection-ordered";
+        const item = pagedQuery.#compileOneStatementBatchItem(batchShape);
         const cursorOutputNames = paginationOrderBy.map((_spec, index) =>
           oneStatementBatchOrderColumn(index),
         );
@@ -1991,7 +2032,13 @@ export class ExecutableQuery<
           cursorDirection: "f" | "b",
         ): string =>
           this.#cursorFromValues(
-            cursorOutputNames.map((outputName) => row[outputName]),
+            paginationOrderBy.map((spec, index) =>
+              readBatchKeyValue(
+                row[oneStatementBatchOrderColumn(index)],
+                spec,
+                batchShape,
+              ),
+            ),
             row,
             cursorDirection,
           );

@@ -229,9 +229,9 @@ export interface DialectAdapter {
    * parameter compared with the key takes the key's type. SQLite's keys are
    * REAL: it renders them with 17 significant digits, which identify every
    * double, an infinity as `Inf` / `-Inf`, and binds the double that text
-   * denotes: before SQLite 3.43, which libSQL builds on, neither
-   * `CAST(x AS TEXT)` nor a REAL's JSON text is exact, and neither is
-   * `CAST(text AS REAL)`.
+   * denotes, relying on none of the engine's own float conversions: the
+   * SQLite libSQL ships (3.45.1) renders a REAL with 15 significant digits
+   * in `CAST(x AS TEXT)` and in JSON.
    */
   readonly relevanceCursorKey: Readonly<{
     /**
@@ -268,6 +268,22 @@ export interface DialectAdapter {
      */
     operand: (this: void, bound: string | number) => SqlFragment;
   }>;
+
+  /**
+   * The value a `store.batchOnce()` envelope carries a numeric keyset key of
+   * a full-text, vector or hybrid page as, so the page's cursor reads back
+   * exactly the double the statement computed, as a page read alone does.
+   * The SQLite libSQL ships (3.45.1) renders a REAL inside JSON with 15
+   * significant digits, which puts two nearly equal keys at one cursor
+   * position, so SQLite carries a number as its 17-significant-digit text
+   * and any other value unchanged. PostgreSQL's JSON renders a number as its
+   * own text output, so it carries the value unchanged. The cursor reads a
+   * text back with `parseRepresentableDouble`.
+   */
+  readonly batchExactNumber: (
+    this: void,
+    expression: SqlFragment,
+  ) => SqlFragment;
 
   /**
    * Builds the dialect's planner-statistics refresh for a temporary table.

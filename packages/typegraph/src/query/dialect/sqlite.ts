@@ -209,6 +209,9 @@ export const sqliteDialect: BuiltinDialectAdapter = {
     },
   },
 
+  batchExactNumber: (expression) =>
+    sql`CASE WHEN typeof(${expression}) IN ('integer', 'real') THEN printf('%!.17g', ${expression}) ELSE ${expression} END`,
+
   keyText(expression) {
     return sql`${expression} COLLATE BINARY`;
   },

@@ -13,6 +13,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ValidationError } from "../../../src";
+import { expectObservation } from "../../helpers/known-defect";
 import type { IntegrationStore } from "./fixtures";
 import { PLAIN_CURSOR_FIXTURES } from "./plain-cursor-fixtures";
 import {
@@ -293,6 +294,58 @@ export function registerCursorFieldContractIntegrationTests(
           outcome: "ValidationError",
         })),
       );
+    });
+  });
+
+  describe("A batched page of a query without a search", () => {
+    // A numeric orderBy() key reaches a batched page's cursor through the
+    // batch's JSON envelope. The SQLite libSQL ships (3.45.1) renders
+    // a REAL there with 15 significant digits, so keys that differ past them
+    // share one cursor value and the next page skips the rows between.
+    it("carries a numeric orderBy() key exactly, so rows whose keys differ in the last bits are each read once", async () => {
+      const store = context.getStore();
+      const prices = [0.29999999999999993, 0.3, 0.30000000000000004];
+      for (const [index, price] of prices.entries()) {
+        await store.nodes.Product.create(
+          { name: `n${index}`, price, category: "batched" },
+          { id: `b${index}` },
+        );
+      }
+      const query = () =>
+        store
+          .query()
+          .from("Product", "p")
+          .whereNode("p", (p) => p.category.eq("batched"))
+          .orderBy("p", "price", "desc")
+          .select((ctx) => ({ id: ctx.p.id }));
+      const rows = await query().execute();
+      const executed: readonly string[] = rows.map((row) => String(row.id));
+      const read: string[] = [];
+      let cursor: string | undefined;
+      for (let guard = 0; guard < 6; guard += 1) {
+        const options = {
+          first: 1,
+          ...(cursor === undefined ? {} : { after: cursor }),
+        };
+        const [page] = await store.batchOnce(
+          () => [query().page(options)] as const,
+        );
+        read.push(...page.data.map((row) => String(row.id)));
+        cursor = page.nextCursor;
+        if (!page.hasNextPage || cursor === undefined) break;
+      }
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: { executed, read },
+        correct: { executed: ["b2", "b1", "b0"], read: ["b2", "b1", "b0"] },
+        defects: [
+          {
+            label: "known defect D17 (batched plain-page numeric key)",
+            on: { driver: ["libsql"] },
+            today: { executed: ["b2", "b1", "b0"], read: ["b2", "b0"] },
+          },
+        ],
+      });
     });
   });
 }
