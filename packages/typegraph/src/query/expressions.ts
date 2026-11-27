@@ -250,10 +250,14 @@ export type DatabaseExpression<
 }>;
 
 /**
- * @internal Where a date an expression yields comes from, when it is not
- * stored text (`DatabaseExpression.dateOrigin`).
+ * @internal Where a date in a query result comes from, when it is not stored
+ * property text: `"stated"`, a date the caller stated
+ * (`DatabaseExpression.dateOrigin`), or `"engine"`, a result column the
+ * compiler cast to the engine's timestamp type (`resultDateOrigin`). It picks
+ * the decode leaf (`decodeExpressionDate`).
  */
-export type DateOrigin = NonNullable<DatabaseExpression["dateOrigin"]>;
+export type DateOrigin =
+  NonNullable<DatabaseExpression["dateOrigin"]> | "engine";
 
 export type NonNull<T> = Exclude<T, undefined>;
 export type LiteralResult<T> = T extends null ? undefined : T;
@@ -311,7 +315,7 @@ function createExpression<T, Scope extends string>(
 }
 
 /** The date origins an expression carries (see {@link DatabaseExpression}). */
-export type ExpressionDateOrigins = Pick<
+type ExpressionDateOrigins = Pick<
   DatabaseExpression,
   "dateOrigin" | "elementDateOrigins"
 >;

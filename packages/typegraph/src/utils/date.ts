@@ -196,6 +196,24 @@ export function canonicalizeDatabaseTimestamp(
   return new Date(milliseconds).toISOString();
 }
 
+/**
+ * Canonicalizes a value the database driver returns for an engine timestamp
+ * (a column the query compiler cast to the engine's timestamp type): a `Date`,
+ * or the engine's text with an explicit UTC offset, on a driver that does not
+ * parse it (`2024-01-02 08:34:05.678+05:30`). The offset makes the instant
+ * unambiguous whatever the session time zone. Text without an offset is not an
+ * engine timestamp, so it, and every other value, yields `undefined`; the
+ * instant itself is read by {@link canonicalizeDatabaseTimestamp}.
+ */
+export function canonicalizeEngineTimestamp(
+  value: unknown,
+): string | undefined {
+  const engineShaped =
+    value instanceof Date ||
+    (typeof value === "string" && OFFSET_DATETIME_PATTERN.test(value));
+  return engineShaped ? canonicalizeDatabaseTimestamp(value) : undefined;
+}
+
 const DIGIT_ZERO = 0x30;
 
 /**

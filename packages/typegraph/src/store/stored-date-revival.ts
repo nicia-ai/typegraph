@@ -80,7 +80,11 @@ import {
   kindShapeTypeInfo,
 } from "../query/schema-introspector";
 import { type KindRegistry } from "../registry/kind-registry";
-import { dateInstantText, isPortableTimestamp } from "../utils/date";
+import {
+  canonicalizeEngineTimestamp,
+  dateInstantText,
+  isPortableTimestamp,
+} from "../utils/date";
 import { isPlainObject } from "../utils/object";
 
 /** The schema wrappers whose input is their inner schema's input. */
@@ -318,6 +322,24 @@ export function decodeStatedDate(value: unknown): unknown {
   if (typeof value !== "string" && typeof value !== "number") return value;
   const decoded = new Date(value);
   return Number.isNaN(decoded.getTime()) ? value : decoded;
+}
+
+/**
+ * A date a query result column holds that the query compiler cast to the
+ * engine's timestamp type (`DialectAdapter.jsonExtractDateOrigin`), as a read
+ * returns it: what a driver hands back for an engine timestamp — a `Date`, or
+ * the engine's offset-bearing text on a driver that does not parse it — becomes
+ * the `Date` of that instant ({@link canonicalizeEngineTimestamp}), whatever
+ * the session time zone. Any other value, text without an offset included, is
+ * not an engine timestamp and is decoded by the strict {@link decodeStoredDate}.
+ * Which leaf a query result uses is decided by the column's origin
+ * (`decodeExpressionDate`), never by a terminal.
+ */
+export function decodeEngineTimestamp(value: unknown): unknown {
+  const canonical = canonicalizeEngineTimestamp(value);
+  return canonical === undefined ?
+      decodeStoredDate(value)
+    : new Date(canonical);
 }
 
 /**

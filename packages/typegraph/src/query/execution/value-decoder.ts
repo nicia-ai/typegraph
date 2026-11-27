@@ -8,6 +8,7 @@
  */
 
 import {
+  decodeEngineTimestamp,
   decodeStatedDate,
   decodeStoredDate,
   decodeStoredValue,
@@ -18,28 +19,46 @@ import { type DateOrigin } from "../expressions";
 import { type FieldTypeInfo } from "../schema-introspector";
 
 /**
- * A date a query expression yields, decoded by the leaf its origin names: a
- * date the caller stated (`dateOrigin: "stated"` — a literal, a parameter, or
- * a composition of only those) by {@link decodeStatedDate}, which returns the
- * `Date` stated; every other date, which is stored property text, by the
- * strict {@link decodeStoredDate}. The one choice every query terminal makes.
+ * A date a query result yields, decoded by the leaf its origin names: a date
+ * the caller stated (`"stated"` — a literal, a parameter, or a composition of
+ * only those) by {@link decodeStatedDate}, which returns the `Date` stated; a
+ * result column the compiler cast to the engine's timestamp type (`"engine"`,
+ * `resultDateOrigin`) by {@link decodeEngineTimestamp}, which reads the
+ * instant a driver returns for it; every other date, which is stored property
+ * text, by the strict {@link decodeStoredDate}. The one choice every query
+ * terminal makes.
  */
 export function decodeExpressionDate(
   value: unknown,
   origin: DateOrigin | undefined,
 ): unknown {
-  return origin === "stated" ?
-      decodeStatedDate(value)
-    : decodeStoredDate(value);
+  switch (origin) {
+    case "stated": {
+      return decodeStatedDate(value);
+    }
+    case "engine": {
+      return decodeEngineTimestamp(value);
+    }
+    case undefined: {
+      return decodeStoredDate(value);
+    }
+  }
 }
 
 export function nullToUndefined(value: unknown): unknown {
   return value === null ? undefined : value;
 }
 
+/**
+ * A selected property field's value as a read returns it. `dateOrigin` is the
+ * origin of the result column when the field itself is a date
+ * (`resultDateOrigin`); a date nested in an object, array or record is JSON
+ * text and is decoded, as a whole row's props are, by the one read owner.
+ */
 export function decodeSelectedValue(
   value: unknown,
   typeInfo: FieldTypeInfo | undefined,
+  dateOrigin: DateOrigin | undefined,
 ): unknown {
   const normalized = nullToUndefined(value);
   if (normalized === undefined) return undefined;
@@ -48,9 +67,10 @@ export function decodeSelectedValue(
     return normalized;
   }
 
-  // Every position the field's typing says reads as a `Date` — the field
-  // itself, or one nested in an object, array or record — is decoded by the
-  // one read owner, exactly as a whole row's props are.
+  if (typeInfo.valueType === "date") {
+    return decodeExpressionDate(normalized, dateOrigin);
+  }
+
   return decodeStoredValue(
     storedReadPlan(typeInfo),
     decodeByValueType(normalized, typeInfo.valueType),

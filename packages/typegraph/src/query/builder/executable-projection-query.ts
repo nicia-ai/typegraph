@@ -11,6 +11,8 @@ import { decodeStoredValue } from "../../store/stored-date-revival";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import type { QueryAst, SortDirection, ValueType } from "../ast";
 import { compileNameCheckedQuery } from "../compiler";
+import { resultDateOrigin } from "../compiler/typed-json-extract";
+import { type SqlDialect } from "../dialect/types";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import { decodeExpressionDate } from "../execution/value-decoder";
 import {
@@ -22,7 +24,7 @@ import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
 import { buildRowQueryAst } from "./ast-builder";
-import { buildCompileOptions } from "./compile-options";
+import { buildCompileOptions, compileDialect } from "./compile-options";
 import { assertExpressionScope, getExpressionScope } from "./expression-scope";
 import type { ExpressionProjectionEntries } from "./expression-subqueries";
 import { getQueryBuilderInternalContext } from "./internal-context";
@@ -545,7 +547,11 @@ export class ExecutableProjectionQuery<
     const decoded = Object.fromEntries(
       Object.entries(this.#fields).map(([key, expression]) => [
         key,
-        decodeExpressionValue(row[key], expression),
+        decodeExpressionValue(
+          row[key],
+          expression,
+          compileDialect(this.#config),
+        ),
       ]),
     ) as ProjectionResult<Fields>;
     return this.#mapRow(decoded);
@@ -557,9 +563,16 @@ export class ExecutableProjectionQuery<
   }
 }
 
+/**
+ * A projected column as a read returns it. A scalar date column decodes by the
+ * origin the compiler gives it for `dialect` (`resultDateOrigin`); a collected
+ * element or record field, which the compiler built into JSON, by the
+ * expression's own origin.
+ */
 export function decodeExpressionValue(
   value: unknown,
   expression: DatabaseExpression,
+  dialect: SqlDialect,
 ): unknown {
   if (value === null || value === undefined) return undefined;
   switch (expression.valueType) {
@@ -570,7 +583,7 @@ export function decodeExpressionValue(
       return decodeScalarExpressionValue(
         value,
         expression.valueType,
-        expression.dateOrigin,
+        resultDateOrigin(expression.dateOrigin, dialect),
       );
     }
     case "object":

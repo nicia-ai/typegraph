@@ -37,6 +37,7 @@ import {
   compileNameCheckedQuery,
   type CompileQueryOptions,
 } from "../compiler/index";
+import { resultDateOrigin } from "../compiler/typed-json-extract";
 import {
   buildCursorFromRow,
   buildCursorFromValues,
@@ -1136,6 +1137,7 @@ export class ExecutableQuery<
         selectiveFields,
         this.#config.schemaIntrospector,
         this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
+        this.#dialect(),
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
@@ -1336,6 +1338,7 @@ export class ExecutableQuery<
         selectiveFields,
         this.#config.schemaIntrospector,
         this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
+        this.#dialect(),
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
@@ -1521,7 +1524,11 @@ export class ExecutableQuery<
           )
         : undefined;
 
-      const decoded = decodeSelectedValue(row[outputName], typeInfo);
+      const decoded = decodeSelectedValue(
+        row[outputName],
+        typeInfo,
+        resultDateOrigin(undefined, this.#dialect()),
+      );
 
       if (segments.length === 1) {
         aliasObject[topField] = decoded;

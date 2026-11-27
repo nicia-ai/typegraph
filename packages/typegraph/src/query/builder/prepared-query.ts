@@ -658,6 +658,7 @@ export class PreparedQuery<R> {
           this.#selectiveFields,
           this.#schemaIntrospector,
           this.#selectFn,
+          this.#dialect,
         );
       } catch (error) {
         if (error instanceof MissingSelectiveFieldError) {

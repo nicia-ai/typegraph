@@ -10,10 +10,14 @@ import { describe, expect, it } from "vitest";
 
 import { expr } from "../src";
 import { decodeExpressionValue } from "../src/query/builder/executable-projection-query";
+import { resultDateOrigin } from "../src/query/compiler/typed-json-extract";
 import { createFieldExpression } from "../src/query/expressions";
 import { jsonPointer } from "../src/query/json-pointer";
 import { fieldRef } from "../src/query/predicates";
-import { decodeStatedDate } from "../src/store/stored-date-revival";
+import {
+  decodeEngineTimestamp,
+  decodeStatedDate,
+} from "../src/store/stored-date-revival";
 
 const YEAR_ZERO_TEXT = "0000-06-01T00:00:00.000Z";
 const YEAR_ZERO = new Date(YEAR_ZERO_TEXT);
@@ -50,27 +54,33 @@ describe("a query expression's date decodes by its origin", () => {
       literal: decodeExpressionValue(
         YEAR_ZERO_TEXT,
         expr.literal(new Date(YEAR_ZERO)),
+        "sqlite",
       ),
       parameter: decodeExpressionValue(
         YEAR_ZERO_TEXT,
         expr.param("at", "date"),
+        "sqlite",
       ),
       statedCoalesce: decodeExpressionValue(
         YEAR_ZERO_TEXT,
         expr.coalesce(expr.param("at", "date"), expr.literal(YEAR_ZERO)),
+        "sqlite",
       ),
       statedExtreme: decodeExpressionValue(
         YEAR_ZERO_TEXT,
         expr.max(expr.literal(YEAR_ZERO)),
+        "sqlite",
       ),
-      stored: decodeExpressionValue(YEAR_ZERO_TEXT, storedDate()),
+      stored: decodeExpressionValue(YEAR_ZERO_TEXT, storedDate(), "sqlite"),
       mixedCoalesce: decodeExpressionValue(
         YEAR_ZERO_TEXT,
         expr.coalesce(storedDate(), expr.literal(YEAR_ZERO)),
+        "sqlite",
       ),
       storedExtreme: decodeExpressionValue(
         YEAR_ZERO_TEXT,
         expr.min(storedDate()),
+        "sqlite",
       ),
     };
     expect(decoded).toEqual({
@@ -90,10 +100,12 @@ describe("a query expression's date decodes by its origin", () => {
       stated: decodeExpressionValue(
         collectedText,
         expr.collect(expr.literal(YEAR_ZERO), ORDER),
+        "sqlite",
       ),
       stored: decodeExpressionValue(
         collectedText,
         expr.collect(storedDate(), ORDER),
+        "sqlite",
       ),
     }).toEqual({
       stated: [YEAR_ZERO, undefined],
@@ -108,6 +120,7 @@ describe("a query expression's date decodes by its origin", () => {
       decodeExpressionValue(
         JSON.stringify([{ stated: YEAR_ZERO_TEXT, stored: YEAR_ZERO_TEXT }]),
         records,
+        "sqlite",
       ),
     ).toEqual([{ stated: YEAR_ZERO, stored: YEAR_ZERO_TEXT }]);
   });
@@ -120,5 +133,88 @@ describe("a query expression's date decodes by its origin", () => {
       decodeStatedDate("not a date"),
       decodeStatedDate(true),
     ]).toEqual([YEAR_ZERO, YEAR_ZERO, YEAR_ZERO, "not a date", true]);
+  });
+});
+
+describe("a date column the compiler cast to an engine timestamp decodes as an engine timestamp", () => {
+  const INSTANT = new Date("2024-01-02T03:04:05.678Z");
+  // What postgres-js hands back for a `timestamptz` column, in two session zones.
+  const UTC_ENGINE_TEXT = "2024-01-02 03:04:05.678+00";
+  const KOLKATA_ENGINE_TEXT = "2024-01-02 08:34:05.678+05:30";
+
+  it("types every non-stated scalar date column by the dialect's extraction, and a stated one as stated", () => {
+    expect({
+      postgresStored: resultDateOrigin(undefined, "postgres"),
+      postgresStated: resultDateOrigin("stated", "postgres"),
+      sqliteStored: resultDateOrigin(undefined, "sqlite"),
+      sqliteStated: resultDateOrigin("stated", "sqlite"),
+    }).toEqual({
+      postgresStored: "engine",
+      postgresStated: "stated",
+      sqliteStored: undefined,
+      sqliteStated: "stated",
+    });
+  });
+
+  it("reads the instant of the engine's offset-bearing text or a Date in every scalar shape", () => {
+    expect({
+      utc: decodeExpressionValue(UTC_ENGINE_TEXT, storedDate(), "postgres"),
+      kolkata: decodeExpressionValue(
+        KOLKATA_ENGINE_TEXT,
+        storedDate(),
+        "postgres",
+      ),
+      driverDate: decodeExpressionValue(INSTANT, storedDate(), "postgres"),
+      extreme: decodeExpressionValue(
+        KOLKATA_ENGINE_TEXT,
+        expr.max(storedDate()),
+        "postgres",
+      ),
+      mixedCoalesce: decodeExpressionValue(
+        KOLKATA_ENGINE_TEXT,
+        expr.coalesce(storedDate(), expr.literal(INSTANT)),
+        "postgres",
+      ),
+    }).toEqual({
+      utc: INSTANT,
+      kolkata: INSTANT,
+      driverDate: INSTANT,
+      extreme: INSTANT,
+      mixedCoalesce: INSTANT,
+    });
+  });
+
+  it("leaves text without an offset, and the same text on SQLite, under the strict stored leaf", () => {
+    expect({
+      zoneless: decodeExpressionValue(
+        "2024-01-02 03:04:05.678",
+        storedDate(),
+        "postgres",
+      ),
+      dateOnly: decodeExpressionValue("2024-01-02", storedDate(), "postgres"),
+      sqliteOffsetText: decodeExpressionValue(
+        KOLKATA_ENGINE_TEXT,
+        storedDate(),
+        "sqlite",
+      ),
+      engineLeafZoneless: decodeEngineTimestamp("2024-01-02 03:04:05.678"),
+      engineLeafCanonical: decodeEngineTimestamp(INSTANT.toISOString()),
+    }).toEqual({
+      zoneless: "2024-01-02 03:04:05.678",
+      dateOnly: "2024-01-02",
+      sqliteOffsetText: KOLKATA_ENGINE_TEXT,
+      engineLeafZoneless: "2024-01-02 03:04:05.678",
+      engineLeafCanonical: INSTANT,
+    });
+  });
+
+  it("keeps collected elements, which the compiler built into JSON, under their expression's origin", () => {
+    expect(
+      decodeExpressionValue(
+        JSON.stringify([KOLKATA_ENGINE_TEXT]),
+        expr.collect(storedDate(), ORDER),
+        "postgres",
+      ),
+    ).toEqual([KOLKATA_ENGINE_TEXT]);
   });
 });

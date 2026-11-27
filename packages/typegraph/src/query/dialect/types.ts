@@ -385,6 +385,18 @@ export interface DialectAdapter {
     pointer: JsonPointer,
   ) => SqlFragment;
 
+  /**
+   * What a date {@link DialectAdapter.jsonExtractDate} reads becomes in a
+   * result row: `"engine"` when the extraction casts the stored text to the
+   * engine's timestamp type, so the driver hands back an engine timestamp (a
+   * `Date`, or the engine's offset-bearing text on a driver that does not
+   * parse it); `undefined` when the extraction returns the stored text as is.
+   * The compiler reads it where it types a result column
+   * (`resultDateOrigin`); no terminal does. PostgreSQL casts to
+   * `timestamptz`; SQLite returns the stored text.
+   */
+  readonly jsonExtractDateOrigin: "engine" | undefined;
+
   // ============================================================
   // JSON Array Operations
   // ============================================================

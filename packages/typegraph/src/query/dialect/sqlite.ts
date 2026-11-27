@@ -291,6 +291,9 @@ export const sqliteDialect: BuiltinDialectAdapter = {
     return sql`json_extract(${column}, ${sql.raw(escapeSqliteLiteral(path))})`;
   },
 
+  // `jsonExtractDate` returns the stored text as is.
+  jsonExtractDateOrigin: undefined,
+
   // ============================================================
   // JSON Array Operations
   // ============================================================

@@ -150,7 +150,9 @@ such a date. A composition that may yield a stored date is decoded as stored
 text. Every date a query returns is the same value on SQLite and PostgreSQL
 whatever the PostgreSQL session `TimeZone` is: `expr.collect()` elements and
 the date columns of a `batchOnce()` payload are emitted as canonical UTC text
-on both.
+on both, and a scalar date column PostgreSQL casts to `timestamptz` decodes
+as the instant the engine returns, whether the driver hands back a `Date` or
+offset-bearing text (postgres-js).
 
 A write that parses stored properties again first turns that stored text back
 into a `Date`, so an update that does not touch a date property leaves it as

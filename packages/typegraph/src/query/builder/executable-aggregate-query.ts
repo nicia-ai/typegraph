@@ -9,7 +9,6 @@ import type { GraphBackend, TransactionBackend } from "../../backend/types";
 import { type GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
 import { type StoreTransactionBackend } from "../../store/operation-scope";
-import { decodeStoredDate } from "../../store/stored-date-revival";
 import { createDataKeyedBag } from "../../utils/object";
 import {
   type AggregateExpr,
@@ -23,11 +22,14 @@ import {
   compileNameCheckedQuery,
   type CompileQueryOptions,
 } from "../compiler/index";
+import { resultDateOrigin } from "../compiler/typed-json-extract";
+import { decodeExpressionDate } from "../execution/value-decoder";
 import type { DatabaseExpression } from "../expressions";
+import { type DateOrigin } from "../expressions";
 import { parseJsonPointer } from "../json-pointer";
 import { type CompiledSelectSql } from "../sql-intent";
 import { buildRowQueryAst } from "./ast-builder";
-import { buildCompileOptions } from "./compile-options";
+import { buildCompileOptions, compileDialect } from "./compile-options";
 import { getQueryBuilderInternalContext } from "./internal-context";
 import type {
   PreparedBindings,
@@ -550,17 +552,23 @@ export class ExecutableAggregateQuery<
     // on a `{}` literal would hand that key to `Object.prototype`'s setter
     // and drop the value.
     const result = createDataKeyedBag<unknown>();
+    // An aggregate or group key over a date property is a column the compiler
+    // read through `jsonExtractDate`.
+    const dateOrigin = resultDateOrigin(
+      undefined,
+      compileDialect(this.#config),
+    );
     for (const key of Object.keys(this.#fields)) {
       const field = this.#fields[key];
       if (!field) continue;
       const value = row[key];
 
       if (field.__type === "aggregate") {
-        result[key] = normalizeAggregateValue(field, value);
+        result[key] = normalizeAggregateValue(field, value, dateOrigin);
         continue;
       }
 
-      result[key] = normalizeFieldValue(field, value);
+      result[key] = normalizeFieldValue(field, value, dateOrigin);
     }
     // SPREAD at the boundary. The null-prototype bag is an internal write-side
     // protection, not something a caller asked for: returned as-is, an
@@ -577,6 +585,7 @@ export class ExecutableAggregateQuery<
 function normalizeAggregateValue(
   expression: AggregateExpr,
   value: unknown,
+  dateOrigin: DateOrigin | undefined,
 ): unknown {
   if (value === null) return undefined;
 
@@ -596,7 +605,7 @@ function normalizeAggregateValue(
   }
 
   if (expression.field.valueType === "date") {
-    return decodeStoredDate(value);
+    return decodeExpressionDate(value, dateOrigin);
   }
 
   return value;
@@ -620,7 +629,11 @@ function normalizeBooleanValue(value: unknown): unknown {
   return value;
 }
 
-function normalizeFieldValue(field: FieldRef, value: unknown): unknown {
+function normalizeFieldValue(
+  field: FieldRef,
+  value: unknown,
+  dateOrigin: DateOrigin | undefined,
+): unknown {
   if (value === null) return undefined;
 
   if (field.valueType === "boolean") {
@@ -628,7 +641,7 @@ function normalizeFieldValue(field: FieldRef, value: unknown): unknown {
   }
 
   if (field.valueType === "date") {
-    return decodeStoredDate(value);
+    return decodeExpressionDate(value, dateOrigin);
   }
 
   return value;

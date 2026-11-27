@@ -19,6 +19,9 @@ import type {
   QueryBuilderState,
   SelectContext,
 } from "../builder/types";
+import { resultDateOrigin } from "../compiler/typed-json-extract";
+import { type SqlDialect } from "../dialect/types";
+import { type DateOrigin } from "../expressions";
 import {
   type FieldTypeInfo,
   type SchemaIntrospector,
@@ -65,6 +68,8 @@ type PropsFieldPlan = Readonly<{
   field: string;
   outputName: string;
   typeInfo: FieldTypeInfo | undefined;
+  /** The origin of the column when the field itself is a date (`resultDateOrigin`). */
+  dateOrigin: DateOrigin | undefined;
 }>;
 
 type AliasPlan = Readonly<{
@@ -111,8 +116,14 @@ export function mapSelectiveResults<
   selectiveFields: readonly SelectiveField[],
   schemaIntrospector: SchemaIntrospector,
   selectFunction: (context: SelectContext<Aliases, EdgeAliases>) => R,
+  dialect: SqlDialect,
 ): readonly R[] {
-  const plans = buildAliasPlans(state, selectiveFields, schemaIntrospector);
+  const plans = buildAliasPlans(
+    state,
+    selectiveFields,
+    schemaIntrospector,
+    resultDateOrigin(undefined, dialect),
+  );
 
   return rows.map((row) => {
     const context = buildSelectiveContext<Aliases, EdgeAliases>(
@@ -143,6 +154,7 @@ function buildAliasPlans(
   state: QueryBuilderState,
   selectiveFields: readonly SelectiveField[],
   schemaIntrospector: SchemaIntrospector,
+  propsDateOrigin: DateOrigin | undefined,
 ): readonly AliasPlan[] {
   const aliasInfo = new Map<
     string,
@@ -222,6 +234,7 @@ function buildAliasPlans(
           field: field.field,
           outputName: field.outputName,
           typeInfo,
+          dateOrigin: propsDateOrigin,
         });
       }
     }
@@ -340,7 +353,11 @@ function buildRequiredAliasValue(
   }
 
   for (const field of plan.propsFields) {
-    const decoded = decodeSelectedValue(row[field.outputName], field.typeInfo);
+    const decoded = decodeSelectedValue(
+      row[field.outputName],
+      field.typeInfo,
+      field.dateOrigin,
+    );
     base[field.field] = decoded;
   }
 

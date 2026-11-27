@@ -49,10 +49,14 @@ import {
   type EdgeKindMembership,
   recordedIntervalColumns,
 } from "../query/compiler/temporal";
-import { compileTypedJsonExtract } from "../query/compiler/typed-json-extract";
+import {
+  compileTypedJsonExtract,
+  resultDateOrigin,
+} from "../query/compiler/typed-json-extract";
 import { quoteIdentifier } from "../query/compiler/utils";
 import type { DialectAdapter } from "../query/dialect/types";
 import { decodeSelectedValue } from "../query/execution/value-decoder";
+import { type DateOrigin } from "../query/expressions";
 import { jsonPointer } from "../query/json-pointer";
 import {
   createSchemaIntrospector,
@@ -703,6 +707,11 @@ type KindProjectionPlan = Readonly<{
 type ProjectionPlan = Readonly<{
   fullKinds: readonly string[];
   projectedKinds: ReadonlyMap<string, KindProjectionPlan>;
+  /**
+   * The origin of a projected property column that is itself a date: the
+   * column is read through `jsonExtractDate` (`resultDateOrigin`).
+   */
+  dateOrigin: DateOrigin | undefined;
 }>;
 
 type SubgraphExecutionParams<
@@ -813,11 +822,13 @@ function buildSubgraphPlan<
     options.project?.nodes,
     (kind, field) => introspector.getFieldTypeInfo(kind, field),
     "node",
+    resultDateOrigin(undefined, params.dialect.name),
   );
   const edgeProjectionPlan = buildEdgeProjectionPlan(
     params.graph,
     options.edges,
     options.project?.edges,
+    resultDateOrigin(undefined, params.dialect.name),
   );
   const reachableCte = buildSubgraphReachableCte(ctx, baseSchema, surface);
   const compositionEdgeKinds = resolveSubgraphCompositionEdgeKinds(params, ctx);
@@ -850,6 +861,7 @@ function buildSubgraphPlan<
         params.graph,
         compositionOnlyEdgeKinds,
         options.project?.edges,
+        edgeProjectionPlan.dateOrigin,
       ),
     ),
   };
@@ -866,6 +878,8 @@ function extendProjectionPlan(
       ...base.projectedKinds,
       ...extension.projectedKinds,
     ]),
+    // Both plans type the columns of one statement.
+    dateOrigin: base.dateOrigin,
   };
 }
 
@@ -879,6 +893,7 @@ function buildEdgeProjectionPlan<G extends GraphDef>(
   edgeKinds: readonly string[],
   projection:
     Readonly<Record<string, readonly string[] | undefined>> | undefined,
+  dateOrigin: DateOrigin | undefined,
 ): ProjectionPlan {
   const introspector = getSubgraphSchemaIntrospector(graph);
   return buildProjectionPlan(
@@ -886,6 +901,7 @@ function buildEdgeProjectionPlan<G extends GraphDef>(
     projection,
     (kind, field) => introspector.getEdgeFieldTypeInfo(kind, field),
     "edge",
+    dateOrigin,
   );
 }
 
@@ -1516,6 +1532,7 @@ function buildProjectionPlan(
     Readonly<Record<string, readonly string[] | undefined>> | undefined,
   resolveFieldType: FieldTypeResolver,
   entityPrefix: KindEntity,
+  dateOrigin: DateOrigin | undefined,
 ): ProjectionPlan {
   const projectedKinds = new Map<string, KindProjectionPlan>();
   const fullKinds: string[] = [];
@@ -1541,7 +1558,7 @@ function buildProjectionPlan(
     );
   }
 
-  return { fullKinds, projectedKinds };
+  return { fullKinds, projectedKinds, dateOrigin };
 }
 
 function buildKindProjectionPlan(
@@ -2417,11 +2434,13 @@ function applyProjectedFields(
   target: Record<string, unknown>,
   row: Readonly<Record<string, unknown>>,
   kindPlan: KindProjectionPlan,
+  dateOrigin: DateOrigin | undefined,
 ): void {
   for (const fieldPlan of kindPlan.propertyFields) {
     target[fieldPlan.field] = decodeSelectedValue(
       row[fieldPlan.outputName],
       fieldPlan.typeInfo,
+      dateOrigin,
     );
   }
 }
@@ -2471,7 +2490,7 @@ function mapSubgraphNodeRow(
     projectedNode["meta"] = rowToNodeMeta(normalizeSubgraphRowTimestamps(row));
   }
 
-  applyProjectedFields(projectedNode, row, kindPlan);
+  applyProjectedFields(projectedNode, row, kindPlan, projectionPlan.dateOrigin);
   return projectedNode as Node;
 }
 
@@ -2505,6 +2524,6 @@ function mapSubgraphEdgeRow(
     projectedEdge["meta"] = rowToEdgeMeta(normalizeSubgraphRowTimestamps(row));
   }
 
-  applyProjectedFields(projectedEdge, row, kindPlan);
+  applyProjectedFields(projectedEdge, row, kindPlan, projectionPlan.dateOrigin);
   return projectedEdge as Edge;
 }

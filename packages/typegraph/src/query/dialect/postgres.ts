@@ -312,6 +312,8 @@ export const postgresDialect: BuiltinDialectAdapter = {
     return sql`(${column} #>> ${path})::timestamptz`;
   },
 
+  jsonExtractDateOrigin: "engine",
+
   // ============================================================
   // JSON Array Operations
   // ============================================================

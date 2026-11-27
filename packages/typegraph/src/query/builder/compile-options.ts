@@ -18,8 +18,14 @@ import {
   vectorSlotKey,
   type VectorSlotMap,
 } from "../compiler/schema";
+import { type SqlDialect } from "../dialect/types";
 import { getQueryBuilderInternalContext } from "./internal-context";
 import { type QueryBuilderConfig } from "./types";
+
+/** The dialect a query built with `config` compiles for. */
+export function compileDialect(config: QueryBuilderConfig): SqlDialect {
+  return config.dialect ?? "sqlite";
+}
 
 export function buildCompileOptions(
   config: QueryBuilderConfig,
@@ -31,7 +37,7 @@ export function buildCompileOptions(
   const vectorStrategy = config.backend?.vectorStrategy;
   const { recordedReadBinding } = getQueryBuilderInternalContext(config);
   return {
-    dialect: config.dialect ?? "sqlite",
+    dialect: compileDialect(config),
     schema: config.schema,
     windowFunctions: config.backend?.capabilities.windowFunctions ?? true,
     orderedAggregates:

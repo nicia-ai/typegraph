@@ -170,7 +170,6 @@ export {
 export type { Store } from "../store/store";
 export { createStore, createStoreWithSchema } from "../store/store";
 export {
-  passStoredProps,
   storedFormOfReadProps,
   type StoredPropsReader,
   storedPropsReaders,

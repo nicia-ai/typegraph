@@ -308,6 +308,7 @@ describe("createTrackingContext", () => {
           deletedAt: node.meta.deletedAt,
         };
       },
+      "postgres",
     );
 
     expect(results).toEqual([

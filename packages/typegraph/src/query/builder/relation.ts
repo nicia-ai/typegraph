@@ -41,7 +41,7 @@ import {
 import { resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
 import { asCompiledSelectSql } from "../sql-intent";
-import { buildCompileOptions } from "./compile-options";
+import { buildCompileOptions, compileDialect } from "./compile-options";
 import { decodeExpressionValue } from "./executable-projection-query";
 import {
   assertExpressionScope,
@@ -721,7 +721,11 @@ export class ExecutableRelationQuery<
         Object.fromEntries(
           entries.map(([outputName, expression]) => [
             outputName,
-            decodeExpressionValue(row[outputName], expression),
+            decodeExpressionValue(
+              row[outputName],
+              expression,
+              compileDialect(this.#definition.config),
+            ),
           ]),
         ) as RelationProjectionResult<NextFields>,
     });
