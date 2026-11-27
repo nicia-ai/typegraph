@@ -695,9 +695,15 @@ in another key order). It names the claims by owner instead.
   per kept claim. When that exceeds what your engine binds in one statement,
   split it by constraint, keeping each constraint's `keep` entries in the
   statement that names it, so no statement releases a claim another keeps.
-  List the kept pairs flat (a row-value `NOT IN`, as below) rather than as one
-  nested condition per claim, which SQLite refuses past an expression depth of
-  1000. The bundled backends split by their declared `maxBindParameters`.
+  Never split one constraint's `keep` entries across statements: the
+  statement carrying one part would release the keys the other part keeps.
+  When one constraint's entries alone do not fit, read the owner's live keys
+  under that constraint on the same target and tombstone, by key, exactly
+  those not in its complete `keep` list. List the kept pairs flat (a
+  row-value `NOT IN`, as below) rather than as one nested condition per
+  claim, which SQLite refuses past an expression depth of 1000. The bundled
+  backends split by their declared `maxBindParameters`, and a hand-assembled
+  operation strategy supplies `buildOwnerClaimKeys` for that read.
 - **What it returns.** Nothing. The store ignores the value. A release that matches no entry succeeds.
 - **Idempotence.** Calling it again with the same params changes nothing: an
   entry it already tombstoned is no longer live, and is left as it is. An

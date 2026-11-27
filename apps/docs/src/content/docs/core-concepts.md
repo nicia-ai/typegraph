@@ -865,9 +865,11 @@ value: create, update, upsert, import, `updateWhere()`, graph merge,
 resurrection, `findByConstraint()` and `getOrCreateByConstraint()`. A write
 keys the props it validated. A path that starts from a stored row (the row an
 update replaces, a tombstone a provenance reopen or `getOrCreateByConstraint()`
-revives, a merge's after-image) keys the stored props with their `z.date()`
-text read back as a `Date`, the one place a stored value and its validated
-form differ, and never parses them through the schema again.
+revives, a merge's after-image) keys the stored props with the two
+differences between a stored value and its validated form undone: `z.date()`
+text is read back as a `Date`, and each `z.object()` value is put back in
+its schema's key order, which a PostgreSQL `jsonb` column does not keep. It
+never parses them through the schema again.
 
 A claim is released by the node that holds it. An update gives back every
 claim the node holds under the constraint other than the key it now claims,

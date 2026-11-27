@@ -845,10 +845,11 @@ collides with the other:
   with, and `getOrCreateByConstraint()` creates a new node rather than
   resurrecting a soft-deleted holder of it. Releases are unaffected.
 - **Values imported verbatim.** An import under `onUnknownProperty: "allow"`
-  keys a node's claims and an edge's match identity from the document's text.
-  A value whose schema parse differs from that text, such as an object a
-  PostgreSQL export returns in `jsonb` key order or an identity field the
-  schema lower-cases, does not collide with a create of the same value.
+  keys a node's claims and an edge's match identity from the document's text,
+  with dates revived and `z.object()` values put back in their schema's key
+  order. A value whose schema parse otherwise differs from that text, such as
+  an identity field the schema lower-cases, does not collide with a create of
+  the same value.
 - **Values whose validated key order follows their input.** A `z.record()`
   value, or the extra keys of a `z.looseObject()`, keys in the order its keys
   were stated, so two writers stating them in different orders hold two
