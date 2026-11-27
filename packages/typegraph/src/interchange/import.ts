@@ -204,7 +204,6 @@ import {
   nowIso,
   validateOptionalCanonicalIsoDate,
   type ValidityLowerBoundFence,
-  withPlainDates,
 } from "../utils/date";
 import { createDataKeyedBag, hasOwnKey } from "../utils/object";
 import { requireDefined } from "../utils/presence";
@@ -6140,14 +6139,7 @@ function storableImportProperties(
   | { success: true; data: Record<string, unknown> }
   | { success: false; error: string } {
   const issue = unstorableDateIssue(persisted) ?? unstorableDateIssue(parsed);
-  // As the store's own writes do (`validateProps`): a `Date` is persisted as
-  // the instant it holds, whatever serializer an in-memory document's carries.
-  if (issue === undefined) {
-    return {
-      success: true,
-      data: withPlainDates(persisted) as Record<string, unknown>,
-    };
-  }
+  if (issue === undefined) return { success: true, data: persisted };
   return { success: false, error: `${issue.path}: ${issue.message}` };
 }
 

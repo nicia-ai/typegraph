@@ -1,7 +1,10 @@
 import { TrustedImportError } from "../../errors";
 import { sql } from "../../query/sql-fragment";
 import { asCompiledStatementSql } from "../../query/sql-intent";
-import { resolveStampedValidityLowerBound } from "../../utils/date";
+import {
+  resolveStampedValidityLowerBound,
+  storedJsonText,
+} from "../../utils/date";
 import {
   requireFenceLockTables,
   requireWriteFence,
@@ -318,7 +321,7 @@ export function createSqliteTrustedImportSession(
           item.graphId,
           item.kind,
           item.id,
-          JSON.stringify(item.props),
+          storedJsonText(item.props),
           resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
             DATABASE_NULL,
           item.validTo ?? DATABASE_NULL,
@@ -340,7 +343,7 @@ export function createSqliteTrustedImportSession(
           item.fromId,
           item.toKind,
           item.toId,
-          JSON.stringify(item.props),
+          storedJsonText(item.props),
           item.matchIdentity?.name ?? DATABASE_NULL,
           item.matchIdentity?.key ?? DATABASE_NULL,
           resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
@@ -387,7 +390,7 @@ export function createPostgresTrustedImportSession(
         postgresArray(params.map((item) => item.graphId)),
         postgresArray(params.map((item) => item.kind)),
         postgresArray(params.map((item) => item.id)),
-        postgresArray(params.map((item) => JSON.stringify(item.props))),
+        postgresArray(params.map((item) => storedJsonText(item.props))),
         postgresArray(
           params.map(
             (item) =>
@@ -410,7 +413,7 @@ export function createPostgresTrustedImportSession(
         postgresArray(params.map((item) => item.fromId)),
         postgresArray(params.map((item) => item.toKind)),
         postgresArray(params.map((item) => item.toId)),
-        postgresArray(params.map((item) => JSON.stringify(item.props))),
+        postgresArray(params.map((item) => storedJsonText(item.props))),
         postgresArray(
           params.map((item) => item.matchIdentity?.name ?? DATABASE_NULL),
         ),

@@ -30,7 +30,6 @@ import {
   isInvertedValidityWindow,
   isPortableTimestamp,
   type PropsDateValue,
-  withPlainDates,
 } from "../utils/date";
 import { readOwnProperty } from "../utils/object";
 import { serializedStreamRefusal, withImportStreamLease } from "./import";
@@ -359,23 +358,12 @@ function unstorableDatePropertyMessage(
   );
 }
 
-/**
- * A streamed entity's props as written: verbatim, except that a `Date` an
- * in-memory stream holds is written as the instant it holds, as every store
- * write writes one (`withPlainDates`), not as its own serializer says.
- */
-function writtenProps(
-  properties: Readonly<Record<string, unknown>>,
-): Record<string, unknown> {
-  return withPlainDates(properties) as Record<string, unknown>;
-}
-
 function nodeParams(graphId: string, node: InterchangeNode): InsertNodeParams {
   return {
     graphId,
     kind: node.kind,
     id: node.id,
-    props: writtenProps(node.properties),
+    props: node.properties,
     ...(node.validFrom === undefined ? {} : { validFrom: node.validFrom }),
     ...(node.validTo === undefined ? {} : { validTo: node.validTo }),
   };
@@ -386,7 +374,6 @@ function edgeParams(
   edge: InterchangeEdge,
   registration: EdgeRegistration,
 ): InsertEdgeParams {
-  const props = writtenProps(edge.properties);
   const matchIdentity = resolveEdgeMatchIdentityStorage(
     registration.matchIdentity,
     {
@@ -394,7 +381,7 @@ function edgeParams(
       fromId: edge.from.id,
       toKind: edge.to.kind,
       toId: edge.to.id,
-      props,
+      props: edge.properties,
     },
     { graphId, edgeKind: edge.kind },
   );
@@ -406,7 +393,7 @@ function edgeParams(
     fromId: edge.from.id,
     toKind: edge.to.kind,
     toId: edge.to.id,
-    props,
+    props: edge.properties,
     ...(matchIdentity === undefined ? {} : { matchIdentity }),
     ...(edge.validFrom === undefined ? {} : { validFrom: edge.validFrom }),
     ...(edge.validTo === undefined ? {} : { validTo: edge.validTo }),

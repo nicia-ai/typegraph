@@ -8,7 +8,10 @@ import type {
   VectorStrategy,
 } from "../../../query/dialect/vector-strategy";
 import { chunk as chunkArray } from "../../../utils/array";
-import { resolveStampedValidityLowerBound } from "../../../utils/date";
+import {
+  resolveStampedValidityLowerBound,
+  storedJsonText,
+} from "../../../utils/date";
 import { encodeTupleKey } from "../../../utils/tuple-key";
 import type {
   AtomicNodePostimageEntry,
@@ -562,7 +565,7 @@ function buildGatedNodeInsert(
   gateAlias: string,
 ): SQL {
   const { nodes } = tables;
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
   const columns = nodeColumnList(nodes);
   const gate = sql.identifier(gateAlias);
 

@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { asNodeId, defineEdge, defineGraph, defineNode } from "../../../src";
+import { defineNodeIndex } from "../../../src/indexes";
 import {
   exportGraph,
   type GraphData,
@@ -44,6 +45,12 @@ const DatedWriteDocument = defineNode("DatedWriteDoc", {
   }),
 });
 
+/** An index over the untyped `extra` property, which a probe may state as a `Date`. */
+const datedWriteExtraIndex = defineNodeIndex(DatedWriteDocument, {
+  name: "dated_write_doc_extra",
+  fields: ["extra"],
+});
+
 const datedWriteCites = defineEdge("datedWriteCites", {
   schema: z.object({ at: z.date(), seenAt: z.date().optional() }),
 });
@@ -71,6 +78,7 @@ function buildDatedGraph(id: string) {
         to: [DatedWriteDocument],
       },
     },
+    indexes: [datedWriteExtraIndex],
   });
 }
 
@@ -403,6 +411,54 @@ export function registerDatePropertyWriteIntegrationTests(
           restored.nodes.map((node) => node.properties["revisions"]),
           restored.edges.map((edge) => edge.properties["at"]),
         ]).toEqual([[[stored], [stored]], [stored]]);
+      });
+
+      it("an endpoint match compares the instant the Date holds", async () => {
+        const store = await context.createStore(sourceGraph);
+        const from = await store.nodes.DatedWriteDoc.create({
+          title: "from",
+          publishedAt: PUBLISHED,
+        });
+        const to = await store.nodes.DatedWriteDoc.create({
+          title: "to",
+          publishedAt: LATER,
+        });
+        const existing = await store.edges.datedWriteCites.create(from, to, {
+          at: PUBLISHED,
+        });
+        await store.edges.datedWriteCites.create(from, to, { at: LATER });
+        const matched =
+          await store.edges.datedWriteCites.getOrCreateByEndpoints(
+            from,
+            to,
+            { at: disguised() },
+            { matchOn: ["at"] },
+          );
+        expect([matched.action, matched.edge.id]).toEqual([
+          "found",
+          existing.id,
+        ]);
+      });
+
+      it("an index probe looks up the instant the Date holds", async () => {
+        const store = await context.createStore(sourceGraph);
+        await store.nodes.DatedWriteDoc.create({
+          title: "published",
+          publishedAt: PUBLISHED,
+          extra: PUBLISHED,
+        });
+        await store.nodes.DatedWriteDoc.create({
+          title: "later",
+          publishedAt: LATER,
+          extra: LATER,
+        });
+        const [candidates] = await store.nodes.DatedWriteDoc.bulkFindByIndex(
+          "dated_write_doc_extra",
+          [{ props: { extra: disguised() } }],
+        );
+        expect((candidates ?? []).map((node) => node.title)).toEqual([
+          "published",
+        ]);
       });
 
       it("a predicate compares the instant the Date holds", async () => {

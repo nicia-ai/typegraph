@@ -151,9 +151,11 @@ import { compareCodePoints, compareStrings } from "../../utils/compare";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
+  dateInstantText,
   nowIso,
   preservesImmutableLowerBound,
   resolveStampedValidityLowerBound,
+  storedJsonText,
   validateOptionalCanonicalIsoDate,
   validateStatedValidityLowerBound,
 } from "../../utils/date";
@@ -1301,7 +1303,7 @@ export function createNodeBatchValidationSeams(
       graph_id: params.graphId,
       kind: params.kind,
       id: params.id,
-      props: JSON.stringify(params.props),
+      props: storedJsonText(params.props),
       version: 1,
       // The simulated cached row only needs a NodeRow-shaped valid_from
       // (string | undefined, never null) for existence/uniqueness checks,
@@ -8543,7 +8545,7 @@ type ProbeScalar = string | number | boolean | Date;
  * string normalize identically — and produce identical predicates).
  */
 function normalizeProbeScalar(value: ProbeScalar): string | number | boolean {
-  return value instanceof Date ? value.toISOString() : value;
+  return value instanceof Date ? dateInstantText(value) : value;
 }
 
 const PROBE_NULL_TAG = 0;

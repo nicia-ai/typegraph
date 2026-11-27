@@ -10,7 +10,10 @@ import {
   type EdgeCardinalitySpec,
   edgeCardinalitySpec,
 } from "../../../store/claims/edge-claims";
-import { resolveStampedValidityLowerBound } from "../../../utils/date";
+import {
+  resolveStampedValidityLowerBound,
+  storedJsonText,
+} from "../../../utils/date";
 import type {
   ClaimEdgeCardinalityParams,
   CompositionClaimScope,
@@ -876,7 +879,7 @@ export function buildInsertEdgeIfEndpointsLiveWithCardinalityClaim(
   const { edgeClaims, edges, nodes } = tables;
   const claimsName = getTableName(edgeClaims);
   const nodeTable = quotedTableName(getTableName(nodes));
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
   const columns = edgeColumnList(edges);
   const target = edgeCardinalityClaimTarget(claim);
 

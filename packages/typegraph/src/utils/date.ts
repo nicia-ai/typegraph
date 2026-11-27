@@ -12,7 +12,6 @@ import {
   INVERTED_VALIDITY_WINDOW_CODE,
   ValidationError,
 } from "../errors";
-import { isPlainObject } from "./object";
 
 /**
  * The time value a `Date` holds, read from the object itself rather than
@@ -44,30 +43,35 @@ export function dateInstantText(date: Date): string {
 }
 
 /**
- * `value` with every `Date` it holds — itself, an array element, or a
- * plain-object value at any depth — replaced by a plain `Date` of the instant
- * it holds ({@link dateTimeValue}), so every later serializer (`JSON.stringify`
- * on a backend's write, a uniqueness key, a hook) reads that instant whatever
- * the caller's object carried. Returns `value` itself when it holds no `Date`;
- * any other object is returned untouched.
+ * The JSON replacer behind {@link storedJsonText}. `JSON.stringify` calls a
+ * value's own `toJSON` before a replacer sees it, so the replacer reads the
+ * original from its holder: a `Date` there is written as the instant it
+ * holds, and an invalid one as `null`, as `Date.prototype.toJSON` writes it.
  */
-export function withPlainDates(value: unknown): unknown {
-  if (value instanceof Date) return new Date(dateTimeValue(value));
-  if (Array.isArray(value)) {
-    const items = value as readonly unknown[];
-    const replaced = items.map((item) => withPlainDates(item));
-    return replaced.some((item, index) => item !== items[index]) ? replaced : (
-        value
-      );
-  }
-  if (!isPlainObject(value)) return value;
-  const entries = Object.entries(value).map(
-    ([key, element]) => [key, withPlainDates(element)] as const,
-  );
-  const changed = entries.some(([key, element]) => element !== value[key]);
-  // `Object.fromEntries` defines own data properties, so a `__proto__` key
-  // stays a property rather than reaching the setter.
-  return changed ? Object.fromEntries(entries) : value;
+function storedDateReplacer(
+  this: Readonly<Record<string, unknown>>,
+  key: string,
+  value: unknown,
+): unknown {
+  const original = this[key];
+  if (!(original instanceof Date)) return value;
+  if (Number.isFinite(dateTimeValue(original)))
+    return dateInstantText(original);
+  // eslint-disable-next-line unicorn/no-null -- JSON `null`, what `Date.prototype.toJSON` writes for an invalid `Date`
+  return null;
+}
+
+/**
+ * `value` as the JSON text the store persists: `JSON.stringify`, except that
+ * every `Date` it holds (itself, an array element, or a value at any depth) is
+ * written as {@link dateInstantText} of the instant it holds, never through a
+ * `toJSON` or `toISOString` the caller's object carries. This is where a
+ * validated `Date` becomes stored text on every built-in backend write and in
+ * every uniqueness key, so the props the schema returned are handed on
+ * untouched until then.
+ */
+export function storedJsonText(value: unknown): string {
+  return JSON.stringify(value, storedDateReplacer);
 }
 
 /**

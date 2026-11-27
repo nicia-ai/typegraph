@@ -1,4 +1,5 @@
 import { ConfigurationError, UnsupportedPredicateError } from "../../errors";
+import { dateInstantText } from "../../utils/date";
 import {
   assertPortableCountDistinctValueType,
   assertPortableScalarValueType,
@@ -74,7 +75,7 @@ function compileLiteral(
   dialect: DialectAdapter,
 ): SqlFragment {
   if (value === undefined) return sql.raw("NULL");
-  if (value instanceof Date) return sql`${value.toISOString()}`;
+  if (value instanceof Date) return sql`${dateInstantText(value)}`;
   if (typeof value === "object") return sql`${JSON.stringify(value)}`;
   if (typeof value === "boolean") return dialect.booleanLiteral(value);
   if (typeof value === "number") {
