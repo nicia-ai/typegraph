@@ -1810,16 +1810,17 @@ export class ExecutableQuery<
     );
   }
 
-  /** Decodes `cursor` and refuses it unless it positions this keyset. */
+  /**
+   * Decodes `cursor` and refuses it unless it positions this keyset; its field
+   * values come back in the form their position compares.
+   */
   #decodeCursorFor(cursor: string | undefined): CursorData | undefined {
     if (cursor === undefined) return undefined;
-    const cursorData = decodeCursor(cursor);
-    validateKeysetCursor(
-      cursorData,
+    return validateKeysetCursor(
+      decodeCursor(cursor),
       this.#keyset(),
       this.#searchCursorBinding(),
     );
-    return cursorData;
   }
 
   /**

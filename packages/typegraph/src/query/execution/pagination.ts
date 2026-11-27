@@ -61,15 +61,16 @@ export function parsePaginateOptions(options: PaginateOptions): {
 }
 
 /**
- * Validates cursor data against ORDER BY columns.
+ * Validates cursor data against ORDER BY columns, returning it in canonical
+ * form ({@link validateCursorColumns}).
  */
 export function validateCursor(
   cursorData: CursorData | undefined,
   orderBy: readonly OrderSpec[],
-): void {
-  if (cursorData) {
-    validateCursorColumns(cursorData, orderBy);
-  }
+): CursorData | undefined {
+  return cursorData === undefined ? undefined : (
+      validateCursorColumns(cursorData, orderBy)
+    );
 }
 
 /**

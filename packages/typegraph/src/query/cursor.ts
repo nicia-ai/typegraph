@@ -305,62 +305,82 @@ export function buildCursorFromValues(
 }
 
 /**
- * Validates that cursor columns match the query's ORDER BY columns.
+ * Validates that cursor columns match the query's ORDER BY columns, and
+ * returns the cursor with each value in its field's canonical form
+ * ({@link canonicalCursorFieldValue}), the form its position compares.
  *
  * @throws ValidationError if columns don't match
  */
 export function validateCursorColumns(
   cursorData: CursorData,
   orderSpecs: readonly OrderSpec[],
-): void {
+): CursorData {
   validateCursorColumnIds(
     cursorData,
     orderSpecs.map((spec) => buildColumnId(spec)),
   );
-  for (const [index, spec] of orderSpecs.entries()) {
-    validateCursorFieldValue(cursorData.vals[index], spec, buildColumnId(spec));
-  }
+  return {
+    ...cursorData,
+    vals: orderSpecs.map((spec, index) =>
+      requireCursorFieldValue(
+        cursorData.vals[index],
+        spec,
+        buildColumnId(spec),
+      ),
+    ),
+  };
 }
 
 /**
- * Whether `value` is a value a cursor can carry for a key over `spec`'s
- * field: NULL, or a JSON scalar of the field's value type (any JSON value
- * for a field of unknown type, which may hold one). A cursor holding anything
- * else was not issued for this query, and comparing it would be a database
- * error (a text compared as a PostgreSQL number) or a position among values
- * of another type.
+ * The value a cursor carries for a key over `spec`'s field, in the form its
+ * position compares, or `undefined` when the cursor cannot have been issued
+ * for this field: NULL, or a JSON scalar of the field's value type (any JSON
+ * value for a field of unknown type, which may hold one). Accepts every form
+ * a terminal has issued: SQLite's `batchOnce()` carries a boolean as `0`/`1`,
+ * read back here as `false`/`true` so every dialect binds a boolean. A
+ * cursor holding anything else was not issued for this query, and comparing
+ * it would be a database error (a text compared as a PostgreSQL number) or a
+ * position among values of another type.
  */
-function isCursorFieldValue(value: unknown, spec: OrderSpec): boolean {
-  if (value === null) return true;
+function canonicalCursorFieldValue(
+  value: unknown,
+  spec: OrderSpec,
+): Readonly<{ value: unknown }> | undefined {
+  if (value === null) return { value };
   const valueType =
     spec.field.__type === "field_ref" ? spec.field.valueType : undefined;
   switch (valueType) {
     case "string":
     case "date": {
-      return typeof value === "string";
+      return typeof value === "string" ? { value } : undefined;
     }
     case "number": {
-      return typeof value === "number" && Number.isFinite(value);
+      return typeof value === "number" && Number.isFinite(value) ?
+          { value }
+        : undefined;
     }
     case "boolean": {
-      return typeof value === "boolean";
+      if (typeof value === "boolean") return { value };
+      if (value === 0 || value === 1) return { value: value === 1 };
+      return undefined;
     }
     case "array":
     case "object":
     case "embedding":
     case "unknown":
     case undefined: {
-      return true;
+      return { value };
     }
   }
 }
 
-function validateCursorFieldValue(
+function requireCursorFieldValue(
   value: unknown,
   spec: OrderSpec,
   columnId: string,
-): void {
-  if (isCursorFieldValue(value, spec)) return;
+): unknown {
+  const canonical = canonicalCursorFieldValue(value, spec);
+  if (canonical !== undefined) return canonical.value;
   throw new ValidationError(
     `Cursor value for column ${columnId} is not a value of its field`,
     {
@@ -650,7 +670,8 @@ function refuseSearchCursor(message: string): never {
  * {@link SEARCH_CURSOR_MISMATCH}: a cursor issued before this check existed, by
  * another search, by a query that is not a search, or by another dialect. A
  * query that is not a search refuses a search's cursor the same way. Field
- * columns are then checked as for any cursor ({@link validateCursorColumns}).
+ * columns are then checked as for any cursor ({@link validateCursorColumns}),
+ * and the cursor is returned with them in their canonical form.
  *
  * @throws ValidationError if the cursor does not position this keyset
  */
@@ -658,7 +679,7 @@ export function validateKeysetCursor(
   cursorData: CursorData,
   keys: readonly KeysetKey[],
   search: SearchCursorBinding | undefined,
-): void {
+): CursorData {
   if (search === undefined) {
     if (cursorData.s !== undefined)
       refuseSearchCursor(
@@ -677,13 +698,18 @@ export function validateKeysetCursor(
     cursorData,
     keys.map((key) => keysetColumnId(key)),
   );
-  for (const [index, key] of keys.entries()) {
-    if (key.kind === "field")
-      validateCursorFieldValue(
-        cursorData.vals[index],
-        key.spec,
-        keysetColumnId(key),
-      );
-  }
-  if (search !== undefined) keysetPositionValues(cursorData, keys, search);
+  const canonical: CursorData = {
+    ...cursorData,
+    vals: keys.map((key, index) =>
+      key.kind === "field" ?
+        requireCursorFieldValue(
+          cursorData.vals[index],
+          key.spec,
+          keysetColumnId(key),
+        )
+      : cursorData.vals[index],
+    ),
+  };
+  if (search !== undefined) keysetPositionValues(canonical, keys, search);
+  return canonical;
 }
