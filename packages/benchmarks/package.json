@@ -27,6 +27,8 @@
     "bench:write:file": "tsx src/write-bench.ts --storage=file",
     "prebench:write:postgres": "pnpm --filter @nicia-ai/typegraph build",
     "bench:write:postgres": "tsx src/write-bench.ts --backend=postgres",
+    "prebench:transaction-overhead": "pnpm --filter @nicia-ai/typegraph build",
+    "bench:transaction-overhead": "tsx src/transaction-overhead-bench.ts",
     "prebench:acyclicity": "pnpm --filter @nicia-ai/typegraph build",
     "bench:acyclicity": "tsx src/acyclicity-bench.ts",
     "prebench:acyclicity:file": "pnpm --filter @nicia-ai/typegraph build",

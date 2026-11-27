@@ -214,3 +214,19 @@ compares two 20-sample passes of overlapping full payloads, disjoint payloads,
 and identity-only results against a pooled PostgreSQL service. It records the
 client and server placement, an observed simple-query round trip, and the raw
 latency distributions without publishing the connection string.
+
+## Transaction overhead benchmark
+
+Measure the fixed cost `store.transaction` adds around the work it runs, on an
+in-memory better-sqlite3 store: 5,000 empty transactions, and 5,000
+transactions that each create one node. Each loop runs two unmeasured rounds
+and nine measured ones, each on a fresh store, and reports the median and the
+fastest round.
+
+```bash
+pnpm --filter @nicia-ai/typegraph-benchmarks bench:transaction-overhead
+```
+
+Compare two revisions by running it on each, on the same machine, with
+nothing else running: the per-transaction cost is a few microseconds, so a
+loaded machine hides a difference of that size.
