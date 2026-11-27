@@ -7361,6 +7361,10 @@ type RelevanceComparisonPredicate = Readonly<{
     source: RelevanceSortSource;
     op: "eq" | "gt" | "lt";
     value: string | number;
+}> | Readonly<{
+    __type: "relevance_comparison";
+    source: RelevanceSortSource;
+    op: "isNull" | "isNotNull";
 }>;
 
 // @public
@@ -7368,6 +7372,14 @@ type RelevanceSortSource = "fulltext_rank" | "vector_distance" | "hybrid_score" 
 
 // @public (undocumented)
 type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable" | "getPendingKindRemovals" | "getAllKindRemovals" | "recordKindRemoval" | "ensureReconciliationMarkersTable" | "getReconciliationMarker" | "setReconciliationMarker">;
+
+// @public
+type RepeatableApproximateSearch = Readonly<{
+    repeatable: true;
+}> | Readonly<{
+    repeatable: false;
+    reason: string;
+}>;
 
 // @public (undocumented)
 interface RequiredEdgeCollectionLookup<G extends GraphDef = GraphDef> {
@@ -9760,6 +9772,7 @@ type VectorCapabilities = Readonly<{
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
     searchFrontierTuning: VectorSearchFrontierTuning;
+    repeatableApproximateSearch: RepeatableApproximateSearch;
 }>;
 
 // @public

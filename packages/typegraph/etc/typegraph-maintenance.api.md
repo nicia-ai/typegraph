@@ -6226,6 +6226,10 @@ type RelevanceComparisonPredicate = Readonly<{
     source: RelevanceSortSource;
     op: "eq" | "gt" | "lt";
     value: string | number;
+}> | Readonly<{
+    __type: "relevance_comparison";
+    source: RelevanceSortSource;
+    op: "isNull" | "isNotNull";
 }>;
 
 // @public
@@ -6259,6 +6263,14 @@ export type RepairRelation = "nodes" | "edges" | "recordedNodes" | "recordedEdge
 
 // @public
 export type RepairRelationScope = "live" | "live-and-recorded";
+
+// @public
+type RepeatableApproximateSearch = Readonly<{
+    repeatable: true;
+}> | Readonly<{
+    repeatable: false;
+    reason: string;
+}>;
 
 // @public (undocumented)
 interface RequiredEdgeCollectionLookup<G extends GraphDef = GraphDef> {
@@ -8330,6 +8342,7 @@ type VectorCapabilities = Readonly<{
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
     searchFrontierTuning: VectorSearchFrontierTuning;
+    repeatableApproximateSearch: RepeatableApproximateSearch;
 }>;
 
 // @public

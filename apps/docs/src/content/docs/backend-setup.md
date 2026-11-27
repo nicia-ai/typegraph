@@ -2975,6 +2975,7 @@ TypeGraph choosing separate query semantics per backend:
 | Vector metric `inner_product`                          | ✗                                                 | ✓                                          | Rejected at compile time on SQLite (`sqlite-vec`/`libsql-native` expose `cosine` + `l2`; `pgvector` adds `inner_product`) |
 | Vector index type `ivfflat`                            | ✗                                                 | ✓                                          | Index declaration is **skipped** on SQLite (`indexTypes`: `hnsw`/`none` vs `hnsw`/`ivfflat`/`none`)                       |
 | Filtered approximate search **guarantees** a full page | ✓ `sqlite-vec` / ✗ `libsql-native`                | ✗ (`pgvector` recovers, but is bounded)    | Only `sqlite-vec` guarantees it; the others can return **fewer than `limit`** rows under heavy filtering — see below      |
+| Repeatable approximate search (`vector.repeatableApproximateSearch`) | ✓ `sqlite-vec` / ✗ `libsql-native`           | ✓ (`pgvector`)                             | libSQL's DiskANN starts each search from a random node, so an approximate `execute()` can return different neighbors on an unchanged database. `paginate()`, `page()` and `stream()` refuse an approximate search there with `UnsupportedBackendCapabilityError` (`details.capability` `vector.repeatableApproximateSearch`); exact search pages on every backend |
 | Per-query fulltext `language` override                 | ✗                                                 | ✓                                          | Throws on SQLite — FTS5's tokenizer is fixed at table-create time; `tsvector` accepts a regconfig per query               |
 | HNSW `efSearch` query tuning                           | ✗                                                 | ✓ transactional HNSW drivers               | Refused, never ignored: `UnsupportedBackendCapabilityError` with `details.capability` `vector.searchFrontierTuning` on **any** SQLite backend (vector and hybrid alike — neither `sqlite-vec`'s `vec0` KNN nor `libsql-native`'s DiskANN has a per-search frontier), and on transaction-less Postgres or a non-HNSW slot |
 | Bounded planner-statistics sampling                    | ✓ standard connections / ✗ D1 and Durable Objects | Native `ANALYZE` sampling                  | Restricted SQLite skips `analysis_limit` but still attempts scoped `ANALYZE`. Performance only — same results             |
@@ -3040,6 +3041,12 @@ Vector and fulltext capabilities are populated from the configured strategy, so 
 bundled strategies (`sqlite-vec`/`libsql-native`/`pgvector`, `fts5`/`tsvector`). A custom strategy advertising
 different `metrics`/`indexTypes`/`filteredApproximateSearch`/`searchFrontierTuning` shifts these rows accordingly —
 always check `backend.capabilities` at runtime rather than hard-coding the dialect.
+
+`repeatableApproximateSearch` is **required** too: `{ repeatable: true }` promises that an approximate search returns the
+same rows on every execution over an unchanged database, which cursor pagination of one needs, and
+`{ repeatable: false, reason }` makes paging an approximate search a typed refusal naming the reason. A strategy's
+`buildSearch` must also break distance ties by node id wherever its engine takes an order (`compileRelevanceCandidateOrder`)
+and keep zero-norm embeddings out of a cosine search (`vectorDefinedDistanceConditions`), as the bundled strategies do.
 
 `searchFrontierTuning` is **required** on a vector strategy's capabilities, so a strategy must state whether it has a
 per-search ANN frontier knob rather than inheriting silence. It is a discriminated union: `{ tunable: true, parameter,

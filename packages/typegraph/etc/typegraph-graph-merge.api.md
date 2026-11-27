@@ -8188,6 +8188,10 @@ type RelevanceComparisonPredicate = Readonly<{
     source: RelevanceSortSource;
     op: "eq" | "gt" | "lt";
     value: string | number;
+}> | Readonly<{
+    __type: "relevance_comparison";
+    source: RelevanceSortSource;
+    op: "isNull" | "isNotNull";
 }>;
 
 // @public
@@ -8198,6 +8202,14 @@ type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable
 
 // @public
 export function reopenDurableBranch<G extends GraphDef, TStoreDescriptor extends DurableStoreDescriptor = DurableStoreDescriptor>(graph: G, descriptor: DurableBranchDescriptor<TStoreDescriptor>, strategy: DurableWorkingCopyStrategy<G, TStoreDescriptor>): Promise<Result<DurableGraphBranch<G>, BranchError>>;
+
+// @public
+type RepeatableApproximateSearch = Readonly<{
+    repeatable: true;
+}> | Readonly<{
+    repeatable: false;
+    reason: string;
+}>;
 
 // @public
 export type ReportNodeIdentity = Readonly<{
@@ -10477,6 +10489,7 @@ type VectorCapabilities = Readonly<{
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
     searchFrontierTuning: VectorSearchFrontierTuning;
+    repeatableApproximateSearch: RepeatableApproximateSearch;
 }>;
 
 // @public

@@ -277,10 +277,12 @@ const first = await results.paginate({ first: 20 });
 const second = await results.paginate({ first: 20, after: first.nextCursor });
 ```
 
-The cursor carries the boundary row's relevance values as the database rendered them (PostgreSQL's
-text for the value, SQLite's 17 significant digits), with its `orderBy()` values and its identity,
-and the next page compares against them exactly, so rows with equal or nearly equal scores are not
-skipped or repeated at a page boundary. PostgreSQL's float text is exact at its default
+The cursor carries the boundary row's relevance values as the database rendered them (on
+PostgreSQL the text of the value as `double precision`, the one type every relevance key sorts
+and compares in there; on SQLite 17 significant digits), with its `orderBy()` values and its
+identity, and the next page compares against them exactly, so rows with equal or nearly equal
+scores are not skipped or repeated at a page boundary. A relevance value that is NULL sorts after
+every value, as the least relevant, and the cursor carries it as NULL. PostgreSQL's float text is exact at its default
 `extra_float_digits` of 1 or above; in a session that lowers it, issuing a search cursor is refused
 with a `ConfigurationError` whose `details.code` is `SEARCH_CURSOR_KEY_UNAVAILABLE`. A search whose
 rows are groups (`groupByNode()`) cannot be paged and is refused with
@@ -288,9 +290,21 @@ rows are groups (`groupByNode()`) cannot be paged and is refused with
 
 The cursor filters the completed match rows after the search has ranked its candidates and taken
 its top `k`, so every page ranks the same candidates `execute()` ranks and no page reaches past the
-top `k`. An approximate `similarTo(..., { approximate: true })` pages the candidates its own
-`execute()` returns, including a short result where the backend's filtered approximate search can
-under-fill (`backend.capabilities.vector.filteredApproximateSearch.guaranteesFullPage` is `false`).
+top `k`. Every top-`k` cut breaks ties by node id, inside the engine's own search where the
+engine takes an order (pgvector, every exact scan), so a cut inside a tie keeps the same rows on
+every execution.
+
+An approximate `similarTo(..., { approximate: true })` pages the candidates its own `execute()`
+returns, including a short result where the backend's filtered approximate search can under-fill
+(`backend.capabilities.vector.filteredApproximateSearch.guaranteesFullPage` is `false`). That
+needs a search that returns the same candidates on every run, which
+`backend.capabilities.vector.repeatableApproximateSearch` declares. pgvector and sqlite-vec are
+repeatable (sqlite-vec's KNN takes tied neighbors in its storage order rather than by node id).
+libSQL's DiskANN is not: `vector_top_k` starts each search from a randomly chosen node, so two
+`execute()` calls of one approximate search can return different neighbors, and `paginate()`,
+`page()` and `stream()` refuse it with an `UnsupportedBackendCapabilityError` whose
+`details.capability` is `vector.repeatableApproximateSearch`. Drop `approximate` to page the exact
+search there.
 
 **Writes between pages.** Each page runs the search again. Without writes between pages the walk is
 exact. A write that changes which rows match, or how relevant they are, gives a weaker guarantee
@@ -305,10 +319,15 @@ must reflect one state of the data.
 **Refused cursors.** A search's cursor records the search it was issued for: each predicate's query
 text or embedding, `k`, minimum score, metric and approximate retrieval, and the hybrid fusion.
 `paginate()` and `page()` refuse a cursor issued for another search, for a query without a search,
-or by another backend dialect, and a search query's cursor issued by a release before relevance
-keys were part of the cursor, with a `ValidationError` whose issue `code` is
-`SEARCH_CURSOR_MISMATCH`. Start again without a cursor. A query without a search issues and accepts
-the same cursors as before.
+or by another backend dialect, a search query's cursor issued by a release before relevance keys
+were part of the cursor, and a cursor whose relevance value is not one the backend renders or is
+outside the range its key type holds, with a `ValidationError` whose issue `code` is
+`SEARCH_CURSOR_MISMATCH`. Start again without a cursor. The search is recorded as a 128-bit
+digest. A query without a search issues the same cursors as before.
+
+On every query, a cursor value that is not a value of its field (a string for a numeric field, an
+object for a string field) is refused with a `ValidationError` before the query reaches the
+database.
 
 ### Recursive traversals are not paginated
 

@@ -1507,6 +1507,9 @@ export type CompiledStatementSql = IntentSql<"statement">;
 export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
+export function compileRelevanceCandidateOrder(value: SqlFragment, direction: "asc" | "desc", nodeId: SqlFragment): SqlFragment;
+
+// @public
 export type CompositionClaimScope = Readonly<{
     kind: "composition";
     holders: readonly Readonly<{
@@ -1971,6 +1974,7 @@ export interface DialectAdapter {
     readonly partitionedRowsJsonArrays?: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string, partitionColumn: string) => SqlFragment;
     readonly quoteIdentifier: (this: void, name: string) => string;
     readonly relevanceCursorKey: Readonly<{
+        value: (this: void, expression: SqlFragment) => SqlFragment;
         select: (this: void, expression: SqlFragment) => SqlFragment;
         bind: (this: void, text: string) => string | number | undefined;
     }>;
@@ -3843,6 +3847,14 @@ export type RepairRelation = "nodes" | "edges" | "recordedNodes" | "recordedEdge
 export type RepairRelationScope = "live" | "live-and-recorded";
 
 // @public
+export type RepeatableApproximateSearch = Readonly<{
+    repeatable: true;
+}> | Readonly<{
+    repeatable: false;
+    reason: string;
+}>;
+
+// @public
 export type RequiredExtrasOf<D extends CapabilityBundleDefinition, Op extends OperationNames<D>> = Extract<D["operations"][number], {
     operation: Op;
 }> extends ({
@@ -5204,7 +5216,11 @@ export type VectorCapabilities = Readonly<{
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
     searchFrontierTuning: VectorSearchFrontierTuning;
+    repeatableApproximateSearch: RepeatableApproximateSearch;
 }>;
+
+// @public
+export function vectorDefinedDistanceConditions(distanceExpression: SqlFragment, metric: VectorMetric): readonly SqlFragment[];
 
 // @public
 export type VectorIndexDeclaration = Readonly<{

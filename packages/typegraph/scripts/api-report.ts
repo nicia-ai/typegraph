@@ -1121,6 +1121,11 @@ const EMPTY_FORGOTTEN_EXPORT_DEBT: ForgottenExportDebt = {
 // +2 each on `.`, `./interchange`, `./profiler`, `./schema`, `./graph-merge`,
 // `./provenance`, `./store`, `./identity`, `./maintenance`, `./sqlite/local`,
 // `./postgres/pglite` and `./adapters/drizzle/postgres/working-copy`.
+// Repeatable approximate search: `VectorCapabilities` gains the required
+// `repeatableApproximateSearch` declaration, typed
+// `RepeatableApproximateSearch`. `./backend` exports it directly
+// (unchanged); every other entrypoint that renders `VectorCapabilities`
+// reaches it as it reaches `VectorSearchFrontierTuning` (+1 each).
 const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Meta-edge removal: removing the public `InferenceType`
   // union (never re-exported from most entrypoints, only pulled in
@@ -1297,12 +1302,12 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // measured set reproduces its previous fingerprint. `./core` and
   // `./backend` exported it directly and lose the export instead.
   ".": {
-    count: 1093,
-    sha256: "849c06f96056c8e9ed0a3e47b8e124a556c2c318e0d1445e1de71cb62f0779ba",
+    count: 1094,
+    sha256: "93fd50f40e067fa0c692f0994651047e0524454d766577da27207677936c920f",
   },
   "./adapters/drizzle/engine": {
-    count: 352,
-    sha256: "d473a1d4bb0e71864446964ad17e34fa6a2fa90a1ecefbedf1d0ca6908b2be40",
+    count: 353,
+    sha256: "0fc3217343b9a95d607acc6a01b4341e1c75d009b8c5d5d01825982c63656777",
   },
   // #956: the Drizzle index-table types its builders name
   // (`EdgeIndexTable`, `NodeIndexTable`, `NamedSqlWrapper`) are now exported
@@ -1313,8 +1318,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     sha256: "7949327562f8f8bfd738f6439a424d88ccd82ac6182724dc755f0eca5bad2944",
   },
   "./adapters/drizzle/postgres": {
-    count: 280,
-    sha256: "f61ae5d28192f778bd0804bbdf1ae363dbc08ed16ed99fb71386771872166a65",
+    count: 281,
+    sha256: "0459821c808ca7074d1ce18bd88b198c9503a53eba7ddaa823b94cce7ac5478e",
   },
   // The dedicated working-copy adapter exposes Store and durable strategy
   // signatures, making their portable implementation types transitively
@@ -1353,24 +1358,24 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `./postgres/pglite` and `./sqlite/local` 972→975, `./profiler`
   // 968→971, `./provenance` 981→984).
   "./adapters/drizzle/postgres/working-copy": {
-    count: 1010,
-    sha256: "d3566e0aba737918c762a7e28d92be124aa3f31012d20d5cc19f1691c709c0e8",
+    count: 1011,
+    sha256: "d44ea1b083e16a6a3d62741f3316071cd36702b5dca5bd5f77c284190337c643",
   },
   "./adapters/drizzle/postgres/pglite": {
-    count: 284,
-    sha256: "00069af945b67c521ece4cd92ace5d1788df5990c73c7dad1ed6ee0009525c3b",
+    count: 285,
+    sha256: "1f7f05df1fbe699b0df431c4a3c4f27ec4251cb831e2266f7f4e301d67f6d8ce",
   },
   "./adapters/drizzle/sqlite": {
-    count: 280,
-    sha256: "f61ae5d28192f778bd0804bbdf1ae363dbc08ed16ed99fb71386771872166a65",
+    count: 281,
+    sha256: "0459821c808ca7074d1ce18bd88b198c9503a53eba7ddaa823b94cce7ac5478e",
   },
   "./adapters/drizzle/sqlite/libsql": {
-    count: 284,
-    sha256: "9afe991b4b858e2248c84ac36a8f7b8aabb835832bd564e0e7e1e036e9a18bc6",
+    count: 285,
+    sha256: "aff56c6e7d675630bfb849a390ee026d8d6e24649d551645ca8ce1948eedcad6",
   },
   "./adapters/drizzle/sqlite/local": {
-    count: 284,
-    sha256: "9afe991b4b858e2248c84ac36a8f7b8aabb835832bd564e0e7e1e036e9a18bc6",
+    count: 285,
+    sha256: "aff56c6e7d675630bfb849a390ee026d8d6e24649d551645ca8ce1948eedcad6",
   },
   "./backend": {
     count: 26,
@@ -1406,36 +1411,36 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // Exact apply receipts expose TransactionReceipt as a named export here:
   // measured forgotten-export debt drops from 874 to 873, with no new symbols.
   "./graph-merge": {
-    count: 993,
-    sha256: "adda7f223af9bdd7c457578781936b292ff8f371c5ad88eb3e308c8935d83a5a",
+    count: 994,
+    sha256: "89df2ef8248552752abbb2392cbc0bd6c00b098f7c6cf97ed7c84681cab616f4",
   },
   "./identity": {
-    count: 962,
-    sha256: "7b68eecdc2f48ad92ef93999314a9985b379a1b2f8732b5f950903a2f887eb92",
+    count: 963,
+    sha256: "d91322853544e50ff130e9b5b951f8031b8acbcae874f4d552352b5dae87c4cf",
   },
   "./indexes": {
     count: 31,
     sha256: "ade8e22b2fbc66f14bbc5eb4a01414c226200488b56a3096e425668a1a7fb356",
   },
   "./interchange": {
-    count: 989,
-    sha256: "5ed8a4c303b23ef928db7fd1aa21f696f9e2080a5b39622f2f18dc892c04ffd4",
+    count: 990,
+    sha256: "775a9603d6eea1dc7f136012b440d2215f561b223143cc5920392e6986a8d853",
   },
   "./maintenance": {
-    count: 997,
-    sha256: "f08089bf745940548a41e4118ddb0fe24dbcca933516c68c8f27ad4a026a8e43",
+    count: 998,
+    sha256: "1618303e23a50ee3162dcc70116e083e91df9bd61ce08ef27a54593c4dc75420",
   },
   "./postgres/pglite": {
-    count: 995,
-    sha256: "6e87770a02ef9026d079c61d214290e584e992f4f7a522950225762e357816e1",
+    count: 996,
+    sha256: "74226010fe85c3a310850b220724bf2ff29c22ab90b521250b724467e9cf0c6d",
   },
   "./profiler": {
-    count: 989,
-    sha256: "5ed8a4c303b23ef928db7fd1aa21f696f9e2080a5b39622f2f18dc892c04ffd4",
+    count: 990,
+    sha256: "775a9603d6eea1dc7f136012b440d2215f561b223143cc5920392e6986a8d853",
   },
   "./provenance": {
-    count: 997,
-    sha256: "55235f08a8ef1d55fb4091d998d683ba1a26ea28913501d7837846bfd8d580e7",
+    count: 998,
+    sha256: "fafc0e65aeb99ba5760a299e4e37acea5cd46762f4cd040f3fbb638633385048",
   },
   // Declared-alias fragments (#863): `QueryFragment`'s call signature and
   // brand, and `composeFragments`' signature, are typed by private helpers in
@@ -1450,8 +1455,8 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // `FlexibleQueryFragment` drops `MergeAliasMaps` and `MergeEdgeAliasMaps`
   // (-2). Delta: `./query` 520→543; no other entrypoint moved.
   "./query": {
-    count: 327,
-    sha256: "15886b3950cc2938daf43648b9e14b8844f8c2860f3563dbcf1f43255e3056c3",
+    count: 328,
+    sha256: "edbb8ee69fc6ebec226421f4af7799b96707abc641731126c88989020c52859b",
   },
   // Identity transition log: `ensureSchema`'s inline `{ preloaded?: ... }`
   // options type was extracted into the named (but non-exported)
@@ -1463,16 +1468,16 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
   // signature does. +1, only on `./schema` — the sole entrypoint that
   // names `ensureSchema`.
   "./schema": {
-    count: 994,
-    sha256: "90436450908e983bd0c5059194a8b84bc39e421019822e5f7110070ec5e127c4",
+    count: 995,
+    sha256: "2a51bf7b08179ef5580cdc98374afa4115b06af5f37cdceefaeeb3391e179dbb",
   },
   "./sqlite/local": {
-    count: 995,
-    sha256: "6e87770a02ef9026d079c61d214290e584e992f4f7a522950225762e357816e1",
+    count: 996,
+    sha256: "74226010fe85c3a310850b220724bf2ff29c22ab90b521250b724467e9cf0c6d",
   },
   "./store": {
-    count: 719,
-    sha256: "de84ab5c56a3adb141390f96a161f01a38f23dc4041113373225731b2341aa41",
+    count: 720,
+    sha256: "2a4136022947998a305732f76c895a9432f19f7e0b9b0089d7c4a4c5009dca20",
   },
 };
 
