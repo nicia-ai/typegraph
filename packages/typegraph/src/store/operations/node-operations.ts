@@ -130,6 +130,7 @@ import {
   compileIndexWhere,
   compileNodeIndexFieldKeys,
   type IndexCompilationContext,
+  pairIndexFieldValueTypes,
 } from "../../indexes/compiler";
 import { type NodeIndexDeclaration } from "../../indexes/types";
 import { type ValueType } from "../../query/ast";
@@ -8639,7 +8640,10 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
   // PostgreSQL also cannot build the expression index such a key needs (its
   // text-to-timestamptz cast is not immutable). Declare the gap rather than
   // return backend-dependent results.
-  if (index.fieldValueTypes.includes("date")) {
+  const lookupFields = pairIndexFieldValueTypes(index).filter(
+    (field) => field.position === "key",
+  );
+  if (lookupFields.some((field) => field.valueType === "date")) {
     throw new ConfigurationError(
       `bulkFindByIndex does not support date-typed key fields on index "${indexName}" (node kind "${kind}")`,
       { indexName, kind },
@@ -8675,14 +8679,9 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
 
   // 1. Extract + validate each input's indexed-field probe tuple.
   const probes: unknown[][] = items.map((item) =>
-    index.fields.map((pointer, position) => {
+    lookupFields.map(({ pointer, valueType }) => {
       const value = resolveJsonPointer(item.props, pointer);
-      validateIndexProbeValue(
-        value,
-        index.fieldValueTypes[position],
-        pointer,
-        kind,
-      );
+      validateIndexProbeValue(value, valueType, pointer, kind);
       return value;
     }),
   );

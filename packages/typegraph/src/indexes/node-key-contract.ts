@@ -13,6 +13,38 @@ export function parseNodeIndexKeyDirection(
   return value === "asc" || value === "desc" ? value : undefined;
 }
 
+/**
+ * The one decision of whether a relational index declaration pairs every
+ * lookup and covering field with exactly one value type. Returns the refusal
+ * message, or `undefined` when both pairs of arrays have equal lengths.
+ *
+ * {@link pairIndexFieldValueTypes} (`./compiler`) refuses with it before
+ * pairing, and the stored-schema parser refuses a document that fails it.
+ */
+export function validateIndexFieldValueTypes(
+  index: Readonly<{
+    name: string;
+    fields: readonly unknown[];
+    fieldValueTypes: readonly unknown[];
+    coveringFields: readonly unknown[];
+    coveringFieldValueTypes: readonly unknown[];
+  }>,
+): string | undefined {
+  if (
+    index.fields.length === index.fieldValueTypes.length &&
+    index.coveringFields.length === index.coveringFieldValueTypes.length
+  ) {
+    return undefined;
+  }
+  return (
+    `Index "${index.name}" has ${index.fields.length} fields but ` +
+    `${index.fieldValueTypes.length} field value types, and ` +
+    `${index.coveringFields.length} covering fields but ` +
+    `${index.coveringFieldValueTypes.length} covering field value types; ` +
+    "each field needs exactly one value type."
+  );
+}
+
 export function validateEdgeIndexKeysPresence(
   value: object,
 ): string | undefined {
