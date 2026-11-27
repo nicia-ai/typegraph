@@ -34,6 +34,7 @@ import { sql } from "../../../src/query/sql-fragment";
 import type * as OperationScopeModule from "../../../src/store/operation-scope";
 import {
   enterOperation,
+  enterTransactionOperation,
   openTransactionSession,
 } from "../../../src/store/operation-scope";
 import { createMutationWitness } from "../../../src/store/recorded-capture";
@@ -339,7 +340,9 @@ describe("engine-native recorded time: transaction receipts (PGlite)", () => {
     vi.resetModules();
     const foreign: typeof OperationScopeModule =
       await import("../../../src/store/operation-scope");
-    expect(foreign.enterTransactionOperation).not.toBe(enterOperation);
+    expect(foreign.enterTransactionOperation).not.toBe(
+      enterTransactionOperation,
+    );
 
     const outcome = await store.transactionWithReceipt(async (tx) => {
       await storeRuntime(store).applyIdentityMergeAtTarget(
