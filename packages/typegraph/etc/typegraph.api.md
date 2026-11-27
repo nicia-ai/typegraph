@@ -1642,9 +1642,6 @@ type DatabaseExpression<out T = unknown, out Scope extends string = string> = Re
     arrayElementType?: ValueType;
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
-    readPlan?: unknown;
-    dateOrigin?: "stated";
-    elementDateOrigins?: Readonly<Record<string, "stated">>;
     nullable: boolean;
     scopeIdentity: symbol;
     __value?: T;
@@ -3101,9 +3098,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, number>;
@@ -3116,9 +3110,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: boolean | undefined;
@@ -3132,9 +3123,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: number | undefined;
@@ -3151,9 +3139,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: number | undefined;
@@ -3166,9 +3151,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, boolean>;
@@ -3181,9 +3163,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, boolean>;
@@ -3196,9 +3175,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, boolean>;
@@ -3214,9 +3190,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, boolean>;
@@ -3229,9 +3202,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, boolean>;
@@ -3244,9 +3214,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: T | undefined;
@@ -3259,9 +3226,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: T | undefined;
@@ -3274,9 +3238,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, number>;
@@ -3289,9 +3250,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, boolean>;
@@ -3305,9 +3263,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: boolean | undefined;
@@ -3321,9 +3276,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: NullIfEitherUndefined<Left, Right, number>;
@@ -3336,9 +3288,6 @@ export const expr: {
         arrayElementType?: ValueType;
         elementValueType?: ValueType;
         elementFields?: Readonly<Record<string, ValueType>>;
-        readPlan?: unknown;
-        dateOrigin?: "stated";
-        elementDateOrigins?: Readonly<Record<string, "stated">>;
         nullable: boolean;
         scopeIdentity: symbol;
         __value?: number | undefined;
@@ -7338,13 +7287,12 @@ type RelationColumn = Readonly<{
     valueType: ValueType;
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
-    readPlan?: unknown;
     nullable: boolean;
     identity?: Readonly<{
         component: "id" | "kind";
         alias: string;
     }>;
-}> & Pick<DatabaseExpression, "dateOrigin" | "elementDateOrigins">;
+}>;
 
 // @public (undocumented)
 type RelationColumnContext<Fields extends RelationProjection> = {

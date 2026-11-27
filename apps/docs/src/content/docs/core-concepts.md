@@ -129,10 +129,19 @@ before. A read runs no part of the schema: it applies no parse, transform or
 refinement. So these still read as stored:
 
 - A `z.string()` or `z.iso.datetime()`, whose output is a string.
-- A union with a date member (`z.union([z.date(), z.string()])`), a tuple, and
-  a `.transform()`, even one that returns a `Date`. Declare
-  `z.string().pipe(z.coerce.date())` rather than
+- A union with a date member (`z.union([z.date(), z.string()])`), a tuple, a
+  `z.lazy()` (even `z.lazy(() => z.date())`), the values an object's
+  `.catchall(z.date())` admits, and a `.transform()`, even one that returns a
+  `Date`. Declare `z.string().pipe(z.coerce.date())` rather than
   `z.string().transform((text) => new Date(text))` when you want a `Date`.
+- A position a union's branches do not all type as a date. A union of
+  structured branches (`z.union([z.array(z.object({ at: z.date() })),
+  z.array(z.object({ at: z.string() }))])`) decodes only the positions every
+  branch types as a date, whichever branch comes first.
+- A position reached again through a recursive schema. In a getter-recursive
+  object (`get children() { return z.array(Tree) }`) the root's date
+  properties read as `Date`s, and everything under `children` reads as
+  stored.
 - Stored text that is not the canonical form the store writes (years 0001 to
   9999, UTC, milliseconds), for example text an older schema or raw SQL
   wrote. A read returns it exactly as stored and never an `Invalid Date`, and
@@ -147,12 +156,21 @@ A date you state in a query rather than store, an `expr.literal()` or
 column or `expr.collect()` as the `Date` you stated, including one outside the
 years 0001 to 9999. So does a `coalesce()` or `when()` whose every branch is
 such a date. A composition that may yield a stored date is decoded as stored
-text. Every date a query returns is the same value on SQLite and PostgreSQL
+text. A `coalesce()` or `when()` of structured properties, and a
+`union()`, `unionAll()`, `intersect()` or `except()` of two relations,
+decode a column's date positions only where every branch or operand types
+them as dates, so a row from one operand is never decoded under the other's
+schema. Every date a query returns is the same value on SQLite and PostgreSQL
 whatever the PostgreSQL session `TimeZone` is: `expr.collect()` elements and
 the date columns of a `batchOnce()` payload are emitted as canonical UTC text
 on both, and a scalar date column PostgreSQL casts to `timestamptz` decodes
 as the instant the engine returns, whether the driver hands back a `Date` or
-offset-bearing text (postgres-js).
+offset-bearing text (postgres-js), including an offset to the second, which
+PostgreSQL renders for an instant before a zone adopted standard time
+(`+00:09:21` in `Europe/Paris` before 1891). Legacy stored text PostgreSQL
+casts to a BC date has no canonical text, so `expr.collect()` and
+`batchOnce()` return it on PostgreSQL as its era-bearing UTC text
+(`0001-06-01T00:00:00.000Z BC`), never as a `Date` of a CE instant.
 
 A write that parses stored properties again first turns that stored text back
 into a `Date`, so an update that does not touch a date property leaves it as

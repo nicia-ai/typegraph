@@ -1266,9 +1266,6 @@ type DatabaseExpression<out T = unknown, out Scope extends string = string> = Re
     arrayElementType?: ValueType;
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
-    readPlan?: unknown;
-    dateOrigin?: "stated";
-    elementDateOrigins?: Readonly<Record<string, "stated">>;
     nullable: boolean;
     scopeIdentity: symbol;
     __value?: T;
@@ -6276,13 +6273,12 @@ type RelationColumn = Readonly<{
     valueType: ValueType;
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
-    readPlan?: unknown;
     nullable: boolean;
     identity?: Readonly<{
         component: "id" | "kind";
         alias: string;
     }>;
-}> & Pick<DatabaseExpression, "dateOrigin" | "elementDateOrigins">;
+}>;
 
 // @public (undocumented)
 type RelationColumnContext<Fields extends RelationProjection> = {
