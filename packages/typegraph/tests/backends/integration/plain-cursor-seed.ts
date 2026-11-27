@@ -5,8 +5,11 @@
  *
  * Every sortable value type a field of the shared integration graph holds:
  * booleans, numbers (zero, negative, integer, fraction, the largest safe
- * integer), strings (Latin-1, as the release before this one could only encode), dates, and NULL (an absent optional
- * field), with ties so the id tiebreak carries positions too.
+ * integer), strings, dates, and NULL (an absent optional field), with ties
+ * so the id tiebreak carries positions too. The strings are lowercase ASCII,
+ * which every collation orders alike: a plain `orderBy()` compares text in
+ * the database's collation, and the server PostgreSQL lanes resume fixtures
+ * captured on PGlite, whose collation is byte order.
  */
 
 export type PlainCursorSort = Readonly<{
@@ -38,7 +41,7 @@ export const PLAIN_CURSOR_SEED: readonly SeedRow[] = [
     kind: "Product",
     id: "p1",
     props: {
-      name: "Ångström",
+      name: "aardvark",
       price: 0,
       category: "c",
       inStock: true,
