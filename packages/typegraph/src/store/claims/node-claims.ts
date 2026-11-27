@@ -26,7 +26,10 @@ import {
   type UniqueConstraintBackend,
   type UniqueRow,
 } from "../../backend/types";
-import { uniqueConstraintKey } from "../../constraints";
+import {
+  uniqueConstraintKey,
+  uniqueConstraintReadsAnyField,
+} from "../../constraints";
 import { type UniqueConstraint } from "../../core/types";
 import {
   type ConfigurationError,
@@ -1093,6 +1096,12 @@ export type UniquenessUpdatePlan = Readonly<{
  *
  * There is deliberately no before-image: what the row held is read from the
  * claim relation by owner, never recomputed from the props it held.
+ *
+ * `statedFields` names the fields a write states over the row's stored props
+ * (an `update()` patch); it is absent when the write replaces the props
+ * wholesale. A live row's constraint that reads none of them
+ * ({@link uniqueConstraintReadsAnyField}) keeps its key and its applicability,
+ * so its claim is left as it stands with no statement.
  */
 export type NodeClaimTransition = Readonly<{
   kind: string;
@@ -1100,7 +1109,27 @@ export type NodeClaimTransition = Readonly<{
   restores: boolean;
   props: Record<string, unknown>;
   constraints: readonly UniqueConstraint[];
+  statedFields?: readonly string[];
 }>;
+
+/**
+ * The constraints whose claims a transition moves: every one for a restored
+ * row and for a wholesale replacement, and for a patch of a live row only
+ * those that read a field it states. The props a patch leaves alone are the
+ * stored ones, validated by the same schema, so a constraint reading none of
+ * them keys and applies as it did, whatever form its claim was keyed in.
+ */
+function transitionConstraints(
+  transition: NodeClaimTransition,
+): readonly UniqueConstraint[] {
+  if (transition.restores || transition.statedFields === undefined) {
+    return transition.constraints;
+  }
+  const stated = new Set(transition.statedFields);
+  return transition.constraints.filter((constraint) =>
+    uniqueConstraintReadsAnyField(constraint, stated),
+  );
+}
 
 /**
  * Decides one row's claim transition, writing nothing.
@@ -1110,9 +1139,11 @@ export type NodeClaimTransition = Readonly<{
  * live is kept rather than claimed again (so an update that moves no key
  * issues no reservation, and a backend that cannot roll a claim back with its
  * row is not refused for it). The release then gives up every other claim the
- * owner holds under the kind's uniqueness constraints — the key it moved off,
- * the claim of a constraint that stopped applying, and a claim an earlier
- * writer keyed in another form alike.
+ * owner holds under the constraints the transition moves — the key it moved
+ * off, the claim of a constraint that stopped applying, and a claim an earlier
+ * writer keyed in another form alike. A constraint a patch provably leaves
+ * alone ({@link transitionConstraints}) is neither probed nor released, so a
+ * patch that reads no constrained field issues no statement here.
  *
  * A restoring row additionally claims its disjointness entries fresh: its own
  * reservation was released when it was tombstoned, and nothing else could
@@ -1126,7 +1157,8 @@ export async function planNodeClaimTransition(
   ctx: UniquenessProbeContext,
   transition: NodeClaimTransition,
 ): Promise<UniquenessUpdatePlan> {
-  const { kind, id, props, constraints } = transition;
+  const { kind, id, props } = transition;
+  const constraints = transitionConstraints(transition);
   const claims: NodeClaimEntry[] = [];
   const keep: KeptUniqueClaim[] = [];
   for (const entry of nodeClaimEntries(

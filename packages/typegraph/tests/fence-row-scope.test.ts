@@ -167,29 +167,29 @@ type StoreFlavor = "history" | "revisionTracking" | "schemaManaged";
  * commit), and a history store also
  * retains that instant in the recorded-anchor log.
  *
- * The node's kind declares a unique constraint, so an update that keeps its
- * key probes that key and releases the owner's other claims (two statements),
- * and a soft delete releases its claims by owner without reading the row
- * again after its tombstone.
+ * The node's kind declares a unique constraint. The update's patch states no
+ * field the constraint reads, so it issues no claim statement (the count is
+ * the unconstrained update's), and a soft delete releases its claims by owner
+ * without reading the row again after its tombstone.
  */
 const STATEMENTS_WITHOUT_A_FENCE_ROW = {
   history: {
     nodeCreate: 11,
-    nodeUpdate: 12,
+    nodeUpdate: 10,
     unconstrainedEdgeCreate: 9,
     cardinalityEdgeCreate: 9,
     nodeDelete: 13,
   },
   revisionTracking: {
     nodeCreate: 7,
-    nodeUpdate: 8,
+    nodeUpdate: 6,
     unconstrainedEdgeCreate: 5,
     cardinalityEdgeCreate: 5,
     nodeDelete: 8,
   },
   schemaManaged: {
     nodeCreate: 7,
-    nodeUpdate: 8,
+    nodeUpdate: 6,
     unconstrainedEdgeCreate: 5,
     cardinalityEdgeCreate: 5,
     nodeDelete: 8,

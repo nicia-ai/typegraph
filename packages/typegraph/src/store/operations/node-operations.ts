@@ -2010,10 +2010,18 @@ async function prepareNodeUpdate<G extends GraphDef>(
     validTo,
   );
 
+  // A patch states its own fields over the stored props; a replacement states
+  // every field. The claim transition skips a constraint a patch provably
+  // leaves alone (`NodeClaimTransition.statedFields`).
+  const statedFields =
+    options?.replacementProps === undefined ?
+      Object.keys(input.props)
+    : undefined;
   const shared = {
     schema: nodeKind.schema,
     validatedProps,
     uniqueConstraints: registration.unique ?? [],
+    ...(statedFields !== undefined && { statedFields }),
     ...(validTo !== undefined && { validTo }),
     ...(input.clearValidTo === true && { clearValidTo: true as const }),
   };
@@ -2036,6 +2044,7 @@ async function prepareNodeUpdate<G extends GraphDef>(
     existing,
     validatedProps,
     shared.uniqueConstraints,
+    statedFields,
   );
   const validToAfter =
     resurrectionInstant === undefined ?
@@ -4967,7 +4976,12 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
           const { registration, validatedProps: nextProps } =
             resolveNodeUpdateProps(ctx, current, inputProps);
           transitions.push(
-            nodeClaimTransition(current, nextProps, registration.unique ?? []),
+            nodeClaimTransition(
+              current,
+              nextProps,
+              registration.unique ?? [],
+              Object.keys(inputProps),
+            ),
           );
         }
       }

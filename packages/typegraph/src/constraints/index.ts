@@ -142,6 +142,27 @@ export function uniqueConstraintKey(
     : undefined;
 }
 
+/**
+ * Whether a uniqueness constraint's key, or whether it applies at all, can
+ * depend on any of `fields`: the constraint's own fields and the field its
+ * `where` predicate tests.
+ *
+ * THE reading of "which props does a constraint consult": a write that states
+ * none of them over a node's stored props provably leaves the constraint's
+ * key and applicability as they were, so its claim needs no statement. A
+ * `where` callback that names no predicate answers `true` — the evaluation
+ * that refuses it ({@link checkWherePredicate}) must still be reached.
+ */
+export function uniqueConstraintReadsAnyField(
+  constraint: UniqueConstraint,
+  fields: ReadonlySet<string>,
+): boolean {
+  if (constraint.fields.some((field) => fields.has(field))) return true;
+  if (!constraint.where) return false;
+  const predicate = captureWherePredicate(constraint.where);
+  return predicate === undefined || fields.has(predicate.field);
+}
+
 /** The predicate a unique constraint's `where` builder returns. */
 export type UniquePredicate = Readonly<{
   __type: "unique_predicate";

@@ -672,6 +672,7 @@ function planNodeUpdateUniqueness(
     existing: NodeRow;
     validatedProps: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
+    statedFields: readonly string[] | undefined;
   }>,
   backend: Backend,
 ): Promise<UniquenessUpdatePlan> {
@@ -681,6 +682,7 @@ function planNodeUpdateUniqueness(
       args.existing,
       args.validatedProps,
       args.uniqueConstraints,
+      args.statedFields,
     ),
   );
 }
@@ -691,12 +693,15 @@ function planNodeUpdateUniqueness(
  * claims. Shared by the update itself and by a batch that judges several
  * updates before writing any of them, so the two cannot read a row
  * differently. `props` are the VALIDATED props the row is about to hold —
- * the claim keys are derived from them alone.
+ * the claim keys are derived from them alone. `statedFields` are the fields a
+ * patch states over the stored props, `undefined` for a wholesale replacement
+ * (see {@link NodeClaimTransition}).
  */
 export function nodeClaimTransition(
   existing: NodeRow,
   props: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
+  statedFields: readonly string[] | undefined,
 ): NodeClaimTransition {
   return {
     kind: existing.kind,
@@ -704,6 +709,7 @@ export function nodeClaimTransition(
     restores: existing.deleted_at !== undefined,
     props,
     constraints,
+    ...(statedFields === undefined ? {} : { statedFields }),
   };
 }
 
@@ -740,6 +746,12 @@ export async function applyNodeUpdate(
      */
     claimProps?: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
+    /**
+     * The fields a patch states over the stored props; absent for a write
+     * that replaces them wholesale. A constraint reading none of them keeps
+     * its claim with no statement ({@link NodeClaimTransition}).
+     */
+    statedFields?: readonly string[];
     validFrom?: string | null;
     validTo?: string;
     clearValidTo?: true;
@@ -759,6 +771,7 @@ export async function applyNodeUpdate(
       existing: args.existing,
       validatedProps: args.claimProps ?? args.validatedProps,
       uniqueConstraints: args.uniqueConstraints,
+      statedFields: args.statedFields,
     },
     backend,
   );
