@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
 import { snapshotExportContention } from "../../../src/backend/transaction-resource";
+import { ConfigurationError } from "../../../src/errors";
 import { type IdentityTransferAssertion } from "../../../src/identity/service";
 import { IdentityEndpointValidityError } from "../../../src/identity-entry";
 import type * as InterchangeModule from "../../../src/interchange";
@@ -16,6 +17,7 @@ import {
 import { storeBackend, storeRuntime } from "../../../src/store/runtime-port";
 import { type Store } from "../../../src/store/store";
 import { requireDefined } from "../../../src/utils/presence";
+import { expectObservation } from "../../helpers/known-defect";
 import {
   createTestBackend,
   expectAuditedBackend,
@@ -68,6 +70,14 @@ const identityInterchangeTargetGraph = identityInterchangeGraph(
 );
 
 const HOUR_MS = 60 * 60 * 1000;
+
+/** What a window-end node update another copy imports comes to. */
+type ForeignWindowEndImport =
+  | Readonly<{
+      errors: readonly unknown[];
+      nodes: Readonly<{ created: number; updated: number; skipped: number }>;
+    }>
+  | Readonly<{ refused: unknown }>;
 const CANONICAL_TIMESTAMP_PATTERN =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -272,6 +282,65 @@ export function registerIdentityImportIntegrationTests(
         id: "a",
       });
       expect(members.map((member) => member.id).toSorted()).toEqual(["a", "b"]);
+    });
+
+    it("updates a node with a window end into a history store from another copy of the library", async () => {
+      // Another copy's importer, as in the case above. A node update that
+      // states `validTo` runs behind a savepoint the importer opens itself,
+      // before it crosses the runtime port, so the savepoint statement goes
+      // through the capture surface it opened its transaction on.
+      vi.resetModules();
+      const foreign: typeof InterchangeModule =
+        await import("../../../src/interchange");
+      expect(foreign.importGraph).not.toBe(importGraph);
+      const store = await context.createHistoryStore(
+        identityInterchangeGraph("identity_import_foreign_copy_window_end"),
+      );
+      await store.nodes.Person.create({ name: "A" }, { id: "a" });
+      const validTo = isoAt(24 * HOUR_MS);
+      const observed: ForeignWindowEndImport = await foreign
+        .importGraph(
+          store,
+          {
+            formatVersion: FORMAT_VERSION,
+            exportedAt: isoAt(0),
+            source: { type: "external" },
+            nodes: [
+              {
+                kind: "Person",
+                id: "a",
+                properties: { name: "A2" },
+                validTo,
+              },
+            ],
+            edges: [],
+          },
+          { onConflict: "update", onUnknownProperty: "error" },
+        )
+        .then(
+          (result) => ({ errors: result.errors, nodes: result.nodes }),
+          (error: unknown) => ({
+            refused:
+              error instanceof ConfigurationError ?
+                error.details["code"]
+              : String(error),
+          }),
+        );
+      expectObservation({
+        lane: { lane: context.lane },
+        observed,
+        correct: {
+          errors: [],
+          nodes: { created: 0, updated: 1, skipped: 0 },
+        },
+        defects: [
+          {
+            label: "D18",
+            on: {},
+            today: { refused: "RECORDED_CAPTURE_RAW_SQL_DISABLED" },
+          },
+        ],
+      });
     });
 
     describe("a node window end stated by onConflict: update", () => {
