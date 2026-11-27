@@ -11,16 +11,21 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
-import { ConfigurationError, ValidationError } from "../../../src";
+import { ConfigurationError, createStore, ValidationError } from "../../../src";
+import { deriveBackend } from "../../../src/backend/derive-backend";
 import { UnsupportedBackendCapabilityError } from "../../../src/errors";
 import type { PaginatedResult } from "../../../src/query/builder/types";
 import {
   SEARCH_CURSOR_MISMATCH,
   searchCursorFingerprint,
 } from "../../../src/query/cursor";
+import type { Store } from "../../../src/store/store";
 import { propertyRuns } from "../../property/run-budget";
-import type { IntegrationStore } from "./fixtures";
+import { type IntegrationStore, integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
+
+/** A store the search helpers read through: the lane's, or one over a derived backend. */
+type SearchStore = Store<typeof integrationTestGraph>;
 
 type SearchKind = "fulltext" | "vector" | "hybrid";
 const SEARCH_KINDS: readonly SearchKind[] = ["fulltext", "vector", "hybrid"];
@@ -105,7 +110,7 @@ type SearchOptions = Readonly<{
   category?: string;
 }>;
 
-function searchArticles(store: IntegrationStore, options: SearchOptions) {
+function searchArticles(store: SearchStore, options: SearchOptions) {
   const k = options.k ?? 10;
   const text = options.text ?? "climate";
   const vectorOptions =
@@ -142,7 +147,7 @@ const ORDERINGS: readonly Ordering[] = [
 ];
 
 function orderedSearch(
-  store: IntegrationStore,
+  store: SearchStore,
   options: SearchOptions,
   ordering: Ordering,
 ) {
@@ -172,7 +177,7 @@ type PageOptions = Readonly<{
 }>;
 
 async function readPage(
-  store: IntegrationStore,
+  store: SearchStore,
   query: () => SearchQuery,
   terminal: Exclude<Terminal, "stream">,
   options: PageOptions,
@@ -202,7 +207,7 @@ const MAX_PAGES = 50;
  * reassembled in reading order), and returns the ids in the order read.
  */
 async function walk(
-  store: IntegrationStore,
+  store: SearchStore,
   query: () => SearchQuery,
   terminal: Terminal,
   direction: "forward" | "backward",
@@ -833,6 +838,59 @@ export function registerSearchPaginationIntegrationTests(
           backward: await walk(store, query, "paginate", "backward", 1),
           batched: await walk(store, query, "batchOnce", "forward", 2),
           stream: await walk(store, query, "stream", "forward", 1),
+        }).toEqual({
+          approximate,
+          forward: executed,
+          backward: executed,
+          batched: executed,
+          stream: executed,
+        });
+      }
+    });
+
+    it("pages a search through a custom strategy whose engine form is exact, approximate or not, even when it declares no approximate repeatability", async (ctx) => {
+      const laneStore = storeWith(context, ctx, "vector");
+      const laneBackend = laneStore.backend;
+      const strategy = laneBackend.vectorStrategy;
+      if (strategy === undefined) {
+        ctx.skip();
+        return;
+      }
+      await seedRanked(laneStore);
+      // A strategy whose buildSearch is exact (searchIsExact) serves both
+      // the exact and the approximate search through its engine form, so
+      // neither retrieves approximately; it declares nothing about
+      // approximate repeatability, which then reads as not repeatable.
+      const {
+        repeatableApproximateSearch: _undeclared,
+        ...undeclaredCapabilities
+      } = strategy.capabilities;
+      const store = createStore(
+        integrationTestGraph,
+        deriveBackend(laneBackend, {
+          vectorStrategy: {
+            ...strategy,
+            searchIsExact: true,
+            capabilities: undeclaredCapabilities,
+          },
+        }),
+      );
+      for (const approximate of [false, true]) {
+        const query = () =>
+          searchArticles(store, { kind: "vector", approximate }).select(
+            (row) => ({ id: row.a.id }),
+          );
+        const executed = await executedIds(query());
+        expect({ approximate, executed }).toEqual({
+          approximate,
+          executed: ["r1", "r2", "r3", "r4", "r5"],
+        });
+        expect({
+          approximate,
+          forward: await walk(store, query, "paginate", "forward", 2),
+          backward: await walk(store, query, "page", "backward", 2),
+          batched: await walk(store, query, "batchOnce", "forward", 2),
+          stream: await walk(store, query, "stream", "forward", 2),
         }).toEqual({
           approximate,
           forward: executed,

@@ -1,4 +1,7 @@
-import { type RepeatableApproximateSearch } from "../../../backend/types";
+import {
+  type RepeatableApproximateSearch,
+  type VectorIndexType,
+} from "../../../backend/types";
 import {
   CompilerInvariantError,
   UnsupportedBackendCapabilityError,
@@ -25,6 +28,7 @@ import {
   vectorDefinedDistanceConditions,
   vectorMinScoreCondition,
   vectorScoreExpression,
+  type VectorStrategy,
 } from "../../dialect/vector-strategy";
 import { type DatabaseExpression } from "../../expressions";
 import {
@@ -1406,17 +1410,31 @@ type BuildStandardEmbeddingsCteInput = Readonly<{
 }>;
 
 /**
- * Refuses a cursor page of an approximate search that the engine serves
- * through an ANN form whose results change from run to run
- * (`capabilities.repeatableApproximateSearch`): each page re-runs the
- * search and positions itself among the candidates that run returns, so
- * rows would be skipped and repeated. Exact search, and a slot whose index
- * type is `"none"`, never reach the ANN form and are never refused.
+ * Whether a vector branch served through the strategy's engine form
+ * (`buildSearch`) retrieves its candidates approximately: never for a
+ * strategy whose engine form is exact (`searchIsExact`, which then serves
+ * the exact and the approximate search alike), nor for a slot whose index
+ * type is `"none"`, which compiles to the strategy's exact scan.
+ */
+function engineFormIsApproximate(
+  strategy: VectorStrategy,
+  indexType: VectorIndexType,
+): boolean {
+  return strategy.searchIsExact !== true && indexType !== "none";
+}
+
+/**
+ * Refuses a cursor page of a search that retrieves its candidates through
+ * an approximate engine form ({@link engineFormIsApproximate}) whose results
+ * change from run to run (`capabilities.repeatableApproximateSearch`): each
+ * page re-runs the search and positions itself among the candidates that run
+ * returns, so rows would be skipped and repeated. A branch that retrieves
+ * exactly is never refused.
  */
 function assertRepeatableApproximateSearch(
   input: Readonly<{
     cursorPaged: boolean;
-    indexType: string;
+    approximateRetrieval: boolean;
     repeatability: RepeatableApproximateSearch;
     engine: string;
     nodeKind: string;
@@ -1425,7 +1443,7 @@ function assertRepeatableApproximateSearch(
 ): void {
   if (
     !input.cursorPaged ||
-    input.indexType === "none" ||
+    !input.approximateRetrieval ||
     input.repeatability.repeatable
   )
     return;
@@ -1569,7 +1587,10 @@ export function buildStandardEmbeddingsCte(
     if (annSlot !== undefined) {
       assertRepeatableApproximateSearch({
         cursorPaged: input.cursorPaged,
-        indexType: annSlot.indexType,
+        approximateRetrieval: engineFormIsApproximate(
+          vectorStrategy,
+          annSlot.indexType,
+        ),
         repeatability: resolveRepeatableApproximateSearch(
           vectorStrategy.capabilities,
         ),
