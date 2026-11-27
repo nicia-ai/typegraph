@@ -61,8 +61,8 @@ import {
   type PredicateCompilerContext,
 } from "../predicates";
 import {
+  optionalRelevanceTargets,
   type RelevanceSortKey,
-  type RelevanceSortSource,
   SELECTION_ORDER_COLUMN,
 } from "../relevance-order";
 import {
@@ -851,36 +851,60 @@ function isPredicateCompilerContext(
   return "schema" in context;
 }
 
+/** One relevance-relation join and the node alias whose rows it filters. */
+type RelevanceJoin = Readonly<{ nodeAlias: string; join: SqlFragment }>;
+
 function buildRelevanceJoins(
   vectorPredicate: VectorSimilarityPredicate | undefined,
   fulltextPredicate: FulltextMatchPredicate | undefined,
-): SqlFragment[] {
+): readonly RelevanceJoin[] {
   const hybridTargetAlias = getHybridTargetAlias(
     vectorPredicate,
     fulltextPredicate,
   );
   if (hybridTargetAlias !== undefined) {
     return [
-      buildRelevanceJoin(
-        HYBRID_CANDIDATES_CTE_ALIAS,
-        hybridTargetAlias,
-        "INNER JOIN",
-      ),
-      buildRelevanceJoin(EMBEDDINGS_CTE_ALIAS, hybridTargetAlias, "LEFT JOIN"),
-      buildRelevanceJoin(FULLTEXT_CTE_ALIAS, hybridTargetAlias, "LEFT JOIN"),
+      {
+        nodeAlias: hybridTargetAlias,
+        join: buildRelevanceJoin(
+          HYBRID_CANDIDATES_CTE_ALIAS,
+          hybridTargetAlias,
+          "INNER JOIN",
+        ),
+      },
+      {
+        nodeAlias: hybridTargetAlias,
+        join: buildRelevanceJoin(
+          EMBEDDINGS_CTE_ALIAS,
+          hybridTargetAlias,
+          "LEFT JOIN",
+        ),
+      },
+      {
+        nodeAlias: hybridTargetAlias,
+        join: buildRelevanceJoin(
+          FULLTEXT_CTE_ALIAS,
+          hybridTargetAlias,
+          "LEFT JOIN",
+        ),
+      },
     ];
   }
 
-  const joins: SqlFragment[] = [];
+  const joins: RelevanceJoin[] = [];
   if (vectorPredicate) {
-    joins.push(
-      buildRelevanceJoin(EMBEDDINGS_CTE_ALIAS, vectorPredicate.field.alias),
-    );
+    const nodeAlias = vectorPredicate.field.alias;
+    joins.push({
+      nodeAlias,
+      join: buildRelevanceJoin(EMBEDDINGS_CTE_ALIAS, nodeAlias),
+    });
   }
   if (fulltextPredicate) {
-    joins.push(
-      buildRelevanceJoin(FULLTEXT_CTE_ALIAS, fulltextPredicate.field.alias),
-    );
+    const nodeAlias = fulltextPredicate.field.alias;
+    joins.push({
+      nodeAlias,
+      join: buildRelevanceJoin(FULLTEXT_CTE_ALIAS, nodeAlias),
+    });
   }
   return joins;
 }
@@ -926,24 +950,46 @@ export function buildStandardFromClause(
     ...relevanceRelations(vectorPredicate, fulltextPredicate),
   ];
 
+  // Node IDs are unique only within a kind (PK is graph_id, kind, id),
+  // so the relevance-CTE joins must include node_kind. Without it,
+  // polymorphic queries would cross-join on user-supplied ids shared
+  // across kinds.
+  const relevanceJoins = buildRelevanceJoins(
+    vectorPredicate,
+    fulltextPredicate,
+  );
+  // A relevance relation on an optional traversal's target filters that
+  // traversal's rows, as an ordinary predicate on the target does: it is
+  // joined inside the optional join, `LEFT JOIN (cte INNER JOIN relevance)`,
+  // so a start row whose targets all fail the search keeps one row with the
+  // optional side absent. Joined after it, its inner join dropped that row.
+  const optionalTargets = optionalRelevanceTargets(ast);
+  const isNestedJoin = (join: RelevanceJoin) =>
+    optionalTargets.has(join.nodeAlias);
+
   const joins: SqlFragment[] = [];
   for (const traversal of ast.traversals) {
     const cteAlias = aliasCteName(traversal.nodeAlias);
     const previousAlias = traversal.joinFromAlias;
     const previousCteName = aliasCteName(previousAlias);
     const joinType = traversal.optional ? "LEFT JOIN" : "INNER JOIN";
+    const nestedJoins = relevanceJoins
+      .filter(
+        (join) => isNestedJoin(join) && join.nodeAlias === traversal.nodeAlias,
+      )
+      .map((join) => join.join);
+    const joinedRelation =
+      nestedJoins.length === 0 ?
+        sql.raw(cteAlias)
+      : sql`(${sql.raw(cteAlias)} ${sql.join(nestedJoins, sql` `)})`;
     // The join reads the previous alias's id and kind by name on both sides.
     joins.push(
-      sql`${sql.raw(joinType)} ${sql.raw(cteAlias)} ON ${readAliasColumn(cteAlias, previousAlias, "id")} = ${readAliasColumn(previousCteName, previousAlias, "id")} AND ${readAliasColumn(cteAlias, previousAlias, "kind")} = ${readAliasColumn(previousCteName, previousAlias, "kind")}`,
+      sql`${sql.raw(joinType)} ${joinedRelation} ON ${readAliasColumn(cteAlias, previousAlias, "id")} = ${readAliasColumn(previousCteName, previousAlias, "id")} AND ${readAliasColumn(cteAlias, previousAlias, "kind")} = ${readAliasColumn(previousCteName, previousAlias, "kind")}`,
     );
   }
 
-  // Node IDs are unique only within a kind (PK is graph_id, kind, id),
-  // so the relevance-CTE joins must include node_kind. Without it,
-  // polymorphic queries would cross-join on user-supplied ids shared
-  // across kinds.
-  for (const join of buildRelevanceJoins(vectorPredicate, fulltextPredicate)) {
-    joins.push(join);
+  for (const relevanceJoin of relevanceJoins) {
+    if (!isNestedJoin(relevanceJoin)) joins.push(relevanceJoin.join);
   }
 
   return {
@@ -1803,10 +1849,10 @@ function compileHybridRrfScore(
 
 /** The value one relevance sort key reads from a single match row. */
 function compileRelevancePerMatchValue(
-  source: RelevanceSortSource,
+  key: RelevanceSortKey,
   input: RelevanceSortValueInput,
 ): SqlFragment {
-  switch (source) {
+  switch (key.source) {
     case "fulltext_rank": {
       return readColumn(FULLTEXT_CTE_ALIAS, "rank");
     }
@@ -1814,12 +1860,18 @@ function compileRelevancePerMatchValue(
       return readColumn(EMBEDDINGS_CTE_ALIAS, "distance");
     }
     case "hybrid_score": {
-      return compileHybridRrfScore(input.fusion);
+      const score = compileHybridRrfScore(input.fusion);
+      // COALESCE scores a row matched by neither leg 0, which a match can
+      // also score under a zero weight. A row whose optional side is absent
+      // has no candidate and no score: NULL, which sorts it last.
+      if (key.nulls === undefined) return score;
+      return sql`CASE WHEN ${readColumn(HYBRID_CANDIDATES_CTE_ALIAS, "node_id")} IS NULL THEN NULL ELSE ${score} END`;
     }
     case "hybrid_node_id": {
       // Deterministic tiebreak on the CTE-projected node_id. At least one of
-      // the two CTEs always has a non-NULL node_id for any row returned by
-      // the LEFT JOIN-union shape, so COALESCE always resolves. It compares
+      // the two CTEs has a non-NULL node_id for any matched row of the
+      // LEFT JOIN-union shape, so COALESCE resolves; it is NULL only for a
+      // row whose optional side is absent, which sorts last. It compares
       // in byte order (`binaryText`) on every backend, the order of
       // `store.search.hybrid`'s JS-side code-unit tiebreak and of SQLite's
       // BINARY collation, so ties never follow a PostgreSQL database's
@@ -1842,7 +1894,7 @@ function compileRelevanceSortValue(
   key: RelevanceSortKey,
   input: RelevanceSortValueInput,
 ): SqlFragment {
-  const perMatch = compileRelevancePerMatchValue(key.source, input);
+  const perMatch = compileRelevancePerMatchValue(key, input);
   if (!input.aggregated) return perMatch;
   return sql`${sql.raw(key.direction === "desc" ? "MAX" : "MIN")}(${perMatch})`;
 }
@@ -1871,9 +1923,14 @@ function compileStandardRelevanceOrderTerms(
   const terms = (placement: RelevanceSortKey["placement"]) =>
     keys
       .filter((key) => key.placement === placement)
-      .map(
-        (key) =>
-          sql`${compileRelevanceSortValue(key, input)} ${sql.raw(key.direction === "desc" ? "DESC" : "ASC")}`,
+      .map((key) =>
+        key.nulls === undefined ?
+          sql`${compileRelevanceSortValue(key, input)} ${sql.raw(key.direction === "desc" ? "DESC" : "ASC")}`
+        : compileOrderTerm(
+            compileRelevanceSortValue(key, input),
+            key.direction,
+            key.nulls,
+          ),
       );
   const userOrders = compileStandardOrderTerms({
     ast,

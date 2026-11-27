@@ -98,6 +98,7 @@ export { registerNodeHardDeleteClaimReleaseIntegrationTests } from "./node-hard-
 export { registerOntologyEquivalenceIntegrationTests } from "./ontology-equivalence";
 export { registerOntologyTighteningIntegrationTests } from "./ontology-tightening";
 export { registerOntologyTypedSubsumptionIntegrationTests } from "./ontology-typed-subsumption";
+export { registerOptionalTraversalRelevanceIntegrationTests } from "./optional-traversal-relevance";
 export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-property";
