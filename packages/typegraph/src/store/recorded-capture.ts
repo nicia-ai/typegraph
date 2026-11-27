@@ -1206,25 +1206,41 @@ export function createRecordedTransactionScope<
   // The scope's pending capture and graph-lock memo mirror the writes and
   // locks on this transaction, so a savepoint unit that rolls back restores
   // them. The flush stops every savepoint opened later from checkpointing the
-  // scope (`unregisterCheckpoint`). A savepoint already open when the scope
-  // flushed may still roll back over the flush. Its writes, history rows
-  // included, are discarded by the engine, and the sealed session has nothing
-  // pending to restore, so it stays sealed. The memo is still restored: the
-  // rollback released every graph lock taken after the savepoint opened.
+  // scope (`unregisterCheckpoint`). A savepoint open before the flush can
+  // still roll back over it, and what that leaves depends on when the
+  // savepoint first saw the scope:
+  //
+  // - The savepoint was already open when the scope was created, and the
+  //   scope joined it here (`joining`). Everything the scope captured and
+  //   flushed is inside the savepoint, so the engine discards all of it. The
+  //   sealed session has nothing pending to restore and stays sealed. The
+  //   memo is still restored, because the rollback released every graph lock
+  //   taken after the savepoint opened.
+  // - The savepoint opened after the scope and checkpointed it then. Writes
+  //   the scope captured before the savepoint survive the rollback, but the
+  //   history rows the flush wrote for them do not. `restore` refuses the
+  //   sealed session, so the unit fails with `SavepointRecoveryFailure`
+  //   rather than leaving a transaction that commits live writes without
+  //   their history.
   let flushed = false;
+  let joining = true;
   const captureCheckpoint = (): (() => void) => {
+    const joinedOpenSavepoint = joining;
     const captured = session.checkpoint();
     const locks = new Map(graphLocks);
     return () => {
-      if (!flushed) session.restore(captured);
+      if (!(flushed && joinedOpenSavepoint)) session.restore(captured);
       graphLocks.clear();
       for (const [graphId, lock] of locks) graphLocks.set(graphId, lock);
     };
   };
+  // `registerSavepointState` checkpoints the scope into every savepoint that
+  // is already open synchronously, before it returns.
   const unregisterCheckpoint = registerSavepointState(
     target,
     captureCheckpoint,
   );
+  joining = false;
   return {
     backend: overlay,
     async flush(): Promise<RecordedFlushInstants> {

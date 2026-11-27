@@ -33,6 +33,7 @@ import {
   projectBackendWithout,
   projectGraphBackend,
 } from "../../../src/backend/derive-backend";
+import { SavepointRecoveryFailure } from "../../../src/backend/session-savepoint";
 import { type GraphBackend } from "../../../src/backend/types";
 import { type GraphData, importGraph } from "../../../src/interchange";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
@@ -41,6 +42,7 @@ import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import {
   enterOperation,
   openTransactionSession,
+  type Operation,
 } from "../../../src/store/operation-scope";
 import {
   createRecordedTransactionScope,
@@ -156,6 +158,53 @@ function knowsEdge(id: string, label: string): GraphData["edges"][number] {
     to: { kind: "SavepointPerson", id: "target" },
     properties: { label },
   };
+}
+
+function savepointNote(id: string) {
+  return {
+    graphId: stampGraph.id,
+    kind: "SavepointNote",
+    id,
+    props: { body: id },
+  } as const;
+}
+
+/** Provisions a history store, and returns what the flushed-scope cases drive and read. */
+async function prepareFlushedScopeFixture(context: IntegrationTestContext) {
+  // Provisions the recorded relations on every lane.
+  await context.createHistoryStore(stampGraph);
+  const backend = context.getBackend();
+  const statements = statementExecutionVerdict(backend);
+  if (!statements.supported)
+    throw new Error("Fixture requires statement execution");
+  const schema = createSqlSchema(backend.tableNames);
+  const openScope = (operation: Operation): RecordedTransactionScope =>
+    createRecordedTransactionScope(
+      operation,
+      operation.backend,
+      batchPointReadVerdict(backend),
+      schema,
+    );
+  const liveIds = async (ids: readonly string[]) => {
+    const live: string[] = [];
+    for (const id of ids) {
+      if (
+        (await backend.getNode(stampGraph.id, "SavepointNote", id)) !==
+        undefined
+      )
+        live.push(id);
+    }
+    return live;
+  };
+  const recordedCount = async (): Promise<number> => {
+    const rows = await backend.execute<Readonly<{ count: unknown }>>(
+      asCompiledRowsSql(
+        sql`SELECT COUNT(*) AS count FROM ${schema.recordedNodesTable} WHERE graph_id = ${stampGraph.id}`,
+      ),
+    );
+    return Number(rows[0]?.count);
+  };
+  return { backend, statements, openScope, liveIds, recordedCount };
 }
 
 export function registerSavepointRecoveryIntegrationTests(
@@ -533,43 +582,79 @@ export function registerSavepointRecoveryIntegrationTests(
     });
   });
   describe("a savepoint unit around a capture scope that flushed inside it", () => {
-    it.each(["inside the unit", "before the unit"] as const)(
-      "rolls back, restores the graph-lock memo, leaves the scope sealed, and keeps the transaction committable (scope opened %s)",
-      async (opened) => {
-        // Provisions the recorded relations on every lane.
-        await context.createHistoryStore(stampGraph);
-        const backend = context.getBackend();
-        const statements = statementExecutionVerdict(backend);
-        if (!statements.supported)
-          throw new Error("Fixture requires statement execution");
-        const schema = createSqlSchema(backend.tableNames);
-        const note = (id: string) =>
-          ({
-            graphId: stampGraph.id,
-            kind: "SavepointNote",
-            id,
-            props: { body: id },
-          }) as const;
-        let scope: RecordedTransactionScope | undefined;
-        await backend.transaction(async (transaction) => {
+    it("recovers when the scope was created, written and flushed inside the unit: the memo is restored, the scope stays sealed, and the transaction commits the writes around the unit", async () => {
+      const { backend, statements, openScope, liveIds, recordedCount } =
+        await prepareFlushedScopeFixture(context);
+      const before = await recordedCount();
+      let scope: RecordedTransactionScope | undefined;
+      await backend.transaction(async (transaction) => {
+        const operation = enterOperation(openTransactionSession(transaction));
+        await operation.backend.insertNode(savepointNote("kept-before"));
+        await runRecordedTransactionSavepoint(
+          operation,
+          operation.backend,
+          statements,
+          "test_flushed_scope_rollback",
+          async () => {
+            scope = openScope(operation);
+            await scope.backend.insertNode(savepointNote("rolled-back"));
+            await scope.flush();
+            return {
+              action: "rollback",
+              value: undefined,
+              cause: new Error("refused"),
+            };
+          },
+        );
+        // The rollback released every graph lock the scope took inside the
+        // savepoint, so its memo is back to what it was when the savepoint
+        // opened: empty, as the scope had taken no lock yet.
+        expect([
+          ...requireDefined(recordedGraphLockMemoOf(operation)).keys(),
+        ]).toEqual([]);
+        // The flush sealed the scope, and the rollback reopens nothing: a
+        // write through its surface is refused as it was right after the
+        // flush, before any statement.
+        await expect(
+          requireDefined(scope).backend.insertNode(
+            savepointNote("after-rollback"),
+          ),
+        ).rejects.toThrow(/capture session is sealed/);
+        await operation.backend.insertNode(savepointNote("kept-after"));
+      });
+
+      // The engine discarded the scope's live row and the history rows its
+      // flush wrote; the writes on either side of the unit committed.
+      expect(
+        await liveIds([
+          "kept-before",
+          "rolled-back",
+          "after-rollback",
+          "kept-after",
+        ]),
+      ).toEqual(["kept-before", "kept-after"]);
+      expect(await recordedCount()).toBe(before);
+    });
+
+    it("fails the unit with SavepointRecoveryFailure when the scope captured a write before the unit, and the transaction commits nothing", async () => {
+      const { backend, statements, openScope, liveIds, recordedCount } =
+        await prepareFlushedScopeFixture(context);
+      const before = await recordedCount();
+      await expect(
+        backend.transaction(async (transaction) => {
           const operation = enterOperation(openTransactionSession(transaction));
-          const openScope = (): RecordedTransactionScope =>
-            createRecordedTransactionScope(
-              operation,
-              operation.backend,
-              batchPointReadVerdict(backend),
-              schema,
-            );
-          await operation.backend.insertNode(note("kept-before"));
-          if (opened === "before the unit") scope = openScope();
+          const scope = openScope(operation);
+          // Captured by the scope before the unit opens: this live row
+          // survives a rollback to the savepoint, while the history row the
+          // flush writes for it inside the unit does not.
+          await scope.backend.insertNode(savepointNote("captured-before"));
           await runRecordedTransactionSavepoint(
             operation,
             operation.backend,
             statements,
             "test_flushed_scope_rollback",
             async () => {
-              scope ??= openScope();
-              await scope.backend.insertNode(note("rolled-back"));
+              await scope.backend.insertNode(savepointNote("rolled-back"));
               await scope.flush();
               return {
                 action: "rollback",
@@ -578,41 +663,13 @@ export function registerSavepointRecoveryIntegrationTests(
               };
             },
           );
-          // The rollback released every graph lock the scope took inside the
-          // savepoint, so its memo is back to what it was when the savepoint
-          // opened: empty, as the scope had taken no lock yet.
-          expect([
-            ...requireDefined(recordedGraphLockMemoOf(operation)).keys(),
-          ]).toEqual([]);
-          // The flush sealed the scope, and the rollback reopens nothing: a
-          // write through its surface is refused as it was right after the
-          // flush, before any statement.
-          await expect(
-            requireDefined(scope).backend.insertNode(note("after-rollback")),
-          ).rejects.toThrow(/capture session is sealed/);
-          await operation.backend.insertNode(note("kept-after"));
-        });
+        }),
+      ).rejects.toBeInstanceOf(SavepointRecoveryFailure);
 
-        // The engine discarded the scope's live row and the history rows its
-        // flush wrote; the writes on either side of the unit committed.
-        for (const [id, live] of [
-          ["kept-before", true],
-          ["rolled-back", false],
-          ["after-rollback", false],
-          ["kept-after", true],
-        ] as const) {
-          expect(
-            (await backend.getNode(stampGraph.id, "SavepointNote", id)) !==
-              undefined,
-          ).toBe(live);
-        }
-        const recorded = await backend.execute<Readonly<{ count: unknown }>>(
-          asCompiledRowsSql(
-            sql`SELECT COUNT(*) AS count FROM ${schema.recordedNodesTable} WHERE graph_id = ${stampGraph.id} AND id = ${"rolled-back"}`,
-          ),
-        );
-        expect(Number(recorded[0]?.count)).toBe(0);
-      },
-    );
+      // The recovery failure aborted the transaction: no live write survives
+      // without the history row that records it.
+      expect(await liveIds(["captured-before", "rolled-back"])).toEqual([]);
+      expect(await recordedCount()).toBe(before);
+    });
   });
 }
