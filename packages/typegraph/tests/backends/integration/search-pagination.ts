@@ -976,7 +976,7 @@ export function registerSearchPaginationIntegrationTests(
                 : { id: row.a.id, node: row.a },
               );
           };
-          const walked = query as unknown as () => SearchQuery;
+          const walked = query;
           outcomes.push({
             kind,
             selection,
@@ -2137,10 +2137,10 @@ export function registerSearchPaginationIntegrationTests(
         });
         const page = await query().paginate({ first: 2, after: large });
         // Past every distance, so no vector row follows it; a rank or fused
-        // score sorts descending, so every row follows it.
-        expect({ kind, rows: kind === "vector" ? page.data : [] }).toEqual({
+        // score sorts descending, so every row follows it, from the first.
+        expect({ kind, rows: page.data.map((row) => row.id) }).toEqual({
           kind,
-          rows: [],
+          rows: kind === "vector" ? [] : executed.slice(0, 2),
         });
       }
     });
