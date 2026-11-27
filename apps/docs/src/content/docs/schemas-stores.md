@@ -2318,7 +2318,7 @@ statements, so on SQLite the same callback commits what it wrote. Some failures 
 transaction in the engine itself (a trigger's `RAISE(ROLLBACK)`, an `ON CONFLICT ROLLBACK`
 constraint, or an error SQLite answers by rolling back): where the driver reports the engine's
 transaction state (better-sqlite3, bun:sqlite, a local libSQL client) TypeGraph checks it before
-every statement, and elsewhere it asks right after a statement fails; unless the transaction is
+every statement of a transaction it opened, and elsewhere it asks right after a statement fails; unless the transaction is
 open, every later statement of it is refused with a `TransactionRolledBackError`
 (`details.detectedBy: "statement-failure"`), so none runs in autocommit, and the transaction
 rejects with it. On Durable Object storage, which cannot be asked, the first failed statement ends

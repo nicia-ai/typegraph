@@ -2541,8 +2541,9 @@ so. Nothing the transaction wrote was saved.
   ROLLBACK` constraint, or an error SQLite answers by rolling back
   (`SQLITE_FULL`, `SQLITE_IOERR`, an interrupt). Where the driver's own flag
   reports the engine's transaction state (better-sqlite3, bun:sqlite, a local
-  libSQL client), TypeGraph reads it before every statement of the transaction
-  starts; elsewhere it asks right after a statement fails with an SQL error,
+  libSQL client), TypeGraph reads it before every statement of a transaction
+  it opened starts (an adopted transaction keeps only the after-failure
+  check); elsewhere it asks right after a statement fails with an SQL error,
   SQLite itself on the transaction's session (a remote libSQL client, libSQL
   before 0.18, sql.js, `sqlite-proxy`), and where it cannot ask (Durable
   Object storage) the first such failure ends the transaction. A typed
