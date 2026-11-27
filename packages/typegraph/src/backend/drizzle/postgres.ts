@@ -1129,6 +1129,54 @@ const toSchemaVersionRow = createSchemaVersionRowMapper(
 const READ_ONLY_SAVEPOINT = "typegraph_read_only_scope";
 
 /**
+ * Makes the current savepoint read-only and reads the mode back in the same
+ * statement: `set_config('transaction_read_only', 'on', true)` is
+ * `SET TRANSACTION READ ONLY`, and the outer `current_setting` reads the
+ * session's mode once the subquery has set it (PostgreSQL never flattens a
+ * subquery whose target list calls a volatile function into its parent).
+ * Both functions are schema-qualified, so no `search_path` can shadow them.
+ */
+const READ_ONLY_SAVEPOINT_MODE_SQL =
+  "SELECT requested.mode AS requested_mode, " +
+  "pg_catalog.current_setting('transaction_read_only') AS transaction_read_only " +
+  "FROM (SELECT pg_catalog.set_config('transaction_read_only', 'on', true) AS mode) AS requested";
+
+/**
+ * Makes the savepoint `tx` read-only, as its first statement, and refuses
+ * when the session did not take the mode: what the session reads back for
+ * `transaction_read_only`, not what was requested, is what leaves the
+ * caller's raw `tx.sql` writes to the engine inside the read-only scope.
+ */
+async function enterReadOnlySavepoint(tx: AnyPgTransaction): Promise<void> {
+  const result: unknown = await tx.execute(
+    sql.raw(READ_ONLY_SAVEPOINT_MODE_SQL),
+  );
+  const rows =
+    Array.isArray(result) ? result : (
+      ((result as Readonly<{ rows?: readonly unknown[] }>).rows ?? [])
+    );
+  const [row] = rows as readonly (
+    | Readonly<{ transaction_read_only?: unknown }>
+    | undefined
+  )[];
+  const mode = row?.transaction_read_only;
+  if (mode === "on") return;
+  throw new ConfigurationError(
+    "The PostgreSQL session did not take the read-only mode TypeGraph set " +
+      "for a read-only transaction's savepoint: transaction_read_only reads " +
+      `${mode === undefined ? "nothing" : JSON.stringify(mode)} after it was set.`,
+    {
+      code: "POSTGRES_READ_ONLY_MODE_NOT_TAKEN",
+      transactionReadOnly: typeof mode === "string" ? mode : String(mode),
+    },
+    {
+      suggestion:
+        "Connect through a driver or proxy that runs every statement of a transaction on one server session, so the session enforces the read-only mode.",
+    },
+  );
+}
+
+/**
  * Whether `handle` is a Drizzle PostgreSQL transaction object: THE
  * classifier every site in this module that asks "is this a transaction"
  * calls — factory routing (`createPostgresBackend`,
@@ -2317,7 +2365,7 @@ function buildPostgresEngineProfileInternal(
           // The session then refuses every write in it, the caller's own
           // savepoints and raw `tx.sql` statements included.
           if (config?.accessMode === "read only") {
-            await tx.execute(sql.raw("SET TRANSACTION READ ONLY"));
+            await enterReadOnlySavepoint(tx);
           }
         }
         return body(tx);
