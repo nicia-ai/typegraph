@@ -205,20 +205,31 @@ export interface DialectAdapter {
    * cursor stores: text survives every driver and the JSON a
    * `store.batchOnce()` envelope carries rows in, where a number would be
    * printed again. `bind` turns that text into the value the cursor's
-   * comparison binds, or `undefined` for text this dialect never renders,
-   * which the cursor then refuses.
+   * comparison binds, or `undefined` for text this dialect never renders or
+   * a value its key type cannot hold, which the cursor then refuses before
+   * the database sees it.
    *
-   * PostgreSQL's float output is the shortest text that reads back as the same
-   * value at the default `extra_float_digits` of 1 or above (below it the key
-   * renders NULL and the cursor is refused) and `numeric` text is exact, so
-   * the text is bound as it is: an untyped parameter
-   * compared with the key takes the key's own type. SQLite renders the REAL
+   * PostgreSQL compares every key as `double precision` (`value`), whose
+   * output is the shortest text that reads back as the same value at the
+   * default `extra_float_digits` of 1 or above (below it the key renders
+   * text the cursor refuses), so the text is bound as it is: an untyped
+   * parameter compared with the key takes the key's type. SQLite renders the REAL
    * with 17 significant digits, which identify every double, and binds the
    * double that text denotes: before SQLite 3.43, which libSQL builds on,
    * neither `CAST(x AS TEXT)` nor a REAL's JSON text is exact, and neither is
    * `CAST(text AS REAL)`.
    */
   readonly relevanceCursorKey: Readonly<{
+    /**
+     * The value of a numeric relevance key that the statement sorts by and a
+     * cursor carries and compares, in one SQL type per dialect. PostgreSQL
+     * casts every key to `double precision`; SQLite's keys are REAL already.
+     */
+    value: (this: void, expression: SqlFragment) => SqlFragment;
+    /**
+     * The text of a non-NULL {@link value}; a NULL key is carried as NULL by
+     * the shared compiler and never reaches this.
+     */
     select: (this: void, expression: SqlFragment) => SqlFragment;
     bind: (this: void, text: string) => string | number | undefined;
   }>;

@@ -128,12 +128,19 @@ export type RelevanceSortSource =
  * `DialectAdapter.relevanceCursorKey`) and is bound unchanged, so the
  * comparison is exact.
  */
-export type RelevanceComparisonPredicate = Readonly<{
-  __type: "relevance_comparison";
-  source: RelevanceSortSource;
-  op: "eq" | "gt" | "lt";
-  value: string | number;
-}>;
+export type RelevanceComparisonPredicate =
+  | Readonly<{
+      __type: "relevance_comparison";
+      source: RelevanceSortSource;
+      op: "eq" | "gt" | "lt";
+      value: string | number;
+    }>
+  | Readonly<{
+      __type: "relevance_comparison";
+      source: RelevanceSortSource;
+      /** A key a cursor carries as NULL (a cosine distance to a zero embedding). */
+      op: "isNull" | "isNotNull";
+    }>;
 
 /**
  * A string predicate.

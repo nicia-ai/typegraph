@@ -690,7 +690,7 @@ describe(".matches() with polymorphic alias", () => {
     // The fulltext CTE's inner LIMIT must break rank ties by node_id so
     // the top-k cutoff matches the backend's fulltextSearch (rank DESC, node_id ASC).
     expect(sqlText).toMatch(
-      /ORDER BY rank DESC,\s+"typegraph_node_fulltext"\."node_id" ASC\s+LIMIT/,
+      /ORDER BY rank DESC NULLS LAST,\s+"typegraph_node_fulltext"\."node_id" ASC\s+LIMIT/,
     );
 
     const malformedAst = {

@@ -12,6 +12,7 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import { ConfigurationError, ValidationError } from "../../../src";
+import { UnsupportedBackendCapabilityError } from "../../../src/errors";
 import type { PaginatedResult } from "../../../src/query/builder/types";
 import {
   SEARCH_CURSOR_MISMATCH,
@@ -252,6 +253,32 @@ function encodeCursorJson(json: unknown): string {
     .replace(/=+$/, "");
 }
 
+async function expectApproximatePagingRefusal(
+  query: () => SearchQuery,
+  reason: string,
+): Promise<void> {
+  const reads: readonly (() => Promise<unknown>)[] = [
+    () => query().paginate({ first: 2 }),
+    () => query().page({ last: 2 }).execute(),
+    () => query().stream({ batchSize: 2 })[Symbol.asyncIterator]().next(),
+  ];
+  for (const read of reads) {
+    const error = await Promise.resolve()
+      .then(read)
+      .then(
+        () => "resolved without a refusal",
+        (error_: unknown) => error_,
+      );
+    expect(error).toBeInstanceOf(UnsupportedBackendCapabilityError);
+    expect((error as UnsupportedBackendCapabilityError).details).toEqual(
+      expect.objectContaining({
+        capability: "vector.repeatableApproximateSearch",
+        reason,
+      }),
+    );
+  }
+}
+
 async function expectSearchCursorRefusal(
   read: () => Promise<unknown>,
 ): Promise<void> {
@@ -353,10 +380,15 @@ export function registerSearchPaginationIntegrationTests(
         // to 15 digits, a float parsed and printed again) moves the boundary:
         // the boundary row comes back, or its tied neighbour is skipped.
         const angles = [0.7, 0.7, 0.7000001, 0.7000002, 0.7000002, 0.7];
+        // The full-text ranks are near-tied the same way: "climate" and
+        // "report" sit 300, 301 or 302 words apart, which moves both a BM25
+        // rank (document length) and `ts_rank_cd` (cover length) by a
+        // fraction of a percent, and repeats each spacing.
+        const spacings = [300, 300, 301, 302, 302, 300];
         for (const [index, angle] of angles.entries()) {
           await store.nodes.Article.create(
             {
-              title: index % 2 === 0 ? "climate report" : "climate summary",
+              title: `climate ${"pad ".repeat(spacings[index] ?? 0)}report`,
               body: "notes",
               category: "near",
               published: true,
@@ -365,9 +397,18 @@ export function registerSearchPaginationIntegrationTests(
             { id: `n${index}` },
           );
         }
-        const query = () => orderedSearch(store, { kind }, "relevance");
+        const query = () =>
+          orderedSearch(store, { kind, text: "climate report" }, "relevance");
         const executed = await executedIds(query());
         expect(executed).toHaveLength(angles.length);
+        // Three distinct ranks, each tie broken by id: the ranks differ.
+        expect({ kind, executed }).toEqual({
+          kind,
+          executed:
+            kind === "fulltext" ?
+              ["n0", "n1", "n5", "n2", "n3", "n4"]
+            : executed,
+        });
         expect({
           forward: await walk(store, query, "paginate", "forward", 1),
           backward: await walk(store, query, "paginate", "backward", 1),
@@ -451,7 +492,7 @@ export function registerSearchPaginationIntegrationTests(
       });
     }
 
-    it("an approximate vector search pages exactly the candidates its execute() returns, under-filled or not", async (ctx) => {
+    it("an approximate vector search pages exactly the candidates its execute() returns, under-filled or not, or is refused where the engine cannot repeat it", async (ctx) => {
       const store = storeWith(context, ctx, "vector");
       await seedRanked(store);
       for (let index = 0; index < 12; index += 1) {
@@ -476,6 +517,14 @@ export function registerSearchPaginationIntegrationTests(
         })
           .orderBy("a", "category", "asc")
           .select((row) => ({ id: row.a.id }));
+      const repeatability =
+        store.backend.capabilities.vector?.repeatableApproximateSearch;
+      if (repeatability?.repeatable === false) {
+        // An engine whose approximate search changes from run to run cannot
+        // page it: each page would rank another candidate set.
+        await expectApproximatePagingRefusal(query, repeatability.reason);
+        return;
+      }
       const executed = await executedIds(query());
       expect(executed.length).toBeLessThanOrEqual(4);
       const guaranteesFullPage =
@@ -732,6 +781,354 @@ export function registerSearchPaginationIntegrationTests(
       expect(batched.nextCursor).toBe(golden);
     });
 
+    it("a vector search whose k cut falls inside a tie returns the same rows on every execution, and its pages read exactly them", async (ctx) => {
+      const store = storeWith(context, ctx, "vector");
+      // 26 identical embeddings and k = 5: which five make the cut is decided
+      // by the tiebreak inside the engine's top-k, or by the engine itself.
+      const ids = Array.from({ length: 26 }, (_unused, index) =>
+        String.fromCodePoint(97 + index),
+      );
+      for (const id of ids) {
+        await store.nodes.Article.create(
+          {
+            title: "climate",
+            body: "notes",
+            category: "tied",
+            published: true,
+            embedding: embeddingAt(0.4),
+          },
+          { id },
+        );
+      }
+      const repeatability =
+        store.backend.capabilities.vector?.repeatableApproximateSearch;
+      for (const approximate of [false, true]) {
+        const query = () =>
+          searchArticles(store, { kind: "vector", k: 5, approximate }).select(
+            (row) => ({ id: row.a.id }),
+          );
+        if (approximate && repeatability?.repeatable === false) {
+          await expectApproximatePagingRefusal(query, repeatability.reason);
+          continue;
+        }
+        const executions = new Set<string>();
+        for (let run = 0; run < 20; run += 1) {
+          const rows = await executedIds(query());
+          executions.add(rows.join(","));
+        }
+        expect({ approximate, executions: [...executions] }).toEqual({
+          approximate,
+          executions: [expect.any(String)],
+        });
+        const executed = await executedIds(query());
+        expect(executed).toHaveLength(5);
+        // The exact cut is total: tied distances fall back to the node id.
+        expect({ approximate, executed }).toEqual({
+          approximate,
+          executed: approximate ? executed : ["a", "b", "c", "d", "e"],
+        });
+        expect({
+          approximate,
+          forward: await walk(store, query, "paginate", "forward", 1),
+          backward: await walk(store, query, "paginate", "backward", 1),
+          batched: await walk(store, query, "batchOnce", "forward", 2),
+          stream: await walk(store, query, "stream", "forward", 1),
+        }).toEqual({
+          approximate,
+          forward: executed,
+          backward: executed,
+          batched: executed,
+          stream: executed,
+        });
+      }
+    });
+
+    for (const kind of ["vector", "hybrid"] as const) {
+      for (const ordering of ORDERINGS) {
+        it(`${kind}, ordered by ${ordering}: a zero embedding, whose cosine distance is undefined, never matches the vector search, and pages read exactly execute()'s rows`, async (ctx) => {
+          const store = storeWith(context, ctx, kind);
+          await seedRanked(store);
+          for (const id of ["z1", "z2", "z3"]) {
+            await store.nodes.Article.create(
+              {
+                title: "climate notes",
+                body: "notes",
+                category: "m",
+                published: true,
+                embedding: [0, 0, 0, 0],
+              },
+              { id },
+            );
+          }
+          const query = () => orderedSearch(store, { kind }, ordering);
+          const executed = await executedIds(query());
+          // SQLite computes the distance as NULL and sorted it first,
+          // PostgreSQL as NaN and sorted it last: neither is a neighbor. A
+          // hybrid search still finds the rows through its full-text leg.
+          expect(executed.toSorted()).toEqual(
+            kind === "vector" ?
+              ["r1", "r2", "r3", "r4", "r5"]
+            : ["r1", "r2", "r3", "r4", "r5", "z1", "z2", "z3"],
+          );
+          expect({
+            forward: await walk(store, query, "paginate", "forward", 1),
+            backward: await walk(store, query, "paginate", "backward", 1),
+            page: await walk(store, query, "page", "backward", 2),
+            batched: await walk(store, query, "batchOnce", "forward", 1),
+            stream: await walk(store, query, "stream", "forward", 1),
+          }).toEqual({
+            forward: executed,
+            backward: executed,
+            page: executed,
+            batched: executed,
+            stream: executed,
+          });
+        });
+      }
+    }
+
+    it("positions a cursor whose relevance key is NULL after every row with a value, on every key", async (ctx) => {
+      const store = context.getStore();
+      const kinds = SEARCH_KINDS.filter((kind) =>
+        capabilitiesOf(kind).every(
+          (capability) =>
+            store.backend.capabilities[capability]?.supported === true,
+        ),
+      );
+      if (kinds.length === 0) ctx.skip();
+      await seedRanked(store);
+      for (const kind of kinds) {
+        const query = () => orderedSearch(store, { kind }, "category asc");
+        const executed = await executedIds(query());
+        const first = await query().paginate({ first: 2 });
+        const json = decodeCursorJson(requireCursor(first.nextCursor));
+        const cols = json["cols"] as readonly string[];
+        const vals = json["vals"] as readonly unknown[];
+        // NULL in every numeric relevance key: the least relevant place,
+        // after every row (relevance NULLs sort last on every dialect).
+        const atNull = encodeCursorJson({
+          ...json,
+          vals: vals.map((value, index) =>
+            (
+              cols[index] === "@relevance.hybrid_node_id" ||
+              !String(cols[index]).startsWith("@relevance.")
+            ) ?
+              value
+              // eslint-disable-next-line unicorn/no-null -- the JSON a cursor carries a NULL key as
+            : null,
+          ),
+        });
+        const after = await query().paginate({ first: 10, after: atNull });
+        const before = await query().paginate({ last: 2, before: atNull });
+        expect({
+          kind,
+          after: after.data.map((row) => row.id),
+          before: before.data.map((row) => row.id),
+        }).toEqual({ kind, after: [], before: executed.slice(-2) });
+      }
+    });
+
+    it("a query embedding or fusion option mutated after the query is built changes neither its rows nor its cursor", async (ctx) => {
+      const store = storeWith(context, ctx, "hybrid");
+      await seedRanked(store);
+      const embedding = [...QUERY_VECTOR];
+      const fusion = { k: 60, weights: { vector: 1, fulltext: 1 } };
+      const built = store
+        .query()
+        .from("Article", "a")
+        .whereNode("a", (a) =>
+          a.$fulltext
+            .matches("climate", 10)
+            .and(a.embedding.similarTo(embedding, 10)),
+        )
+        .fuseWith(fusion)
+        .select((row) => ({ id: row.a.id }));
+      const vectorOnly = store
+        .query()
+        .from("Article", "a")
+        .whereNode("a", (a) => a.embedding.similarTo(embedding, 10))
+        .select((row) => ({ id: row.a.id }));
+      const executed = await executedIds(built);
+      const vectorExecuted = await executedIds(vectorOnly);
+      const first = await built.paginate({ first: 2 });
+      const vectorFirst = await vectorOnly.paginate({ first: 2 });
+
+      // Point the caller's arrays and options at the least relevant row.
+      embedding.splice(0, embedding.length, ...embeddingAt(1.2));
+      fusion.weights.vector = 50;
+      fusion.k = 1;
+
+      const rest = await built.paginate({
+        first: 10,
+        after: requireCursor(first.nextCursor),
+      });
+      const vectorRest = await vectorOnly.paginate({
+        first: 10,
+        after: requireCursor(vectorFirst.nextCursor),
+      });
+      expect({
+        hybrid: [...first.data, ...rest.data].map((row) => row.id),
+        hybridExecute: await executedIds(built),
+        vector: [...vectorFirst.data, ...vectorRest.data].map((row) => row.id),
+        vectorExecute: await executedIds(vectorOnly),
+      }).toEqual({
+        hybrid: executed,
+        hybridExecute: executed,
+        vector: vectorExecuted,
+        vectorExecute: vectorExecuted,
+      });
+    });
+
+    it("refuses a relevance key outside what its database can represent before it reaches the database", async (ctx) => {
+      const store = context.getStore();
+      const kinds = SEARCH_KINDS.filter((kind) =>
+        capabilitiesOf(kind).every(
+          (capability) =>
+            store.backend.capabilities[capability]?.supported === true,
+        ),
+      );
+      if (kinds.length === 0) ctx.skip();
+      await seedRanked(store);
+      for (const kind of kinds) {
+        const query = () => orderedSearch(store, { kind }, "relevance");
+        const first = await query().paginate({ first: 2 });
+        const json = decodeCursorJson(requireCursor(first.nextCursor));
+        const vals = json["vals"] as unknown[];
+        // Out of range for a double (and so for every narrower type) on
+        // every engine: overflow, underflow to zero, and their negatives.
+        for (const forged of ["1e9999", "-1e9999", "1e-400", "-1e-400"]) {
+          const tampered = encodeCursorJson({
+            ...json,
+            vals: [forged, ...vals.slice(1)],
+          });
+          await expectSearchCursorRefusal(() =>
+            query().paginate({ first: 2, after: tampered }),
+          );
+          await expectSearchCursorRefusal(() =>
+            query().page({ last: 2, before: tampered }).execute(),
+          );
+        }
+        // Representable as a double but not as PostgreSQL's `real` (the type
+        // `ts_rank_cd` returns): a valid position past every row.
+        const large = encodeCursorJson({
+          ...json,
+          vals: ["1e39", ...vals.slice(1)],
+        });
+        const page = await query().paginate({ first: 2, after: large });
+        // Past every distance, so no vector row follows it; a rank or fused
+        // score sorts descending, so every row follows it.
+        expect({ kind, rows: kind === "vector" ? page.data : [] }).toEqual({
+          kind,
+          rows: [],
+        });
+      }
+    });
+
+    it("pages a valid cursor or refuses it with a ValidationError, never a database error, for arbitrary and mutated cursors", async (ctx) => {
+      const store = context.getStore();
+      const kinds = SEARCH_KINDS.filter((kind) =>
+        capabilitiesOf(kind).every(
+          (capability) =>
+            store.backend.capabilities[capability]?.supported === true,
+        ),
+      );
+      if (kinds.length === 0) ctx.skip();
+      await seedRanked(store);
+      const issued = new Map<SearchKind, Record<string, unknown>>();
+      for (const kind of kinds) {
+        const first = await orderedSearch(
+          store,
+          { kind },
+          "category asc",
+        ).paginate({ first: 2 });
+        issued.set(kind, decodeCursorJson(requireCursor(first.nextCursor)));
+      }
+      const scalar = fc.oneof(
+        fc.string(),
+        fc.double(),
+        fc.integer(),
+        fc.boolean(),
+        // eslint-disable-next-line unicorn/no-null -- a JSON null in the cursor
+        fc.constant(null),
+        fc.constantFrom(
+          "1e9999",
+          "-1e9999",
+          "1e-400",
+          "1e39",
+          "NaN",
+          "Infinity",
+          "-Infinity",
+          "0x10",
+          " 0.5",
+          "0.5 ",
+          "",
+          "-0",
+          `0.${"3".repeat(2000)}`,
+          "9".repeat(400),
+        ),
+      );
+      const value = fc.oneof(
+        scalar,
+        fc.array(scalar, { maxLength: 2 }),
+        fc.dictionary(fc.string(), scalar, { maxKeys: 2 }),
+      );
+      const cursorArbitrary = fc.oneof(
+        fc.string().map((text) => ({ kind: "text", cursor: text }) as const),
+        fc
+          .record({
+            kind: fc.constantFrom(...kinds),
+            index: fc.nat(),
+            value,
+            field: fc.constantFrom("vals", "cols", "s", "d", "v"),
+          })
+          .map(({ kind, index, value: replacement, field }) => {
+            const json = issued.get(kind) ?? {};
+            const original = json[field];
+            const mutated =
+              Array.isArray(original) ?
+                original.map((entry: unknown, position) =>
+                  position === index % original.length ? replacement : entry,
+                )
+              : replacement;
+            return {
+              kind: "mutated",
+              search: kind,
+              cursor: encodeCursorJson({ ...json, [field]: mutated }),
+            } as const;
+          }),
+      );
+      await fc.assert(
+        fc.asyncProperty(
+          cursorArbitrary,
+          fc.constantFrom<"after" | "before">("after", "before"),
+          async (forged, position) => {
+            const kind = forged.kind === "text" ? kinds[0] : forged.search;
+            const query = orderedSearch(
+              store,
+              { kind: kind ?? "fulltext" },
+              "category asc",
+            );
+            const outcome = await query
+              .paginate(
+                position === "after" ?
+                  { first: 2, after: forged.cursor }
+                : { last: 2, before: forged.cursor },
+              )
+              .then(
+                () => "page",
+                (error: unknown) => error,
+              );
+            expect(
+              outcome === "page" || outcome instanceof ValidationError ?
+                "page or ValidationError"
+              : outcome,
+            ).toBe("page or ValidationError");
+          },
+        ),
+        { numRuns: propertyRuns({ ci: 200, local: 150 }) },
+      );
+    });
+
     it("concatenated pages equal execute() for random corpora with duplicate scores", async (ctx) => {
       const store = context.getStore();
       const capabilities = store.backend.capabilities;
@@ -754,7 +1151,14 @@ export function registerSearchPaginationIntegrationTests(
                   "climate report",
                   "solar climate notes",
                 ),
-                angle: fc.constantFrom(0, 0.2, 0.2, 0.5),
+                // "zero": a zero embedding, whose cosine distance is undefined.
+                angle: fc.constantFrom<number | "zero">(
+                  0,
+                  0.2,
+                  0.2,
+                  0.5,
+                  "zero",
+                ),
                 body: fc.constantFrom("alpha", "beta"),
               }),
               { minLength: 1, maxLength: 9 },
@@ -789,7 +1193,10 @@ export function registerSearchPaginationIntegrationTests(
                 body: article.body,
                 category,
                 published: true,
-                embedding: embeddingAt(article.angle),
+                embedding:
+                  article.angle === "zero" ?
+                    [0, 0, 0, 0]
+                  : embeddingAt(article.angle),
               });
             }
             const query = () => {

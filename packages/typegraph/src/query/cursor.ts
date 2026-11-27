@@ -8,7 +8,7 @@
  */
 
 import { ConfigurationError, ValidationError } from "../errors";
-import { shortHash } from "../utils/hash";
+import { sha256HexSync } from "../utils/hash";
 import { type FieldRef, type OrderSpec, type QueryAst } from "./ast";
 import { systemColumnSelectedPath } from "./builder/order-by-field";
 import { getNodeKindsForAlias } from "./compiler/predicate-utils";
@@ -317,12 +317,88 @@ export function validateCursorColumns(
     cursorData,
     orderSpecs.map((spec) => buildColumnId(spec)),
   );
+  for (const [index, spec] of orderSpecs.entries()) {
+    validateCursorFieldValue(cursorData.vals[index], spec, buildColumnId(spec));
+  }
+}
+
+/**
+ * Whether `value` is a value a cursor can carry for a key over `spec`'s
+ * field: NULL, or a JSON scalar of the field's value type (any JSON value
+ * for a field of unknown type, which may hold one). A cursor holding anything
+ * else was not issued for this query, and comparing it would be a database
+ * error (a text compared as a PostgreSQL number) or a position among values
+ * of another type.
+ */
+function isCursorFieldValue(value: unknown, spec: OrderSpec): boolean {
+  if (value === null) return true;
+  const valueType =
+    spec.field.__type === "field_ref" ? spec.field.valueType : undefined;
+  switch (valueType) {
+    case "string":
+    case "date": {
+      return typeof value === "string";
+    }
+    case "number": {
+      return typeof value === "number" && Number.isFinite(value);
+    }
+    case "boolean": {
+      return typeof value === "boolean";
+    }
+    case "array":
+    case "object":
+    case "embedding":
+    case "unknown":
+    case undefined: {
+      return true;
+    }
+  }
+}
+
+function validateCursorFieldValue(
+  value: unknown,
+  spec: OrderSpec,
+  columnId: string,
+): void {
+  if (isCursorFieldValue(value, spec)) return;
+  throw new ValidationError(
+    `Cursor value for column ${columnId} is not a value of its field`,
+    {
+      issues: [
+        {
+          path: "cursor",
+          message: `Cursor value for column ${columnId} is not a value of its field`,
+        },
+      ],
+    },
+    {
+      suggestion:
+        "This cursor was not issued for this query. Start again without a cursor.",
+    },
+  );
 }
 
 function validateCursorColumnIds(
   cursorData: CursorData,
   expectedCols: readonly string[],
 ): void {
+  if (cursorData.vals.length !== cursorData.cols.length) {
+    throw new ValidationError(
+      `Cursor has ${cursorData.vals.length} values for ${cursorData.cols.length} columns`,
+      {
+        issues: [
+          {
+            path: "cursor",
+            message: "Cursor values do not match its columns",
+          },
+        ],
+      },
+      {
+        suggestion:
+          "This cursor was not issued for this query. Start again without a cursor.",
+      },
+    );
+  }
   if (cursorData.cols.length !== expectedCols.length) {
     throw new ValidationError(
       `Cursor has ${cursorData.cols.length} columns but query has ${expectedCols.length} ORDER BY columns`,
@@ -392,6 +468,13 @@ export type SearchCursorBinding = Readonly<{
   bindRelevanceKey: (text: string) => string | number | undefined;
 }>;
 
+/**
+ * The length of a search cursor's fingerprint: a 128-bit SHA-256 prefix, so
+ * two distinct searches never in practice accept each other's cursors (a
+ * 32-bit hash did: two query texts collided).
+ */
+const SEARCH_CURSOR_FINGERPRINT_BYTES = 16;
+
 /** The code of the refusal of a cursor that does not position this query. */
 export const SEARCH_CURSOR_MISMATCH = "SEARCH_CURSOR_MISMATCH";
 
@@ -446,7 +529,10 @@ export function searchCursorFingerprint(
         ast.fusion?.weights?.fulltext,
       ]
     : [];
-  return shortHash(JSON.stringify([dialect, fulltext, vector, fusion]));
+  return sha256HexSync(
+    JSON.stringify([dialect, fulltext, vector, fusion]),
+    SEARCH_CURSOR_FINGERPRINT_BYTES,
+  );
 }
 
 /** The column identifier a cursor records for one keyset key. */
@@ -500,7 +586,8 @@ export function buildKeysetCursor(
 
 /**
  * The value a cursor's comparison binds for a relevance key the cursor carries
- * as `value`, or `undefined` when `value` is not a key this dialect renders.
+ * as `value`, `null` for a NULL key, or `undefined` when `value` is not a
+ * key this dialect renders or a value its key type cannot hold.
  * The hybrid node-id tiebreak is text compared as text; a numeric key is the
  * text `DialectAdapter.relevanceCursorKey.select` rendered, bound by its
  * `bind`.
@@ -509,7 +596,11 @@ function relevanceKeyBinding(
   key: RelevanceSortKey,
   value: unknown,
   search: SearchCursorBinding,
-): string | number | undefined {
+): string | number | null | undefined {
+  // A NULL key (a cosine distance to a zero embedding) is carried as NULL and
+  // positioned in the key's null placement.
+  // eslint-disable-next-line unicorn/no-null -- a cursor's JSON carries a NULL key as null
+  if (value === null) return null;
   if (typeof value !== "string") return undefined;
   if (key.source === "hybrid_node_id") return value;
   return search.bindRelevanceKey(value);
@@ -586,5 +677,13 @@ export function validateKeysetCursor(
     cursorData,
     keys.map((key) => keysetColumnId(key)),
   );
+  for (const [index, key] of keys.entries()) {
+    if (key.kind === "field")
+      validateCursorFieldValue(
+        cursorData.vals[index],
+        key.spec,
+        keysetColumnId(key),
+      );
+  }
   if (search !== undefined) keysetPositionValues(cursorData, keys, search);
 }

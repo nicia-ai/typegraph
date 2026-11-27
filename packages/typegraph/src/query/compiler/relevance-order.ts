@@ -5,6 +5,7 @@ import type {
   RelevanceSortSource,
   SortDirection,
 } from "../ast";
+import { RELEVANCE_NULL_ORDERING } from "../order";
 import { isAggregatedStatement } from "./aggregated-statement";
 import {
   extractFulltextMatchPredicates,
@@ -20,20 +21,23 @@ import { missingRowIdentityOrder } from "./row-identity-order";
 export type RelevanceSortKey = Readonly<{
   source: RelevanceSortSource;
   direction: SortDirection;
+  /** Where a NULL value sorts: `RELEVANCE_NULL_ORDERING`, least relevant. */
+  nulls: "first" | "last";
   placement: "leading" | "trailing";
 }>;
 
 function relevanceSortKey(source: RelevanceSortSource): RelevanceSortKey {
+  const nulls = RELEVANCE_NULL_ORDERING;
   switch (source) {
     case "fulltext_rank":
     case "hybrid_score": {
-      return { source, direction: "desc", placement: "leading" };
+      return { source, direction: "desc", nulls, placement: "leading" };
     }
     case "vector_distance": {
-      return { source, direction: "asc", placement: "leading" };
+      return { source, direction: "asc", nulls, placement: "leading" };
     }
     case "hybrid_node_id": {
-      return { source, direction: "asc", placement: "trailing" };
+      return { source, direction: "asc", nulls, placement: "trailing" };
     }
   }
 }

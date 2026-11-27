@@ -14,7 +14,10 @@ import { sql, type SqlFragment } from "../sql-fragment";
 import { applyAggregateFilter } from "./aggregate-filter";
 import { tsvectorStrategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
-import { DOUBLE_OVERFLOW_BOUNDARY } from "./numeric-conversion";
+import {
+  DOUBLE_OVERFLOW_BOUNDARY,
+  parseRepresentableDouble,
+} from "./numeric-conversion";
 import {
   getSqlDialectProfile,
   inlineSqlStringLiteral,
@@ -154,9 +157,19 @@ function postgresElementCast(elementType: ValueType | undefined): SqlFragment {
 /**
  * PostgreSQL dialect adapter implementation.
  */
-/** The text PostgreSQL renders a `real`, `double precision` or `numeric` as. */
-const POSTGRES_NUMERIC_TEXT =
-  /^(?:-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|-?Infinity|NaN)$/;
+/**
+ * The text the cursor key of a relevance value renders as when the session's
+ * float output is not exact (`extra_float_digits` below 1): text no double
+ * renders as, so the cursor refuses it.
+ */
+const INEXACT_FLOAT_OUTPUT = "inexact float output";
+
+/** The non-finite `double precision` values, as PostgreSQL renders them. */
+const POSTGRES_SPECIAL_DOUBLES: ReadonlySet<string> = new Set([
+  "NaN",
+  "Infinity",
+  "-Infinity",
+]);
 
 export const postgresDialect: BuiltinDialectAdapter = {
   dateValue(value) {
@@ -195,14 +208,25 @@ export const postgresDialect: BuiltinDialectAdapter = {
   },
 
   relevanceCursorKey: {
+    // One type for every relevance key, whatever its source computes (a
+    // `real` ts_rank_cd, a `double precision` distance, a `numeric` fused
+    // score): widening a `real` is exact, and the cursor's bound text then
+    // has one type whose range `bind` can check before the database sees it.
+    value: (expression) => sql`CAST(${expression} AS DOUBLE PRECISION)`,
     // Float text is exact only at `extra_float_digits` >= 1 (the default):
-    // below it the key renders NULL, which the cursor refuses, rather than a
+    // below it the key renders text the cursor refuses, rather than a
     // rounded value that would skip or repeat nearly tied rows.
     select: (expression) =>
-      sql`CASE WHEN current_setting('extra_float_digits')::integer >= 1 THEN CAST(${expression} AS TEXT) END`,
-    // The text a float, real or numeric renders as: anything else would be a
-    // database error, not a refused cursor.
-    bind: (text) => (POSTGRES_NUMERIC_TEXT.test(text) ? text : undefined),
+      sql`CASE WHEN current_setting('extra_float_digits')::integer >= 1 THEN CAST(${expression} AS TEXT) ELSE ${INEXACT_FLOAT_OUTPUT} END`,
+    // The text of a `double precision` value: any other text, or a value out
+    // of its range, would be a database error, not a refused cursor.
+    bind: (text) =>
+      (
+        POSTGRES_SPECIAL_DOUBLES.has(text) ||
+        parseRepresentableDouble(text) !== undefined
+      ) ?
+        text
+      : undefined,
   },
 
   keyText(expression) {

@@ -31,11 +31,13 @@ import {
   type VectorSearchParams,
 } from "../../../backend/types";
 import { shortHash } from "../../../utils/hash";
+import { compileRelevanceCandidateOrder } from "../../order";
 import { sql, type SqlFragment } from "../../sql-fragment";
 import {
   assertFiniteEmbedding,
   quoteIdentifier,
   VECTOR_CONTRIBUTION_PREFIX,
+  vectorDefinedDistanceConditions,
   vectorMinScoreCondition,
   vectorPhysicalName,
   vectorScoreExpression,
@@ -118,6 +120,9 @@ const PGVECTOR_CAPABILITIES: VectorCapabilities = {
     indexType: "hnsw",
     requiresTransactionScope: true,
   },
+  // An HNSW or IVFFlat scan is a deterministic walk of the index, and every
+  // search form breaks distance ties by node id over the rows it returns.
+  repeatableApproximateSearch: { repeatable: true },
 };
 
 /** Whether a slot's declared index type materializes a real pgvector ANN index. */
@@ -458,6 +463,7 @@ function createPgvectorStrategyWithPrefixes(
       // scan automatically, so the strategy never branches on `slot.indexType`.
       const conditions: SqlFragment[] = [
         sql`${table}."graph_id" = ${params.graphId}`,
+        ...vectorDefinedDistanceConditions(distance, params.metric),
       ];
       if (params.minScore !== undefined) {
         conditions.push(
@@ -490,24 +496,29 @@ function createPgvectorStrategyWithPrefixes(
       // MATERIALIZED wrapper — the fence stops the planner from collapsing
       // the sort back into the index scan's claimed ordering — and page in
       // the wrapper: an OFFSET inside the relaxed scan could discard the
-      // wrong rows. Score is monotone in distance, so ordering by score per
-      // the metric's direction restores exact ranking.
+      // wrong rows. The wrapper re-sorts by the distance itself, in the
+      // candidate order every cut uses (`compileRelevanceCandidateOrder`):
+      // a cosine score sorted descending would put a NaN distance first.
+      //
+      // Every form breaks distance ties by node id. With an HNSW or IVFFlat
+      // index the planner keeps the ordered index scan and adds an
+      // incremental sort on the node id over it (verified on PostgreSQL 18),
+      // so which tied neighbors make the k cut is total over the rows the
+      // index returns, and repeatable on an unchanged database.
       if (slot.indexType === "ivfflat") {
-        const direction =
-          params.metric === "cosine" ? sql.raw("DESC") : sql.raw("ASC");
         // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
         const relaxedBody = sql`
-        SELECT ${table}."node_id" AS node_id, ${score} AS score
+        SELECT ${table}."node_id" AS node_id, ${score} AS score, ${distance} AS distance
         FROM ${table}
         WHERE ${sql.join(conditions, sql` AND `)}
-        ORDER BY ${distance} ASC
+        ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", sql`${table}."node_id"`)}
         LIMIT ${params.limit + pageOffset}
       `;
         // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
         return sql`
         WITH tg_vec_relaxed AS MATERIALIZED (${relaxedBody})
         SELECT node_id, score FROM tg_vec_relaxed
-        ORDER BY score ${direction}, node_id ASC
+        ORDER BY ${compileRelevanceCandidateOrder(sql`distance`, "asc", sql`node_id`)}
         ${pageClause}
       `;
       }
@@ -516,7 +527,7 @@ function createPgvectorStrategyWithPrefixes(
       SELECT ${table}."node_id" AS node_id, ${score} AS score
       FROM ${table}
       WHERE ${sql.join(conditions, sql` AND `)}
-      ORDER BY ${distance} ASC
+      ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", sql`${table}."node_id"`)}
       ${pageClause}
     `;
     },

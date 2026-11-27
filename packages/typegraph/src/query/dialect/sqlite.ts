@@ -21,6 +21,7 @@ import {
   DOUBLE_OVERFLOW_BOUNDARY,
   MAXIMUM_FINITE_DOUBLE_INTEGER,
   MAXIMUM_FINITE_DOUBLE_TEXT,
+  parseRepresentableDouble,
 } from "./numeric-conversion";
 import { getSqlDialectProfile, packSqlListValue } from "./profile";
 import { type BuiltinDialectAdapter } from "./types";
@@ -179,11 +180,9 @@ export const sqliteDialect: BuiltinDialectAdapter = {
   },
 
   relevanceCursorKey: {
+    value: (expression) => expression,
     select: (expression) => sql`printf('%!.17g', ${expression})`,
-    bind: (text) => {
-      const value = Number(text);
-      return text.trim() !== "" && Number.isFinite(value) ? value : undefined;
-    },
+    bind: (text) => parseRepresentableDouble(text),
   },
 
   keyText(expression) {

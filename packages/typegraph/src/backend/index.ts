@@ -38,10 +38,12 @@ export {
   buildVectorCapabilities,
   quoteIdentifier,
   VECTOR_CONTRIBUTION_PREFIX,
+  vectorDefinedDistanceConditions,
   vectorMinScoreCondition,
   vectorPhysicalName,
   vectorScoreExpression,
 } from "../query/dialect/vector-strategy";
+export { compileRelevanceCandidateOrder } from "../query/order";
 export type {
   RenderedSql,
   SqlChunk,
@@ -440,6 +442,7 @@ export type {
   RecursiveTraversalCapability,
   ReleaseIndexMaterializationClaimParams,
   RemovalMaterializationBackend,
+  RepeatableApproximateSearch,
   ResolvedNodeUpdateBatchEntry,
   ResolvedNodeUpdateBatchParams,
   RowProps,

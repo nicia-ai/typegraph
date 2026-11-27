@@ -120,10 +120,12 @@ describe("vector compilation semantics", () => {
     expect(sql).toContain("AS distance");
     expect(sql).toContain("AS score");
     expect(sql).toMatch(
-      /ROW_NUMBER\(\) OVER \(ORDER BY distance ASC, node_id ASC\) AS ord/,
+      /ROW_NUMBER\(\) OVER \(ORDER BY distance ASC NULLS LAST, node_id ASC\) AS ord/,
     );
     // The inner k-cutoff bounds the ranked set to the predicate's limit.
-    expect(sql).toMatch(/ORDER BY distance ASC, node_id ASC\s+LIMIT 10/);
+    expect(sql).toMatch(
+      /ORDER BY distance ASC NULLS LAST, node_id ASC\s+LIMIT 10/,
+    );
   });
 
   it("rejects vector relevance ranking when window functions are unavailable", () => {

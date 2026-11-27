@@ -16,7 +16,6 @@ import {
   type NodePredicate,
   type OrderSpec,
   type PredicateExpression,
-  type RelevanceComparisonPredicate,
   type TupleComparisonPredicate,
 } from "../ast";
 import { isNullableSystemOrderField } from "../builder/order-by-field";
@@ -152,25 +151,70 @@ function buildKeysetPosition(
   }
 
   if (orConditions.length === 0) {
-    // Only a NULL field key can leave nothing past the cursor; a relevance
-    // key always has a value to compare.
-    const firstField = keys.find((key) => key.kind === "field");
-    return buildImpossiblePredicate(
-      requireCursorField(requireDefined(firstField).spec.field),
-    );
+    // Only NULL keys sorted last leave nothing past the cursor.
+    const operand = keysetOperand(requireDefined(keys[0]));
+    return { __type: "and", predicates: [operand.isNull, operand.isNotNull] };
   }
   return orConditions.length === 1 ?
       requireDefined(orConditions[0])
     : { __type: "or", predicates: orConditions };
 }
 
+/**
+ * What a keyset position compares for one key: the predicates that test the
+ * key for NULL and compare it with a cursor value. A field key reads its
+ * field; a relevance key reads the per-match value its statement computes.
+ */
+type KeysetOperand = Readonly<{
+  isNull: PredicateExpression;
+  isNotNull: PredicateExpression;
+  compare: (op: "eq" | "gt" | "lt", value: unknown) => PredicateExpression;
+}>;
+
+function fieldOperand(field: FieldRef): KeysetOperand {
+  return {
+    isNull: { __type: "null_check", op: "isNull", field },
+    isNotNull: { __type: "null_check", op: "isNotNull", field },
+    compare: (op, value) => ({
+      __type: "comparison",
+      op,
+      left: field,
+      right: { __type: "literal", value: value as string | number | boolean },
+    }),
+  };
+}
+
+function relevanceOperand(key: RelevanceSortKey): KeysetOperand {
+  const { source } = key;
+  return {
+    isNull: { __type: "relevance_comparison", source, op: "isNull" },
+    isNotNull: { __type: "relevance_comparison", source, op: "isNotNull" },
+    compare: (op, value) => {
+      if (typeof value !== "string" && typeof value !== "number")
+        throw new CompilerInvariantError(
+          `A cursor reached the keyset without a value for the ${source} relevance key`,
+          { phase: "relevance-cursor-key" },
+        );
+      return { __type: "relevance_comparison", source, op, value };
+    },
+  };
+}
+
+function keysetOperand(key: KeysetKey): KeysetOperand {
+  return key.kind === "field" ?
+      fieldOperand(requireCursorField(key.spec.field))
+    : relevanceOperand(key.key);
+}
+
+function keysetOrder(key: KeysetKey): OrderSpec | RelevanceSortKey {
+  return key.kind === "field" ? key.spec : key.key;
+}
+
 function buildKeyEqualityPredicate(
   key: KeysetKey,
   value: unknown,
 ): PredicateExpression {
-  if (key.kind === "field")
-    return buildEqualityPredicate(requireCursorField(key.spec.field), value);
-  return buildRelevanceComparison(key.key, "eq", value);
+  return buildOperandEquality(keysetOperand(key), value);
 }
 
 function buildKeyPositionPredicate(
@@ -178,32 +222,12 @@ function buildKeyPositionPredicate(
   value: unknown,
   position: "after" | "before",
 ): PredicateExpression | undefined {
-  if (key.kind === "field")
-    return buildPositionPredicate(
-      requireCursorField(key.spec.field),
-      key.spec,
-      value,
-      position,
-    );
-  const isAscending = key.key.direction === "asc";
-  return buildRelevanceComparison(
-    key.key,
-    isAscending === (position === "after") ? "gt" : "lt",
+  return buildOperandPosition(
+    keysetOperand(key),
+    keysetOrder(key),
     value,
+    position,
   );
-}
-
-function buildRelevanceComparison(
-  key: RelevanceSortKey,
-  op: RelevanceComparisonPredicate["op"],
-  value: unknown,
-): RelevanceComparisonPredicate {
-  if (typeof value !== "string" && typeof value !== "number")
-    throw new CompilerInvariantError(
-      `A cursor reached the keyset without a value for the ${key.source} relevance key`,
-      { phase: "relevance-cursor-key" },
-    );
-  return { __type: "relevance_comparison", source: key.source, op, value };
 }
 
 /**
@@ -409,62 +433,58 @@ function buildEqualityPredicate(
   field: FieldRef,
   value: unknown,
 ): PredicateExpression {
-  if (value === null || value === undefined) {
-    return { __type: "null_check", op: "isNull", field };
-  }
-  return {
-    __type: "comparison",
-    op: "eq",
-    left: field,
-    right: { __type: "literal", value: value as string | number | boolean },
-  };
+  return buildOperandEquality(fieldOperand(field), value);
 }
 
 /**
- * Builds a comparison predicate for cursor pagination.
+ * "Equal to the cursor's value" for one keyset key: NULL matches NULL. The
+ * one owner of keyset equality, for field and relevance keys alike.
  */
-function buildPositionPredicate(
-  field: FieldRef,
-  spec: OrderSpec,
+function buildOperandEquality(
+  operand: KeysetOperand,
+  value: unknown,
+): PredicateExpression {
+  if (value === null || value === undefined) return operand.isNull;
+  return operand.compare("eq", value);
+}
+
+/**
+ * "Strictly after (or before) the cursor's value" for one keyset key, in the
+ * key's direction and null placement (`resolveNullOrdering`, the placement
+ * its ORDER BY term compiles with): a NULL value sits before or after every
+ * value, so a NULL cursor value leaves either every non-NULL row or none,
+ * and a non-NULL one admits the NULL rows on their side. `undefined` when no
+ * row can be strictly past it. The one owner of the keyset's null handling,
+ * for field and relevance keys alike.
+ */
+function buildOperandPosition(
+  operand: KeysetOperand,
+  order: Readonly<{
+    direction: OrderSpec["direction"];
+    nulls?: "first" | "last" | undefined;
+  }>,
   value: unknown,
   position: "after" | "before",
 ): PredicateExpression | undefined {
-  const nulls = resolveNullOrdering(spec);
+  const nulls = resolveNullOrdering(order);
   if (value === null || value === undefined) {
     const nonNullValuesMatch =
       (position === "after" && nulls === "first") ||
       (position === "before" && nulls === "last");
-    return nonNullValuesMatch ?
-        { __type: "null_check", op: "isNotNull", field }
-      : undefined;
+    return nonNullValuesMatch ? operand.isNotNull : undefined;
   }
 
-  const isAscending = spec.direction === "asc";
-  const comparison: PredicateExpression = {
-    __type: "comparison",
-    op: isAscending === (position === "after") ? "gt" : "lt",
-    left: field,
-    right: { __type: "literal", value: value as string | number | boolean },
-  };
+  const isAscending = order.direction === "asc";
+  const comparison = operand.compare(
+    isAscending === (position === "after") ? "gt" : "lt",
+    value,
+  );
   const nullValuesMatch =
     (position === "after" && nulls === "last") ||
     (position === "before" && nulls === "first");
   return nullValuesMatch ?
-      {
-        __type: "or",
-        predicates: [comparison, { __type: "null_check", op: "isNull", field }],
-      }
+      { __type: "or", predicates: [comparison, operand.isNull] }
     : comparison;
-}
-
-function buildImpossiblePredicate(field: FieldRef): PredicateExpression {
-  return {
-    __type: "and",
-    predicates: [
-      { __type: "null_check", op: "isNull", field },
-      { __type: "null_check", op: "isNotNull", field },
-    ],
-  };
 }
 
 /**

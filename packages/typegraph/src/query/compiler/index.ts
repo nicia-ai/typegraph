@@ -1820,6 +1820,7 @@ function compileStandardQueryWithCteStrategy(
         names,
         nodeKinds,
         vectorPredicate,
+        cursorPaged: shape === "cursor-keyed",
       }),
     );
   }

@@ -63,6 +63,9 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root >
       "l2",
       "inner_product",
     ],
+    "repeatableApproximateSearch": {
+      "repeatable": true,
+    },
     "searchFrontierTuning": {
       "indexType": "hnsw",
       "parameter": "hnsw.ef_search",
@@ -285,6 +288,9 @@ exports[`engine-profile parity: member keys, capabilities, marks > PGlite root, 
       "l2",
       "inner_product",
     ],
+    "repeatableApproximateSearch": {
+      "repeatable": true,
+    },
     "searchFrontierTuning": {
       "indexType": "hnsw",
       "parameter": "hnsw.ef_search",
@@ -508,6 +514,9 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
       "cosine",
       "l2",
     ],
+    "repeatableApproximateSearch": {
+      "repeatable": true,
+    },
     "searchFrontierTuning": {
       "reason": "a vec0 KNN takes only \`k\` (the page size); sqlite-vec exposes no ANN frontier parameter",
       "tunable": false,
@@ -710,6 +719,9 @@ exports[`engine-profile parity: member keys, capabilities, marks > better-sqlite
       "cosine",
       "l2",
     ],
+    "repeatableApproximateSearch": {
+      "repeatable": true,
+    },
     "searchFrontierTuning": {
       "reason": "a vec0 KNN takes only \`k\` (the page size); sqlite-vec exposes no ANN frontier parameter",
       "tunable": false,
@@ -2329,6 +2341,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "params": [
       "[1,0,0]",
       "engine_profile_parity_script",
+      "[1,0,0]",
       "engine_profile_parity_script",
       "Document",
       "<<TIMESTAMP>>",
@@ -2339,17 +2352,17 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
     "sql": "
       SELECT "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" AS node_id, (1 - (("tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" <=> $1::vector))) AS score
       FROM "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"
-      WHERE "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."graph_id" = $2 AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" IN (
+      WHERE "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."graph_id" = $2 AND ("tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" <=> $3::vector) < 3 AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" IN (
     SELECT "id" AS node_id
     FROM "typegraph_nodes"
-    WHERE "graph_id" = $3
-      AND "kind" = $4
+    WHERE "graph_id" = $4
+      AND "kind" = $5
       AND "deleted_at" IS NULL
-      AND ("valid_from" IS NULL OR "valid_from" <= $5)
-      AND ("valid_to" IS NULL OR "valid_to" > $6)
+      AND ("valid_from" IS NULL OR "valid_from" <= $6)
+      AND ("valid_to" IS NULL OR "valid_to" > $7)
   )
-      ORDER BY ("tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" <=> $7::vector) ASC
-      LIMIT $8
+      ORDER BY ("tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" <=> $8::vector) ASC NULLS LAST, "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" ASC
+      LIMIT $9
     ",
   },
   {
@@ -2389,6 +2402,7 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
       "Document",
       "[1,0,0]",
       "engine_profile_parity_script",
+      "[1,0,0]",
       "Document",
       "[1,0,0]",
       5,
@@ -2407,23 +2421,23 @@ exports[`engine-profile parity: ordered compiled-SQL capture > PGlite: efSearch 
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_id ASC) AS ord
       FROM (
         
         SELECT node_id, $5 AS node_kind, (1.0 - score) AS distance, score
         FROM (
       SELECT "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" AS node_id, (1 - (("tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" <=> $6::vector))) AS score
       FROM "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"
-      WHERE "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."graph_id" = $7 AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = $8)
-      ORDER BY ("tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" <=> $9::vector) ASC
-      LIMIT $10
+      WHERE "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."graph_id" = $7 AND ("tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" <=> $8::vector) < 3 AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = $9)
+      ORDER BY ("tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" <=> $10::vector) ASC NULLS LAST, "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" ASC
+      LIMIT $11
     ) AS tg_ann_src
       
-        ORDER BY distance ASC, node_id ASC
-        LIMIT $11
+        ORDER BY distance ASC NULLS LAST, node_id ASC
+        LIMIT $12
       ) AS vec_inner
     )
-   SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC, cte_d.d_id ASC NULLS LAST",
+   SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY CAST(cte_embeddings.distance AS DOUBLE PRECISION) ASC NULLS LAST, cte_d.d_id ASC NULLS LAST",
   },
   {
     "params": [],
@@ -4891,22 +4905,22 @@ exports[`engine-profile parity: ordered compiled-SQL capture > better-sqlite3: e
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_id ASC) AS ord
       FROM (
         
         SELECT node_id, ? AS node_kind, (1.0 - score) AS distance, score
         FROM (
         SELECT "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" AS node_id, (1 - (vec_distance_cosine("tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding", vec_f32(?)))) AS score
         FROM "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"
-        WHERE "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" MATCH vec_f32(?) AND k = ? AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."graph_id" = ? AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = ?)
+        WHERE "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."embedding" MATCH vec_f32(?) AND k = ? AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."graph_id" = ? AND distance < 3 AND "tg_vec_engine_profile_parity_script_document_embedding_74fd603b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = ?)
         ORDER BY distance ASC
       ) AS tg_ann_src
       
-        ORDER BY distance ASC, node_id ASC
+        ORDER BY distance ASC NULLS LAST, node_id ASC
         LIMIT ?
       ) AS vec_inner
     )
-   SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC, cte_d.d_id ASC NULLS LAST",
+   SELECT cte_d.d_id AS "d_id" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC NULLS LAST, cte_d.d_id ASC NULLS LAST",
   },
 ]
 `;

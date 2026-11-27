@@ -419,6 +419,31 @@ describe("searchCursorFingerprint", () => {
       ]).size,
     ).toBe(4);
   });
+
+  const searchDocuments = (text: string) =>
+    createQueryBuilder<typeof graph>(graph.id, buildKindRegistry(graph))
+      .from("Doc", "d")
+      .whereNode("d", (d) => d.$fulltext.matches(text, 10))
+      .select((ctx) => ({ id: ctx.d.id }))
+      .toAst();
+
+  it("does not collide where a 32-bit hash did", () => {
+    // Both texts hashed to 97757315 under the 32-bit fingerprint, so each
+    // search accepted the other's cursor.
+    for (const dialect of ["sqlite", "postgres"] as const) {
+      expect(
+        searchCursorFingerprint(searchDocuments("climate 2957"), dialect),
+      ).not.toBe(
+        searchCursorFingerprint(searchDocuments("climate 52473"), dialect),
+      );
+    }
+  });
+
+  it("is a 128-bit digest", () => {
+    expect(searchCursorFingerprint(search("Doc", "climate"), "sqlite")).toMatch(
+      /^[\da-f]{32}$/,
+    );
+  });
 });
 
 describe("encodeCursor", () => {

@@ -269,6 +269,53 @@ describe("pgvectorStrategy under PGlite (executed against bundled pgvector)", ()
     expect(rows.map((row) => row["node_id"])).toEqual(["d1"]);
   });
 
+  it("keeps the HNSW index scan and cuts tied neighbors by node id", async () => {
+    const s = slot("hnsw");
+    await createStorage(s);
+    await execAll([requireDefined(pgvectorStrategy.buildCreateIndex?.(s))]);
+    // 30 neighbors tied at distance 0, inserted out of id order, among 120
+    // others.
+    for (let index = 29; index >= 0; index -= 1) {
+      await upsert(s, `t${String(index).padStart(2, "0")}`, [1, 0, 0]);
+    }
+    for (let index = 0; index < 120; index += 1) {
+      const angle = 0.2 + index / 100;
+      await upsert(s, `o${index}`, [Math.cos(angle), Math.sin(angle), 0.1]);
+    }
+    const search = pgvectorStrategy.buildSearch(
+      s,
+      searchParams([1, 0, 0], { limit: 5, indexType: "hnsw" }),
+      sql`SELECT node_id FROM ${sql.identifier(pgvectorStrategy.tableName(GRAPH, "Document", "embedding"))}`,
+    );
+    const table = pgvectorStrategy.tableName(GRAPH, "Document", "embedding");
+    // Statistics, as a loaded table has them: without them the planner reads
+    // the primary key instead of the vector index.
+    await engine.client.exec(`ANALYZE "${table}"`);
+    await engine.client.exec("SET enable_seqscan = off");
+    try {
+      const compiled = renderPostgres(search);
+      const plan = await engine.client.query<Record<string, string>>(
+        `EXPLAIN ${compiled.sql}`,
+        [...compiled.params],
+      );
+      const planText = plan.rows
+        .map((row) => row["QUERY PLAN"] ?? "")
+        .join("\n");
+      // The tiebreak sorts on top of the ordered index scan, not instead of
+      // it.
+      expect(planText).toMatch(/Index Scan using \S+ on/);
+      expect(planText).toMatch(/Incremental Sort/);
+      const runs = new Set<string>();
+      for (let run_ = 0; run_ < 10; run_ += 1) {
+        const rows = await run(search);
+        runs.add(rows.map((row) => String(row["node_id"])).join(","));
+      }
+      expect([...runs]).toEqual(["t00,t01,t02,t03,t04"]);
+    } finally {
+      await engine.client.exec("RESET enable_seqscan");
+    }
+  });
+
   it("builds an IVFFlat index that executes", async () => {
     const s = slot("ivfflat");
     await createStorage(s);

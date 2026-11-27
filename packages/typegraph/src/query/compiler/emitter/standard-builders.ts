@@ -1,5 +1,7 @@
+import { type RepeatableApproximateSearch } from "../../../backend/types";
 import {
   CompilerInvariantError,
+  UnsupportedBackendCapabilityError,
   UnsupportedPredicateError,
 } from "../../../errors";
 import { requireDefined } from "../../../utils/presence";
@@ -19,12 +21,14 @@ import {
 import { type DialectAdapter } from "../../dialect/types";
 import {
   assertApproximateMetricSupported,
+  vectorDefinedDistanceConditions,
   vectorMinScoreCondition,
   vectorScoreExpression,
 } from "../../dialect/vector-strategy";
 import { type DatabaseExpression } from "../../expressions";
 import {
   compileOrderTerm,
+  compileRelevanceCandidateOrder,
   resolveNullOrdering,
   reverseOrder,
 } from "../../order";
@@ -1392,7 +1396,50 @@ type BuildStandardEmbeddingsCteInput = Readonly<{
   names: SqlStatementNames;
   nodeKinds: readonly string[];
   vectorPredicate: VectorSimilarityPredicate;
+  /**
+   * Whether the statement reads a cursor page (the `cursor-keyed` shape).
+   * A page of an approximate search the engine cannot repeat is refused
+   * ({@link assertRepeatableApproximateSearch}).
+   */
+  cursorPaged: boolean;
 }>;
+
+/**
+ * Refuses a cursor page of an approximate search that the engine serves
+ * through an ANN form whose results change from run to run
+ * (`capabilities.repeatableApproximateSearch`): each page re-runs the
+ * search and positions itself among the candidates that run returns, so
+ * rows would be skipped and repeated. Exact search, and a slot whose index
+ * type is `"none"`, never reach the ANN form and are never refused.
+ */
+function assertRepeatableApproximateSearch(
+  input: Readonly<{
+    cursorPaged: boolean;
+    indexType: string;
+    repeatability: RepeatableApproximateSearch;
+    engine: string;
+    nodeKind: string;
+    fieldPath: string;
+  }>,
+): void {
+  if (
+    !input.cursorPaged ||
+    input.indexType === "none" ||
+    input.repeatability.repeatable
+  )
+    return;
+  throw new UnsupportedBackendCapabilityError(
+    "Cursor pagination of an approximate vector search",
+    "vector.repeatableApproximateSearch",
+    {
+      engine: input.engine,
+      nodeKind: input.nodeKind,
+      fieldPath: input.fieldPath,
+      reason: input.repeatability.reason,
+    },
+    `Drop approximate: true to page the exact search, or read the approximate search with execute() alone: ${input.repeatability.reason}.`,
+  );
+}
 
 /** The columns `cte_embeddings` emits, in its SELECT list's order. */
 const EMBEDDINGS_CTE_COLUMNS = [
@@ -1519,6 +1566,14 @@ export function buildStandardEmbeddingsCte(
         slotDescriptor
       : undefined;
     if (annSlot !== undefined) {
+      assertRepeatableApproximateSearch({
+        cursorPaged: input.cursorPaged,
+        indexType: annSlot.indexType,
+        repeatability: vectorStrategy.capabilities.repeatableApproximateSearch,
+        engine: vectorStrategy.name,
+        nodeKind: kind,
+        fieldPath,
+      });
       ctx.annIndexTypes?.add(annSlot.indexType);
       // Membership candidates WITHOUT the scoped subquery's DISTINCT:
       // strategies embed these as `node_id IN (...)`, where duplicates
@@ -1583,6 +1638,7 @@ export function buildStandardEmbeddingsCte(
 
     const conditions: SqlFragment[] = [
       sql`${qualifyColumn(tableName, "graph_id")} = ${graphId}`,
+      ...vectorDefinedDistanceConditions(distanceExpr, branchMetric),
     ];
     if (minScore !== undefined) {
       // minScore validation (finiteness, cosine range) is handled by the
@@ -1625,10 +1681,11 @@ export function buildStandardEmbeddingsCte(
   // assign vector ordinals to every candidate, letting documents far
   // outside the requested top-k contribute to the RRF fused score and
   // reorder final results.
-  // Both break distance ties by node id, as the fulltext CTE breaks rank
-  // ties: which tied match makes the k cut, and the hybrid ordinal each
-  // tied match gets, are then the same in every statement, so every cursor
-  // page of a search ranks the candidates its `execute()` ranks.
+  // Both take the candidates in `compileRelevanceCandidateOrder`, as the
+  // fulltext CTE does and as each strategy's own engine cut does where the
+  // engine allows it: which tied match makes the k cut, and the hybrid
+  // ordinal each tied match gets, are then the same in every statement, so
+  // every execution and cursor page of a search ranks the same candidates.
   declareFixedCteWithColumns(
     names,
     EMBEDDINGS_CTE_ALIAS,
@@ -1642,10 +1699,10 @@ export function buildStandardEmbeddingsCte(
         ${readDerivedTableColumn("node_kind")},
         ${readDerivedTableColumn("distance")},
         ${readDerivedTableColumn("score")},
-        ROW_NUMBER() OVER (ORDER BY ${readDerivedTableColumn("distance")} ASC, ${readDerivedTableColumn("node_id")} ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY ${compileRelevanceCandidateOrder(readDerivedTableColumn("distance"), "asc", readDerivedTableColumn("node_id"))}) AS ord
       FROM (
         ${unionBody}
-        ORDER BY ${readDerivedTableColumn("distance")} ASC, ${readDerivedTableColumn("node_id")} ASC
+        ORDER BY ${compileRelevanceCandidateOrder(readDerivedTableColumn("distance"), "asc", readDerivedTableColumn("node_id"))}
         LIMIT ${vectorPredicate.limit}
       ) AS vec_inner
     )
@@ -1747,7 +1804,7 @@ export function buildStandardFulltextCte(
         ${readDerivedTableColumn("node_id")},
         ${readDerivedTableColumn("node_kind")},
         ${readDerivedTableColumn("rank")},
-        ROW_NUMBER() OVER (ORDER BY ${readDerivedTableColumn("rank")} DESC, ${readDerivedTableColumn("node_id")} ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY ${compileRelevanceCandidateOrder(readDerivedTableColumn("rank"), "desc", readDerivedTableColumn("node_id"))}) AS ord
       FROM (
         SELECT
           ${qualifyColumn(tableName, "node_id")} AS node_id,
@@ -1760,7 +1817,7 @@ export function buildStandardFulltextCte(
          AND ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_kind`)} =
              ${qualifyColumn(tableName, "node_kind")}
         WHERE ${sql.join(conditions, sql` AND `)}
-        ORDER BY ${readDerivedTableColumn("rank")} DESC, ${qualifyColumn(tableName, "node_id")} ASC
+        ORDER BY ${compileRelevanceCandidateOrder(readDerivedTableColumn("rank"), "desc", qualifyColumn(tableName, "node_id"))}
         LIMIT ${limit}
       ) AS fts_inner
     )
@@ -1842,15 +1899,18 @@ function compileRelevancePerMatchValue(
   source: RelevanceSortSource,
   input: RelevanceSortValueInput,
 ): SqlFragment {
+  // A numeric key is read as `relevanceCursorKey.value`, the one type the
+  // ORDER BY sorts, the cursor key renders and the cursor comparison binds.
+  const { value } = input.dialect.relevanceCursorKey;
   switch (source) {
     case "fulltext_rank": {
-      return readColumn(FULLTEXT_CTE_ALIAS, "rank");
+      return value(readColumn(FULLTEXT_CTE_ALIAS, "rank"));
     }
     case "vector_distance": {
-      return readColumn(EMBEDDINGS_CTE_ALIAS, "distance");
+      return value(readColumn(EMBEDDINGS_CTE_ALIAS, "distance"));
     }
     case "hybrid_score": {
-      return compileHybridRrfScore(input.fusion);
+      return value(compileHybridRrfScore(input.fusion));
     }
     case "hybrid_node_id": {
       // Deterministic tiebreak on the CTE-projected node_id. At least one of
@@ -1911,9 +1971,12 @@ function compileStandardRelevanceOrderTerms(
   return describeSelectionOrder(ast).map((key) => {
     switch (key.kind) {
       case "relevance": {
-        const direction =
-          reversed ? reverseOrder(key.key).direction : key.key.direction;
-        return sql`${compileRelevanceSortValue(key.key, input)} ${sql.raw(direction === "desc" ? "DESC" : "ASC")}`;
+        const order = reversed ? reverseOrder(key.key) : key.key;
+        return compileOrderTerm(
+          compileRelevanceSortValue(key.key, input),
+          order.direction,
+          resolveNullOrdering(order),
+        );
       }
       case "field": {
         return compileTerm(
@@ -1972,7 +2035,9 @@ export function buildStandardSelectionOrderColumn(
  * The value a keyset cursor carries for one relevance sort key of a match
  * row: a numeric key (rank, distance, fused score) rendered by
  * `DialectAdapter.relevanceCursorKey`, which keeps it exact across the round
- * trip; the hybrid node-id tiebreak as the text it compares as.
+ * trip, and NULL when the key is NULL (a cosine distance to a zero
+ * embedding), which the cursor carries as NULL; the hybrid node-id tiebreak
+ * as the text it compares as.
  */
 function compileRelevanceCursorKeyValue(
   source: RelevanceSortSource,
@@ -1980,7 +2045,7 @@ function compileRelevanceCursorKeyValue(
 ): SqlFragment {
   const value = compileRelevancePerMatchValue(source, input);
   return source === "hybrid_node_id" ? value : (
-      input.dialect.relevanceCursorKey.select(value)
+      sql`CASE WHEN ${value} IS NULL THEN NULL ELSE ${input.dialect.relevanceCursorKey.select(value)} END`
     );
 }
 
@@ -2026,11 +2091,24 @@ export function compileRelevanceComparison(
       "A relevance cursor comparison was compiled for a statement whose rows are groups",
       { phase: "relevance-cursor-key" },
     );
-  const operator =
-    predicate.op === "eq" ? "="
-    : predicate.op === "gt" ? ">"
-    : "<";
-  return sql`${compileRelevancePerMatchValue(predicate.source, input)} ${sql.raw(operator)} ${predicate.value}`;
+  const value = compileRelevancePerMatchValue(predicate.source, input);
+  switch (predicate.op) {
+    case "isNull": {
+      return sql`${value} IS NULL`;
+    }
+    case "isNotNull": {
+      return sql`${value} IS NOT NULL`;
+    }
+    case "eq":
+    case "gt":
+    case "lt": {
+      const operator =
+        predicate.op === "eq" ? "="
+        : predicate.op === "gt" ? ">"
+        : "<";
+      return sql`${value} ${sql.raw(operator)} ${predicate.value}`;
+    }
+  }
 }
 
 /**

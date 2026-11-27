@@ -52,3 +52,29 @@ export function reverseOrder<
     nulls: resolveNullOrdering(order) === "first" ? "last" : "first",
   };
 }
+
+/**
+ * Where a full-text, vector or hybrid match whose relevance value is NULL
+ * sorts: after every match with a value, as the least relevant, in both a
+ * descending rank and an ascending distance. A cosine distance to a zero
+ * embedding is NULL on SQLite (PostgreSQL computes NaN, which it sorts after
+ * every number). The one owner of that placement: the statement's ORDER BY,
+ * every top-k cut of a search (`compileRelevanceCandidateOrder`) and a keyset
+ * cursor's position all read it.
+ */
+export const RELEVANCE_NULL_ORDERING = "last";
+
+/**
+ * The total order a top-k cut of search candidates takes its rows in: by
+ * `value` in `direction`, NULLs last ({@link RELEVANCE_NULL_ORDERING}), then
+ * by `nodeId`. A cut inside a tie then keeps the same rows in every
+ * statement, so every execution and every cursor page of one search ranks
+ * the same candidates.
+ */
+export function compileRelevanceCandidateOrder(
+  value: SqlFragment,
+  direction: "asc" | "desc",
+  nodeId: SqlFragment,
+): SqlFragment {
+  return sql`${compileOrderTerm(value, direction, RELEVANCE_NULL_ORDERING)}, ${nodeId} ASC`;
+}
