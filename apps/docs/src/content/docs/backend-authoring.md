@@ -625,7 +625,7 @@ contracts before upgrading.
 | `updateResolvedNodesBatch` | Optional | Update a resolved set all-or-nothing behind its version gate. Return every updated row, or `[]` when the gate refused. | Rows are matched by id and checked against the entries. `[]` makes the store recover row by row through `updateNode`; a partial count is a `ConfigurationError`. Absent: the per-row path. |
 | `updateNodeSet`, `compareAndSetNode` | Optional | Apply one set-based update. Return `{ affectedCount, rows }`, with `rows` holding the after-image of every affected row. | `rows` drive validation and the sidecar and claim rebuild; `affectedCount` is returned to the caller. Absent: `updateWhere()` and compare-and-set refuse with `SET_UPDATE_UNSUPPORTED` / `COMPARE_AND_SET_UNSUPPORTED`. They also need interactive transactions. |
 | `upsertHeterogeneousNodes` | Optional | Upsert plain caller-id nodes across kinds behind the stated schema fence. Return one row per entry, in entry order. | Read positionally. A row count different from the entry count is `HETEROGENEOUS_NODE_BATCH_STALE_SCHEMA`. Absent: `tx.writeNodeUpsertBatch()` refuses with `UnsupportedBackendCapabilityError`. |
-| `deleteNode` | Required | Tombstone one node row, returning nothing. | The store then removes the node's uniqueness entries, embeddings and fulltext row itself, through the sidecar members below. |
+| `deleteNode` | Required | Tombstone one node row, returning nothing. | The store then releases the node's uniqueness and `disjointWith` entries through `releaseUniquesByOwner`, and removes its embeddings and fulltext row, through the sidecar members below. |
 | `lockNodes` | Required | Read and lock rows; see [Node-row locks](/backend-setup#node-row-locks-locknodes). | Rows are matched by id. |
 
 ### Edge writes
@@ -659,11 +659,95 @@ contracts before upgrading.
 | `insertUnique` | Required | Reserve one key. Throw `UniquenessError` when a different live owner (another `(concreteKind, nodeId)`) holds it. In the bundled backends the same owner, or a tombstoned holder, takes the row over. | The store issues the reservation before the row it gates, maps a `UniquenessError` to its own error (for example `DisjointError`), and releases the reservation with `deleteUnique` if the row write fails. |
 | `insertUniqueBatch` | Optional | `insertUnique` for many entries, with the same conflict semantics. The store never passes two entries with the same key on the same axis and constraint. | Absent: one `insertUnique` per entry. `updateWhere()` on a constrained kind and resolved writes need it, and refuse with `SET_UPDATE_UNIQUENESS_UNSUPPORTED` / `RESOLVED_NODE_UNIQUENESS_UNSUPPORTED`. |
 | `deleteUnique` | Required | Release an owner's live entry for one constraint and key: across every axis when `nodeKind` is absent, or only that axis when it is present. The bundled backends tombstone the entry. | Called only to undo a reservation a failed row write just took, always with `nodeKind`. Return value ignored. |
-| `releaseUniquesByOwner` | Required | Release (tombstone, in the bundled backends) every live entry the owner `(concreteKind, nodeId)` holds under the listed `constraintNames`, at every axis, except the `(constraintName, key)` pairs in `keep`. Match by owner and constraint only: no key outside `keep` is consulted. An empty `constraintNames` releases nothing. | Every lifecycle release: a soft delete names the kind's uniqueness and `disjointWith` claims with an empty `keep`; an update or resurrection names the kind's uniqueness constraints and keeps the keys it now holds. Return value ignored. |
+| `releaseUniquesByOwner` | Required | Tombstone every live entry the owner `(concreteKind, nodeId)` holds under the listed `constraintNames`, at every axis, except the `(constraintName, key)` pairs in `keep`; see [Releasing claims by owner](#releasing-claims-by-owner). | Every lifecycle release: a soft delete names the kind's uniqueness and `disjointWith` claims with an empty `keep`; an update or resurrection names the constraints it moves and keeps the keys it now holds. Return value ignored. |
 | `checkUnique` | Required | Return the entry at the axis, or `undefined`. Include tombstoned entries only when `includeDeleted` is set. | Cached and overlaid with the write's pending claims. |
 | `checkUniqueBatch` | Optional | Return the entries found for the listed keys. A missing key means absent. | Rows are matched by key, so order does not matter. Absent: one `checkUnique` per key. Set updates and resolved writes need it. |
 | `hardDeleteUniquesByNodeIds` | Optional | Permanently remove every entry the listed nodes own. | No fallback. Set updates and resolved writes need it, and refuse as `insertUniqueBatch` does when it is unavailable. |
 | `hardDeleteUniquesByConcreteKind` | Optional by type | Permanently remove every entry owned by nodes of one concrete kind, at whatever axis. | One of the four members `constraintClaims` requires (next table). The store does not call it today: kind removal compiles the same statement itself. |
+
+### Releasing claims by owner
+
+`releaseUniquesByOwner(params: ReleaseUniquesByOwnerParams)` is required from
+0.77.0: a backend object without it does not type-check as a `GraphBackend`. It
+is how the store gives a node's uniqueness claims back. The store never
+recomputes the key an earlier write claimed, because the same value can key
+differently from its stored and its validated form (a date is ISO text in the
+row and a `Date` after validation, and a PostgreSQL `jsonb` object comes back
+in another key order). It names the claims by owner instead.
+
+- **What it deletes.** Every entry of this `graphId` whose owner columns
+  `concrete_kind` and `node_id` equal `concreteKind` and `nodeId`, that is
+  live (`deleted_at` unset), whose `constraintName` is one of `constraintNames`, at every axis
+  (`node_kind`), except an entry whose `(constraintName, key)` pair is listed
+  in `keep`. Match on owner and constraint name only. Do not compare any key
+  except those in `keep`, and do not touch another owner's entry, even one
+  with the same key.
+- **How it deletes.** Tombstone the entry, as `deleteUnique` does: it must
+  stop being returned by `checkUnique`, and must still be returned, with its
+  key and owner, when `includeDeleted` is set. `getOrCreateByConstraint()`
+  finds a soft-deleted node through its released entry.
+- **Where it runs.** On the target the store calls it on: the
+  `TransactionBackend` of the write's frame on a transactional backend, where
+  it must execute on that transaction's connection so that it commits or rolls
+  back with the row write it follows. Implement it on the root backend and on
+  every transaction handle.
+- **What it returns.** Nothing. The store ignores the value. A release that matches no entry succeeds.
+- **Idempotence.** Calling it again with the same params changes nothing: an
+  entry it already tombstoned is no longer live, and is left as it is. An
+  empty `constraintNames` releases nothing and needs no statement.
+
+The store calls it after the row write it belongs to, never before it. A soft
+delete names every uniqueness and `disjointWith` constraint of the kind and
+keeps nothing. An update or a resurrection names the constraints it moves and
+keeps the keys it has just claimed or already holds. An update whose patch
+states no field that a constraint reads (neither its fields nor the field its
+`where` tests) leaves that constraint alone and calls nothing for it.
+
+A reference implementation, for a backend that stores entries in one SQL table
+with the bundled column names. Bind `execute` to the connection the member is
+called on:
+
+```typescript
+import type {
+  GraphBackend,
+  ReleaseUniquesByOwnerParams,
+} from "@nicia-ai/typegraph/backend";
+
+type Execute = (sql: string, parameters: readonly unknown[]) => Promise<void>;
+
+function releaseUniquesByOwnerOn(
+  execute: Execute,
+): GraphBackend["releaseUniquesByOwner"] {
+  return async (params: ReleaseUniquesByOwnerParams) => {
+    if (params.constraintNames.length === 0) return;
+    const parameters: unknown[] = [
+      new Date().toISOString(),
+      params.graphId,
+      params.concreteKind,
+      params.nodeId,
+    ];
+    const bind = (value: unknown): string => {
+      parameters.push(value);
+      return `${parameters.length}`;
+    };
+    const constraints = params.constraintNames.map((name) => bind(name));
+    const kept = params.keep.map(
+      (claim) =>
+        ` AND NOT (constraint_name = ${bind(claim.constraintName)} AND key = ${bind(claim.key)})`,
+    );
+    await execute(
+      `UPDATE typegraph_node_uniques SET deleted_at = $1
+        WHERE graph_id = $2 AND concrete_kind = $3 AND node_id = $4
+          AND deleted_at IS NULL
+          AND constraint_name IN (${constraints.join(", ")})${kept.join("")}`,
+      parameters,
+    );
+  };
+}
+```
+
+Index the owner columns `(graph_id, concrete_kind, node_id)` so the statement
+does not scan the table. The bundled schema already has that index.
 
 ### Edge cardinality claims
 

@@ -829,10 +829,12 @@ neither collides with the other:
   `onUnknownProperty: "allow"` or a provenance revival on an earlier release
   could key a date claim from its unquoted ISO text, where a create keys the
   JSON-quoted text of the `Date`. A create of the same date is admitted beside
-  such a claim. Rewriting the holder (for example `update(id, {})`) re-keys
-  its claim from validated props, and refuses with `UniquenessError` when a
-  duplicate was already admitted; resolve the duplicate (for example by
-  hard-deleting one of the two nodes) and rewrite the holder again. Until then,
+  such a claim. An update that states the constrained field, even with its
+  current value (for example `update(id, { at: node.at })`), re-keys the
+  holder's claim from validated props, and refuses with `UniquenessError`
+  when a duplicate was already admitted; resolve the duplicate (for example by
+  hard-deleting one of the two nodes) and update the holder again. An update
+  whose patch states no field the constraint reads leaves the claim as it is. Until then,
   `getOrCreateByConstraint()` does not resurrect a soft-deleted holder whose
   released claim has the other form, and creates a new node instead.
 - **Values whose validated key order follows their input.** A `z.record()`

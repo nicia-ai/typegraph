@@ -872,7 +872,10 @@ first.
 A claim is released by the node that holds it. An update gives back every
 claim the node holds under the constraint other than the key it now claims,
 and a delete gives back all of them, without recomputing the key an earlier
-write took. A claim keyed in an older form is released the same way. Two
+write took. A claim keyed in an older form is released the same way. An
+`update()` whose patch states none of a constraint's fields, nor the field
+its `where` tests, cannot change that constraint's key, so it leaves the
+claim alone and issues no statement for it. Two
 cases this does not repair are described in
 [Limitations](/limitations#uniqueness-claims-keyed-in-another-form).
 
