@@ -932,6 +932,91 @@ export function registerSearchPaginationIntegrationTests(
       expect([...first.data, ...second.data]).toEqual(plainRows);
     });
 
+    it("issues a cursor from a sort value that holds a NUL, where the text can hold one", async (ctx) => {
+      const store = context.getStore();
+      if (!getDialect(store.backend.dialect).capabilities.textAdmitsNul)
+        ctx.skip();
+      const kinds = SEARCH_KINDS.filter((kind) =>
+        capabilitiesOf(kind).every(
+          (capability) =>
+            store.backend.capabilities[capability]?.supported === true,
+        ),
+      );
+      // Tied on relevance; the category orders them, two of them past a NUL.
+      for (const [id, category] of [
+        ["n1", "a"],
+        ["n2", "a\u0000a"],
+        ["n3", "a\u0000b"],
+        ["n4", "b"],
+      ] as const) {
+        await store.nodes.Article.create(
+          {
+            title: "climate report",
+            body: "notes",
+            category,
+            published: true,
+            embedding: embeddingAt(0.3),
+          },
+          { id },
+        );
+      }
+      const outcomes = [];
+      for (const kind of ["plain", ...kinds] as const) {
+        for (const selection of ["id", "node"] as const) {
+          const query = () => {
+            const from =
+              kind === "plain" ?
+                store.query().from("Article", "a")
+              : searchArticles(store, { kind });
+            return from
+              .orderBy("a", "category", "asc")
+              .select((row) =>
+                selection === "id" ?
+                  { id: row.a.id }
+                : { id: row.a.id, node: row.a },
+              );
+          };
+          const walked = query as unknown as () => SearchQuery;
+          outcomes.push({
+            kind,
+            selection,
+            executed: await executedIds(walked()),
+            paginate: await walk(store, walked, "paginate", "forward", 1).then(
+              (read) => read,
+              invariantRefusal,
+            ),
+            batched: await walk(store, walked, "batchOnce", "forward", 1),
+          });
+        }
+      }
+      const correct = outcomes.map((outcome) => ({
+        ...outcome,
+        executed: ["n1", "n2", "n3", "n4"],
+        paginate: ["n1", "n2", "n3", "n4"],
+        batched: ["n1", "n2", "n3", "n4"],
+      }));
+      // libSQL's driver returns a selected text up to its first NUL, so a
+      // selective page issues its cursor from "a" and its next page reads
+      // n2 again; main returns that page again and again.
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: outcomes,
+        correct,
+        defects: [
+          {
+            label:
+              "known defect fix5-libsql-nul (libSQL truncates a selected text at its first NUL)",
+            on: { driver: ["libsql"] },
+            today: correct.map((outcome) =>
+              outcome.selection === "id" ?
+                { ...outcome, paginate: "CompilerInvariantError" }
+              : outcome,
+            ),
+          },
+        ],
+      });
+    });
+
     it("refuses a cursor whose text its database cannot hold (a NUL on PostgreSQL, a lone surrogate anywhere) before it reaches the database, and pages a NUL where the text can hold it", async () => {
       const store = context.getStore();
       await seedRanked(store);
