@@ -11,7 +11,10 @@
 import { expect } from "vitest";
 
 import { type VectorSearchParams } from "../../../src/backend/types";
-import { pgvectorStrategy } from "../../../src/query/dialect/vector/pgvector-strategy";
+import {
+  pgvectorIndexName,
+  pgvectorStrategy,
+} from "../../../src/query/dialect/vector/pgvector-strategy";
 import { type VectorSlot } from "../../../src/query/dialect/vector-strategy";
 import { renderPostgres, sql } from "../../../src/query/sql-fragment";
 
@@ -24,7 +27,21 @@ export type PlanSession = Readonly<{
 }>;
 
 const RESORT_ABOVE_CTE_SCAN =
-  /\n\s*->\s+Sort\n\s+Sort Key: \(\(?tg_vec_relaxed\.distance \+ '?0'?(?:::double precision)?\)?\)?, tg_vec_relaxed\.node_id\n\s+->\s+CTE Scan on tg_vec_relaxed/;
+  /\n\s*->\s+Sort\n\s+Sort Key: \(\(?tg_vec_relaxed\.distance \+ '?0'?(?:::double precision)?\)?\)?, tg_vec_relaxed\.node_id COLLATE "C"\n\s+->\s+CTE Scan on tg_vec_relaxed/;
+
+/**
+ * The plan's text from the materialized wrapper on: the relaxed scan the
+ * wrapper's CTE runs. A generic `Index Scan` would also match the embedding
+ * table's primary-key scan.
+ */
+function relaxedCtePlan(planText: string): string {
+  const start = planText.indexOf("CTE tg_vec_relaxed");
+  return start === -1 ? "" : planText.slice(start);
+}
+
+function escapeRegExp(text: string): string {
+  return text.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
+}
 
 /**
  * EXPLAINs the IVFFlat search of `slot` (seeded and indexed by the caller)
@@ -74,7 +91,14 @@ export async function expectIvfflatPlansResort(
             return typeof line === "string" ? line : "";
           })
           .join("\n");
-        expect(planText).toMatch(/Index Scan using \S+ on/);
+        // The relaxed scan is the IVFFlat index itself, by name, inside the
+        // materialized wrapper: a fallback to a B-tree scan and a full sort
+        // would also show an `Index Scan`.
+        expect(relaxedCtePlan(planText)).toMatch(
+          new RegExp(
+            String.raw`Index Scan using ${escapeRegExp(pgvectorIndexName(slot))} on ${escapeRegExp(table)}\b`,
+          ),
+        );
         expect(planText).toMatch(RESORT_ABOVE_CTE_SCAN);
       }
     }

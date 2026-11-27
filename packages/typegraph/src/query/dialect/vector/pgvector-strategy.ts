@@ -33,6 +33,7 @@ import {
 import { shortHash } from "../../../utils/hash";
 import { compileRelevanceCandidateOrder } from "../../order";
 import { sql, type SqlFragment } from "../../sql-fragment";
+import { postgresDialect } from "../postgres";
 import {
   assertFiniteEmbedding,
   quoteIdentifier,
@@ -520,14 +521,14 @@ function createPgvectorStrategyWithPrefixes(
         SELECT ${table}."node_id" AS node_id, ${score} AS score, ${distance} AS distance
         FROM ${table}
         WHERE ${sql.join(conditions, sql` AND `)}
-        ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${table}."node_id"` })}
+        ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${table}."node_id"` }, postgresDialect)}
         LIMIT ${params.limit + pageOffset}
       `;
         // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
         return sql`
         WITH tg_vec_relaxed AS MATERIALIZED (${relaxedBody})
         SELECT node_id, score FROM tg_vec_relaxed
-        ORDER BY ${compileRelevanceCandidateOrder(sql`(distance + 0)`, "asc", { nodeKind: undefined, nodeId: sql`node_id` })}
+        ORDER BY ${compileRelevanceCandidateOrder(sql`(distance + 0)`, "asc", { nodeKind: undefined, nodeId: sql`node_id` }, postgresDialect)}
         ${pageClause}
       `;
       }
@@ -536,7 +537,7 @@ function createPgvectorStrategyWithPrefixes(
       SELECT ${table}."node_id" AS node_id, ${score} AS score
       FROM ${table}
       WHERE ${sql.join(conditions, sql` AND `)}
-      ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${table}."node_id"` })}
+      ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${table}."node_id"` }, postgresDialect)}
       ${pageClause}
     `;
     },

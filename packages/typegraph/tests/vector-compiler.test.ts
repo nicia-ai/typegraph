@@ -120,11 +120,12 @@ describe("vector compilation semantics", () => {
     expect(sql).toContain("AS distance");
     expect(sql).toContain("AS score");
     expect(sql).toMatch(
-      /ROW_NUMBER\(\) OVER \(ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC\) AS ord/,
+      /ROW_NUMBER\(\) OVER \(ORDER BY distance ASC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC\) AS ord/,
     );
-    // The inner k-cutoff bounds the ranked set to the predicate's limit.
+    // The inner k-cutoff bounds the ranked set to the predicate's limit,
+    // breaking ties on the candidate identity in byte order.
     expect(sql).toMatch(
-      /ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC\s+LIMIT 10/,
+      /ORDER BY distance ASC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC\s+LIMIT 10/,
     );
   });
 

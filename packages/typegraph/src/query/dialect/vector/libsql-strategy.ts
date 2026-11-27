@@ -29,6 +29,7 @@ import {
 } from "../../../backend/types";
 import { compileRelevanceCandidateOrder } from "../../order";
 import { sql, type SqlFragment } from "../../sql-fragment";
+import { sqliteDialect } from "../sqlite";
 import {
   assertFiniteEmbedding,
   quoteIdentifier,
@@ -329,7 +330,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
         FROM vector_top_k(${indexName}, ${query}, ${annK})
         JOIN ${quoted} ON ${quoted}.rowid = id
         WHERE ${sql.join(conditions, sql` AND `)}
-        ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${quoted}."node_id"` })}
+        ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${quoted}."node_id"` }, sqliteDialect)}
         ${pageClause}
       `;
     }
@@ -352,7 +353,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
       SELECT ${quoted}."node_id" AS node_id, ${score} AS score
       FROM ${quoted}
       WHERE ${sql.join(conditions, sql` AND `)}
-      ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${quoted}."node_id"` })}
+      ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${quoted}."node_id"` }, sqliteDialect)}
       ${pageClause}
     `;
   },

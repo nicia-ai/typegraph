@@ -304,6 +304,48 @@ async function walk(
 }
 
 /**
+ * On PostgreSQL, gives the node-id columns the search cuts read (the
+ * full-text table's and the vector strategy's table for `Article.embedding`)
+ * the ICU `unicode` collation, which orders `a` before `B`, and returns
+ * the restore; `undefined` on SQLite, whose text is byte-ordered by
+ * definition, or where the engine has no such collation.
+ */
+async function linguisticSearchNodeIds(
+  store: IntegrationStore,
+): Promise<(() => Promise<void>) | undefined> {
+  const { backend } = store;
+  if (backend.dialect !== "postgres") return undefined;
+  const executeDdl = backend.executeDdl;
+  const fulltextTable = backend.tableNames?.fulltext;
+  const vectorTable = backend.vectorStrategy?.tableName(
+    integrationTestGraph.id,
+    "Article",
+    "embedding",
+  );
+  if (executeDdl === undefined || fulltextTable === undefined) return undefined;
+  const [probe] = await backend.execute<{ linguistic: unknown }>(
+    asCompiledRowsSql(
+      sql.raw(
+        `SELECT CASE WHEN 'a' COLLATE "unicode" < 'B' COLLATE "unicode" THEN 1 ELSE 0 END AS linguistic`,
+      ),
+    ),
+  );
+  if (Number(probe?.linguistic) !== 1) return undefined;
+  const tables = [
+    fulltextTable,
+    ...(vectorTable === undefined ? [] : [vectorTable]),
+  ];
+  const alter = async (collation: string) => {
+    for (const table of tables)
+      await executeDdl(
+        `ALTER TABLE "${table}" ALTER COLUMN node_id TYPE text COLLATE ${collation}`,
+      );
+  };
+  await alter(`"unicode"`);
+  return () => alter(`"default"`);
+}
+
+/**
  * The text a cursor carries for a double relevance key of the value
  * `double`, rendered by the dialect's own `relevanceCursorKey` in SQL.
  */
@@ -1172,6 +1214,69 @@ export function registerSearchPaginationIntegrationTests(
     });
 
     for (const kind of SEARCH_KINDS) {
+      it(`${kind}: a k cut inside a tie keeps the candidate whose id sorts first in byte order, as store.search does`, async (ctx) => {
+        const store = storeWith(context, ctx, kind);
+        // Tied on every leg. Byte order puts "B" (0x42) before "a" (0x61);
+        // a linguistic collation puts "a" first. Created "a" first, so an
+        // order that fell back to storage would keep "a" too.
+        for (const id of ["a", "B"]) {
+          await store.nodes.Article.create(
+            {
+              title: "climate",
+              body: "notes",
+              category: "binary",
+              published: true,
+              embedding: embeddingAt(0.3),
+            },
+            { id },
+          );
+        }
+        // On PostgreSQL the tied ids are compared under a linguistic
+        // collation, so the case fails if a cut loses its byte order.
+        const restore = await linguisticSearchNodeIds(store);
+        try {
+          const query = () =>
+            searchArticles(store, { kind, k: 1 }).select((row) => ({
+              id: row.a.id,
+            }));
+          const facade =
+            kind === "fulltext" ?
+              await store.search.fulltext("Article", {
+                query: "climate",
+                limit: 1,
+              })
+            : kind === "vector" ?
+              await store.search.vector("Article", {
+                fieldPath: "embedding",
+                queryEmbedding: QUERY_VECTOR,
+                limit: 1,
+              })
+            : await store.search.hybrid("Article", {
+                limit: 1,
+                vector: {
+                  fieldPath: "embedding",
+                  queryEmbedding: QUERY_VECTOR,
+                },
+                fulltext: { query: "climate" },
+              });
+          expect({
+            kind,
+            facade: facade.map((hit) => hit.node.id),
+            executed: await executedIds(query()),
+            paged: await walk(store, query, "paginate", "forward", 1),
+            batched: await walk(store, query, "batchOnce", "forward", 1),
+          }).toEqual({
+            kind,
+            facade: ["B"],
+            executed: ["B"],
+            paged: ["B"],
+            batched: ["B"],
+          });
+        } finally {
+          await restore?.();
+        }
+      });
+
       it(`${kind}: a k cut inside a tie between two kinds' nodes with one id takes them in kind order, on execute() and every page`, async (ctx) => {
         storeWith(context, ctx, kind);
         const store = await context.createStore(polymorphicSearchGraph);

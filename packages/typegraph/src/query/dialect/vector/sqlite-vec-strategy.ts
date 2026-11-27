@@ -63,6 +63,7 @@ import {
 } from "../../../backend/types";
 import { compileRelevanceCandidateOrder } from "../../order";
 import { sql, type SqlFragment } from "../../sql-fragment";
+import { sqliteDialect } from "../sqlite";
 import {
   assertFiniteEmbedding,
   quoteIdentifier,
@@ -407,7 +408,7 @@ export const sqliteVecStrategy: VectorStrategy = {
       SELECT ${table}."node_id" AS node_id, ${score} AS score
       FROM ${table}
       WHERE ${sql.join(conditions, sql` AND `)}
-      ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${table}."node_id"` })}
+      ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${table}."node_id"` }, sqliteDialect)}
       ${pageClause}
     `;
   },

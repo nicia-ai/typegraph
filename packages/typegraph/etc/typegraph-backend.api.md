@@ -1511,7 +1511,7 @@ export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 export function compileRelevanceCandidateOrder(value: SqlFragment, direction: "asc" | "desc", identity: Readonly<{
     nodeKind: SqlFragment | undefined;
     nodeId: SqlFragment;
-}>): SqlFragment;
+}>, dialect: Pick<DialectAdapter, "binaryText">): SqlFragment;
 
 // @public
 export type CompositionClaimScope = Readonly<{

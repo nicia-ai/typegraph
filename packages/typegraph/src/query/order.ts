@@ -1,5 +1,6 @@
 import { ConfigurationError } from "../errors";
 import type { SortDirection } from "./ast";
+import type { DialectAdapter } from "./dialect/types";
 import { sql, type SqlFragment } from "./sql-fragment";
 
 /** Compiles one portable scalar ORDER BY term with explicit null placement. */
@@ -73,6 +74,12 @@ export const RELEVANCE_NULL_ORDERING = "last";
  * statement, so every execution and every cursor page of one search ranks
  * the same candidates.
  *
+ * The identity compares in byte order on every backend
+ * (`dialect.binaryText`), as `store.search`'s own top-k cut breaks a tie,
+ * not in a PostgreSQL database's collation: a linguistic collation orders
+ * `a` before `B` where byte order and SQLite take `B` first, so the same
+ * tie would keep a different candidate on each backend and API.
+ *
  * `nodeKind` is `undefined` only for a cut over one kind's candidates (a
  * vector strategy's scan of one kind's table), where it is the same for
  * every row and orders nothing.
@@ -84,8 +91,11 @@ export function compileRelevanceCandidateOrder(
     nodeKind: SqlFragment | undefined;
     nodeId: SqlFragment;
   }>,
+  dialect: Pick<DialectAdapter, "binaryText">,
 ): SqlFragment {
   const kindTerm =
-    identity.nodeKind === undefined ? sql`` : sql`${identity.nodeKind} ASC, `;
-  return sql`${compileOrderTerm(value, direction, RELEVANCE_NULL_ORDERING)}, ${kindTerm}${identity.nodeId} ASC`;
+    identity.nodeKind === undefined ?
+      sql``
+    : sql`${dialect.binaryText(identity.nodeKind)} ASC, `;
+  return sql`${compileOrderTerm(value, direction, RELEVANCE_NULL_ORDERING)}, ${kindTerm}${dialect.binaryText(identity.nodeId)} ASC`;
 }

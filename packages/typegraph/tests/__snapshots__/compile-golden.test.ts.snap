@@ -6330,19 +6330,26 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC) AS ord
       FROM (
-        
+        SELECT
+          node_id,
+          node_kind,
+          distance,
+          score
+        FROM (
+          
         SELECT node_id, $5 AS node_kind, (1.0 - score) AS distance, score
         FROM (
       SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $6::vector))) AS score
       FROM "tg_vec_compile_golden_document_embedding_8872495b"
       WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = $7 AND ("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $8::vector) < 3 AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = $9)
-      ORDER BY ("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $10::vector) ASC NULLS LAST, "tg_vec_compile_golden_document_embedding_8872495b"."node_id" ASC
+      ORDER BY ("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $10::vector) ASC NULLS LAST, "tg_vec_compile_golden_document_embedding_8872495b"."node_id" COLLATE "C" ASC
       LIMIT $11
     ) AS tg_ann_src
       
-        ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC
+        ) AS vec_candidates
+        ORDER BY distance ASC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC
         LIMIT $12
       ) AS vec_inner
     )
@@ -6384,7 +6391,13 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         score,
         ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
-        
+        SELECT
+          node_id,
+          node_kind,
+          distance,
+          score
+        FROM (
+          
         SELECT node_id, ? AS node_kind, (1.0 - score) AS distance, score
         FROM (
         SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (vector_distance_cos("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vector32(?)))) AS score
@@ -6395,6 +6408,7 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         LIMIT ?
       ) AS tg_ann_src
       
+        ) AS vec_candidates
         ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC
         LIMIT ?
       ) AS vec_inner
@@ -6433,7 +6447,13 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         score,
         ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
-        
+        SELECT
+          node_id,
+          node_kind,
+          distance,
+          score
+        FROM (
+          
         SELECT node_id, ? AS node_kind, (1.0 - score) AS distance, score
         FROM (
         SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (vec_distance_cosine("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vec_f32(?)))) AS score
@@ -6442,6 +6462,7 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         ORDER BY distance ASC
       ) AS tg_ann_src
       
+        ) AS vec_candidates
         ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC
         LIMIT ?
       ) AS vec_inner
@@ -6478,9 +6499,15 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC) AS ord
       FROM (
-        
+        SELECT
+          node_id,
+          node_kind,
+          distance,
+          score
+        FROM (
+          
       SELECT
         "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id,
         $5 AS node_kind,
@@ -6500,7 +6527,8 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
        AND scoped_relevance_nodes.node_kind = $8
       WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = $9 AND ("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $10::vector) < 3
     
-        ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC
+        ) AS vec_candidates
+        ORDER BY distance ASC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC
         LIMIT $11
       ) AS vec_inner
     )
@@ -6538,7 +6566,13 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         score,
         ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
-        
+        SELECT
+          node_id,
+          node_kind,
+          distance,
+          score
+        FROM (
+          
       SELECT
         "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id,
         ? AS node_kind,
@@ -6558,6 +6592,7 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
        AND scoped_relevance_nodes.node_kind = ?
       WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND vector_distance_cos("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vector32(?)) < 3
     
+        ) AS vec_candidates
         ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC
         LIMIT ?
       ) AS vec_inner
@@ -6596,7 +6631,13 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         score,
         ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
-        
+        SELECT
+          node_id,
+          node_kind,
+          distance,
+          score
+        FROM (
+          
         SELECT node_id, ? AS node_kind, (1.0 - score) AS distance, score
         FROM (
         SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (vec_distance_cosine("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vec_f32(?)))) AS score
@@ -6605,6 +6646,7 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         ORDER BY distance ASC
       ) AS tg_ann_src
       
+        ) AS vec_candidates
         ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC
         LIMIT ?
       ) AS vec_inner
@@ -6638,7 +6680,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         node_id,
         node_kind,
         rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind ASC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC) AS ord
       FROM (
         SELECT
           "typegraph_node_fulltext"."node_id" AS node_id,
@@ -6658,7 +6700,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
          AND scoped_relevance_nodes.node_kind =
              "typegraph_node_fulltext"."node_kind"
         WHERE "typegraph_node_fulltext"."graph_id" = $6 AND "typegraph_node_fulltext"."node_kind" = $7 AND "typegraph_node_fulltext"."tsv" @@ websearch_to_tsquery("language", $8)
-        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" ASC, "typegraph_node_fulltext"."node_id" ASC
+        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" COLLATE "C" ASC, "typegraph_node_fulltext"."node_id" COLLATE "C" ASC
         LIMIT $9
       ) AS fts_inner
     )
@@ -6743,7 +6785,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         node_id,
         node_kind,
         rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind ASC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC) AS ord
       FROM (
         SELECT
           "typegraph_node_fulltext"."node_id" AS node_id,
@@ -6763,7 +6805,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
          AND scoped_relevance_nodes.node_kind =
              "typegraph_node_fulltext"."node_kind"
         WHERE "typegraph_node_fulltext"."graph_id" = $6 AND "typegraph_node_fulltext"."node_kind" = $7 AND "typegraph_node_fulltext"."tsv" @@ websearch_to_tsquery("language", $8)
-        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" ASC, "typegraph_node_fulltext"."node_id" ASC
+        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" COLLATE "C" ASC, "typegraph_node_fulltext"."node_id" COLLATE "C" ASC
         LIMIT $9
       ) AS fts_inner
     )
@@ -6846,7 +6888,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         node_id,
         node_kind,
         rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind ASC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC) AS ord
       FROM (
         SELECT
           "typegraph_node_fulltext"."node_id" AS node_id,
@@ -6866,7 +6908,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
          AND scoped_relevance_nodes.node_kind =
              "typegraph_node_fulltext"."node_kind"
         WHERE "typegraph_node_fulltext"."graph_id" = $4 AND "typegraph_node_fulltext"."node_kind" = $5 AND "typegraph_node_fulltext"."tsv" @@ websearch_to_tsquery("language", $6)
-        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" ASC, "typegraph_node_fulltext"."node_id" ASC
+        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" COLLATE "C" ASC, "typegraph_node_fulltext"."node_id" COLLATE "C" ASC
         LIMIT $7
       ) AS fts_inner
     )
@@ -6947,7 +6989,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         node_id,
         node_kind,
         rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind ASC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC) AS ord
       FROM (
         SELECT
           "typegraph_node_fulltext"."node_id" AS node_id,
@@ -6967,7 +7009,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
          AND scoped_relevance_nodes.node_kind =
              "typegraph_node_fulltext"."node_kind"
         WHERE "typegraph_node_fulltext"."graph_id" = $4 AND "typegraph_node_fulltext"."node_kind" = $5 AND "typegraph_node_fulltext"."tsv" @@ websearch_to_tsquery("language", $6)
-        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" ASC, "typegraph_node_fulltext"."node_id" ASC
+        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" COLLATE "C" ASC, "typegraph_node_fulltext"."node_id" COLLATE "C" ASC
         LIMIT $7
       ) AS fts_inner
     )

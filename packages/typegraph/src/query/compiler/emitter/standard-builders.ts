@@ -1709,6 +1709,10 @@ export function buildStandardEmbeddingsCte(
   // assign vector ordinals to every candidate, letting documents far
   // outside the requested top-k contribute to the RRF fused score and
   // reorder final results.
+  // The cut reads the candidates through `vec_candidates`: its order
+  // compares the identity in byte order (`binaryText`), an expression,
+  // which PostgreSQL resolves against a branch's FROM list, where `node_id`
+  // is ambiguous, and refuses on a UNION's result.
   // Both take the candidates in `compileRelevanceCandidateOrder`, as the
   // fulltext CTE does and as each strategy's own engine cut does where the
   // engine allows it: which tied match makes the k cut, and the hybrid
@@ -1727,10 +1731,17 @@ export function buildStandardEmbeddingsCte(
         ${readDerivedTableColumn("node_kind")},
         ${readDerivedTableColumn("distance")},
         ${readDerivedTableColumn("score")},
-        ROW_NUMBER() OVER (ORDER BY ${compileRelevanceCandidateOrder(readDerivedTableColumn("distance"), "asc", { nodeKind: readDerivedTableColumn("node_kind"), nodeId: readDerivedTableColumn("node_id") })}) AS ord
+        ROW_NUMBER() OVER (ORDER BY ${compileRelevanceCandidateOrder(readDerivedTableColumn("distance"), "asc", { nodeKind: readDerivedTableColumn("node_kind"), nodeId: readDerivedTableColumn("node_id") }, ctx.dialect)}) AS ord
       FROM (
-        ${unionBody}
-        ORDER BY ${compileRelevanceCandidateOrder(readDerivedTableColumn("distance"), "asc", { nodeKind: readDerivedTableColumn("node_kind"), nodeId: readDerivedTableColumn("node_id") })}
+        SELECT
+          ${readDerivedTableColumn("node_id")},
+          ${readDerivedTableColumn("node_kind")},
+          ${readDerivedTableColumn("distance")},
+          ${readDerivedTableColumn("score")}
+        FROM (
+          ${unionBody}
+        ) AS vec_candidates
+        ORDER BY ${compileRelevanceCandidateOrder(readDerivedTableColumn("distance"), "asc", { nodeKind: readDerivedTableColumn("node_kind"), nodeId: readDerivedTableColumn("node_id") }, ctx.dialect)}
         LIMIT ${vectorPredicate.limit}
       ) AS vec_inner
     )
@@ -1832,7 +1843,7 @@ export function buildStandardFulltextCte(
         ${readDerivedTableColumn("node_id")},
         ${readDerivedTableColumn("node_kind")},
         ${readDerivedTableColumn("rank")},
-        ROW_NUMBER() OVER (ORDER BY ${compileRelevanceCandidateOrder(readDerivedTableColumn("rank"), "desc", { nodeKind: readDerivedTableColumn("node_kind"), nodeId: readDerivedTableColumn("node_id") })}) AS ord
+        ROW_NUMBER() OVER (ORDER BY ${compileRelevanceCandidateOrder(readDerivedTableColumn("rank"), "desc", { nodeKind: readDerivedTableColumn("node_kind"), nodeId: readDerivedTableColumn("node_id") }, dialect)}) AS ord
       FROM (
         SELECT
           ${qualifyColumn(tableName, "node_id")} AS node_id,
@@ -1845,7 +1856,7 @@ export function buildStandardFulltextCte(
          AND ${sql.raw(`${SCOPED_RELEVANCE_NODES_ALIAS}.node_kind`)} =
              ${qualifyColumn(tableName, "node_kind")}
         WHERE ${sql.join(conditions, sql` AND `)}
-        ORDER BY ${compileRelevanceCandidateOrder(readDerivedTableColumn("rank"), "desc", { nodeKind: qualifyColumn(tableName, "node_kind"), nodeId: qualifyColumn(tableName, "node_id") })}
+        ORDER BY ${compileRelevanceCandidateOrder(readDerivedTableColumn("rank"), "desc", { nodeKind: qualifyColumn(tableName, "node_kind"), nodeId: qualifyColumn(tableName, "node_id") }, dialect)}
         LIMIT ${limit}
       ) AS fts_inner
     )
