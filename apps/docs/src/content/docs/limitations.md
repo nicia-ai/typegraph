@@ -996,6 +996,15 @@ adopt a caller-owned transaction:
   the same time allocate the same recorded revision, and the second fails with
   the driver's `UNIQUE constraint failed: typegraph_recorded_anchors…` error.
   Run the adoptions one after another, or roll back after that failure.
+- **Provenance calls on two such adoptions must not overlap.** Verbs and
+  provenance reads on one native transaction must be sequenced: overlap is
+  refused where the adoptions are provably the same transaction and is
+  unsupported, with an undefined result, where they are not. Two
+  `withRecordedTransaction` adoptions of a transaction you began on a
+  better-sqlite3 connection are not provably the same, so a `retract` on one
+  and an `unRetract` on the other started together can commit a fact live with
+  no support. Await each call before starting the next. See
+  [Provenance](/provenance#retracting-inside-your-own-transaction).
 - **Reconstruction cost.** Recorded reads rebuild from the history relations and
   are slower than live reads, most noticeably for full-graph subgraph /
   algorithm reconstructions on PostgreSQL.

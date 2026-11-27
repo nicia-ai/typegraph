@@ -11,10 +11,14 @@
  * sources of `shared` at once left both flags set and `shared` live with no
  * support.
  *
- * The transition does not rely on the refusal for correctness. After its
- * writes it re-reads every source flag on the transaction and reconciles a
- * change (`transitionInExclusiveSection`, `src/provenance/transition.ts`),
- * so whichever verb re-reads last closes `shared`.
+ * Overlap on unproven adoptions is unsupported: verbs and provenance reads on
+ * one native transaction must be sequenced. This case is the one the verb's
+ * re-read and reconcile pass (`transitionInExclusiveSection`,
+ * `src/provenance/transition.ts`) closes and the section does not, and it is
+ * why that pass is kept: both verbs flip a flag, so whichever re-reads last
+ * sees the other's flag and closes `shared`. The shared provenance suite pins
+ * an overlap it does not close (a restoration that flips no flag beside a
+ * retraction), as a known defect on better-sqlite3.
  *
  * Revert check: return the first pass's report without re-reading the
  * flags, and `shared` stays live with both flags set.

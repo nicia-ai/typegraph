@@ -1,3 +1,4 @@
+import { sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -33,6 +34,7 @@ import {
 } from "../../../src/provenance";
 import type { HistoryStore } from "../../../src/store/store";
 import { requireDefined } from "../../../src/utils/presence";
+import { expectObservation } from "../../helpers/known-defect";
 import type { IntegrationTestContext } from "./test-context";
 
 const Source = defineNode("Source", {
@@ -477,8 +479,9 @@ function recordingTransactionTarget(
 
 /**
  * `backend` with every transaction it opens handing its callback a
- * {@link recordingTransactionTarget}, so a test can count the statements a
- * call inside a store transaction issued.
+ * {@link recordingTransactionTarget}, and every caller transaction it adopts
+ * bound through one, so a test can count the statements a call inside a
+ * store transaction or an adopted binding issued.
  *
  * `park(member, occurrence)` holds the `occurrence`-th call of `member`
  * from then on, before it reaches the database, until `release()`;
@@ -522,6 +525,12 @@ function recordTransactionCalls(backend: AdapterBackend<unknown>): Readonly<{
           (target) => fn(recordingTransactionTarget(target, calls, holdCall)),
           options,
         ),
+      adoptTransaction: (native) =>
+        recordingTransactionTarget(
+          backend.adoptTransaction(native),
+          calls,
+          holdCall,
+        ),
     }),
     park: (member, occurrence = 1) => {
       const signals: { reached?: () => void; release?: () => void } = {};
@@ -540,6 +549,58 @@ function recordTransactionCalls(backend: AdapterBackend<unknown>): Readonly<{
       return { reached, release: () => signals.release?.() };
     },
   };
+}
+
+type NativeStatementRunner = Readonly<{
+  run?: (query: unknown) => unknown;
+  execute?: (query: unknown) => unknown;
+}>;
+
+/** Runs one statement on a native handle, as the caller's own SQL would. */
+async function runCallerStatement(
+  native: unknown,
+  statement: string,
+): Promise<void> {
+  const runner = native as NativeStatementRunner;
+  const query = drizzleSql.raw(statement);
+  if (runner.run !== undefined) await runner.run(query);
+  else if (runner.execute === undefined) {
+    throw new Error("The native handle runs no statement.");
+  } else {
+    await runner.execute(query);
+  }
+}
+
+/**
+ * Runs `body` on a transaction the caller begins, as an application that
+ * adopts its own transaction does. On better-sqlite3 that is a `BEGIN` on the
+ * connection, whose handle identifies the connection and not the
+ * transaction, so no adoption of it is proven to share another's state. On
+ * every other driver the caller's transaction runs on a handle of its own
+ * (`src/backend/native-transaction-handle.ts`), which proves it.
+ */
+async function inCallerTransaction<T>(
+  context: IntegrationTestContext,
+  backend: AdapterBackend<unknown>,
+  body: (native: unknown) => Promise<T>,
+): Promise<T> {
+  if (context.driver !== "better-sqlite3") {
+    return backend.transactionWithNative((_target, native) => body(native));
+  }
+  // The drizzle handle over the connection, kept past the transaction that
+  // handed it out: a statement on it runs on whatever the connection has.
+  const connection = await backend.transactionWithNative((_target, native) =>
+    Promise.resolve(native),
+  );
+  await runCallerStatement(connection, "BEGIN");
+  try {
+    const result = await body(connection);
+    await runCallerStatement(connection, "COMMIT");
+    return result;
+  } catch (error) {
+    await runCallerStatement(connection, "ROLLBACK");
+    throw error;
+  }
 }
 
 /** A backend that cannot adopt a schema write refuses the evolved transaction. */
@@ -2419,6 +2480,129 @@ export function registerProvenanceIntegrationTests(
       );
       expect(sortedIds(duringVerb.report.died)).toEqual(everything);
       expect(await provenance.holding()).toEqual([]);
+    });
+
+    // Verbs and provenance reads on one native transaction must be
+    // sequenced. Overlap is refused where two adoptions are provably the same
+    // transaction and unsupported where they are not; the transaction-session
+    // rule that refuses an adopted call while another context is active on
+    // the same native transaction removes the second case. Pinned here: `ab`
+    // has one justification requiring both sources. `retract(a)` closes `ab`
+    // and is parked before its flag write; `unRetract(b)` then runs through a
+    // second adoption of the same caller transaction. Where the adoptions are
+    // proven the same (every driver but better-sqlite3, whose caller-begun
+    // transaction is identified by its connection only), it is refused before
+    // any statement. On better-sqlite3 the two adoptions get native states of
+    // their own: `b` is already available, so its verb flips nothing and
+    // reopens `ab`, which its read finds supported; `retract(a)` then flips
+    // its flag, re-reads the availability it decided and skips its reconcile
+    // pass, and both adoptions succeed with `ab` live and unsupported. The
+    // reconcile pass cannot close this: each verb's re-read agrees with its
+    // own decision.
+    it("refuses a verb on a second adoption of one native transaction while a verb runs on the first, where the adoptions are proven the same (known defect: unproven adoptions commit a live fact with no support)", async () => {
+      const backend = context.getBackend();
+      const recorded = recordTransactionCalls(backend);
+      const [store] = await createAdapterStoreWithSchema(
+        provenanceGraph,
+        recorded.backend,
+        { history: true },
+      );
+      const [a, b] = await Promise.all(
+        ["a", "b"].map((id) =>
+          store.nodes.Source.create({ label: id, retracted: false }, { id }),
+        ),
+      );
+      const fact = await store.nodes.Fact.create({ label: "ab" }, { id: "ab" });
+      const justification = await store.nodes.Justification.create(
+        { label: "ab-j" },
+        { id: "ab-j" },
+      );
+      for (const source of [requireDefined(a), requireDefined(b)]) {
+        await store.edges.premiseOf.create(source, justification, {});
+      }
+      await store.edges.derives.create(justification, fact, {});
+      const provenance = createRetractionCapability(store, config);
+      const outcomeOf = (work: Promise<unknown>): Promise<string> =>
+        work.then(
+          () => "fulfilled",
+          (error: unknown) =>
+            error instanceof ConfigurationError ?
+              String(error.details["code"])
+            : String(error),
+        );
+
+      const outcomes = await inCallerTransaction(
+        context,
+        backend,
+        async (native) => {
+          const parked = recorded.park("updateNode");
+          const first = outcomeOf(
+            store.withRecordedTransaction(native, (tx) =>
+              provenance.retract(ref("Source", "a"), tx),
+            ),
+          );
+          await parked.reached;
+          // The statements of the verb itself, not of the adoption around it.
+          let secondIssued = 0;
+          const second = await outcomeOf(
+            store.withRecordedTransaction(native, async (tx) => {
+              const issuedBefore = recorded.calls.length;
+              try {
+                return await provenance.unRetract(ref("Source", "b"), tx);
+              } finally {
+                secondIssued = recorded.calls.length - issuedBefore;
+              }
+            }),
+          );
+          parked.release();
+          return { first: await first, second, secondIssued };
+        },
+      );
+
+      const flags = await store.nodes.Source.find();
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: {
+          ...outcomes,
+          secondIssued: outcomes.secondIssued > 0 ? "some" : "none",
+          flags: flags
+            .map((source): readonly [string, boolean] => [
+              source.id,
+              source.retracted,
+            ])
+            .toSorted(([left], [right]) => left.localeCompare(right)),
+          live: sortedIds(await store.nodes.Fact.find()),
+          believed: sortedIds(await provenance.holding()),
+        },
+        correct: {
+          first: "fulfilled",
+          second: "PROVENANCE_TRANSITION_OVERLAPPING",
+          secondIssued: "none",
+          flags: [
+            ["a", true],
+            ["b", false],
+          ],
+          live: [],
+          believed: [],
+        },
+        defects: [
+          {
+            label: "overlapping verbs on unproven adoptions",
+            on: { driver: ["better-sqlite3"] },
+            today: {
+              first: "fulfilled",
+              second: "fulfilled",
+              secondIssued: "some",
+              flags: [
+                ["a", true],
+                ["b", false],
+              ],
+              live: ["ab"],
+              believed: [],
+            },
+          },
+        ],
+      });
     });
 
     // Load-bearing: handing a verb straight to an array method passes the

@@ -393,15 +393,17 @@ transaction are refused the same way, and so is a verb started while either of
 them reads: a read beside a verb's writes could see part of a close pass
 applied, a believed set no order of the two calls produces, or vouch for a
 fact the verb had already decided to close. Two reads may overlap.
-The refusal needs proof that two calls run on one transaction. Two
+Verbs and provenance reads on one native transaction must be sequenced:
+overlap is refused where the adoptions are provably the same transaction and
+is unsupported, with an undefined result, where they are not. Two
 `withRecordedTransaction()` adoptions of a transaction you began yourself on
-a better-sqlite3 connection have none, since a connection does not say which
-transaction is open on it, so their verbs are not refused. The verb does not
-rely on the refusal to stay correct: after its writes it re-reads every
-source flag on the transaction and, if another verb changed one since its
-support read, runs once more without flipping anything, so whichever verb
-re-reads last brings every fact it reaches in line with the flags. A read on
-another such adoption is not refused either. Other calls are not refused: a
+a better-sqlite3 connection are not provably the same, since a connection
+does not say which transaction is open on it, so overlapping calls on them
+are not refused and can commit a fact live with no support: a `retract(a)`
+that has closed a fact needing sources `a` and `b`, beside an
+`unRetract(b)` on the other adoption that finds `b` available and reopens
+the fact. A verb's re-read of the source flags after its writes repairs some
+such overlaps, not that one. Other calls are not refused: a
 write that overlaps the verb can land between the transition's support read
 and its writes.
 
@@ -864,9 +866,12 @@ reads in its own transaction.
   read-only form of `holding(tx)` is refused there, on SQLite and PostgreSQL
   alike, with `UnsupportedBackendCapabilityError` (capability
   `write transaction access`) before any statement, and the transaction stays
-  usable. On a `row` fence, read the believed set with `holding()` or with
-  `holding(tx)` in a transaction that can write, under a role that may write
-  the fences table.
+  usable. On a `row` fence, read the believed set with `holding()`, under a
+  role that may write the fences table. `holding(tx)` in a transaction that
+  can write answers there on PostgreSQL only: SQLite cannot report the
+  isolation a `row` fence acquisition observed, so the keyed-fence freshness
+  rule below refuses it with `UnsupportedBackendCapabilityError` (capability
+  `observedReadCommittedIsolation`) before any read.
 - In a transaction that can write, `holding(tx)` and `assertHolds` on a keyed
   write fence (PostgreSQL's default) need read committed isolation, observed on
   the lock statement, as the retraction verbs do; see

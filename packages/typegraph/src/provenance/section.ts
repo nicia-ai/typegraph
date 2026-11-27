@@ -15,10 +15,11 @@
  * The section is shared only where the sessions share their native
  * transaction's state, which is only on proof (`session.native`): two
  * adoptions of one caller-begun transaction on a connection-level handle
- * (better-sqlite3) each get a state of their own and are not refused. A verb
- * stays correct there through its own re-read and reconcile pass
- * (`transitionInExclusiveSection`, `./transition.ts`); a read on another
- * adoption is not excluded.
+ * (better-sqlite3) each get a state of their own and are not refused.
+ * Overlap there is unsupported and its result undefined (a fact can commit
+ * live with no support); the transaction-session rule that refuses an
+ * adopted call while another context is active removes it for every
+ * feature, so no provenance-specific guard is added for it here.
  */
 import { ConfigurationError } from "../errors";
 import {

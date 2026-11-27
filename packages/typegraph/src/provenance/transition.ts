@@ -399,10 +399,10 @@ export async function runTransition<
  * The refusal holds only where the sessions share their native transaction's
  * state, which is only on proof (`session.native`): two adoptions of one
  * caller-begun transaction on a connection-level handle (better-sqlite3)
- * each get a state of their own and are not refused. The transition is
- * therefore also correct without the refusal: it re-reads the availability
- * it decided from after its writes and reconciles a change
- * ({@link transitionInExclusiveSection}).
+ * each get a state of their own and are not refused, and overlap there is
+ * unsupported with an undefined result (`RetractionCapability`,
+ * `./types.ts`). The re-read and reconcile pass of
+ * {@link transitionInExclusiveSection} repairs some such overlaps, not all.
  */
 async function transitionInTransaction<
   G extends GraphDef,
@@ -449,12 +449,17 @@ async function transitionInTransaction<
  * availability differs from the one it decided, it runs a reconcile pass,
  * which is the verb re-run with nothing left to flip: a fresh support read,
  * then the closes and reopens that bring every fact reachable from its
- * sources in line with the current flags. Of two overlapping transitions,
- * the later re-read follows both flag writes (each transition writes its
- * flags before it re-reads), so at least that one reconciles, and every fact
- * whose support depends on both is reachable from both. A reconcile pass
- * writes no flag, so each further pass answers a flag written by another
- * verb since the previous read, and the loop ends once they stop.
+ * sources in line with the current flags. A reconcile pass writes no flag,
+ * so each further pass answers a flag written by another verb since the
+ * previous read, and the loop ends once they stop.
+ *
+ * This is a partial repair, kept because it closes a case the section does
+ * not (two retractions of a fact's two sources on two unproven adoptions,
+ * `tests/provenance-adopted-overlap.test.ts`), not a guarantee: a verb that
+ * flips no flag is invisible to the other's re-read, so a restoration of an
+ * already available source that reopens a fact beside a retraction parked
+ * after its close leaves that fact live with no support (pinned in the
+ * shared provenance suite). Overlap on unproven adoptions stays unsupported.
  */
 async function transitionInExclusiveSection<
   G extends GraphDef,

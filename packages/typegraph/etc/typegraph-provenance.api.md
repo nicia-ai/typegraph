@@ -6378,7 +6378,7 @@ type RestoredRecordedInstant = string & {
     readonly [RECORDED_INSTANT_BRAND]: "RestoredRecordedInstant";
 };
 
-// @public (undocumented)
+// @public
 export type RetractionCapability<G extends GraphDef = GraphDef, SourceKind extends NodeKind<G> = NodeKind<G>, FactKind extends NodeKind<G> = NodeKind<G>, JustificationKind extends NodeKind<G> = NodeKind<G>> = Readonly<{
     retract: (source: ProvenanceSourceInput<G, SourceKind>, tx?: TransactionContext<G>) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
     retractMany: (sources: readonly ProvenanceSourceInput<G, SourceKind>[], tx?: TransactionContext<G>) => Promise<RetractionReport<G, FactKind, JustificationKind>>;
