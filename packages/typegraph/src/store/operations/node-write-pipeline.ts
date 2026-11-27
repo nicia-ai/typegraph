@@ -1259,10 +1259,14 @@ export async function applyNodeSetUpdate(
     );
   }
 
+  // Both statements serialize the patch. A copy taken before the first keeps
+  // them serializing the same value even if the caller mutates a nested value
+  // of its patch while the dry-run or the uniqueness probe is in flight.
+  const patch = structuredClone(args.patch);
   const selection = {
     graphId: ctx.graphId,
     kind,
-    patch: args.patch,
+    patch,
     unsetProperties: args.unsetProperties,
     candidateIds: args.candidateIds,
     candidateIdColumn: args.candidateIdColumn,
@@ -1339,7 +1343,7 @@ export async function applyNodeSetUpdate(
   const result = await members.updateNodeSet({
     graphId: ctx.graphId,
     kind,
-    patch: args.patch,
+    patch,
     unsetProperties: args.unsetProperties,
     rows: preview.rows.map((row) => ({ id: row.id, rowToken: row.rowToken })),
   });

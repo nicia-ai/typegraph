@@ -7,6 +7,7 @@ import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
 import {
   asCompiledRowsSql,
+  asCompiledSelectSql,
   asCompiledStatementSql,
 } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
@@ -308,6 +309,148 @@ export function registerSetUpdateConcurrencyTests(
           title: "retitled",
           status: "published",
           version: 3,
+        });
+      },
+    );
+    // A history store takes its per-graph write lock before every write it
+    // records, and so before that write's row locks. A set update's dry-run
+    // row-locks what its write will write, so it must take the graph lock
+    // first too: taken only at the write, it would follow the dry-run's row
+    // lock, and a writer that holds the graph lock while it updates the same
+    // row would deadlock against it.
+    it.runIf(context.serverLaneConcurrency)(
+      "updateWhere() on a history store takes the graph write lock before its dry-run locks the row",
+      async () => {
+        const store = await context.createHistoryStore(raceGraph);
+        const document = await store.nodes.RaceDocument.create({
+          status: "draft",
+          title: "original",
+        });
+        const holding = createGate();
+        const release = createGate();
+        // Holds the graph write lock (any recorded write takes it), then
+        // updates the document once the set update below is waiting.
+        const writing = store.transaction(async (tx) => {
+          await tx.nodes.RaceDocument.create({
+            status: "other",
+            title: "lock holder",
+          });
+          holding.open();
+          await release.opened;
+          await tx.nodes.RaceDocument.update(document.id, {
+            title: "retitled",
+          });
+        });
+        await holding.opened;
+        const updating = store.nodes.RaceDocument.updateWhere({
+          patch: { status: "published" },
+          where: (candidate) => candidate.status.eq("draft"),
+        });
+        try {
+          await vi.waitFor(
+            async () => {
+              const rows = await context.getBackend().execute<CountRow>(
+                asCompiledRowsSql(sql`
+                  SELECT count(*) AS count FROM pg_stat_activity
+                  WHERE datname = current_database()
+                    AND wait_event_type = 'Lock'
+                    AND wait_event = 'advisory'
+                `),
+              );
+              expect(Number(requireDefined(rows[0]).count)).toBe(1);
+            },
+            { timeout: 5000 },
+          );
+        } finally {
+          release.open();
+        }
+        const outcomes = await Promise.allSettled([writing, updating]);
+        const stored = requireDefined(
+          await store.nodes.RaceDocument.getById(document.id),
+        );
+
+        expect({
+          outcomes: outcomes.map((outcome) => outcome.status),
+          affectedCount:
+            outcomes[1].status === "fulfilled" ?
+              outcomes[1].value.affectedCount
+            : undefined,
+          title: stored.title,
+          status: stored.status,
+          version: stored.meta.version,
+        }).toEqual({
+          outcomes: ["fulfilled", "fulfilled"],
+          affectedCount: 1,
+          title: "retitled",
+          status: "published",
+          version: 3,
+        });
+      },
+    );
+    // The keyed write is all or nothing on its own, without the dry-run's
+    // locks: called directly on an autocommit connection, the dry-run's locks
+    // are gone by the time it runs. It locks the keyed rows before it counts
+    // them, so a row a concurrent writer is changing is counted only once that
+    // writer has committed, and a set with one changed row writes nothing.
+    it.runIf(context.serverLaneConcurrency)(
+      "a direct keyed set write that meets a concurrently changed row writes none of its rows",
+      async () => {
+        const store = await context.createStore(raceGraph);
+        const changed = await store.nodes.RaceDocument.create({
+          status: "draft",
+          title: "changed",
+        });
+        const untouched = await store.nodes.RaceDocument.create({
+          status: "draft",
+          title: "untouched",
+        });
+        const backend = context.getBackend();
+        const nodesTable = createSqlSchema(backend.tableNames).nodesTable;
+        const patch = { status: "published" };
+        const preview = await requireDefined(backend.previewNodeSetUpdate)({
+          operation: "updateWhere",
+          graphId: store.graphId,
+          kind: "RaceDocument",
+          patch,
+          candidateIds: asCompiledSelectSql(sql`
+            SELECT id AS document_id FROM ${nodesTable}
+            WHERE graph_id = ${store.graphId} AND kind = 'RaceDocument'
+          `),
+          candidateIdColumn: "document_id",
+        });
+        expect(preview.rows).toHaveLength(2);
+
+        const { affectedCount } = await raceAgainstUncommittedUpdate(
+          context,
+          store,
+          changed.id,
+          { title: "retitled" },
+          () =>
+            requireDefined(backend.updateNodeSet)({
+              graphId: store.graphId,
+              kind: "RaceDocument",
+              patch,
+              rows: preview.rows.map((row) => ({
+                id: row.id,
+                rowToken: row.rowToken,
+              })),
+            }),
+        );
+        const storedChanged = requireDefined(
+          await store.nodes.RaceDocument.getById(changed.id),
+        );
+        const storedUntouched = requireDefined(
+          await store.nodes.RaceDocument.getById(untouched.id),
+        );
+
+        expect({
+          affectedCount,
+          changed: [storedChanged.title, storedChanged.status],
+          untouched: [storedUntouched.status, storedUntouched.meta.version],
+        }).toEqual({
+          affectedCount: 0,
+          changed: ["retitled", "draft"],
+          untouched: ["draft", 1],
         });
       },
     );

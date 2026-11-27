@@ -1097,11 +1097,13 @@ const SET_KEYS = "tg_set_keys";
 const SET_SELECTED = "tg_set_selected";
 const SET_CANDIDATES = "tg_set_candidates";
 const SET_KEY_ROWS = "tg_set_key_rows";
+const SET_LOCKED = "tg_set_locked";
 const SET_RELATIONS = [
   SET_KEYS,
   SET_SELECTED,
   SET_CANDIDATES,
   SET_KEY_ROWS,
+  SET_LOCKED,
 ] as const;
 
 /** The column aliases of the set update's key CTE. */
@@ -1118,13 +1120,16 @@ type SetRelationNames = Readonly<
 >;
 
 /**
- * The token naming one stored node row: its id, version and stored properties,
- * as JSON text. THE one spelling of "the row the dry-run read" — the dry-run
+ * The token naming one stored node row — its id, version, stored properties,
+ * validity window and creation time — as JSON text. THE one spelling of "the row the dry-run read" — the dry-run
  * projects it and the keyed write compares against it, so the two cannot
- * disagree about what makes a row the same row. JSON encoding keeps the three
- * parts apart, and the stored properties are part of it so that a row deleted
- * and re-created under the same id at the same version is told apart unless
- * it is identical in every property the after-image is computed from.
+ * disagree about what makes a row the same row. JSON encoding keeps the parts
+ * apart. The version alone cannot name a row: a row deleted and re-created
+ * under the same id starts again at the version the original may still have.
+ * With the stored properties, the window and the creation time beside it, a
+ * re-created row is told apart unless it is identical in every stored column
+ * but the timestamp of its last write — a row the dry-run's after-image and
+ * validation describe exactly.
  *
  * `relation` qualifies the columns; omitted, they resolve against the
  * statement's single target table.
@@ -1142,6 +1147,9 @@ function setRowToken(
     column(nodes.id.name),
     column(nodes.version.name),
     column(nodes.props.name),
+    column(nodes.validFrom.name),
+    column(nodes.validTo.name),
+    column(nodes.createdAt.name),
   ])} AS TEXT)`;
 }
 
@@ -1367,12 +1375,18 @@ export function buildPreviewNodeSetUpdate(
  * token, so the statement binds a constant number of parameters however many
  * rows it writes. The key CTE carries both: the id drives a keyed lookup of
  * each row, as in the dry-run, and the token, compared on the row that lookup
- * found, makes the match exact (see {@link setRowToken}). The trailing count
- * compares how many keyed rows still carry their token with how many were
- * validated: when any row was changed, deleted or re-created since the
- * dry-run, the count is short, the statement writes no row, and the caller
- * reports the mismatch — a row the caller did not validate is never written,
- * and neither is part of a set it refused.
+ * found, makes the match exact (see {@link setRowToken}).
+ *
+ * All or nothing: the `tg_set_locked` CTE first locks every keyed row that
+ * still carries its token (`rowLock`, as the dry-run did; a no-op when the
+ * dry-run's locks are held), and the write runs only when that count equals
+ * the number of rows validated. Locking before counting is what makes the
+ * count exact on PostgreSQL READ COMMITTED: an unlocked count could include a
+ * row a concurrent writer is changing, which the UPDATE's own recheck would
+ * then skip while writing the rest. When any row was changed, deleted or
+ * re-created since the dry-run, the count is short, the statement writes no
+ * row, and the caller reports the mismatch — a row the caller did not
+ * validate is never written, and neither is part of a set it refused.
  *
  * The `SET` clause is the dry-run's after-image expression
  * ({@link setPatchedProps}) over the same stored row, so the row written is
@@ -1383,11 +1397,13 @@ export function buildUpdateNodeSet(
   dialect: SqlDialect,
   params: UpdateNodeSetParams,
   timestamp: string,
+  rowLock: RowLockClause,
 ): SQL {
   const { nodes } = tables;
   const adapter = getDialect(dialect);
   const relationNames = statementRelationNames(tables, SET_RELATIONS);
   const selected = relationNames[SET_SELECTED];
+  const locked = sql.identifier(relationNames[SET_LOCKED]);
   const keyRows = portableSql.identifier(relationNames[SET_KEY_ROWS]);
   const key = setKeyColumns(relationNames);
   // Built entry by entry rather than through `Object.fromEntries`, so no id
@@ -1410,7 +1426,18 @@ export function buildUpdateNodeSet(
     dialect,
   );
   return sql`
-    ${keysCte}
+    ${keysCte},
+    ${locked} AS (
+      SELECT ${qualifiedColumn(selected, nodes.id)}
+      FROM ${key.keys}
+      JOIN ${nodes} AS ${sql.identifier(selected)}
+        ON ${qualifiedColumn(selected, nodes.graphId)} = ${key.graphId}
+       AND ${qualifiedColumn(selected, nodes.kind)} = ${key.kind}
+       AND ${qualifiedColumn(selected, nodes.id)} = ${key.id}
+      WHERE ${qualifiedColumn(selected, nodes.deletedAt)} IS NULL
+        AND ${selectedToken} = ${key.token}
+      ${rowLock([selected])}
+    )
     UPDATE ${nodes}
     SET ${quotedColumn(nodes.props)} = ${setPatchedProps(adapter, dialect, nodes, params)},
         ${quotedColumn(nodes.updatedAt)} = ${timestamp},
@@ -1420,16 +1447,7 @@ export function buildUpdateNodeSet(
             SELECT ${key.graphId}, ${key.kind}, ${key.id}, ${key.token}
             FROM ${key.keys}
           )
-      AND (
-            SELECT COUNT(*)
-            FROM ${key.keys}
-            JOIN ${nodes} AS ${sql.identifier(selected)}
-              ON ${qualifiedColumn(selected, nodes.graphId)} = ${key.graphId}
-             AND ${qualifiedColumn(selected, nodes.kind)} = ${key.kind}
-             AND ${qualifiedColumn(selected, nodes.id)} = ${key.id}
-            WHERE ${qualifiedColumn(selected, nodes.deletedAt)} IS NULL
-              AND ${selectedToken} = ${key.token}
-          ) = ${params.rows.length}
+      AND (SELECT COUNT(*) FROM ${locked}) = ${params.rows.length}
     RETURNING *
   `;
 }

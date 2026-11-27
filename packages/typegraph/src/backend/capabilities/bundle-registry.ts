@@ -1418,7 +1418,7 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "batchEntityWrite",
-    ceiling: 2,
+    ceiling: 4,
   },
   updateNodeSet: {
     kind: "deferred",

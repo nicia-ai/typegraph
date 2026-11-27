@@ -5373,7 +5373,11 @@ export function createCommonOperationBackend(
       )) {
         await execution.execRun(fence);
       }
-      const query = operationStrategy.buildUpdateNodeSet(params, nowIso());
+      const query = operationStrategy.buildUpdateNodeSet(
+        params,
+        nowIso(),
+        nodeSetUpdateRowLock,
+      );
       const rows = await execution.execAll<Record<string, unknown>>(query);
       const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
       return { affectedCount: updatedRows.length, rows: updatedRows };

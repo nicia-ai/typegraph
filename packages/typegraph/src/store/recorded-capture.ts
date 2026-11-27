@@ -36,6 +36,7 @@ import {
   type InsertNodeParams,
   type InternalTransactionOptions,
   type NodeRow,
+  type PreviewNodeSetUpdateParams,
   type SchemaWriteFenceParams,
 } from "../backend/types";
 import { CompilerInvariantError, ConfigurationError } from "../errors";
@@ -1038,6 +1039,20 @@ function createRecordedTransactionBackend(
   const overlay = deriveBackend(target, {
     ...rawWriteGuards(target, "tx.backend"),
     ...buildRecordedWriteMembers(target, sink, hooks),
+    ...(target.previewNodeSetUpdate === undefined ?
+      {}
+    : {
+        // A set update's dry-run writes nothing, so it records nothing, but
+        // it row-locks what its keyed write will write. Every recorded write
+        // takes the graph write lock BEFORE its row locks (`beforeOne`), so
+        // the dry-run takes it first too: taken only at the write, it would
+        // follow the dry-run's row locks, and a writer holding the graph lock
+        // while it waits on one of those rows would deadlock against it.
+        async previewNodeSetUpdate(params: PreviewNodeSetUpdateParams) {
+          await hooks.beforeOne?.(params.graphId);
+          return requireDefined(target.previewNodeSetUpdate)(params);
+        },
+      }),
     commands: buildRecordedCommandsPort(target, sink, hooks),
   });
   registerRecordedGraphLockMemo(overlay, graphLocks);

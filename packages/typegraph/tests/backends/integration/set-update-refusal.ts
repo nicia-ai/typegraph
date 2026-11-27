@@ -140,15 +140,39 @@ const recreationGraph = defineGraph({
   edges: {},
 });
 
+/** How a row is re-created between a set update's dry-run and its write. */
+type Replacement = Readonly<{
+  label: string;
+  props: Readonly<{ name: string; plan: "free" | "enterprise" }>;
+  validFrom?: string;
+}>;
+
+/**
+ * The replacements, each at version 1 like the original and each still
+ * matching the selection: one with other properties, and one identical in
+ * every property but stored under another validity window.
+ */
+const REPLACEMENTS: readonly Replacement[] = [
+  {
+    label: "with other properties",
+    props: { name: "Recreated", plan: "free" },
+  },
+  {
+    label: "with the same properties under another validity window",
+    props: { name: "Original", plan: "free" },
+    validFrom: "2001-01-01T00:00:00.000Z",
+  },
+];
+
 /**
  * `backend`, whose transactions delete the row `id` and re-create it under the
- * same id, at version 1 and with other properties, immediately before their
- * set update's keyed write — after its dry-run has read and validated the
- * original.
+ * same id as `replacement` describes, immediately before their set update's
+ * keyed write — after its dry-run has read and validated the original.
  */
 function backendRecreatingBeforeSetWrite(
   backend: GraphBackend,
   id: string,
+  replacement: Replacement,
 ): GraphBackend {
   function recreating(target: TransactionBackend): TransactionBackend {
     const updateNodeSet = requireDefined(target.updateNodeSet);
@@ -163,7 +187,10 @@ function backendRecreatingBeforeSetWrite(
           graphId: params.graphId,
           kind: params.kind,
           id,
-          props: { name: "Recreated", plan: "free" },
+          props: replacement.props,
+          ...(replacement.validFrom === undefined ?
+            {}
+          : { validFrom: replacement.validFrom }),
         });
         return updateNodeSet(params);
       },
@@ -723,71 +750,78 @@ export function registerSetUpdateRefusalIntegrationTests(
         );
       });
 
-      it("writes nothing and reports the conflict when the row is re-created under its id between the dry-run and the write", async () => {
-        const store = await context.createStore(recreationGraph);
-        const original = await store.nodes.RecreatedAccount.create({
-          name: "Original",
-          plan: "free",
-        });
-        // Untouched between the two statements: it still carries its token,
-        // and the write must leave it alone too, since the set it belongs to
-        // is refused as a whole.
-        const bystander = await store.nodes.RecreatedAccount.create({
-          name: "Bystander",
-          plan: "free",
-        });
-        // Between the dry-run and the keyed write, this transaction deletes the
-        // row and re-creates it under the same id at the same version (1),
-        // still matching the selection. Only the stored row the dry-run read
-        // can tell the two apart.
-        const recreating = createStore(
-          recreationGraph,
-          backendRecreatingBeforeSetWrite(store.backend, original.id),
-        );
-
-        const thrown = await recreating.transaction(async (tx) =>
-          settle(
-            verb === "updateWhere" ?
-              tx.nodes.RecreatedAccount.updateWhere({
-                patch: { plan: "enterprise" },
-                where: (candidate) => candidate.plan.eq("free"),
-              })
-            : tx.nodes.RecreatedAccount.compareAndSet(original.id, {
-                expected: { plan: "free" },
-                patch: { plan: "enterprise" },
-              }),
-          ),
-        );
-
-        const stored = requireDefined(
-          await store.nodes.RecreatedAccount.getById(original.id),
-        );
-        const storedBystander = requireDefined(
-          await store.nodes.RecreatedAccount.getById(bystander.id),
-        );
-        expectRefusal(
-          {
-            thrown:
-              (
-                thrown instanceof DatabaseOperationError &&
-                thrown.details.reason === "no_row_returned"
-              ) ?
-                "no_row_returned"
-              : String(thrown),
-            name: stored.name,
-            plan: stored.plan,
-            version: stored.meta.version,
-            bystander: [storedBystander.plan, storedBystander.meta.version],
-          },
-          {
-            thrown: "no_row_returned",
-            name: "Recreated",
+      it.for(REPLACEMENTS)(
+        "writes nothing and reports the conflict when the row is re-created under its id $label between the dry-run and the write",
+        async (replacement) => {
+          const store = await context.createStore(recreationGraph);
+          const original = await store.nodes.RecreatedAccount.create({
+            name: "Original",
             plan: "free",
-            version: 1,
-            bystander: ["free", 1],
-          },
-        );
-      });
+          });
+          // Untouched between the two statements: it still carries its token,
+          // and the write must leave it alone too, since the set it belongs to
+          // is refused as a whole.
+          const bystander = await store.nodes.RecreatedAccount.create({
+            name: "Bystander",
+            plan: "free",
+          });
+          // Between the dry-run and the keyed write, this transaction deletes the
+          // row and re-creates it under the same id at the same version (1),
+          // still matching the selection. Only the stored row the dry-run read
+          // can tell the two apart.
+          const recreating = createStore(
+            recreationGraph,
+            backendRecreatingBeforeSetWrite(
+              store.backend,
+              original.id,
+              replacement,
+            ),
+          );
+
+          const thrown = await recreating.transaction(async (tx) =>
+            settle(
+              verb === "updateWhere" ?
+                tx.nodes.RecreatedAccount.updateWhere({
+                  patch: { plan: "enterprise" },
+                  where: (candidate) => candidate.plan.eq("free"),
+                })
+              : tx.nodes.RecreatedAccount.compareAndSet(original.id, {
+                  expected: { plan: "free" },
+                  patch: { plan: "enterprise" },
+                }),
+            ),
+          );
+
+          const stored = requireDefined(
+            await store.nodes.RecreatedAccount.getById(original.id),
+          );
+          const storedBystander = requireDefined(
+            await store.nodes.RecreatedAccount.getById(bystander.id),
+          );
+          expectRefusal(
+            {
+              thrown:
+                (
+                  thrown instanceof DatabaseOperationError &&
+                  thrown.details.reason === "no_row_returned"
+                ) ?
+                  "no_row_returned"
+                : String(thrown),
+              name: stored.name,
+              plan: stored.plan,
+              version: stored.meta.version,
+              bystander: [storedBystander.plan, storedBystander.meta.version],
+            },
+            {
+              thrown: "no_row_returned",
+              name: replacement.props.name,
+              plan: "free",
+              version: 1,
+              bystander: ["free", 1],
+            },
+          );
+        },
+      );
     });
   });
 }

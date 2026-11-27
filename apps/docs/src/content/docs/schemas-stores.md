@@ -1154,8 +1154,8 @@ at the one the snapshot read: it is a different row, and it is written only
 when it already matched the selectors in that snapshot. Re-run `updateWhere()`
 to apply the patch to rows that still match.
 
-The write is keyed to the exact stored rows the dry-run read (id, version and
-properties) and is all or nothing. If one of them changes between the two
+The write is keyed to the exact stored rows the dry-run read (id, version,
+properties, validity window and creation time) and is all or nothing. If one of them changes between the two
 statements, which only the same transaction can do on an engine with row locks
 (for example an overlapping call on the same transaction that deletes and
 re-creates the row), the write changes no row and the call throws

@@ -28,6 +28,7 @@ import {
 } from "../../../src";
 import {
   deriveBackend,
+  projectBackendWithout,
   projectGraphBackend,
 } from "../../../src/backend/derive-backend";
 import {
@@ -253,6 +254,28 @@ function backendRacingTheProbe(backend: GraphBackend): GraphBackend {
   return deriveBackend(projectGraphBackend(backend), {
     transaction: (run, options) =>
       backend.transaction((target) => run(racing(target)), options),
+  });
+}
+
+const SBR_OLD_EMAIL = "old@statement-before-refusal.example";
+
+/**
+ * `backend`, whose transaction targets lack `hardDeleteUniquesByNodeIds` — a
+ * custom transaction handle that implements less than the backend it came
+ * from, which the root's uniqueness verdict does not see.
+ */
+function backendWithoutBatchedClaimDelete(backend: GraphBackend): GraphBackend {
+  return deriveBackend(projectGraphBackend(backend), {
+    transaction: (run, options) =>
+      backend.transaction(
+        (target) =>
+          run(
+            projectBackendWithout(target, [
+              "hardDeleteUniquesByNodeIds",
+            ]) as TransactionBackend,
+          ),
+        options,
+      ),
   });
 }
 
@@ -671,6 +694,109 @@ export function registerStatementBeforeRefusalIntegrationTests(
               refusal: "UniquenessError:UNIQUENESS_VIOLATION",
               members: [COMPETITOR_ID, "refused"],
               claimOwner: COMPETITOR_ID,
+            },
+          },
+        ],
+      });
+    });
+    it("a set update whose new key another writer claims between the uniqueness probe and the re-claim commits no change", async () => {
+      const store = await context.createStore(uniqueGraph);
+      const renamed = await store.nodes.SbrMember.create(
+        { email: SBR_OLD_EMAIL },
+        { id: "renamed" },
+      );
+      const racedStore = createStore(
+        uniqueGraph,
+        backendRacingTheProbe(store.backend),
+      );
+
+      const thrown = await racedStore.transaction(async (tx) =>
+        settle(
+          tx.nodes.SbrMember.updateWhere({
+            patch: { email: SBR_EMAIL },
+            where: (candidate) => candidate.id.eq(renamed.id),
+          }),
+        ),
+      );
+
+      const stored = requireDefined(
+        await store.nodes.SbrMember.getById(renamed.id),
+      );
+      expectObservation({
+        lane,
+        observed: {
+          refusal: refusalOf(thrown),
+          email: stored.email,
+          oldClaimOwner: await emailClaimOwner(store.backend, SBR_OLD_EMAIL),
+          newClaimOwner: await emailClaimOwner(store.backend, SBR_EMAIL),
+        },
+        correct: {
+          refusal: "UniquenessError:UNIQUENESS_VIOLATION",
+          email: SBR_OLD_EMAIL,
+          oldClaimOwner: renamed.id,
+          newClaimOwner: COMPETITOR_ID,
+        },
+        defects: [
+          {
+            label: "audit:set-update-refusal-8",
+            on: EVERY_DRIVER,
+            today: {
+              refusal: "UniquenessError:UNIQUENESS_VIOLATION",
+              email: SBR_EMAIL,
+              oldClaimOwner: undefined,
+              newClaimOwner: COMPETITOR_ID,
+            },
+          },
+        ],
+      });
+    });
+
+    it("a set update on a transaction without the batched claim delete commits no change when it refuses", async () => {
+      const store = await context.createStore(uniqueGraph);
+      const renamed = await store.nodes.SbrMember.create(
+        { email: SBR_OLD_EMAIL },
+        { id: "renamed" },
+      );
+      const narrowedStore = createStore(
+        uniqueGraph,
+        backendWithoutBatchedClaimDelete(store.backend),
+      );
+
+      const thrown = await narrowedStore.transaction(async (tx) =>
+        settle(
+          tx.nodes.SbrMember.updateWhere({
+            patch: { email: SBR_EMAIL },
+            where: (candidate) => candidate.id.eq(renamed.id),
+          }),
+        ),
+      );
+
+      const stored = requireDefined(
+        await store.nodes.SbrMember.getById(renamed.id),
+      );
+      expectObservation({
+        lane,
+        observed: {
+          refused: thrown !== "resolved",
+          email: stored.email,
+          oldClaimOwner: await emailClaimOwner(store.backend, SBR_OLD_EMAIL),
+          newClaimOwner: await emailClaimOwner(store.backend, SBR_EMAIL),
+        },
+        correct: {
+          refused: true,
+          email: SBR_OLD_EMAIL,
+          oldClaimOwner: renamed.id,
+          newClaimOwner: undefined,
+        },
+        defects: [
+          {
+            label: "audit:set-update-refusal-9",
+            on: EVERY_DRIVER,
+            today: {
+              refused: true,
+              email: SBR_EMAIL,
+              oldClaimOwner: renamed.id,
+              newClaimOwner: undefined,
             },
           },
         ],

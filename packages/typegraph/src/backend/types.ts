@@ -952,7 +952,8 @@ export type PreviewNodeSetUpdateParams =
  * `props` is the after-image, computed in SQL by the same expression the
  * write applies, so what a caller validates is what is written. `rowToken`
  * names the exact stored row the after-image was computed from (its id,
- * version and stored properties) and is opaque: a caller hands it back to
+ * version, stored properties, validity window and creation time) and is
+ * opaque: a caller hands it back to
  * {@link GraphBackend.updateNodeSet} unchanged.
  */
 export type NodeSetUpdatePreviewRow = Readonly<{
@@ -976,8 +977,9 @@ export type NodeSetUpdateRowKey = Readonly<{ id: string; rowToken: string }>;
  * {@link GraphBackend.previewNodeSetUpdate} returned.
  *
  * All or nothing. A backend writes the rows only when EVERY key still names
- * the live stored row it was read from — same id, version and stored
- * properties. When any key does not (the row was changed, deleted, or deleted
+ * the live stored row it was read from — same id, version, stored properties,
+ * validity window and creation time — and that holds without the dry-run's
+ * locks too (a direct call on an autocommit connection). When any key does not (the row was changed, deleted, or deleted
  * and re-created under its id since the dry-run), it writes nothing and
  * returns no row. A backend that cannot honor that must not implement
  * {@link GraphBackend.updateNodeSet}.

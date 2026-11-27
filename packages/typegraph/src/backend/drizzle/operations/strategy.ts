@@ -424,7 +424,11 @@ export type CommonOperationStrategy = Readonly<{
     params: PreviewNodeSetUpdateParams,
     rowLock: RowLockClause,
   ) => SQL;
-  buildUpdateNodeSet: (params: UpdateNodeSetParams, timestamp: string) => SQL;
+  buildUpdateNodeSet: (
+    params: UpdateNodeSetParams,
+    timestamp: string,
+    rowLock: RowLockClause,
+  ) => SQL;
   buildResolvedNodeUpdateBatch: (
     params: ResolvedNodeUpdateBatchParams,
     timestamp: string,
@@ -1393,8 +1397,12 @@ function createCommonOperationStrategy(
     ): SQL {
       return buildPreviewNodeSetUpdate(tables, dialect, params, rowLock);
     },
-    buildUpdateNodeSet(params: UpdateNodeSetParams, timestamp: string): SQL {
-      return buildUpdateNodeSet(tables, dialect, params, timestamp);
+    buildUpdateNodeSet(
+      params: UpdateNodeSetParams,
+      timestamp: string,
+      rowLock: RowLockClause,
+    ): SQL {
+      return buildUpdateNodeSet(tables, dialect, params, timestamp, rowLock);
     },
     buildResolvedNodeUpdateBatch(params, timestamp): SQL {
       return buildResolvedNodeUpdateBatch(
