@@ -443,6 +443,52 @@ export function registerSearchPaginationIntegrationTests(
     }
 
     for (const kind of SEARCH_KINDS) {
+      it(`${kind}: rows tied on every relevance key whose ids read as numbers or infinities page once each`, async (ctx) => {
+        const store = storeWith(context, ctx, kind);
+        // Text a number parser (or SQLite's literal reader) takes for a
+        // number or an infinity. The hybrid node-id tiebreak is text and
+        // must be compared as text, not as the numeric relevance keys are.
+        const ids = ["Inf", "-Inf", "NaN", "9e999", "0", "1e3"];
+        for (const id of ids) {
+          await store.nodes.Article.create(
+            {
+              title: "climate report",
+              body: "notes",
+              category: "same",
+              published: true,
+              embedding: embeddingAt(0.4),
+            },
+            { id },
+          );
+        }
+        const query = () => orderedSearch(store, { kind }, "relevance");
+        const executed = await executedIds(query());
+        expect(executed.toSorted()).toEqual(ids.toSorted());
+        for (const pageSize of [1, 2]) {
+          expect({
+            pageSize,
+            forward: await walk(store, query, "paginate", "forward", pageSize),
+            backward: await walk(
+              store,
+              query,
+              "paginate",
+              "backward",
+              pageSize,
+            ),
+            batched: await walk(store, query, "batchOnce", "forward", pageSize),
+            streamed: await walk(store, query, "stream", "forward", pageSize),
+          }).toEqual({
+            pageSize,
+            forward: executed,
+            backward: executed,
+            batched: executed,
+            streamed: executed,
+          });
+        }
+      });
+    }
+
+    for (const kind of SEARCH_KINDS) {
       it(`${kind}: a page boundary between near-tied scores compares the key exactly as the database returned it`, async (ctx) => {
         const store = storeWith(context, ctx, kind);
         // Angles a few float32 steps apart give distances that differ only
@@ -1516,6 +1562,14 @@ export function registerSearchPaginationIntegrationTests(
           "-0",
           `0.${"3".repeat(2000)}`,
           "9".repeat(400),
+          // Ids and other text a number parser or SQLite's literal reader
+          // takes for a number or an infinity, for every text-typed
+          // position (a hybrid node-id key, a text field key).
+          "Inf",
+          "-Inf",
+          "9e999",
+          "0",
+          "1e3",
         ),
       );
       const value = fc.oneof(

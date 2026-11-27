@@ -260,9 +260,11 @@ export interface DialectAdapter {
       source: Exclude<RelevanceSortSource, "hybrid_node_id">,
     ) => string | number | undefined;
     /**
-     * The SQL operand of a value {@link bind} returned, as the cursor's
-     * comparison reads it: a bound parameter, or a literal where no driver
-     * binds the value (SQLite's infinities).
+     * The SQL operand of a value {@link bind} returned for a numeric key,
+     * as the cursor's comparison reads it: a bound parameter, or a literal
+     * where no driver binds the value (SQLite's infinities). The hybrid
+     * node-id key is text and never reaches this: the shared compiler binds
+     * it as a text parameter.
      */
     operand: (this: void, bound: string | number) => SqlFragment;
   }>;

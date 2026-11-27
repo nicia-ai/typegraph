@@ -2103,8 +2103,8 @@ export function buildStandardRelevanceCursorKeyColumns(
 /**
  * Compiles a keyset cursor's comparison of a match row's relevance sort key
  * with the value the cursor carries. The value is what
- * {@link compileRelevanceCursorKeyValue} rendered, written as the dialect's
- * operand for it (`relevanceCursorKey.operand`), so it compares exactly
+ * {@link compileRelevanceCursorKeyValue} rendered, written as
+ * {@link compileRelevanceCursorOperand} writes it, so it compares exactly
  * against the same per-match value the ORDER BY sorts by.
  */
 export function compileRelevanceComparison(
@@ -2131,9 +2131,31 @@ export function compileRelevanceComparison(
         predicate.op === "eq" ? "="
         : predicate.op === "gt" ? ">"
         : "<";
-      return sql`${value} ${sql.raw(operator)} ${input.dialect.relevanceCursorKey.operand(predicate.value)}`;
+      return sql`${value} ${sql.raw(operator)} ${compileRelevanceCursorOperand(predicate.source, predicate.value, input.dialect)}`;
     }
   }
+}
+
+/**
+ * The SQL operand of the value a cursor carries for one relevance key. A
+ * numeric key is written as its dialect writes it
+ * (`relevanceCursorKey.operand`: SQLite turns the infinities into literals).
+ * The hybrid node-id tiebreak is text and is always bound as a text
+ * parameter: an id such as `Inf` or `-Inf` is an id, not an infinity.
+ */
+function compileRelevanceCursorOperand(
+  source: RelevanceSortSource,
+  value: string | number,
+  dialect: DialectAdapter,
+): SqlFragment {
+  if (source !== "hybrid_node_id")
+    return dialect.relevanceCursorKey.operand(value);
+  if (typeof value !== "string")
+    throw new CompilerInvariantError(
+      "A cursor's hybrid node-id key reached the comparison as a non-text value",
+      { phase: "relevance-cursor-key" },
+    );
+  return sql`${value}`;
 }
 
 /**
