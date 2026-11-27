@@ -285,7 +285,7 @@ export function registerDatePropertyWriteIntegrationTests(
           created.publishedAt,
           created.revisions,
           created.review,
-        ]).toEqual([stored, [stored], { at: stored, by: "editor" }]);
+        ]).toEqual([PUBLISHED, [PUBLISHED], { at: PUBLISHED, by: "editor" }]);
 
         const target = await store.nodes.DatedWriteDoc.create({
           title: "target",
@@ -325,7 +325,7 @@ export function registerDatePropertyWriteIntegrationTests(
           upserted.reviewedAt,
           requireDefined(bulk).reviewedAt,
           bulkUpserted?.reviewedAt,
-        ]).toEqual([stored, stored, stored, stored]);
+        ]).toEqual([PUBLISHED, PUBLISHED, PUBLISHED, PUBLISHED]);
 
         const edge = await store.edges.datedWriteCites.create(created, target, {
           at: disguised(),
@@ -333,7 +333,7 @@ export function registerDatePropertyWriteIntegrationTests(
         const edgeUpdated = await store.edges.datedWriteCites.update(edge.id, {
           seenAt: disguised(),
         });
-        expect([edge.at, edgeUpdated.seenAt]).toEqual([stored, stored]);
+        expect([edge.at, edgeUpdated.seenAt]).toEqual([PUBLISHED, PUBLISHED]);
       });
 
       it("a set update stores, and compareAndSet compares, the instant the Date holds", async () => {
@@ -354,7 +354,7 @@ export function registerDatePropertyWriteIntegrationTests(
           patch: { reviewedAt: disguised() },
         });
         const read = await store.nodes.DatedWriteDoc.getById(document.id);
-        expect([read?.title, read?.reviewedAt]).toEqual(["a", stored]);
+        expect([read?.title, read?.reviewedAt]).toEqual(["a", PUBLISHED]);
       });
 
       it("importGraph and trustedImportGraph store the instant an in-memory document's Date holds", async () => {
@@ -583,7 +583,7 @@ export function registerDatePropertyWriteIntegrationTests(
         title: "a",
         at: NOON,
       });
-      expect(document.at).toBe(MIDNIGHT.toISOString());
+      expect(document.at).toEqual(MIDNIGHT);
       // The row holds midnight. An expectation of noon names a different
       // instant, whatever the schema would make of noon on a write.
       const atNoon = await store.nodes.MidnightDateDoc.compareAndSet(
@@ -599,10 +599,7 @@ export function registerDatePropertyWriteIntegrationTests(
       );
       expect(atMidnight).toBe(true);
       const read = await store.nodes.MidnightDateDoc.getById(document.id);
-      expect([read?.title, read?.at]).toEqual([
-        "midnight",
-        MIDNIGHT.toISOString(),
-      ]);
+      expect([read?.title, read?.at]).toEqual(["midnight", MIDNIGHT]);
     });
 
     it("still refuses date text a caller states, in the patch and the expectation", async () => {

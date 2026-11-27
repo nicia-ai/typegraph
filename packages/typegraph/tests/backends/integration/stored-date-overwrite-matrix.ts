@@ -383,10 +383,7 @@ export function registerStoredDateOverwriteMatrixIntegrationTests(
         const node = await collection.create({ title: "a", at: stated });
         await collection.update(node.id, { title: "b", at: restated });
         const read = await collection.getById(node.id);
-        expect([name, read?.["at"]]).toEqual([
-          name,
-          shifted(restated).toISOString(),
-        ]);
+        expect([name, read?.["at"]]).toEqual([name, shifted(restated)]);
       }
     });
   });

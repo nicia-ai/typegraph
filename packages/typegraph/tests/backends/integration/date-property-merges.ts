@@ -153,18 +153,18 @@ const MERGED_DATES = {
   nodes: {
     added: {
       title: "added",
-      publishedAt: REVISED.toISOString(),
-      review: { at: REVISED.toISOString() },
-      revisions: [PUBLISHED.toISOString(), REVISED.toISOString()],
+      publishedAt: REVISED,
+      review: { at: REVISED },
+      revisions: [PUBLISHED, REVISED],
     },
     kept: {
       title: "kept2",
-      publishedAt: PUBLISHED.toISOString(),
-      review: { at: PUBLISHED.toISOString() },
-      revisions: [PUBLISHED.toISOString()],
+      publishedAt: PUBLISHED,
+      review: { at: PUBLISHED },
+      revisions: [PUBLISHED],
     },
   },
-  edges: { cites: LATER.toISOString() },
+  edges: { cites: LATER },
 } as const;
 
 export function registerDatePropertyMergeIntegrationTests(
@@ -227,8 +227,8 @@ export function registerDatePropertyMergeIntegrationTests(
         asNodeId("candidate"),
       );
       expect([read?.publishedAt, read?.revisions]).toEqual([
-        REVISED.toISOString(),
-        [REVISED.toISOString()],
+        REVISED,
+        [REVISED],
       ]);
     });
 
@@ -263,12 +263,7 @@ export function registerDatePropertyMergeIntegrationTests(
         created?.revisions,
         kept?.publishedAt,
         kept?.review,
-      ]).toEqual([
-        REVISED.toISOString(),
-        [REVISED.toISOString()],
-        PUBLISHED.toISOString(),
-        { at: LATER.toISOString() },
-      ]);
+      ]).toEqual([REVISED, [REVISED], PUBLISHED, { at: LATER }]);
     });
 
     it("a merge keeps a date whose wrapper rewrites it", async () => {
@@ -285,7 +280,7 @@ export function registerDatePropertyMergeIntegrationTests(
         { id: "shifted" },
       );
       const stored = new Date(PUBLISHED.getTime() + DAY_MS).toISOString();
-      expect(created.at).toBe(stored);
+      expect(created.at).toEqual(new Date(stored));
       const merged = await merge(base, [fork]);
       expect(isErr(merged) ? merged.error.message : "merged").toBe("merged");
       const [row] = await base.nodes.MergedShiftedDoc.find();
@@ -295,8 +290,7 @@ export function registerDatePropertyMergeIntegrationTests(
       // row was refused).
       expectObservation({
         lane: { dialect: base.backend.dialect },
-        // Reads return the stored text, typed as the schema's `Date`.
-        observed: row?.at as unknown as string | undefined,
+        observed: row?.at?.toISOString(),
         correct: stored,
         defects: [
           {
