@@ -25,6 +25,8 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
+  expr,
+  field,
   max,
   min,
   searchable,
@@ -41,6 +43,7 @@ import { planMerge } from "../../../src/graph-merge/merge";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { exportGraph } from "../../../src/interchange";
 import { requireDefined } from "../../../src/utils/presence";
+import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
 
 const PLAIN = new Date("2024-01-02T03:04:05.678Z");
@@ -92,6 +95,52 @@ const DatedReadExtra = defineNode("DatedReadExtra", {
     xform: z.date().transform((date) => date.getTime()),
   }),
 });
+
+/**
+ * The two shapes a read decodes but the input side does not revive: a record
+ * of dates and a transformed date. Each on its own kind, so one write's
+ * outcome names one shape.
+ */
+const RecordDates = defineNode("RecordDates", {
+  schema: z.object({
+    label: z.string(),
+    rec: z.record(z.string(), z.date()),
+  }),
+});
+const TransformedDate = defineNode("TransformedDate", {
+  schema: z.object({
+    label: z.string(),
+    xform: z.date().transform((date) => date.getTime()),
+  }),
+});
+
+function buildWriteGapGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: {
+      RecordDates: { type: RecordDates },
+      TransformedDate: { type: TransformedDate },
+    },
+    edges: {},
+  });
+}
+
+/**
+ * A write's outcome: `"written"`, or the refusal's name and the date its
+ * validation (its own, or its cause's) refused.
+ */
+async function writeOutcome(write: () => Promise<unknown>): Promise<string> {
+  try {
+    await write();
+    return "written";
+  } catch (error) {
+    if (!(error instanceof Error)) return String(error);
+    const text =
+      error.cause instanceof Error ? error.cause.message : error.message;
+    const reason = /expected date, received \w+/u.exec(text)?.[0] ?? text;
+    return `${error.name}: ${reason}`;
+  }
+}
 
 const datedReadLink = defineEdge("datedReadLink", {
   schema: z.object({
@@ -778,6 +827,75 @@ export function registerDatePropertyReadIntegrationTests(
       });
     });
 
+    it("pins the write-direction gaps: an update or a branch over a stored record of dates or a transformed date refuses", async () => {
+      const recordStore = await context.createStore(
+        buildWriteGapGraph("date_reads_record_gap"),
+        { revisionTracking: true },
+      );
+      const transformStore = await context.createStore(
+        buildWriteGapGraph("date_reads_transform_gap"),
+        { revisionTracking: true },
+      );
+      const recorded = await recordStore.nodes.RecordDates.create({
+        label: "a",
+        rec: { first: RECORDED },
+      });
+      const transformed = await transformStore.nodes.TransformedDate.create({
+        label: "a",
+        xform: TRANSFORMED,
+      });
+      // Reads decode the record and return the transform's number.
+      expect([recorded.rec, transformed.xform]).toEqual([
+        { first: RECORDED },
+        TRANSFORMED.getTime(),
+      ]);
+      const branchOutcome = async (store: typeof recordStore, id: string) =>
+        writeOutcome(async () => {
+          unwrap(
+            await branch(store, () => context.createIsolatedBackend(), {
+              id: asBranchId(id),
+            }),
+          );
+        });
+      const observed = {
+        recordUpdate: await writeOutcome(() =>
+          recordStore.nodes.RecordDates.update(recorded.id, { label: "b" }),
+        ),
+        transformUpdate: await writeOutcome(() =>
+          transformStore.nodes.TransformedDate.update(transformed.id, {
+            label: "b",
+          }),
+        ),
+        recordBranch: await branchOutcome(recordStore, "record-gap"),
+        transformBranch: await branchOutcome(transformStore, "transform-gap"),
+      };
+      // The input side revives neither shape, so a write that re-parses the
+      // stored row refuses it. A write-direction gap, not fixed by reads.
+      expectObservation({
+        lane: { dialect: recordStore.backend.dialect },
+        observed,
+        correct: {
+          recordUpdate: "written",
+          transformUpdate: "written",
+          recordBranch: "written",
+          transformBranch: "written",
+        },
+        defects: [
+          {
+            label: "input-side revival of a record of dates and a transform",
+            on: {},
+            today: {
+              recordUpdate: "ValidationError: expected date, received string",
+              transformUpdate:
+                "ValidationError: expected date, received number",
+              recordBranch: "BranchError: expected date, received string",
+              transformBranch: "BranchError: expected date, received number",
+            },
+          },
+        ],
+      });
+    });
+
     it("non-portable stored text reads back as stored, never an Invalid Date", async () => {
       const store = await context.createStore(
         buildGraph("date_reads_non_portable"),
@@ -827,27 +945,84 @@ export function registerDatePropertyReadIntegrationTests(
         nested: expected.nested,
         arr: expected.arr,
       });
-      // A scalar date the query extracts with an engine cast (PostgreSQL's
-      // `timestamptz`) is the engine's value there; it is never an
-      // `Invalid Date` on any backend.
-      const [scalar] = await store
-        .query()
-        .from("DatedRead", "d")
-        .project((fields) => ({ plain: fields.d.plain }))
+      // Every terminal that types a scalar date in SQL returns non-portable
+      // stored text as stored on SQLite. PostgreSQL extracts the same value
+      // with a `timestamptz` cast, so text it can cast comes back as the
+      // `Date` the cast reads (a backend parity gap the deferred
+      // index/predicate redesign, comparing canonical text, removes). It is
+      // never an `Invalid Date` on any backend.
+      const documents = () => store.query().from("DatedRead", "d");
+      const projection = documents().project((fields) => ({
+        plain: fields.d.plain,
+        latest: fields.$scalar((subquery) =>
+          subquery
+            .from("DatedRead", "x")
+            .aggregate((inner) => ({ value: expr.max(inner.x.plain) })),
+        ),
+      }));
+      const [scalar] = await projection.execute();
+      const [selected] = await documents()
+        .select((ctx) => ({ plain: ctx.d.plain }))
         .execute();
-      const [aggregated] = await store
-        .query()
-        .from("DatedRead", "d")
+      const [aggregated] = await documents()
         .aggregate({ earliest: min("d", "plain") })
         .execute();
-      expect(hasNoInvalidDate([scalar, aggregated])).toBe(true);
-      for (const value of [scalar?.plain, aggregated?.earliest] as unknown[]) {
-        expect(
-          value === NON_PORTABLE ||
-            (value instanceof Date &&
-              value.getTime() === new Date(NON_PORTABLE).getTime()),
-        ).toBe(true);
-      }
+      const [grouped] = await documents()
+        .groupBy("d", "plain")
+        .aggregate({ plain: field("d", "plain") })
+        .execute();
+      const [collected] = await documents()
+        .aggregate((fields) => ({
+          earliest: expr.min(fields.d.plain),
+          every: expr.collect(fields.d.plain, {
+            orderBy: [{ expression: fields.d.title }],
+          }),
+        }))
+        .asRelation()
+        .execute();
+      const [[batched]] = await store.batchOnce(() => [projection] as const);
+      const observed: Readonly<Record<string, unknown>> = {
+        project: scalar?.plain,
+        scalarSubquery: scalar?.latest,
+        select: selected?.plain,
+        aggregate: aggregated?.earliest,
+        groupBy: grouped?.plain,
+        expressionAggregate: collected?.earliest,
+        collect: collected?.every,
+        batchOnce: batched?.plain,
+      };
+      expect(hasNoInvalidDate(observed)).toBe(true);
+      const cast = new Date(NON_PORTABLE);
+      expectObservation({
+        lane: { dialect: store.backend.dialect },
+        observed,
+        correct: {
+          project: NON_PORTABLE,
+          scalarSubquery: NON_PORTABLE,
+          select: NON_PORTABLE,
+          aggregate: NON_PORTABLE,
+          groupBy: NON_PORTABLE,
+          expressionAggregate: NON_PORTABLE,
+          collect: [NON_PORTABLE],
+          batchOnce: NON_PORTABLE,
+        },
+        defects: [
+          {
+            label: "PostgreSQL casts a scalar date to timestamptz",
+            on: { dialect: ["postgres"] },
+            today: {
+              project: cast,
+              scalarSubquery: cast,
+              select: cast,
+              aggregate: cast,
+              groupBy: cast,
+              expressionAggregate: cast,
+              collect: [cast],
+              batchOnce: cast,
+            },
+          },
+        ],
+      });
     });
   });
 }

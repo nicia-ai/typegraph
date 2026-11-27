@@ -211,7 +211,9 @@ field is SQL NULL; its fields decode to `undefined`.
 
 Scalar collection elements may be strings, numbers, Booleans, or dates. Record fields may use those
 same scalar types, and their Boolean, Date, and SQL NULL values decode to `boolean`, `Date`, and
-`undefined` respectively. The result is a readonly array with the projected element types and
+`undefined` respectively. A collected date is emitted as canonical UTC text on every backend, whatever
+the PostgreSQL session time zone, and decodes as every date read does
+([Date properties](/core-concepts#date-properties)). The result is a readonly array with the projected element types and
 nullability preserved. Filtering does not change those types. An
 included SQL NULL operand decodes to `undefined` and remains in the collection; filtering is based
 only on the `filter` expression. This includes NULL values from missing optional targets when the

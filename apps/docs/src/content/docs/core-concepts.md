@@ -136,9 +136,21 @@ refinement. So these still read as stored:
 - Stored text that is not the canonical form the store writes (years 0001 to
   9999, UTC, milliseconds), for example text an older schema or raw SQL
   wrote. A read returns it exactly as stored and never an `Invalid Date`, and
-  `validateStore()` reports it. On PostgreSQL, a selected field, `.project()`
-  scalar or aggregate over a date is extracted with a `timestamptz` cast, so
-  there the engine's cast decides what such text becomes.
+  `validateStore()` reports it. On PostgreSQL, a selected field, a
+  `.project()` scalar, `$scalar()`, `min`/`max`, a `groupBy()` date key and
+  the elements of `expr.collect()` extract the date with a `timestamptz` cast,
+  so there text the engine can cast comes back as the `Date` the cast reads
+  (see the [parity matrix](/backend-setup#sqlite--postgresql-parity)).
+
+A date you state in a query rather than store, an `expr.literal()` or
+`expr.param()` date, comes back from `.project()`, `$scalar()`, a relation
+column or `expr.collect()` as the `Date` you stated, including one outside the
+years 0001 to 9999. So does a `coalesce()` or `when()` whose every branch is
+such a date. A composition that may yield a stored date is decoded as stored
+text. Every date a query returns is the same value on SQLite and PostgreSQL
+whatever the PostgreSQL session `TimeZone` is: `expr.collect()` elements and
+the date columns of a `batchOnce()` payload are emitted as canonical UTC text
+on both.
 
 A write that parses stored properties again first turns that stored text back
 into a `Date`, so an update that does not touch a date property leaves it as
@@ -172,10 +184,10 @@ uniqueness constraint, an endpoint match, `importGraph()` and
 expectation, an index lookup, and a predicate or parameter compared with a
 date. `updateWhere()` and `compareAndSet()` accept a `Date` in their `patch`,
 at any depth of a nested object or array, and store the same text `create()`
-and `update()` store. They refuse a `Date` at a position whose schema would
-read that text back as something else, such as under a union, a record or
-`z.any()`, with a `ValidationError`, since the row would then hold a string
-where you wrote a `Date`. A `compareAndSet()` `expected` value may be a
+and `update()` store. They refuse a `Date` at a position where parsing the
+row again would not turn that text back into a `Date`, such as under a union,
+a record or `z.any()`, with a `ValidationError`, since the row would then hold
+a string where you wrote a `Date`. A `compareAndSet()` `expected` value may be a
 `Date`; it matches when the stored text is that `Date`'s ISO text. It is a
 comparison, not a write, so it is not parsed through the property's schema: a
 transform or `.overwrite()` there does not change the instant it compares.
@@ -185,6 +197,14 @@ same rule as the updates above
 a [graph merge](/graph-merge), whose plans carry each row's properties in their
 stored form: `applyMergePlan()`, `merge()`, candidate write sets and mutation
 plans all apply a dated write.
+
+Reads and these writes still disagree about two shapes. A `z.record()` of
+dates reads back as `Date`s, and a `z.date().transform(…)` reads back as the
+transform's output, but a write that parses the stored row again turns neither
+back into its input: an `update()` of another property of such a kind, and a
+graph-merge `branch()` of a store holding one, fail with a validation error.
+Keep such a property on a kind you do not update, or declare a nested
+`z.object()` or a pipe (`z.string().pipe(z.coerce.date())`) instead.
 
 ### Node Operations
 
