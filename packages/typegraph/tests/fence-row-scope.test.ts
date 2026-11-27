@@ -166,28 +166,33 @@ type StoreFlavor = "history" | "revisionTracking" | "schemaManaged";
  * statement as the clock, plus creating the origin on the graph's first
  * commit), and a history store also
  * retains that instant in the recorded-anchor log.
+ *
+ * The node's kind declares a unique constraint, so an update that keeps its
+ * key probes that key and releases the owner's other claims (two statements),
+ * and a soft delete releases its claims by owner without reading the row
+ * again after its tombstone.
  */
 const STATEMENTS_WITHOUT_A_FENCE_ROW = {
   history: {
     nodeCreate: 11,
-    nodeUpdate: 10,
+    nodeUpdate: 12,
     unconstrainedEdgeCreate: 9,
     cardinalityEdgeCreate: 9,
-    nodeDelete: 14,
+    nodeDelete: 13,
   },
   revisionTracking: {
     nodeCreate: 7,
-    nodeUpdate: 6,
+    nodeUpdate: 8,
     unconstrainedEdgeCreate: 5,
     cardinalityEdgeCreate: 5,
-    nodeDelete: 9,
+    nodeDelete: 8,
   },
   schemaManaged: {
     nodeCreate: 7,
-    nodeUpdate: 6,
+    nodeUpdate: 8,
     unconstrainedEdgeCreate: 5,
     cardinalityEdgeCreate: 5,
-    nodeDelete: 9,
+    nodeDelete: 8,
   },
 } as const satisfies Record<StoreFlavor, Record<string, number>>;
 

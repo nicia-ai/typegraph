@@ -203,8 +203,7 @@ export function blockNodes<K extends NodeType>(
   uniqueKeyProps: (
     node: Node<K>,
     index: number,
-  ) => Record<string, unknown> | undefined = (node) =>
-    node,
+  ) => Record<string, unknown> | undefined = (node) => node,
 ): Map<string, Node<K>[]> {
   const buckets = new Map<string, Node<K>[]>();
 

@@ -56,6 +56,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
     ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-dead","item_name","item_name","item-dead"]
 sql COMMIT
 hook end create node:Item item-dead written
 => ok
@@ -247,8 +249,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","renamed","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
-sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
-    ["<timestamp>","<graph1>","Item","item-a","item_name","item-a"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","renamed"]
 sql COMMIT
 hook end update node:Item item-a written
 => ok
@@ -277,8 +279,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","renamed","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_to" = NULL WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
-sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
-    ["<timestamp>","<graph1>","Item","item-a","item_name","item-a"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","renamed"]
 sql COMMIT
 hook end update node:Item item-a written
 => ok
@@ -307,8 +309,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","upserted","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
-sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
-    ["<timestamp>","<graph1>","Item","item-a","item_name","item-a"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","upserted"]
 sql COMMIT
 hook end update node:Item item-a written
 => ok
@@ -345,6 +347,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
     ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-dead","item_name","item_name","item-dead"]
 sql COMMIT
 hook end update node:Item item-dead written
 => ok
@@ -373,8 +377,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","upserted","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
-sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
-    ["<timestamp>","<graph1>","Item","item-a","item_name","item-a"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","upserted"]
 sql COMMIT
 hook end update node:Item item-a written
 => ok
@@ -417,8 +421,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","first","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"first\"}","<timestamp>","<graph1>","Item","item-a"]
-sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
-    ["<timestamp>","<graph1>","Item","item-a","item_name","item-a"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","first"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL
@@ -427,8 +431,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","second","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"second\"}","<timestamp>","<graph1>","Item","item-a"]
-sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
-    ["<timestamp>","<graph1>","Item","item-a","item_name","first"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","second"]
 sql COMMIT
 => ok
 
@@ -466,8 +470,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","upserted","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
-sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
-    ["<timestamp>","<graph1>","Item","item-a","item_name","item-a"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","upserted"]
 sql COMMIT
 => ok
 
@@ -505,8 +509,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","replaced","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"replaced\"}","<timestamp>","<graph1>","Item","item-a"]
-sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
-    ["<timestamp>","<graph1>","Item","item-a","item_name","item-a"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","replaced"]
 sql COMMIT
 => ok
 
@@ -583,12 +587,8 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","Item","item-c","<graph1>","Item","item-c","Item","item-c"]
 sql UPDATE "typegraph_nodes" SET "deleted_at" = $1 WHERE "typegraph_nodes"."graph_id" = $2 AND "typegraph_nodes"."kind" = $3 AND "typegraph_nodes"."id" = $4 AND "typegraph_nodes"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","Item","item-c"]
-sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
-    ["<graph1>","Item","item-c"]
-sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
-    ["<timestamp>","<graph1>","Item","item-c","\u001edisjointWith","item-c"]
-sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
-    ["<timestamp>","<graph1>","Item","item-c","item_name","item-c"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5, $6)
+    ["<timestamp>","<graph1>","Item","item-c","\u001edisjointWith","item_name"]
 sql COMMIT
 hook end delete node:Item item-c written
 => ok
@@ -625,12 +625,8 @@ sql SELECT * FROM "typegraph_edges" WHERE "typegraph_edges"."graph_id" = $1 AND 
     ["<graph1>","Item","item-c","<graph1>","Item","item-c","Item","item-c"]
 sql UPDATE "typegraph_nodes" SET "deleted_at" = $1 WHERE "typegraph_nodes"."graph_id" = $2 AND "typegraph_nodes"."kind" = $3 AND "typegraph_nodes"."id" = $4 AND "typegraph_nodes"."deleted_at" IS NULL
     ["<timestamp>","<graph1>","Item","item-c"]
-sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
-    ["<graph1>","Item","item-c"]
-sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
-    ["<timestamp>","<graph1>","Item","item-c","\u001edisjointWith","item-c"]
-sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."constraint_name" = $5 AND "typegraph_node_uniques"."key" = $6 AND "typegraph_node_uniques"."deleted_at" IS NULL
-    ["<timestamp>","<graph1>","Item","item-c","item_name","item-c"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5, $6)
+    ["<timestamp>","<graph1>","Item","item-c","\u001edisjointWith","item_name"]
 sql COMMIT
 => ok
 
@@ -766,8 +762,12 @@ sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_sche
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
+sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL
+    ["<graph1>","Item","item_name","item-a"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","item-a"]
 sql COMMIT
 => ok updated
 
@@ -781,8 +781,12 @@ sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_sche
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
+sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL
+    ["<graph1>","Item","item_name","item-a"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","item-a"]
 sql COMMIT
 => ok updated
 
@@ -803,6 +807,8 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Other","item-dead"]
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL
+    ["<graph1>","Item","item_name","item-a"]
+sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL
     ["<graph1>","Item","item_name","item-dead"]
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL
     ["<graph1>","Item","item_name","fresh"]
@@ -810,8 +816,12 @@ sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_sche
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
+sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL
+    ["<graph1>","Item","item_name","item-a"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","item-a"]
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
@@ -824,6 +834,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
     ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-dead","item_name","item_name","item-dead"]
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" IN ($4) AND "typegraph_node_uniques"."deleted_at" IS NULL
@@ -854,6 +866,8 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Other","item-dead"]
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL
+    ["<graph1>","Item","item_name","item-a"]
+sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL
     ["<graph1>","Item","item_name","item-dead"]
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL
     ["<graph1>","Item","item_name","fresh"]
@@ -861,8 +875,12 @@ sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_sche
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
+sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL
+    ["<graph1>","Item","item_name","item-a"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
     ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","item-a"]
 sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
@@ -875,6 +893,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","Item","item_name","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
 sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
     ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_node_uniques" SET "deleted_at" = $1 WHERE "typegraph_node_uniques"."graph_id" = $2 AND "typegraph_node_uniques"."concrete_kind" = $3 AND "typegraph_node_uniques"."node_id" = $4 AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN ($5) AND NOT ("typegraph_node_uniques"."constraint_name" = $6 AND "typegraph_node_uniques"."key" = $7)
+    ["<timestamp>","<graph1>","Item","item-dead","item_name","item_name","item-dead"]
 sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."version" FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = $1 AND "typegraph_schema_versions"."version" = $2 AND "typegraph_schema_versions"."is_active" = TRUE FOR SHARE ), "graph_write_lock" AS MATERIALIZED ( SELECT pg_advisory_xact_lock(hashtext($3), hashtext($4)) AS "lock_token" FROM "schema_fence" ) SELECT TRUE AS "fence_acquired", current_setting('transaction_isolation') AS "transaction_isolation" FROM "graph_write_lock"
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph_id" = $1 AND "typegraph_node_uniques"."node_kind" = $2 AND "typegraph_node_uniques"."constraint_name" = $3 AND "typegraph_node_uniques"."key" IN ($4) AND "typegraph_node_uniques"."deleted_at" IS NULL
