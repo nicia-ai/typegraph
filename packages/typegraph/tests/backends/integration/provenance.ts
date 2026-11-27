@@ -1545,7 +1545,7 @@ export function registerProvenanceIntegrationTests(
   describe.runIf(context.driver !== "better-sqlite3")(
     "provenance on a Store over a read-only transaction's handle",
     () => {
-      it("refuses retract and assertHolds as writes of the read-only transaction, which stays usable", async () => {
+      it("refuses retract and assertHolds at the read-write unit they open in the read-only transaction, which stays usable", async () => {
         const { store } = await seedStore(context);
         // A history store withholds tx.sql, so a plain store over the same
         // graph opens the read-only transaction.
@@ -1584,9 +1584,11 @@ export function registerProvenanceIntegrationTests(
           },
           { accessMode: "read_only" },
         );
+        // Each opens a read-write store.transaction() on the Store over the
+        // read-only transaction, which is refused as it opens.
         for (const [operation, refusal] of [
-          ["provenance retraction transition", outcome.retract],
-          ["provenance.assertHolds()", outcome.assertHolds],
+          ["store.transaction()", outcome.retract],
+          ["store.transaction()", outcome.assertHolds],
         ] as const) {
           expect(refusal).toBeInstanceOf(UnsupportedBackendCapabilityError);
           expect(

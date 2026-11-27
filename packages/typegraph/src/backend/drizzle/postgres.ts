@@ -2298,9 +2298,18 @@ function buildPostgresEngineProfileInternal(
     ): Promise<T> {
       // On a transaction-scoped backend `tx` is a savepoint on `db`: it runs
       // in `db`'s native transaction, not one of its own.
-      const run = (tx: AnyPgTransaction): Promise<T> => {
+      const run = async (tx: AnyPgTransaction): Promise<T> => {
         if (isPostgresTransactionHandle(db)) {
           recordEngineSavepoint(tx, postgresNativeHandle(db));
+          // Drizzle opens a savepoint without the transaction's config, so
+          // a read-only one is made read-only here, as its first statement:
+          // PostgreSQL scopes the access mode to the subtransaction and every
+          // one nested in it, and restores the enclosing mode when it ends.
+          // The session then refuses every write in it, the caller's own
+          // savepoints and raw `tx.sql` statements included.
+          if (config?.accessMode === "read only") {
+            await tx.execute(sql.raw("SET TRANSACTION READ ONLY"));
+          }
         }
         return body(tx);
       };

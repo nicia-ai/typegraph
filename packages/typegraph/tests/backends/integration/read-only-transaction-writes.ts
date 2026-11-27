@@ -13,6 +13,7 @@
  * `collection-surface.ts`, through records typed over those lists, so a new
  * write method fails to compile here until it has a case.
  */
+import { sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -40,7 +41,9 @@ import { defineGraphExtension } from "../../../src/graph-extension";
 import { branch } from "../../../src/graph-merge/branch";
 import { MergeError } from "../../../src/graph-merge/errors";
 import {
+  applyMergePlan,
   applyMergePlanInTransaction,
+  merge,
   planMerge,
 } from "../../../src/graph-merge/merge";
 import { asBranchId } from "../../../src/graph-merge/types";
@@ -57,9 +60,9 @@ import type {
   IDENTITY_WRITE_NAMES,
   NODE_WRITE_NAMES,
 } from "../../../src/store/collection-surface";
+import { STORE_MEMBER_ACCESS } from "../../../src/store/store";
 import { requireDefined } from "../../../src/utils/presence";
 import { unwrap } from "../../../src/utils/result";
-import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
 
 const RotPerson = defineNode("RotPerson", {
@@ -315,6 +318,27 @@ function countingAdoptionBackend(backend: AdapterBackend<unknown>): Readonly<{
       counting = on;
     },
   };
+}
+
+/**
+ * Every member a Store instance offers at runtime: its own properties and
+ * those of every prototype it inherits from, the constructor aside.
+ */
+function storeMemberNames(store: object): readonly string[] {
+  const names = new Set<string>();
+  let level: object | null = store;
+  while (level !== null && level !== Object.prototype) {
+    for (const name of Object.getOwnPropertyNames(level)) {
+      if (name !== "constructor") names.add(name);
+    }
+    level = Object.getPrototypeOf(level) as object | null;
+  }
+  return [...names];
+}
+
+/** A step that does nothing. */
+function settled(): Promise<void> {
+  return Promise.resolve();
 }
 
 /** The native handle a transaction context exposes as `tx.sql`. */
@@ -942,6 +966,85 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
       }
     });
 
+    it("refuses a write left floating through a context adopted over tx.sql until the read-only transaction has ended", async () => {
+      const graph = buildGraph(nextGraphId());
+      let beforeEnd: () => Promise<void> = settled;
+      const base = context.getBackend();
+      // `beforeEnd` runs once the Store's callback has settled and before the
+      // backend ends the transaction: the window a write left floating by the
+      // callback lands in.
+      const backend = deriveBackend(base, {
+        transaction: (fn, options) =>
+          base.transaction(async (tx) => {
+            const output = await fn(tx);
+            await beforeEnd();
+            return output;
+          }, options),
+        transactionWithNative: (fn, options) =>
+          base.transactionWithNative(async (tx, native) => {
+            const output = await fn(tx, native);
+            await beforeEnd();
+            return output;
+          }, options),
+      });
+      const [store] = await createAdapterStoreWithSchema(graph, backend);
+      await seed(store);
+      let late: unknown = "not issued";
+      await store.transaction(
+        async (tx) => {
+          const adopted = store.withTransaction(nativeHandle(tx));
+          beforeEnd = async () => {
+            beforeEnd = settled;
+            late = await rejectionOf(
+              adopted.nodes.RotTeam.create({ name: "late" }, { id: "late" }),
+            );
+          };
+          return tx.nodes.RotPerson.getById(asNodeId("p1"));
+        },
+        { accessMode: "read_only" },
+      );
+      expectReadOnlyRefusal(late, "tx.nodes.RotTeam.create()", graph.id);
+      expect(await store.nodes.RotTeam.getById(asNodeId("late"))).toBe(
+        undefined,
+      );
+    });
+
+    it("ends the read-only scope of a transaction whose callback throws synchronously or rejects", async () => {
+      const graph = buildGraph(nextGraphId());
+      const [store] = await createAdapterStoreWithSchema(
+        graph,
+        context.getBackend(),
+      );
+      await seed(store);
+      const throwing = (() => {
+        throw new Error("the read-only callback throws");
+      }) as unknown as () => Promise<void>;
+      await expect(
+        store.transaction(throwing, { accessMode: "read_only" }),
+      ).rejects.toThrow("the read-only callback throws");
+      await expect(
+        store.transaction(
+          () => Promise.reject(new Error("the read-only callback rejects")),
+          { accessMode: "read_only" },
+        ),
+      ).rejects.toThrow("the read-only callback rejects");
+      // A scope left open would hold the transaction's connection, and the
+      // next transaction on it would read as read-only.
+      await store.transaction(async (tx) => {
+        await tx.nodes.RotTeam.create({ name: "t3" }, { id: "t3" });
+        await store
+          .withTransaction(nativeHandle(tx))
+          .nodes.RotTeam.create({ name: "t4" }, { id: "t4" });
+      });
+      const teams = await store.nodes.RotTeam.find();
+      expect(teams.map((node) => node.id).toSorted()).toEqual([
+        "t1",
+        "t2",
+        "t3",
+        "t4",
+      ]);
+    });
+
     it("leaves a later read-write transaction writable through the same adoption (a native transaction of its own)", async () => {
       const graph = buildGraph(nextGraphId());
       const [store] = await createAdapterStoreWithSchema(
@@ -1096,9 +1199,17 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
             store.identity.assertSame(person("p1"), person("p2")),
         },
         {
-          operation: "tx.nodes.RotTeam.create()",
+          // A read-write unit is refused as it opens, before its fences.
+          operation: "store.transaction()",
           write: (store) =>
             store.transaction((tx) => tx.nodes.RotTeam.create({ name: "t3" })),
+        },
+        {
+          operation: "store.transactionWithReceipt()",
+          write: (store) =>
+            store.transactionWithReceipt((tx) =>
+              tx.nodes.RotTeam.create({ name: "t3" }),
+            ),
         },
         {
           operation: "importGraph()",
@@ -1192,7 +1303,7 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
         });
       }
 
-      it("refuses a write in a history Store's own store.transaction() before its isolation check, at repeatable read", async () => {
+      it("refuses a history Store's own read-write store.transaction() as it opens, before its isolation check, at repeatable read", async () => {
         const graph = buildGraph(nextGraphId());
         const [store] = await createAdapterStoreWithSchema(
           graph,
@@ -1216,7 +1327,7 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
           },
           { accessMode: "read_only", isolationLevel: "repeatable_read" },
         );
-        expectReadOnlyRefusal(refusal, "tx.nodes.RotTeam.create()", graph.id);
+        expectReadOnlyRefusal(refusal, "store.transaction()", graph.id);
         expect(committed?.id).toBe("p1");
       });
 
@@ -1260,25 +1371,290 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
         const team = await store.nodes.RotTeam.getById(asNodeId("t3"));
         // libSQL and PGlite keep the transaction's pinned driver handle in
         // the caller's savepoint, and node-postgres its pooled client, which
-        // holds the read-only scope while it runs. postgres-js gives the
-        // savepoint a client of its own, and the engine does not refuse a
-        // write in a savepoint of a read-write transaction.
-        expectObservation({
-          lane: { driver: context.driver },
-          observed: {
-            write: writeOutcome(write),
-            team: team === undefined ? undefined : String(team.id),
-          },
-          correct: { write: "refused as read-only", team: undefined },
-          defects: [
-            {
-              label:
-                "postgres-js caller savepoint under a read-only savepoint scope",
-              on: { driver: ["postgres-js"] },
-              today: { write: "fulfilled", team: "t3" },
-            },
-          ],
+        // holds the read-only scope while it runs, so the Store refuses the
+        // write. postgres-js gives the savepoint a client of its own that
+        // nothing ties to the scope; the read-only savepoint is read-only at
+        // the engine, which rejects the write and rolls the caller's
+        // savepoint back.
+        expect({
+          write: writeOutcome(write),
+          team: team === undefined ? undefined : String(team.id),
+        }).toEqual({
+          write:
+            context.driver === "postgres-js" ?
+              "rejected: 25006"
+            : "refused as read-only",
+          team: undefined,
         });
+      });
+
+      /** Runs `text` through a Drizzle transaction handle as raw SQL. */
+      function rawStatement(handle: unknown, text: string): Promise<unknown> {
+        const raw = drizzleSql.raw(text);
+        const runner = handle as Readonly<{
+          execute?: (query: typeof raw) => Promise<unknown>;
+          all?: (query: typeof raw) => Promise<unknown>;
+        }>;
+        const member = requireDefined(
+          context.driver === "libsql" ? runner.all : runner.execute,
+        );
+        return Reflect.apply(member, runner, [raw]);
+      }
+
+      /** The rows a raw statement returned, on either dialect. */
+      function rowsOf(
+        result: unknown,
+      ): readonly Readonly<Record<string, unknown>>[] {
+        type Rows = readonly Readonly<Record<string, unknown>>[];
+        return Array.isArray(result) ?
+            (result as Rows)
+          : (result as Readonly<{ rows: Rows }>).rows;
+      }
+
+      it("refuses to mint a revision origin in a read-only scope, and runs no DDL for one", async () => {
+        const graph = buildGraph(nextGraphId());
+        const backend = context.getBackend();
+        const [tracking] = await createAdapterStoreWithSchema(graph, backend, {
+          revisionTracking: true,
+        });
+        await seed(tracking);
+        const opener = createAdapterStore(graph, backend);
+        const where = `WHERE graph_id = '${graph.id}'`;
+        // A graph with no revision origin yet: the next allocation-owner read
+        // would mint one.
+        await opener.transaction(async (tx) => {
+          await rawStatement(
+            nativeHandle(tx),
+            `DELETE FROM typegraph_revision_origins ${where}`,
+          );
+        });
+        let mint: unknown;
+        let origins: unknown;
+        const committed = await opener.transaction(
+          async (tx) => {
+            const overTransaction = createAdapterStore(
+              graph,
+              backendOverTransaction(nativeHandle(tx)),
+              { revisionTracking: true },
+            );
+            mint = await rejectionOf(overTransaction.allocationOwner());
+            origins = rowsOf(
+              await rawStatement(
+                nativeHandle(tx),
+                `SELECT origin FROM typegraph_revision_origins ${where}`,
+              ),
+            ).length;
+            return tx.nodes.RotPerson.getById(asNodeId("p1"));
+          },
+          { accessMode: "read_only" },
+        );
+        expectReadOnlyRefusal(mint, "store.allocationOwner()", graph.id);
+        expect(origins).toBe(0);
+        // On PostgreSQL the transaction is the engine's read-only one, so the
+        // relation DDL would have aborted it before this read.
+        expect(committed?.id).toBe("p1");
+      });
+
+      it("leaves a raw tx.sql write in a read-only savepoint to the engine: PostgreSQL refuses it, SQLite has no read-only savepoint", async () => {
+        const graph = buildGraph(nextGraphId());
+        const [store] = await createAdapterStoreWithSchema(
+          graph,
+          context.getBackend(),
+        );
+        await seed(store);
+        const table = `read_only_raw_${graph.id}`;
+        let write: unknown;
+        let rows: unknown;
+        await store.transaction(async (tx) => {
+          const handle = nativeHandle(tx);
+          await rawStatement(handle, `CREATE TABLE ${table} (x INTEGER)`);
+          const overTransaction = createAdapterStore(
+            graph,
+            backendOverTransaction(handle),
+          );
+          write = await rejectionOf(
+            overTransaction.transaction(
+              async (inner) => {
+                await rawStatement(
+                  nativeHandle(inner),
+                  `INSERT INTO ${table} (x) VALUES (1)`,
+                );
+              },
+              { accessMode: "read_only" },
+            ),
+          );
+          // The caller's transaction is read-write again once the read-only
+          // savepoint has ended, whichever way it ended.
+          await rawStatement(handle, `INSERT INTO ${table} (x) VALUES (2)`);
+          const read = await rawStatement(
+            handle,
+            `SELECT x FROM ${table} ORDER BY x`,
+          );
+          rows = rowsOf(read).map((row) => Number(row["x"]));
+        });
+        expect({ write: writeOutcome(write), rows }).toEqual(
+          context.driver === "libsql" ?
+            { write: "fulfilled", rows: [1, 2] }
+          : { write: "rejected: 25006", rows: [2] },
+        );
+      });
+
+      it("declares every member of a Store over the transaction, and refuses every gated one before any statement, whatever its arguments", async () => {
+        const graph = buildGraph(nextGraphId());
+        const backend = context.getBackend();
+        // A history Store provisions the recorded relations, so the gated
+        // history members (pruning, owner rotation) reach their writes.
+        const [historyStore] = await createAdapterStoreWithSchema(
+          graph,
+          backend,
+          { history: true },
+        );
+        await seed(historyStore);
+        const before = await graphState(historyStore);
+        const owner = await historyStore.allocationOwner();
+        const recorded = await historyStore.recordedNow();
+        // A history Store does not hand out `tx.sql`; a plain Store over the
+        // same graph opens the read-only transaction.
+        const opener = createAdapterStore(graph, backend);
+
+        const runtimeMembers = new Set<string>();
+        const refusals: Record<string, unknown> = {};
+        const committed = await opener.transaction(
+          async (tx) => {
+            for (const history of [false, true]) {
+              const overTransaction = createAdapterStore(
+                graph,
+                backendOverTransaction(nativeHandle(tx)),
+                { history },
+              ) as unknown as Readonly<
+                Record<string, (...args: never[]) => unknown>
+              >;
+              for (const name of storeMemberNames(overTransaction)) {
+                runtimeMembers.add(name);
+              }
+              for (const [name, access] of Object.entries(
+                STORE_MEMBER_ACCESS,
+              )) {
+                if (access !== "gated") continue;
+                // No arguments: the gate refuses before anything reads them.
+                refusals[`${history ? "history" : "plain"} ${name}`] =
+                  await rejectionOf(
+                    Promise.resolve().then((): unknown =>
+                      Reflect.apply(
+                        requireDefined(overTransaction[name]),
+                        overTransaction,
+                        [],
+                      ),
+                    ),
+                  );
+              }
+            }
+            return tx.nodes.RotPerson.getById(asNodeId("p1"));
+          },
+          { accessMode: "read_only" },
+        );
+        expect([...runtimeMembers].toSorted()).toEqual(
+          Object.keys(STORE_MEMBER_ACCESS).toSorted(),
+        );
+        expect(
+          Object.fromEntries(
+            Object.entries(refusals).map(([label, refusal]) => [
+              label,
+              writeOutcome(refusal),
+            ]),
+          ),
+        ).toEqual(
+          Object.fromEntries(
+            Object.keys(refusals).map((label) => [
+              label,
+              "refused as read-only",
+            ]),
+          ),
+        );
+        for (const [label, refusal] of Object.entries(refusals)) {
+          const member = requireDefined(label.split(" ")[1]);
+          expectReadOnlyRefusal(refusal, `store.${member}()`, graph.id);
+        }
+        expect(Object.keys(refusals)).toHaveLength(
+          2 *
+            Object.values(STORE_MEMBER_ACCESS).filter(
+              (access) => access === "gated",
+            ).length,
+        );
+        // On PostgreSQL the transaction is the engine's read-only one, so a
+        // write statement would have aborted it before this read.
+        expect(committed?.id).toBe("p1");
+        expect(await graphState(historyStore as never)).toEqual(before);
+        expect(await historyStore.allocationOwner()).toEqual(owner);
+        expect(await historyStore.recordedNow()).toEqual(recorded);
+      });
+
+      it("refuses graph-merge writes on a Store over the transaction at the unit they open, and lets a branch read it", async () => {
+        const graph = buildGraph(nextGraphId());
+        const backend = context.getBackend();
+        const [store] = await createAdapterStoreWithSchema(graph, backend, {
+          revisionTracking: true,
+        });
+        await seed(store);
+        const source = unwrap(
+          await branch(store, () => context.createIsolatedBackend(), {
+            id: asBranchId("read-only-surface-merge"),
+          }),
+        );
+        await source.store.nodes.RotPerson.create(
+          { name: "p5", email: "p5@example.test" },
+          { id: "p5" },
+        );
+        const artifact = unwrap(await planMerge(store, [source]));
+        const before = await graphState(store);
+        // A revision-tracking Store does not hand out `tx.sql`; a plain Store
+        // over the same graph opens the read-only transaction.
+        const opener = createAdapterStore(graph, backend);
+
+        const outcomes: Record<string, unknown> = {};
+        let branched: unknown;
+        await opener.transaction(
+          async (tx) => {
+            const overTransaction = createAdapterStore(
+              graph,
+              backendOverTransaction(nativeHandle(tx)),
+              { revisionTracking: true },
+            );
+            // A branch only reads the Store it forks.
+            const forked = await branch(
+              overTransaction,
+              () => context.createIsolatedBackend(),
+              { id: asBranchId("read-only-surface-branch") },
+            );
+            branched = forked.success ? "branched" : forked.error;
+            outcomes["merge()"] = await rejectionOf(
+              (async () => unwrap(await merge(overTransaction, [source])))(),
+            );
+            outcomes["applyMergePlan()"] = await rejectionOf(
+              (async () =>
+                unwrap(await applyMergePlan(overTransaction, artifact)))(),
+            );
+            return;
+          },
+          { accessMode: "read_only" },
+        );
+        expect(branched).toBe("branched");
+        expect(Object.keys(outcomes)).toEqual(["merge()", "applyMergePlan()"]);
+        for (const outcome of Object.values(outcomes)) {
+          // Merge reports every failure as a MergeError; the refusal of the
+          // unit it opens is its cause.
+          expect(outcome).toBeInstanceOf(MergeError);
+          const cause = (outcome as MergeError).cause;
+          expect(cause).toBeInstanceOf(UnsupportedBackendCapabilityError);
+          expect(
+            (cause as UnsupportedBackendCapabilityError).details,
+          ).toMatchObject({
+            capability: "write transaction access",
+            accessMode: "read_only",
+            graphId: graph.id,
+          });
+        }
+        expect(await graphState(store)).toEqual(before);
       });
 
       it("reads a read-only savepoint as a scope: the caller's read-write transaction refuses only while it runs", async () => {

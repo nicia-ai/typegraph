@@ -58,7 +58,6 @@ import {
   runInsertBatchReturning,
   runInsertNoReturn,
 } from "./insert-dispatch";
-import { isBackendNativeTransactionReadOnly } from "./native-transaction-state";
 import {
   enterOperation,
   openTransactionSession,
@@ -1462,19 +1461,11 @@ export function createRecordedBackend(
           // joins the transaction it is handed as a binding of its own.
           const operation = enterOperation(openTransactionSession(transaction));
           const target = operation.backend;
-          // Read-only when asked, or when this backend runs inside a caller's
-          // transaction that is inside a read-only scope TypeGraph opened: a
-          // write there is refused before any statement, so neither the
-          // isolation check nor capture runs ahead of the refusal.
-          const readOnly =
-            backendOptions?.accessMode === "read_only" ||
-            isBackendNativeTransactionReadOnly(backend);
           await assertRecordedCaptureTransactionIsolation(
             target,
-            readOnly ?
-              { ...backendOptions, accessMode: "read_only" }
-            : backendOptions,
+            backendOptions,
           );
+          const readOnly = backendOptions?.accessMode === "read_only";
           const scope = createRecordedTransactionScope(
             target,
             batchPointRead,

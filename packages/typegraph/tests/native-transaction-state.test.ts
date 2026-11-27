@@ -22,8 +22,8 @@ import {
 } from "../src/backend/native-transaction-handle";
 import {
   isNativeTransactionReadOnly,
+  openReadOnlyScope,
   resolveNativeTransactionState,
-  runInReadOnlyScope,
 } from "../src/store/native-transaction-state";
 import {
   openTransactionSession,
@@ -361,28 +361,32 @@ describe("native transaction state", () => {
     const opener = boundBackend();
     recordOpenedNativeTransaction(opener, token);
     const elsewhere = bindOnConnection({ connection: "another" });
-    await publishConnectionNativeTransaction(token, async () => {
+    await publishConnectionNativeTransaction(token, () => {
       const openerState = resolveNativeTransactionState(opener);
       const adopted = resolveNativeTransactionState(
         bindOnConnection(connection),
       );
       expect(adopted).not.toBe(openerState);
       expect(isNativeTransactionReadOnly(adopted)).toBe(false);
-      await runInReadOnlyScope(openerState, () => {
-        expect(isNativeTransactionReadOnly(adopted)).toBe(true);
-        expect(
-          isNativeTransactionReadOnly(resolveNativeTransactionState(elsewhere)),
-        ).toBe(false);
-        return Promise.resolve();
-      });
+      const release = openReadOnlyScope(openerState);
+      expect(isNativeTransactionReadOnly(adopted)).toBe(true);
+      expect(
+        isNativeTransactionReadOnly(resolveNativeTransactionState(elsewhere)),
+      ).toBe(false);
+      release();
       expect(isNativeTransactionReadOnly(adopted)).toBe(false);
-      // A scope that throws releases its connection too.
-      await expect(
-        runInReadOnlyScope(openerState, () =>
-          Promise.reject(new Error("the scope fails")),
-        ),
-      ).rejects.toThrow("the scope fails");
+      // Scopes nest, and a second release of one scope releases nothing of
+      // another still open.
+      const outer = openReadOnlyScope(openerState);
+      const inner = openReadOnlyScope(openerState);
+      inner();
+      inner();
+      expect(isNativeTransactionReadOnly(adopted)).toBe(true);
+      expect(isNativeTransactionReadOnly(openerState)).toBe(true);
+      outer();
       expect(isNativeTransactionReadOnly(adopted)).toBe(false);
+      expect(isNativeTransactionReadOnly(openerState)).toBe(false);
+      return Promise.resolve();
     });
   });
 

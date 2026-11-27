@@ -359,8 +359,8 @@ import {
 import { ensureFocusedStatusTable } from "./materialize-shared";
 import {
   isNativeTransactionReadOnly,
+  openReadOnlyScope,
   resolveBackendNativeTransactionState,
-  runInReadOnlyScope,
 } from "./native-transaction-state";
 import {
   countNeighbors as countNeighborsImpl,
@@ -2083,7 +2083,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** Rebuilds derived current identity closure without advancing revision. */
   async rebuildIdentityClosure(): Promise<void> {
-    this.#ownWriteGate()?.assertWritable("store.rebuildIdentityClosure()");
+    this.#assertOwnWritable("rebuildIdentityClosure");
     this.#requireIdentityEnabled();
     await rebuildIdentityClosureWithSchemaFence(
       this.#identityContext(this.#baseBackend),
@@ -2683,6 +2683,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     return native === undefined ? undefined : (
         createTransactionReceiptRecorder({ graphId: this.graphId, native })
       );
+  }
+
+  /**
+   * THE gate of this Store's own members that can write
+   * ({@link STORE_MEMBER_ACCESS}): each member declared `"gated"` calls it
+   * before anything else, so a Store over a caller's transaction refuses it
+   * while that transaction is inside a read-only scope TypeGraph opened,
+   * before any statement and whatever its arguments.
+   */
+  #assertOwnWritable(member: GatedStoreMember): void {
+    this.#ownWriteGate()?.assertWritable(`store.${member}()`);
   }
 
   // === Graph Algorithms ===
@@ -3542,6 +3553,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     before: string,
     options?: PruneRecordedInstantsOptions,
   ): Promise<PruneRecordedInstantsResult> {
+    this.#assertOwnWritable("pruneRecordedInstants");
     return pruneRecordedAnchors(
       this.#recordedAnchorLogContext(),
       before,
@@ -3756,6 +3768,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async rotateAllocationOwner(
     expectedOwner: GraphAllocationOwner,
   ): Promise<GraphAllocationOwner> {
+    this.#assertOwnWritable("rotateAllocationOwner");
     if (
       !this.revisionTrackingEnabled ||
       this.#recordedTimeOwnership === "engine-native"
@@ -4681,6 +4694,17 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     createReceiptRecorder: (() => TransactionReceiptRecorder) | undefined,
     operation: "store.transaction()" | "store.transactionWithReceipt()",
   ): Promise<TransactionRunResult<T>> {
+    // A read-write unit opened inside a read-only scope could only have its
+    // writes refused one by one, while the unit's own fences, isolation check
+    // and capture run around them: it is refused as it opens, and a
+    // read-only one is a read.
+    if (options?.accessMode !== "read_only") {
+      this.#assertOwnWritable(
+        operation === "store.transaction()" ? "transaction" : (
+          "transactionWithReceipt"
+        ),
+      );
+    }
     if (!this.#backend.capabilities.execution.interactiveTransactions) {
       const transactionVerdict = resolveBatchWriteVerdict(this.#backend, {
         needs: "interactive-callback",
@@ -4763,6 +4787,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         createReceiptRecorder ?? createTransactionReceiptRecorder
       )();
       let recordedByGraph: RecordedFlushInstants | undefined;
+      // The read-only scope a read-only attempt opens once its session
+      // exists, released only once the backend's transaction call has
+      // settled: a write left floating after the callback through any context
+      // over this native transaction is still refused until COMMIT, ROLLBACK
+      // or RELEASE.
+      let releaseReadOnlyScope: (() => void) | undefined;
       const transactionOptions = beginPreCommitHookAttempt(
         receiptRequested && this.#captureEnabled ?
           withRecordedFlushObserver(backendOptions, (instants) => {
@@ -4826,7 +4856,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           });
           // Everything the attempt runs on its session, the callback and the
           // pre-commit hook included, runs in the read-only scope a read-only
-          // transaction opens on `session.native` (`runInReadOnlyScope`).
+          // transaction opens on `session.native` (`openReadOnlyScope`).
           const runOnSession = async (): Promise<T> => {
             const runHooks = this.#createBufferedHookRunner(
               pending,
@@ -4898,21 +4928,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             }
             return output;
           };
-          return readOnly ?
-              runInReadOnlyScope(session.native, runOnSession)
-            : runOnSession();
+          if (readOnly)
+            releaseReadOnlyScope = openReadOnlyScope(session.native);
+          return runOnSession();
         };
-        const result =
-          this.#captureEnabled || this.#adapterBackend === undefined ?
-            await this.#backend.transaction(
-              (txBackend: StoreTransactionBackend) => run(txBackend, undefined),
-              transactionOptions,
-            )
-          : await this.#adapterBackend.transactionWithNative(
-              (txBackend: StoreTransactionBackend, nativeTransaction) =>
-                run(txBackend, nativeTransaction),
-              deferNativeHandle(transactionOptions),
-            );
+        const result = await (async () => {
+          try {
+            return this.#captureEnabled || this.#adapterBackend === undefined ?
+                await this.#backend.transaction(
+                  (txBackend: StoreTransactionBackend) =>
+                    run(txBackend, undefined),
+                  transactionOptions,
+                )
+              : await this.#adapterBackend.transactionWithNative(
+                  (txBackend: StoreTransactionBackend, nativeTransaction) =>
+                    run(txBackend, nativeTransaction),
+                  deferNativeHandle(transactionOptions),
+                );
+          } finally {
+            releaseReadOnlyScope?.();
+          }
+        })();
         // The COMMIT above already succeeded: flushing `onOperationEnd` is
         // done by the caller of `runRetriedUnit`, not here, so a hook that
         // throws can never be mistaken for a conflict on an attempt that
@@ -6122,10 +6158,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async clear(
     options: Readonly<{ preserveContributionMaterializations?: boolean }> = {},
   ): Promise<void> {
-    // The Store's own write gate first, as its collection writes pass it: a
-    // Store over a caller's transaction refuses while that transaction is
-    // inside a read-only scope, before any statement.
-    this.#ownWriteGate()?.assertWritable("store.clear()");
+    this.#assertOwnWritable("clear");
     // Tracked tokens and content fingerprints from lineage-capable stores
     // can carry the graph's durable origin; clear rotates that namespace.
     const mintsAnchorOrigin = mintsOriginNamespacedAnchor(
@@ -6291,6 +6324,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * ```
    */
   async refreshStatistics(): Promise<void> {
+    this.#assertOwnWritable("refreshStatistics");
     await this.#backend.refreshStatistics();
   }
 
@@ -6771,7 +6805,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       eager?: MaterializeIndexesOptions;
     }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
-    this.#ownWriteGate()?.assertWritable("store.evolve()");
+    this.#assertOwnWritable("evolve");
     assertFixedSchemaWorkingCopyAllows(this.#baseBackend, "evolve");
     // Catch up to the persisted state first (extension AND deprecated
     // set). Without this, a stale store applying an extension on top
@@ -7005,7 +7039,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     names: readonly string[],
     options?: Readonly<{ ref?: StoreRef<TRefStore> }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
-    this.#ownWriteGate()?.assertWritable("store.deprecateKinds()");
+    this.#assertOwnWritable("deprecateKinds");
     return this.#updateDeprecatedKinds("add", names, options);
   }
 
@@ -7029,7 +7063,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     names: readonly string[],
     options?: Readonly<{ ref?: StoreRef<TRefStore> }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
-    this.#ownWriteGate()?.assertWritable("store.undeprecateKinds()");
+    this.#assertOwnWritable("undeprecateKinds");
     return this.#updateDeprecatedKinds("remove", names, options);
   }
 
@@ -7064,7 +7098,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async materializeIndexes(
     options?: MaterializeIndexesOptions,
   ): Promise<MaterializeIndexesResult> {
-    this.#ownWriteGate()?.assertWritable("store.materializeIndexes()");
+    this.#assertOwnWritable("materializeIndexes");
     const { activeRow, baseline } = await this.#loadCaughtUp("materialize");
     return materializeIndexesImpl(
       {
@@ -7092,6 +7126,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async materializeSystemIndexes(
     options?: MaterializeSystemIndexesOptions,
   ): Promise<MaterializeIndexesResult> {
+    this.#assertOwnWritable("materializeSystemIndexes");
     const { activeRow } = await this.#loadCaughtUp("materialize");
     return materializeSystemIndexesImpl(
       {
@@ -7125,6 +7160,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     fieldPath: string,
     options?: ReembedVectorFieldOptions,
   ): Promise<ReembedVectorFieldResult> {
+    this.#assertOwnWritable("reembedVectorField");
     // Validate up front, before any drop/recreate side effects.
     if (
       options?.batchSize !== undefined &&
@@ -7430,7 +7466,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *   backend cannot probe and repair strategy-owned contributions.
    */
   async repairContributions(): Promise<ContributionRepairResult> {
-    this.#ownWriteGate()?.assertWritable("store.repairContributions()");
+    this.#assertOwnWritable("repairContributions");
     const backend = this.#baseBackend;
     requireExtras(
       CONTRIBUTION_HEALTH,
@@ -7610,6 +7646,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     scope: ContributionRebuildScope,
     options?: RebuildContributionOptions,
   ): Promise<ContributionRebuildResult> {
+    this.#assertOwnWritable("rebuildContribution");
     const backend = this.#baseBackend;
     requireExtras(
       CONTRIBUTION_HEALTH,
@@ -7719,7 +7756,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       eager?: MaterializeRemovalsOptions;
     }>,
   ): Promise<StoreImplementation<G, TNativeTransaction>> {
-    this.#ownWriteGate()?.assertWritable("store.removeKinds()");
+    this.#assertOwnWritable("removeKinds");
     assertFixedSchemaWorkingCopyAllows(this.#baseBackend, "removeKinds");
     const { activeRow, storedSchema, baseline } =
       await this.#loadCaughtUp("remove");
@@ -7906,7 +7943,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   async materializeRemovals(
     options?: MaterializeRemovalsOptions,
   ): Promise<MaterializeRemovalsResult> {
-    this.#ownWriteGate()?.assertWritable("store.materializeRemovals()");
+    this.#assertOwnWritable("materializeRemovals");
     return materializeRemovalsImpl(
       {
         graphId: this.graphId,
@@ -8853,6 +8890,162 @@ class AdapterStoreImplementation<
     return replacement;
   }
 }
+
+/**
+ * How a member of a Store relates to the read-only gate of a Store over a
+ * caller's transaction:
+ *
+ * - `"gated"`: the member can write, so it calls the Store's one member gate
+ *   (`#assertOwnWritable`) before anything else and is refused, before any
+ *   statement, while the caller's transaction is inside a read-only scope
+ *   TypeGraph opened. A transaction member is gated when it opens a
+ *   read-write unit; a read-only one is a read.
+ * - `"scoped"`: the member returns a surface (a collection, the identity
+ *   facade, a context adopted over a native handle) whose own writes ask the
+ *   same read-only state at each write.
+ * - `"at-target"`: an internal step that runs on the transaction target its
+ *   caller hands it, inside a unit that caller's own gate already admitted.
+ * - `"reads"`: the member runs no write.
+ */
+export type StoreMemberAccess = "gated" | "scoped" | "at-target" | "reads";
+
+/**
+ * Every member a Store instance offers, public or internal, by name: the
+ * runtime surface a test enumerates against {@link STORE_MEMBER_ACCESS}.
+ * `reconstructionState` is protected, so `keyof` cannot name it.
+ */
+export type StoreMemberName =
+  | Exclude<keyof AdapterStoreImplementation<GraphDef, unknown>, symbol>
+  | "reconstructionState";
+
+/**
+ * THE declaration of which Store members can write. Typed over every member
+ * name, so a new member does not compile until it is declared here; the
+ * read-only surface test enumerates a Store's runtime members against it and
+ * calls every `"gated"` one inside a read-only scope.
+ */
+export const STORE_MEMBER_ACCESS = {
+  // Writes, each refused at entry.
+  clear: "gated",
+  evolve: "gated",
+  deprecateKinds: "gated",
+  undeprecateKinds: "gated",
+  removeKinds: "gated",
+  materializeIndexes: "gated",
+  materializeRemovals: "gated",
+  materializeSystemIndexes: "gated",
+  refreshStatistics: "gated",
+  reembedVectorField: "gated",
+  repairContributions: "gated",
+  rebuildContribution: "gated",
+  rebuildIdentityClosure: "gated",
+  pruneRecordedInstants: "gated",
+  rotateAllocationOwner: "gated",
+  transaction: "gated",
+  transactionWithReceipt: "gated",
+  // Surfaces whose writes ask the read-only state at each write.
+  nodes: "scoped",
+  edges: "scoped",
+  identity: "scoped",
+  getNodeCollection: "scoped",
+  getNodeCollectionOrThrow: "scoped",
+  getEdgeCollection: "scoped",
+  getEdgeCollectionOrThrow: "scoped",
+  withTransaction: "scoped",
+  withRecordedTransaction: "scoped",
+  withEvolvedTransaction: "scoped",
+  withBackend: "scoped",
+  // Internal steps of a write unit another member opened.
+  applyIdentityMergeAtTarget: "at-target",
+  assertIdentityClassesConsistentAtTarget: "at-target",
+  detachDeletedImportedIdentityNode: "at-target",
+  foldImportedIdentityNodes: "at-target",
+  identityAssertionsAtTarget: "at-target",
+  identityAssertionsTouchingAtTarget: "at-target",
+  identitySchemaPreflight: "at-target",
+  identityTransitionRetentionAtTarget: "at-target",
+  importIdentityAssertionsAtTarget: "at-target",
+  importIdentityTransitionsAtTarget: "at-target",
+  lockIdentityImportTarget: "at-target",
+  readIdentityAssertionPageAtTarget: "at-target",
+  readIdentityTransitionPageAtTarget: "at-target",
+  removeIdentityKindsInSchemaPreflight: "at-target",
+  // Reads.
+  algorithms: "reads",
+  algorithmsAtCoordinate: "reads",
+  allocationOwner: "reads",
+  asOf: "reads",
+  asOfRecorded: "reads",
+  backend: "reads",
+  batch: "reads",
+  batchOnce: "reads",
+  bulkFindEdgesFrom: "reads",
+  bulkFindEdgesTo: "reads",
+  bulkFindRuntimeEdgesFrom: "reads",
+  capabilities: "reads",
+  changesSince: "reads",
+  close: "reads",
+  countNeighbors: "reads",
+  describe: "reads",
+  getEdgePropsSchema: "reads",
+  getEdgePropsSchemaOrThrow: "reads",
+  getNodeByRef: "reads",
+  getNodePropsSchema: "reads",
+  getNodePropsSchemaOrThrow: "reads",
+  graph: "reads",
+  graphId: "reads",
+  historyEnabled: "reads",
+  identityAtCoordinate: "reads",
+  introspect: "reads",
+  lineageRevisionNow: "reads",
+  neighbors: "reads",
+  planEvolution: "reads",
+  probeContributions: "reads",
+  query: "reads",
+  readCurrentIdentityAssertions: "reads",
+  reconciledSchema: "reads",
+  reconstructionState: "reads",
+  recordedEdgeGetById: "reads",
+  recordedEdgeGetByIds: "reads",
+  recordedEdgeScan: "reads",
+  recordedNodeGetById: "reads",
+  recordedNodeGetByIds: "reads",
+  recordedNodeScan: "reads",
+  recordedNow: "reads",
+  recordedReadBound: "reads",
+  recordedReadOwner: "reads",
+  recordedTimeOwnership: "reads",
+  refreshSchema: "reads",
+  registry: "reads",
+  requiresMigration: "reads",
+  resolveRecordedInstant: "reads",
+  revisionJournalEnabled: "reads",
+  revisionNow: "reads",
+  revisionSchema: "reads",
+  revisionTrackingEnabled: "reads",
+  runtimeEdgeKind: "reads",
+  runtimeNodeKind: "reads",
+  schemaChanges: "reads",
+  sealedQuery: "reads",
+  search: "reads",
+  snapshot: "reads",
+  subgraph: "reads",
+  subgraphAtCoordinate: "reads",
+  validateIdentity: "reads",
+  validateStore: "reads",
+  verifyConstraintFences: "reads",
+  verifyContributions: "reads",
+  view: "reads",
+  withCheckedReads: "reads",
+  workingCopyOptions: "reads",
+} as const satisfies Readonly<Record<StoreMemberName, StoreMemberAccess>>;
+
+/** A Store member declared `"gated"` in {@link STORE_MEMBER_ACCESS}. */
+type GatedStoreMember = {
+  [
+    Member in keyof typeof STORE_MEMBER_ACCESS
+  ]: (typeof STORE_MEMBER_ACCESS)[Member] extends "gated" ? Member : never;
+}[keyof typeof STORE_MEMBER_ACCESS];
 
 function createTrackedReplacementRef<G extends GraphDef>(
   initial: Store<G>,
