@@ -75,9 +75,7 @@ const scoredSearchGraph = defineGraph({
  * Doubles 15 significant digits render alike: a key that reached a cursor
  * through such text puts two rows at one position.
  */
-const NEARLY_EQUAL_WEIGHTS = [
-  0.29999999999999993, 0.3, 0.30000000000000004,
-];
+const NEARLY_EQUAL_WEIGHTS = [0.29999999999999993, 0.3, 0.30000000000000004];
 
 const polymorphicSearchGraph = defineGraph({
   id: "search_pagination_polymorphic",
