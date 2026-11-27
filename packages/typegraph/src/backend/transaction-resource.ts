@@ -362,6 +362,43 @@ function describeSerializedResource(resource: object): string {
 }
 
 /**
+ * THE owner of "which connection does this handle run on": the object that
+ * identifies it, or `undefined` when nothing does.
+ *
+ * - What the driver predicates `detected` on the handle itself, when they
+ *   recognized its client: a fact read off the session, and the only answer
+ *   for a handle the caller adopts from a client other than the one its
+ *   backend was built over.
+ * - Otherwise the resource a `{ mode: "shared" }` declaration names: the
+ *   caller's claim, for a driver detection cannot see. (A declaration naming
+ *   something other than a detected connection never gets this far: the
+ *   factory refuses it, {@link resolveDeclaredBackendResource}.)
+ * - Otherwise `undefined`. `{ mode: "independent" }` does not hide a detected
+ *   connection: it is a verdict about whether two wrappers may stream at once,
+ *   not about which connection a statement lands on.
+ *
+ * Every consumer asks here, so no two of them can disagree about whether two
+ * wrappers run on one connection: the serialized-resource audit (a serialized
+ * verdict's `resource` is exactly this answer) and the native-transaction
+ * record's `connection` (`sqliteNativeHandle`, `postgresNativeHandle`).
+ *
+ * Naming one connection is NOT evidence of one live transaction. A connection
+ * runs one transaction after another, so the native-transaction record shares
+ * state only on proof of the same transaction (`native-transaction-handle.ts`:
+ * a token the engine published on the connection, verified live at the
+ * lookup), never on this answer alone.
+ *
+ * @internal
+ */
+export function resolveConnectionIdentity(
+  detected: object | undefined,
+  declaration: SerializedResourceDeclaration | undefined,
+): object | undefined {
+  if (detected !== undefined) return detected;
+  return declaration?.mode === "shared" ? declaration.resource : undefined;
+}
+
+/**
  * The verdict a backend factory records, from what its driver predicates
  * detected and what the caller declared.
  *
@@ -424,18 +461,22 @@ export function resolveDeclaredBackendResource(
         });
         throw refusal;
       }
-      return { kind: "serialized", resource: declaration.resource };
+      break;
     }
     case "independent": {
       return { kind: "independent", identityLeaseResource: {} };
     }
     case "detect":
     case undefined: {
-      return detected === undefined ?
-          { kind: "independent" }
-        : { kind: "serialized", resource: detected };
+      break;
     }
   }
+  // The resource a serialized verdict names IS the connection identity the
+  // native-transaction record names, by construction: one function answers.
+  const connection = resolveConnectionIdentity(detected, declaration);
+  return connection === undefined ?
+      { kind: "independent" }
+    : { kind: "serialized", resource: connection };
 }
 
 /**

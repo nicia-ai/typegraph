@@ -189,6 +189,7 @@ import {
   type SavepointGuard,
 } from "../session-savepoint";
 import {
+  resolveConnectionIdentity,
   resolveDeclaredBackendResource,
   type SerializedResourceDeclaration,
 } from "../transaction-resource";
@@ -1149,11 +1150,24 @@ function isPostgresTransactionHandle(
  *   inside it, and keep no link from a caller's savepoint to its enclosing
  *   transaction;
  * - anything else is a connection or pool, on which the engine publishes no
- *   transaction: no proof.
+ *   transaction: no proof. It names the connection `resolveConnectionIdentity`
+ *   names for the serialized-resource audit (the detected client, else the
+ *   declared resource), or the handle itself when neither identifies one.
  */
-function postgresNativeHandle(db: object): NativeHandle {
+function postgresNativeHandle(
+  db: object,
+  serializedResource: SerializedResourceDeclaration | undefined,
+): NativeHandle {
   if (!isPostgresTransactionHandle(db)) {
-    return { kind: "connection", handle: db, connection: db };
+    return {
+      kind: "connection",
+      handle: db,
+      connection:
+        resolveConnectionIdentity(
+          getSerializedPostgresClient(db as AnyPgDatabase),
+          serializedResource,
+        ) ?? db,
+    };
   }
   const pinned = getPinnedPgliteTransaction(db);
   return pinned === undefined ?
@@ -1256,9 +1270,10 @@ function buildPostgresEngineProfileInternal(
   // work that could fail after a wrapper already observed an unmarked backend.
   // A `serializedResource` declaration that contradicts detection is refused
   // here too, before any object a caller could hold has been built.
+  const { serializedResource } = options;
   const resourceAudit = resolveDeclaredBackendResource(
     getSerializedPostgresClient(db),
-    options.serializedResource,
+    serializedResource,
   );
   const tables = options.tables ?? defaultTables;
   // Set only for tables built from a working-copy allocation's names: every
@@ -2287,7 +2302,10 @@ function buildPostgresEngineProfileInternal(
       // in `db`'s native transaction, not one of its own.
       const run = (tx: AnyPgTransaction): Promise<T> => {
         if (isPostgresTransactionHandle(db)) {
-          recordEngineSavepoint(tx, postgresNativeHandle(db));
+          recordEngineSavepoint(
+            tx,
+            postgresNativeHandle(db, serializedResource),
+          );
         }
         return body(tx);
       };
@@ -2571,6 +2589,7 @@ function buildPostgresEngineProfileInternal(
             const { backend: txBackend, drainAndClose } =
               createTransactionBackend({
                 db: tx,
+                serializedResource,
                 connection: nestedTransactionConnection,
                 adapterOptions,
                 operationStrategy,
@@ -2642,6 +2661,7 @@ function buildPostgresEngineProfileInternal(
       const { backend, contributionReadGate, drainAndClose } =
         createTransactionBackend({
           db: tx,
+          serializedResource,
           connection,
           adapterOptions,
           operationStrategy,
@@ -3624,6 +3644,12 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
    * and must share its queue. Absent: the client `db` itself is pinned to.
    */
   connection?: object | undefined;
+  /**
+   * The root backend's own `serializedResource` declaration, so the native
+   * transaction record names the connection the audit names
+   * (`resolveConnectionIdentity`).
+   */
+  serializedResource: SerializedResourceDeclaration | undefined;
   adapterOptions?: PostgresExecutionAdapterOptions;
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: ResolvedSqlTableNames;
@@ -4617,7 +4643,10 @@ function createTransactionBackend(
     registerDriverSavepointScope(backend, enterDriverScope);
   }
   registerSavepointGuard(backend, guardSavepoint);
-  recordNativeTransactionHandle(backend, postgresNativeHandle(options.db));
+  recordNativeTransactionHandle(
+    backend,
+    postgresNativeHandle(options.db, options.serializedResource),
+  );
 
   if (sessionAtomicBatchAdapter !== undefined) {
     registerAtomicSqlProgram(backend, sessionAtomicBatchAdapter);

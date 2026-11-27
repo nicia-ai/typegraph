@@ -34,7 +34,10 @@
  *    (`@libsql/client` before 0.18, sql.js, Durable Object storage) never has
  *    its token honoured through the connection; only the opener's own bind
  *    records it ({@link recordOpenedNativeTransaction}), and only until its
- *    span ends.
+ *    span ends. Which connection a handle runs on is the one answer
+ *    `resolveConnectionIdentity` (`transaction-resource.ts`) also gives the
+ *    serialized-resource audit; naming the same connection is never itself
+ *    proof of the same transaction, only the live token on it is.
  *
  * Without proof a binding records nothing and the Store gives each of its
  * sessions a state of its own: wrongly sharing is the worse error, wrongly
