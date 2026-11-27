@@ -76,6 +76,55 @@ describe("date utilities", () => {
     });
   });
 
+  describe("canonicalDatabaseTimestampText", () => {
+    it("decides the year on the UTC instant, not on the local text", () => {
+      // PostgreSQL in Pacific/Kiritimati (+14) renders the last hours of 9999
+      // in year 10000, and in a zone west of UTC the first hours of year 1 as
+      // year 1 BC (year 0).
+      expect(canonicalDatabaseTimestampText("10000-01-01T10:00:00+14:00")).toBe(
+        "9999-12-31T20:00:00.000Z",
+      );
+      expect(
+        canonicalDatabaseTimestampText("10000-01-01 13:59:59.999+14"),
+      ).toBe("9999-12-31T23:59:59.999Z");
+      expect(
+        canonicalDatabaseTimestampText("0001-12-31T21:00:00-08:00 BC"),
+      ).toBe("0001-01-01T05:00:00.000Z");
+      expect(canonicalDatabaseTimestampText("0001-12-31 16:00:00-08 BC")).toBe(
+        "0001-01-01T00:00:00.000Z",
+      );
+      // The same local texts an hour further out are outside 0001 to 9999.
+      expect(
+        canonicalDatabaseTimestampText("10000-01-01T14:00:00+14:00"),
+      ).toBeUndefined();
+      expect(
+        canonicalDatabaseTimestampText("0001-12-31T15:59:59.999-08:00 BC"),
+      ).toBeUndefined();
+      expect(
+        canonicalDatabaseTimestampText("0002-12-31T21:00:00-08:00 BC"),
+      ).toBeUndefined();
+    });
+
+    it("reads a local date by the calendar of its own year", () => {
+      // Leap days: 400 and 1 BC (year 0) have one, 100 and 2 BC do not.
+      expect(canonicalDatabaseTimestampText("0400-02-29T00:00:00Z")).toBe(
+        "0400-02-29T00:00:00.000Z",
+      );
+      expect(canonicalDatabaseTimestampText("0100-02-29T00:00:00Z")).toBe(
+        undefined,
+      );
+      expect(
+        canonicalDatabaseTimestampText("10000-02-29T00:00:00+14:00"),
+      ).toBeUndefined();
+      expect(
+        canonicalDatabaseTimestampText("0001-02-29T00:00:00-08:00 BC"),
+      ).toBeUndefined();
+      expect(
+        canonicalDatabaseTimestampText("10000-01-01T10:00:00.1234+14:00"),
+      ).toBeUndefined();
+    });
+  });
+
   describe("isValidIsoDate", () => {
     it("accepts valid ISO 8601 dates with milliseconds", () => {
       expect(isValidIsoDate("2024-01-15T10:30:00.000Z")).toBe(true);

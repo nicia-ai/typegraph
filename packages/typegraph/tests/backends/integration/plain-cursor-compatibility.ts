@@ -347,6 +347,101 @@ export function registerPlainCursorCompatibilityIntegrationTests(
       );
     });
 
+    for (const boundary of YEAR_BOUNDARY_CASES) {
+      it(`resumes a batched timestamp cursor PostgreSQL rendered as ${boundary.rendered} on every PostgreSQL lane`, async (ctx) => {
+        const store = context.getStore();
+        // PostgreSQL issued these cursors; SQLite never renders an offset.
+        if (store.backend.dialect !== "postgres") ctx.skip();
+        await seedTimestamps(store, boundary.dates);
+        const query = () => localMeanTimeQuery(store);
+        // PGlite's session takes the host's zone, in which its driver may
+        // read a resumed row as a BC rendering (fix5-bc-date, pinned by the
+        // walk below); in UTC the rows read back as they are stored.
+        const executeRaw =
+          context.driver === "pglite" ? store.backend.executeRaw : undefined;
+        await executeRaw?.("SET TIME ZONE 'UTC'", []);
+        const outcomes = [];
+        try {
+          for (const fixture of boundary.fixtures) {
+            const options =
+              fixture.position === "after" ?
+                { first: 10, after: fixture.cursor }
+              : { last: 10, before: fixture.cursor };
+            const [batched] = await store.batchOnce(
+              () => [query().page(options)] as const,
+            );
+            outcomes.push({
+              position: fixture.position,
+              paginate: ids(await query().paginate(options)),
+              page: ids(await query().page(options).execute()),
+              batchOnce: ids(batched),
+            });
+          }
+        } finally {
+          await executeRaw?.("RESET TIME ZONE", []);
+        }
+        expect(outcomes).toEqual(
+          boundary.fixtures.map((fixture) => ({
+            position: fixture.position,
+            paginate: fixture.resumes,
+            page: fixture.resumes,
+            batchOnce: fixture.resumes,
+          })),
+        );
+      });
+
+      it(`walks a timestamp key once through batched pages in a session zone that renders it as ${boundary.rendered}`, async (ctx) => {
+        // One connection whose session zone the case can hold: PGlite's.
+        if (context.driver !== "pglite") ctx.skip();
+        const store = context.getStore();
+        const executeRaw = store.backend.executeRaw;
+        if (executeRaw === undefined)
+          throw new Error("The PGlite lane must expose raw SQL.");
+        await seedTimestamps(store, boundary.dates);
+        await executeRaw(`SET TIME ZONE '${boundary.zone}'`, []);
+        try {
+          const walked = [];
+          for (const terminal of ["batchOnce", "paginate"] as const) {
+            for (const direction of ["forward", "backward"] as const) {
+              walked.push({
+                terminal,
+                direction,
+                ids: await walkLocalMeanTime(store, terminal, direction).then(
+                  (read) => read,
+                  (error: unknown) =>
+                    error instanceof RangeError ? "RangeError" : error,
+                ),
+              });
+            }
+          }
+          const correct = walked.map(({ terminal, direction }) => ({
+            terminal,
+            direction,
+            ids: ["t1", "t2", "t3"],
+          }));
+          expectObservation({
+            lane: { driver: context.driver, zone: boundary.zone },
+            observed: walked,
+            correct,
+            defects: [
+              {
+                label:
+                  "known defect fix5-bc-date (PGlite reads a timestamp its session renders in a BC year as an invalid Date)",
+                on: { driver: ["pglite"], zone: ["Etc/GMT+8"] },
+                today: correct.map((outcome) =>
+                  outcome.terminal === "paginate" ?
+                    { ...outcome, ids: "RangeError" }
+                  : outcome,
+                ),
+              },
+            ],
+          });
+        } finally {
+          await executeRaw("RESET TIME ZONE", []);
+        }
+      });
+    }
+
     it("walks a timestamp key once through batched pages in a session zone whose offset has seconds", async (ctx) => {
       // One connection whose session zone the case can hold: PGlite's.
       if (context.driver !== "pglite") ctx.skip();
@@ -438,6 +533,77 @@ async function seedLocalMeanTime(store: IntegrationStore): Promise<void> {
     ["t2", "1900-01-01T00:00:00.000Z"],
     ["t3", "1900-06-01T12:00:00.000Z"],
   ] as const) {
+    await store.nodes.Document.create(
+      { title: id, publishedAt: new Date(publishedAt) },
+      { id },
+    );
+  }
+}
+
+/**
+ * Rows at the ends of the years 0001 to 9999 a timestamp key holds, and the
+ * session zone in which PostgreSQL renders the middle row's instant outside
+ * them: year 10000 east of UTC, `0001 BC` west of it. The cursors are the
+ * ones the release before relevance-ordered cursors issued through
+ * `store.batchOnce()` on PGlite in that zone, sorted by `publishedAt`
+ * ascending, two rows a page, forward (`first: 2`) and backward
+ * (`last: 2`), both positioned on the middle row t2.
+ */
+const YEAR_BOUNDARY_CASES = [
+  {
+    zone: "Pacific/Kiritimati",
+    rendered: "10000-01-01T10:00:00+14:00",
+    dates: [
+      "9999-12-31T09:00:00.000Z",
+      "9999-12-31T20:00:00.000Z",
+      "9999-12-31T23:00:00.000Z",
+    ],
+    fixtures: [
+      {
+        position: "after",
+        cursor:
+          "eyJ2IjoxLCJkIjoiZiIsInZhbHMiOlsiMTAwMDAtMDEtMDFUMTA6MDA6MDArMTQ6MDAiLCJ0MiJdLCJjb2xzIjpbIm4ucHVibGlzaGVkQXQiLCJuLmlkIl19",
+        resumes: ["t3"],
+      },
+      {
+        position: "before",
+        cursor:
+          "eyJ2IjoxLCJkIjoiYiIsInZhbHMiOlsiMTAwMDAtMDEtMDFUMTA6MDA6MDArMTQ6MDAiLCJ0MiJdLCJjb2xzIjpbIm4ucHVibGlzaGVkQXQiLCJuLmlkIl19",
+        resumes: ["t1"],
+      },
+    ],
+  },
+  {
+    zone: "Etc/GMT+8",
+    rendered: "0001-12-31T21:00:00-08:00 BC",
+    dates: [
+      "0001-01-01T01:00:00.000Z",
+      "0001-01-01T05:00:00.000Z",
+      "0001-06-01T00:00:00.000Z",
+    ],
+    fixtures: [
+      {
+        position: "after",
+        cursor:
+          "eyJ2IjoxLCJkIjoiZiIsInZhbHMiOlsiMDAwMS0xMi0zMVQyMTowMDowMC0wODowMCBCQyIsInQyIl0sImNvbHMiOlsibi5wdWJsaXNoZWRBdCIsIm4uaWQiXX0",
+        resumes: ["t3"],
+      },
+      {
+        position: "before",
+        cursor:
+          "eyJ2IjoxLCJkIjoiYiIsInZhbHMiOlsiMDAwMS0xMi0zMVQyMTowMDowMC0wODowMCBCQyIsInQyIl0sImNvbHMiOlsibi5wdWJsaXNoZWRBdCIsIm4uaWQiXX0",
+        resumes: ["t1"],
+      },
+    ],
+  },
+] as const;
+
+async function seedTimestamps(
+  store: IntegrationStore,
+  dates: readonly string[],
+): Promise<void> {
+  for (const [index, publishedAt] of dates.entries()) {
+    const id = `t${index + 1}`;
     await store.nodes.Document.create(
       { title: id, publishedAt: new Date(publishedAt) },
       { id },
