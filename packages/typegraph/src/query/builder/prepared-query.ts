@@ -28,6 +28,7 @@ import { type GraphBackend } from "../../backend/types";
 import { ConfigurationError, UnsupportedPredicateError } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
 import {
+  passStoredProps,
   type StoredPropsReaders,
   storedPropsReaders,
 } from "../../store/stored-date-revival";
@@ -525,8 +526,12 @@ export type PreparedQueryConfig<R> = Readonly<{
   selectiveFields: readonly SelectiveField[] | undefined;
   selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
   schemaIntrospector: SchemaIntrospector;
-  /** The kinds whose stored props a row decodes (`storedPropsReaders`). */
-  registry: KindRegistry;
+  /**
+   * The kinds whose stored props a row decodes (`storedPropsReaders`). Every
+   * query the store prepares states it; a config built without one reads
+   * props exactly as stored, as before reads decoded dates.
+   */
+  registry?: KindRegistry;
 }>;
 
 /**
@@ -594,7 +599,10 @@ export class PreparedQuery<R> {
     this.#selectiveFields = config.selectiveFields;
     this.#selectFn = config.selectFn;
     this.#schemaIntrospector = config.schemaIntrospector;
-    this.#propsReaders = storedPropsReaders(config.registry);
+    this.#propsReaders =
+      config.registry === undefined ?
+        { node: passStoredProps, edge: passStoredProps }
+      : storedPropsReaders(config.registry);
     this.#parameterMetadata = collectParameterMetadata(this.#ast);
     assertDistinctParameterRoles(this.#parameterMetadata);
   }

@@ -227,9 +227,10 @@ export type DatabaseExpression<
    * @internal The date positions under a structured (array or object) property
    * this expression reads, from the property's schema typing: its result decodes
    * them as every other read does (`decodeStoredValue`). A scalar date decodes
-   * by `valueType` alone.
+   * by `valueType` alone. Opaque on the public type (the plan is the store's
+   * internal decode); read it with `expressionReadPlan`.
    */
-  readPlan?: StoredReadPlan;
+  readPlan?: unknown;
   /**
    * @internal `"stated"` when every date this expression yields is one the
    * caller stated — a date literal or parameter, or a composition of only
@@ -366,11 +367,22 @@ function sharedReadPlan(
 ): StoredReadPlan | undefined {
   const [first] = operands;
   return (
-      first?.readPlan !== undefined &&
-        operands.every((operand) => operand.readPlan !== undefined)
+      first !== undefined &&
+        operands.every((operand) => expressionReadPlan(operand) !== undefined)
     ) ?
-      first.readPlan
+      expressionReadPlan(first)
     : undefined;
+}
+
+/**
+ * @internal The read plan a structured expression carries: the one reader of
+ * its opaque `readPlan` field, which only `createExpression` writes, from a
+ * `StoredReadPlan`.
+ */
+export function expressionReadPlan(
+  expression: Pick<DatabaseExpression, "readPlan">,
+): StoredReadPlan | undefined {
+  return expression.readPlan as StoredReadPlan | undefined;
 }
 
 function assertExpression(value: unknown): asserts value is DatabaseExpression {
@@ -614,7 +626,7 @@ export function createOuterReferenceExpression<T, Scope extends string>(
     expression.elementValueType,
     expression.elementFields,
     expression.arrayElementType,
-    expression.readPlan,
+    expressionReadPlan(expression),
   );
 }
 

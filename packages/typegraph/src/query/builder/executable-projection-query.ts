@@ -13,7 +13,11 @@ import type { QueryAst, SortDirection, ValueType } from "../ast";
 import { compileNameCheckedQuery } from "../compiler";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import { decodeExpressionDate } from "../execution/value-decoder";
-import type { DatabaseExpression, DateOrigin } from "../expressions";
+import {
+  type DatabaseExpression,
+  type DateOrigin,
+  expressionReadPlan,
+} from "../expressions";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
@@ -572,7 +576,7 @@ export function decodeExpressionValue(
     case "object":
     case "embedding": {
       return decodeStoredValue(
-        expression.readPlan,
+        expressionReadPlan(expression),
         typeof value === "string" ? (JSON.parse(value) as unknown) : value,
       );
     }
@@ -580,7 +584,7 @@ export function decodeExpressionValue(
       const parsed =
         typeof value === "string" ? (JSON.parse(value) as unknown) : value;
       if (!Array.isArray(parsed) || expression.elementValueType === undefined)
-        return decodeStoredValue(expression.readPlan, parsed);
+        return decodeStoredValue(expressionReadPlan(expression), parsed);
       const elementValueType = expression.elementValueType;
       const elementFields = expression.elementFields;
       return parsed.map((element) => {

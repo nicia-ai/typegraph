@@ -36,6 +36,7 @@ import {
   createFieldExpression,
   type DatabaseExpression,
   expr,
+  expressionReadPlan,
 } from "../expressions";
 import { resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
@@ -175,7 +176,7 @@ function buildContext<Fields extends RelationProjection>(
           outputField(column.outputName, column.valueType),
           scopeIdentity,
           column.nullable,
-          column.readPlan,
+          expressionReadPlan(column),
         ),
         ...(column.elementValueType === undefined ?
           {}
@@ -202,6 +203,7 @@ function relationColumns(
   }> = {},
 ): readonly RelationColumn[] {
   return Object.entries(fields).map(([outputName, expression]) => {
+    const readPlan = expressionReadPlan(expression);
     const base = {
       outputName,
       valueType: expression.valueType,
@@ -211,9 +213,7 @@ function relationColumns(
       ...(expression.elementFields === undefined ?
         {}
       : { elementFields: expression.elementFields }),
-      ...(expression.readPlan === undefined ?
-        {}
-      : { readPlan: expression.readPlan }),
+      ...(readPlan === undefined ? {} : { readPlan }),
       ...(expression.dateOrigin === undefined ?
         {}
       : { dateOrigin: expression.dateOrigin }),

@@ -1,5 +1,4 @@
 import { ConfigurationError } from "../../errors";
-import type { StoredReadPlan } from "../../store/stored-date-revival";
 import type { QueryAst, SortDirection, ValueType } from "../ast";
 import {
   type DatabaseExpression,
@@ -28,8 +27,11 @@ export type RelationColumn = Readonly<{
   valueType: ValueType;
   elementValueType?: ValueType;
   elementFields?: Readonly<Record<string, ValueType>>;
-  /** The date positions of a structured property column (`DatabaseExpression.readPlan`). */
-  readPlan?: StoredReadPlan;
+  /**
+   * The date positions of a structured property column, opaque as
+   * `DatabaseExpression.readPlan` is; read it with `expressionReadPlan`.
+   */
+  readPlan?: unknown;
   nullable: boolean;
   /** Proven graph-node identity carried only from a direct graph field. */
   identity?: Readonly<{

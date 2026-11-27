@@ -19,4 +19,4 @@ The stored form is unchanged. `JSON.stringify` of a read, `exportGraph()` docume
 - A custom `DialectAdapter` must implement `jsonDateText(value)`: return SQL that renders the date `value` as `YYYY-MM-DDTHH:mm:ss.sssZ` UTC text (the identity where dates are already stored as that text).
 - A `z.record()` of dates and a `.transform()` date read back decoded, but an `update()` of another property on such a kind, and a `branch()` of a store holding one, still refuse the stored row with a `ValidationError`. Keep such properties on a kind you do not update.
 - Node and edge `meta` timestamps (`createdAt`, `validFrom` and the rest) are unchanged: they are still ISO strings.
-- `PreparedQueryConfig` has a required `registry` member: the kinds whose stored props a prepared query's rows decode.
+- `PreparedQueryConfig` has an optional `registry` member: the kinds whose stored props a prepared query's rows decode. A config built without one reads props exactly as stored.

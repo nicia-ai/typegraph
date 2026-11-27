@@ -52,7 +52,9 @@ const zonedLink = defineEdge("zonedLink", {
 const graph = defineGraph({
   id: "date_session_zone",
   nodes: { ZonedDoc: { type: ZonedDocument } },
-  edges: { zonedLink: { type: zonedLink, from: [ZonedDocument], to: [ZonedDocument] } },
+  edges: {
+    zonedLink: { type: zonedLink, from: [ZonedDocument], to: [ZonedDocument] },
+  },
 });
 
 /**
