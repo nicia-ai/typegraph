@@ -1428,6 +1428,7 @@ const SQLITE_ROOT_QUEUED_WRITE_MEMBERS: ReadonlySet<BackendMemberName> =
     "upsertEmbeddingBatch",
     "deleteEmbedding",
     "deleteEmbeddingBatch",
+    "dropVectorIndex",
     "upsertFulltext",
     "upsertFulltextBatch",
     "deleteFulltext",
