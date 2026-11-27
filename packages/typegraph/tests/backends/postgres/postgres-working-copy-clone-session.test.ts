@@ -5,11 +5,14 @@
  * with its one session; the clone must run in that session rather than open
  * a second one over the capture surface the member hands out.
  *
- * The probe: every session a module outside the mint opens through
+ * Two probes. Every session a module outside the mint opens through
  * `openTransactionSession` is checked for whether the object it opens over
- * already carries a session (a capture surface built for one). The mint's
- * own opens (`openRootTransaction`'s fallback, a bound session) are internal
- * calls the mock does not see.
+ * already carries a session (a capture surface built for one). And the
+ * session `openRootTransaction` hands the clone on the source is recorded:
+ * it must be the one the capture overlay opened, the session its capture is
+ * bound to. The mint's own opens (`openRootTransaction`'s fallback, a bound
+ * session) are internal calls the first probe does not see, so the second
+ * reads the session the clone actually ran in.
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "pg";
@@ -25,7 +28,15 @@ import type * as OperationScopeModule from "../../../src/store/operation-scope";
 import { storeBackend } from "../../../src/store/runtime-port";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
 
-const sessionOpens = vi.hoisted(() => ({ overHeldSurface: 0 }));
+const sessionOpens = vi.hoisted(() => ({
+  overHeldSurface: 0,
+  // Every session `openRootTransaction` handed a caller, with the root it
+  // opened the transaction on.
+  rootSessions: [] as {
+    root: object;
+    session: OperationScopeModule.TransactionSession;
+  }[],
+}));
 
 /** Whether `surface` carries the session it was built for. */
 function carriesSession(surface: object): boolean {
@@ -44,6 +55,19 @@ vi.mock("../../../src/store/operation-scope", async (importOriginal) => {
     ) => {
       if (carriesSession(args[0])) sessionOpens.overHeldSurface += 1;
       return actual.openTransactionSession(...args);
+    },
+    openRootTransaction: <T>(
+      ...args: Parameters<typeof actual.openRootTransaction<T>>
+    ) => {
+      const [root, fn, options] = args;
+      return actual.openRootTransaction<T>(
+        root,
+        (session) => {
+          sessionOpens.rootSessions.push({ root, session });
+          return fn(session);
+        },
+        options,
+      );
     },
   };
 });
@@ -85,9 +109,18 @@ describe.runIf(process.env["POSTGRES_URL"])(
         const base = await computeBaseVersion(source);
 
         sessionOpens.overHeldSurface = 0;
+        sessionOpens.rootSessions = [];
         const copy = await manager.ephemeral.create(source, base);
         try {
           expect(sessionOpens.overHeldSurface).toBe(0);
+          // The clone's one transaction on the source ran in the session the
+          // capture overlay opened with it: the session its capture binding
+          // lives on, not a second session over the surface it hands out.
+          const onSource = sessionOpens.rootSessions.filter(
+            ({ root }) => root === storeBackend(source),
+          );
+          expect(onSource).toHaveLength(1);
+          expect(onSource[0]?.session.recorded.binding).toBeDefined();
           const people = await copy.nodes.Person.find();
           expect(people.map((person) => person.name)).toEqual(["Source"]);
         } finally {
