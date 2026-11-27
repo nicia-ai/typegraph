@@ -46,6 +46,7 @@ import {
   assertExpressionScope,
   isDatabaseExpression,
 } from "./expression-scope";
+import { storedDateOutputNames } from "./one-statement-batch";
 import {
   type PreparedBindings,
   type PreparedParameterDeclaration,
@@ -1278,6 +1279,7 @@ export class ExecutableRelationQuery<
         executionTarget: backendDerivationRoot(backend),
       },
       outputNames: this.#definition.columns.map((column) => column.outputName),
+      dateOutputNames: storedDateOutputNames(this.#definition.columns),
       orderBy: this.#state.orderBy.map((order, index) => ({
         column: relationOrderColumnName(index),
         direction: order.direction,

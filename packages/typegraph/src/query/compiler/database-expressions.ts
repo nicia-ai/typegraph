@@ -4,7 +4,12 @@ import {
   assertPortableCountDistinctValueType,
   assertPortableScalarValueType,
 } from "../aggregate-value-types";
-import { type AggregateExpr, type FieldRef, type QueryAst } from "../ast";
+import {
+  type AggregateExpr,
+  type FieldRef,
+  type QueryAst,
+  type ValueType,
+} from "../ast";
 import { dateTypedComparisonSubqueries } from "../compared-operands";
 import { type DialectAdapter } from "../dialect/types";
 import {
@@ -144,6 +149,23 @@ function aggregateFunction(operator: AggregateOperator): SqlFragment {
   }
 }
 
+/**
+ * A value as it enters a collected JSON array: a date as the canonical UTC
+ * text the dialect renders for JSON (`jsonDateText`), collected as the string
+ * it then is, so every backend emits the same bytes whatever its session time
+ * zone; any other value as compiled.
+ */
+function collectedValue(
+  name: string,
+  value: SqlFragment,
+  valueType: ValueType,
+  context: DatabaseExpressionCompilerContext,
+): Readonly<{ name: string; value: SqlFragment; valueType: ValueType }> {
+  return valueType === "date" ?
+      { name, value: context.dialect.jsonDateText(value), valueType: "string" }
+    : { name, value, valueType };
+}
+
 function compileNode(
   expression: DatabaseExpression,
   context: DatabaseExpressionCompilerContext,
@@ -276,24 +298,30 @@ function compileNode(
       if (isCollectRecordOperand(operand)) {
         return context.dialect.orderedRecordJsonArray({
           fields: resolveCollectRecordFields(operand.fields).map(
-            ({ name, expression: value }) => {
-              return {
+            ({ name, expression: value }) =>
+              collectedValue(
                 name,
-                value: compileNode(value, context, aggregateDepth + 1),
-                valueType: value.valueType,
-              };
-            },
+                compileNode(value, context, aggregateDepth + 1),
+                value.valueType,
+                context,
+              ),
           ),
           filter: compiledFilter,
           orderBy: ordering,
         });
       }
       assertPortableScalarValueType(operand.valueType, "COLLECT");
+      const { value, valueType } = collectedValue(
+        "",
+        compileNode(operand, context, aggregateDepth + 1),
+        operand.valueType,
+        context,
+      );
       return context.dialect.orderedScalarJsonArray({
         filter: compiledFilter,
         orderBy: ordering,
-        value: compileNode(operand, context, aggregateDepth + 1),
-        valueType: operand.valueType,
+        value,
+        valueType,
       });
     }
     case "aggregate": {

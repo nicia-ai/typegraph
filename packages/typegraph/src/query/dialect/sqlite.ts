@@ -131,6 +131,11 @@ export const sqliteDialect: BuiltinDialectAdapter = {
     return value;
   },
 
+  jsonDateText(value) {
+    // A date is held as its text; SQLite has no session zone to render it in.
+    return value;
+  },
+
   safeNumericConversion(expression) {
     const trimmed = sql`trim(${expression})`;
     const wrapped = sql`'[' || ${trimmed} || ']'`;

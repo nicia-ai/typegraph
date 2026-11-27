@@ -173,6 +173,18 @@ export interface DialectAdapter {
    * value unchanged.
    */
   readonly dateValue: (this: void, value: SqlFragment) => SqlFragment;
+
+  /**
+   * The text a date contributes to a JSON value the compiler builds — a
+   * collected element or record field (`expr.collect`), or a date column of a
+   * `batchOnce()` payload: canonical UTC ISO-8601 text
+   * (`YYYY-MM-DDTHH:mm:ss.sssZ`, the form the store writes), so every dialect
+   * emits the same bytes and the session's configuration cannot change them.
+   * PostgreSQL renders a `timestamptz` inside JSON in the session `TimeZone`,
+   * so it formats the instant in UTC instead; SQLite holds a date as its text
+   * and returns the value unchanged.
+   */
+  readonly jsonDateText: (this: void, value: SqlFragment) => SqlFragment;
   /** Converts strict finite decimal text to a number, returning SQL NULL otherwise. */
   readonly safeNumericConversion: (
     this: void,

@@ -22,7 +22,10 @@ import { buildCompileOptions } from "./compile-options";
 import { assertExpressionScope, getExpressionScope } from "./expression-scope";
 import type { ExpressionProjectionEntries } from "./expression-subqueries";
 import { getQueryBuilderInternalContext } from "./internal-context";
-import { oneStatementBatchSelectionOrder } from "./one-statement-batch";
+import {
+  oneStatementBatchSelectionOrder,
+  storedDateOutputNames,
+} from "./one-statement-batch";
 import {
   bindQueryParameters,
   collectParameterMetadata,
@@ -287,6 +290,15 @@ export class ExecutableProjectionQuery<
         executionTarget: backendDerivationRoot(backend),
       },
       outputNames: envelope.projection.fields.map((field) => field.outputName),
+      dateOutputNames: storedDateOutputNames(
+        Object.entries(this.#fields).map(([outputName, expression]) => ({
+          outputName,
+          valueType: expression.valueType,
+          ...(expression.dateOrigin === undefined ?
+            {}
+          : { dateOrigin: expression.dateOrigin }),
+        })),
+      ),
       orderBy,
       mapRows: (rows: readonly Record<string, unknown>[]) =>
         rows.map((row) => this.#decodeRow(row)),

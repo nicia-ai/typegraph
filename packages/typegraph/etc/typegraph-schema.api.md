@@ -1402,6 +1402,8 @@ type DatabaseExpression<out T = unknown, out Scope extends string = string> = Re
     elementValueType?: ValueType;
     elementFields?: Readonly<Record<string, ValueType>>;
     readPlan?: StoredReadPlan;
+    dateOrigin?: "stated";
+    elementDateOrigins?: Readonly<Record<string, "stated">>;
     nullable: boolean;
     scopeIdentity: symbol;
     __value?: T;
@@ -2440,6 +2442,7 @@ class ExecutableAggregateQuery<G extends GraphDef, Aliases extends AggregateAlia
             executionTarget: object;
         };
         outputNames: string[];
+        dateOutputNames: readonly string[];
         orderBy: {
             column: string;
             direction: SortDirection;
@@ -2491,6 +2494,7 @@ class ExecutableProjectionQuery<Fields extends DatabaseProjection, Context, Resu
             executionTarget: object;
         };
         outputNames: string[];
+        dateOutputNames: readonly string[];
         orderBy: {
             column: string;
             direction: SortDirection;
@@ -2618,6 +2622,7 @@ class ExecutableRelationQuery<Fields extends RelationProjection, Result = Relati
             executionTarget: object;
         };
         outputNames: string[];
+        dateOutputNames: readonly string[];
         orderBy: {
             column: string;
             direction: SortDirection;
@@ -5456,6 +5461,7 @@ type OneStatementBatchableQuery<R = unknown> = Readonly<{
         }>;
         outputNames: readonly string[];
         hiddenOutputNames?: readonly string[];
+        dateOutputNames?: readonly string[];
         orderBy: readonly Readonly<{
             column: string;
             direction: "asc" | "desc";
@@ -6443,7 +6449,7 @@ type RelationColumn = Readonly<{
         component: "id" | "kind";
         alias: string;
     }>;
-}>;
+}> & Pick<DatabaseExpression, "dateOrigin" | "elementDateOrigins">;
 
 // @public (undocumented)
 type RelationColumnContext<Fields extends RelationProjection> = {
