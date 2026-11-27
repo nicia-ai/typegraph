@@ -2459,10 +2459,15 @@ operations make, as well as an orphaned write.
 
 The rule covers transactions TypeGraph opens and ends, and every backend
 bound to one: a backend adopted with `adoptTransaction(native)` over the
-native handle `transactionWithNative()` passes its callback is refused after
-the end too, on every driver that can identify the transaction behind the
-handle (better-sqlite3, bun:sqlite, libSQL 0.18 and later, PGlite,
-node-postgres, postgres-js). On sql.js, libSQL before 0.18 and Durable Object
+native handle `transactionWithNative()` passes its callback, or built over
+that handle with `createPostgresTransactionBackend(native)`,
+`createPostgresBackend(native)` or `createSqliteBackend(native)`, is refused
+after the end too, on every driver that can identify the transaction behind
+the handle (better-sqlite3, bun:sqlite, libSQL 0.18 and later, PGlite,
+node-postgres, postgres-js). A backend built over a database handle is a root
+backend and is not refused; on better-sqlite3 the native handle is the
+connection itself. A backend adopted over a savepoint's native handle closes
+with the enclosing transaction, not with the savepoint, for now. On sql.js, libSQL before 0.18 and Durable Object
 storage, which report no transaction state, such an adoption is not closed. A
 transaction the caller ends (one adopted with `withTransaction` or
 `adoptTransaction`) is not closed by TypeGraph, and an end SQLite makes on
@@ -2472,10 +2477,13 @@ its own (a trigger's
 observed yet: a later statement of the callback still reaches the driver, as
 before (on better-sqlite3 it runs in autocommit).
 
-A transaction backend's `createVectorIndex()` is refused outright, open or
-ended, with a [`ConfigurationError`](#configurationerror) whose
-`details.capability` is `"contributionAdministration"`: creating a vector index
-provisions storage, which only the root backend does.
+The backend a transaction callback receives, and one `adoptTransaction()`
+returns, refuses `createVectorIndex()` outright, open or ended, with a
+[`ConfigurationError`](#configurationerror) whose `details.capability` is
+`"contributionAdministration"`: creating a vector index provisions storage,
+which only a root backend does. A backend you build over a transaction handle
+with `createPostgresTransactionBackend()` still provisions in your
+transaction, so `store.reembedVectorField()` works on a Store over it.
 
 The usual source is a callback that lets work escape it. `Promise.all` rejects
 on its first rejection while its siblings keep running:
