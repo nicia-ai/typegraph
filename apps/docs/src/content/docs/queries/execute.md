@@ -283,9 +283,11 @@ with equal or nearly equal scores are not skipped or repeated at a page boundary
 rank or distance is carried as the text of its `double precision` value, and a fused hybrid score
 as the text of the `numeric` it is computed in: a double cannot hold every score that valid
 `fuseWith()` options produce (weights near `Number.MAX_VALUE` exceed it), and the statement sorts
-and compares each key in that same type. On SQLite every key is a REAL rendered with 17
-significant digits, and an infinity (an L2 distance or fused score past the largest double) as
-`Inf` or `-Inf`, which the next page compares as that infinity. A relevance value that is NULL sorts after
+and compares each key in that same type. On SQLite every key is a REAL carried as its exact
+binary text, an integer significand and a power of two computed with exact REAL arithmetic,
+because SQLite promises no decimal rendering of a REAL that reads back as the same double. An
+infinity (an L2 distance or fused score past the largest double) is carried as `Inf` or `-Inf`,
+which the next page compares as that infinity. A relevance value that is NULL sorts after
 every value, as the least relevant, and the cursor carries it as NULL. PostgreSQL's float text is exact at its default
 `extra_float_digits` of 1 or above; in a session that lowers it, issuing a search cursor is refused
 with a `ConfigurationError` whose `details.code` is `SEARCH_CURSOR_KEY_UNAVAILABLE`. A search whose
@@ -295,9 +297,15 @@ rows are groups (`groupByNode()`) cannot be paged and is refused with
 The cursor filters the completed match rows after the search has ranked its candidates and taken
 its top `k`, so every page ranks the same candidates `execute()` ranks and no page reaches past the
 top `k`. Every top-`k` cut breaks ties by node kind, then node id (an id is unique only within its
-kind, so a search whose alias spans several kinds can tie two nodes with one id), inside the
-engine's own search where the engine takes an order (pgvector, every exact scan), so a cut inside a
-tie keeps the same rows on every execution.
+kind, so a search whose alias spans several kinds can tie two nodes with one id), both in byte
+order whatever the database's collation, as `store.search` breaks them, inside the engine's own
+search where the engine takes an order (pgvector, every exact scan), so a cut inside a tie keeps
+the same rows on every execution, on every backend and through both APIs.
+
+A page whose rows do not advance past the cursor it was asked with (its last row forward, or its
+first row backward, is the row the cursor positions) is refused with a `CompilerInvariantError`
+instead of being returned, so following cursors can never repeat a page forever and `stream()`
+always ends. A correct keyset never produces such a page; the refusal reports the defect.
 
 An approximate `similarTo(..., { approximate: true })` pages the candidates its own `execute()`
 returns, including a short result where the backend's filtered approximate search can under-fill
@@ -337,9 +345,10 @@ object for a string field), or that the field's predicate operand contract refus
 `meta.createdAt` or a date property), is refused with a `ValidationError` before the query reaches
 the database. Every form a terminal has issued is a value: a Boolean key accepts `true`/`false` and
 the `0`/`1` that SQLite's and libSQL's `store.batchOnce()` issue it as, and a timestamp key accepts
-the text with the session's UTC offset (`2024-01-01T19:04:05.678-08:00`) that PostgreSQL's
-`store.batchOnce()` issues it as, or the rendering a PostgreSQL driver returns, compared as the instant
-it names. On PostgreSQL, whose text
+the text with the session's UTC offset (`2024-01-01T19:04:05.678-08:00`, or an offset with
+seconds such as `+00:09:21`, which a zone's local mean time gives a date before the zone adopted
+standard time) that PostgreSQL's `store.batchOnce()` issues it as, or the rendering a PostgreSQL
+driver returns, compared as the instant it names. On PostgreSQL, whose text
 cannot hold a NUL character, a cursor whose text holds one (in an `orderBy()` value, an id or a
 hybrid search's node-id tiebreak) is refused the same way; SQLite's text can hold one, so it pages
 there. A cursor whose text holds a lone UTF-16 surrogate, which no database stores or returns, is
