@@ -29,10 +29,20 @@ import {
   searchable,
 } from "../../../src";
 import { requireDefined } from "../../../src/utils/presence";
+import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
 
 /** A zone with a non-whole-hour offset and no daylight-saving rule. */
 const SESSION_ZONE = "Asia/Kathmandu";
+
+/**
+ * A zone whose offset before it adopted standard time (1891) is local mean
+ * time, to the second: PostgreSQL renders `1880-06-01T00:00:00.001Z` in it as
+ * `1880-06-01 00:09:21.001+00:09:21`.
+ */
+const MEAN_TIME_ZONE = "Europe/Paris";
+const MEAN_TIME_INSTANT = new Date("1880-06-01T00:00:00.001Z");
+const MEAN_TIME_LATER = new Date("1880-06-02T00:00:00.000Z");
 
 const EARLY = new Date("2024-06-15T12:34:56.789Z");
 const LATE = new Date("2025-01-01T00:00:00.000Z");
@@ -66,6 +76,7 @@ const graph = defineGraph({
 async function zonedStore<G extends GraphDef>(
   context: IntegrationTestContext,
   zonedGraph: G,
+  sessionZone: string = SESSION_ZONE,
 ) {
   if (context.getBackend().dialect !== "postgres") {
     return {
@@ -75,9 +86,9 @@ async function zonedStore<G extends GraphDef>(
   }
   const handle = await context.createSerializedBackend();
   const executeRaw = requireDefined(handle.backend.executeRaw);
-  await executeRaw(`SET TIME ZONE '${SESSION_ZONE}'`, []);
+  await executeRaw(`SET TIME ZONE '${sessionZone}'`, []);
   const [zone] = await executeRaw<{ TimeZone: string }>("SHOW TimeZone", []);
-  expect(zone?.TimeZone).toBe(SESSION_ZONE);
+  expect(zone?.TimeZone).toBe(sessionZone);
   const [store] = await createAdapterStoreWithSchema(
     zonedGraph,
     handle.backend,
@@ -299,6 +310,86 @@ export function registerDateSessionZoneIntegrationTests(
           limit: 5,
         });
         expect(hits.map((hit) => hit.node.at)).toEqual([EARLY]);
+      } finally {
+        await close();
+      }
+    });
+
+    it("an instant whose session offset has seconds reads back as its Date on every terminal", async () => {
+      const { store, close } = await zonedStore(context, graph, MEAN_TIME_ZONE);
+      try {
+        await store.nodes.ZonedDoc.create({
+          title: "early mean time",
+          at: MEAN_TIME_INSTANT,
+        });
+        await store.nodes.ZonedDoc.create({
+          title: "later mean time",
+          at: MEAN_TIME_LATER,
+        });
+        const documents = () => store.query().from("ZonedDoc", "d");
+        const projected = documents()
+          .whereNode("d", (d) => d.title.eq("early mean time"))
+          .project((fields) => ({ at: fields.d.at }));
+        const ordered = () =>
+          documents()
+            .select((ctx) => ({ title: ctx.d.title, at: ctx.d.at }))
+            .orderBy("d", "at");
+        async function observe(read: () => Promise<unknown>) {
+          try {
+            return await read();
+          } catch (error) {
+            return { error: error instanceof Error ? error.message : error };
+          }
+        }
+        const observed = {
+          projected: await observe(() => projected.execute()),
+          batched: await observe(() =>
+            store.batchOnce(() => [projected] as const),
+          ),
+          extremes: await observe(() =>
+            documents()
+              .aggregate({ earliest: min("d", "at") })
+              .execute(),
+          ),
+          pages: await observe(async () => {
+            const page = await ordered().paginate({ first: 1 });
+            const next = await ordered().paginate({
+              first: 1,
+              after: requireDefined(page.nextCursor),
+            });
+            return [page.data, next.data];
+          }),
+        };
+        const INVALID = { error: "Invalid time value" };
+        expectObservation({
+          lane: { driver: context.driver },
+          observed,
+          correct: {
+            projected: [{ at: MEAN_TIME_INSTANT }],
+            batched: [[{ at: MEAN_TIME_INSTANT }]],
+            extremes: [{ earliest: MEAN_TIME_INSTANT }],
+            pages: [
+              [{ title: "early mean time", at: MEAN_TIME_INSTANT }],
+              [{ title: "later mean time", at: MEAN_TIME_LATER }],
+            ],
+          },
+          defects: [
+            {
+              // PGlite's own result parser, on the statements the backend
+              // runs through the client rather than a Drizzle prepared
+              // query, turns such text into an `Invalid Date` before any
+              // TypeGraph decoder sees it (`normalizeRow` then throws).
+              label: "PGlite parses a seconds offset as an Invalid Date",
+              on: { driver: ["pglite"] },
+              today: {
+                projected: INVALID,
+                batched: [[{ at: MEAN_TIME_INSTANT }]],
+                extremes: INVALID,
+                pages: INVALID,
+              },
+            },
+          ],
+        });
       } finally {
         await close();
       }

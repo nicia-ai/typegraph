@@ -141,17 +141,33 @@ const CANONICAL_ISO_DATE_PATTERN =
 
 const ZONELESS_DATETIME_PATTERN =
   /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+/**
+ * A timestamp with an explicit UTC offset: `Z`, or hours with optional
+ * minutes and seconds. PostgreSQL renders a `timestamptz` in the session time
+ * zone, and for an instant before a zone adopted standard time that offset is
+ * the zone's local mean time, to the second (`1880-06-01 00:09:21+00:09:21`
+ * in `Europe/Paris`).
+ */
 const OFFSET_DATETIME_PATTERN =
-  /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}(?::?\d{2})?)$/i;
+  /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?)$/i;
+const OFFSET_PATTERN = /^([+-])(\d{2}):?(\d{2})?:?(\d{2})?$/;
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
-function normalizedOffset(offset: string): string {
-  if (offset.toUpperCase() === "Z") return "Z";
-  if (/^[+-]\d{2}$/.test(offset)) return `${offset}:00`;
-  if (/^[+-]\d{4}$/.test(offset)) {
-    return `${offset.slice(0, 3)}:${offset.slice(3)}`;
+/**
+ * The milliseconds an offset (`Z`, `+05`, `+0530`, `+05:30`, `+00:09:21`)
+ * places local time ahead of UTC, or `NaN` for one that is not an offset.
+ */
+function offsetMilliseconds(offset: string): number {
+  if (offset.toUpperCase() === "Z") return 0;
+  const match = OFFSET_PATTERN.exec(offset);
+  if (match === null) return Number.NaN;
+  const [, sign, hours, minutes = "0", seconds = "0"] = match;
+  if (Number(hours) > 23 || Number(minutes) > 59 || Number(seconds) > 59) {
+    return Number.NaN;
   }
-  return offset;
+  const magnitude =
+    (Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds)) * 1000;
+  return sign === "-" ? -magnitude : magnitude;
 }
 
 function databaseTimestampMilliseconds(value: string): number {
@@ -166,7 +182,9 @@ function databaseTimestampMilliseconds(value: string): number {
     if (date === undefined || time === undefined || offset === undefined) {
       return Number.NaN;
     }
-    return Date.parse(`${date}T${time}${normalizedOffset(offset)}`);
+    // Read as UTC wall time, then shifted by the offset: `Date.parse` reads
+    // no offset with seconds.
+    return Date.parse(`${date}T${time}Z`) - offsetMilliseconds(offset);
   }
   if (DATE_ONLY_PATTERN.test(value)) {
     return Date.parse(`${value}T00:00:00.000Z`);
