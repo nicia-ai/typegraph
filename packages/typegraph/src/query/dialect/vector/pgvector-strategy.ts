@@ -500,6 +500,15 @@ function createPgvectorStrategyWithPrefixes(
       // candidate order every cut uses (`compileRelevanceCandidateOrder`):
       // a cosine score sorted descending would put a NaN distance first.
       //
+      // The fence alone does not force the re-sort: PostgreSQL 17 and later
+      // carry a materialized CTE's sort order to the outer query, so an outer
+      // ORDER BY on the very keys the relaxed scan claims to be sorted by is
+      // planned without a Sort and the relaxed order leaks through (seen on
+      // PostgreSQL 18). The outer sort therefore reads `distance + 0`: the
+      // same order for every double, NaN, infinity and NULL, but an
+      // expression no CTE output column carries, so no pathkey can satisfy
+      // it and the plan keeps a full Sort above the CTE Scan.
+      //
       // Every form breaks distance ties by node id. With an HNSW or IVFFlat
       // index the planner keeps the ordered index scan and adds an
       // incremental sort on the node id over it (verified on PostgreSQL 18),
@@ -518,7 +527,7 @@ function createPgvectorStrategyWithPrefixes(
         return sql`
         WITH tg_vec_relaxed AS MATERIALIZED (${relaxedBody})
         SELECT node_id, score FROM tg_vec_relaxed
-        ORDER BY ${compileRelevanceCandidateOrder(sql`distance`, "asc", { nodeKind: undefined, nodeId: sql`node_id` })}
+        ORDER BY ${compileRelevanceCandidateOrder(sql`(distance + 0)`, "asc", { nodeKind: undefined, nodeId: sql`node_id` })}
         ${pageClause}
       `;
       }

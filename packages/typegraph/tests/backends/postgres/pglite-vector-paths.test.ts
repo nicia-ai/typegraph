@@ -42,6 +42,7 @@ import {
   asForeignTransaction,
   ForeignPgTransaction,
 } from "../../helpers/foreign-drizzle-handles";
+import { expectIvfflatPlansResort } from "./ivfflat-resort-plan";
 import {
   setupSharedPgliteEngine,
   type SharedPgliteEngine,
@@ -314,6 +315,31 @@ describe("pgvectorStrategy under PGlite (executed against bundled pgvector)", ()
     } finally {
       await engine.client.exec("RESET enable_seqscan");
     }
+  });
+
+  it("re-sorts an IVFFlat relaxed-order scan above the materialized scan, for every candidate form", async () => {
+    const s = slot("ivfflat");
+    await createStorage(s);
+    for (let index = 0; index < 300; index += 1) {
+      const angle = index / 100;
+      await upsert(s, `o${String(index).padStart(3, "0")}`, [
+        Math.cos(angle),
+        Math.sin(angle),
+        0.1 * (index % 7),
+      ]);
+    }
+    await execAll([requireDefined(pgvectorStrategy.buildCreateIndex?.(s))]);
+    await expectIvfflatPlansResort(
+      {
+        query: (text, params) =>
+          engine.client.query(
+            text,
+            params === undefined ? undefined : [...params],
+          ),
+      },
+      s,
+      (overrides) => searchParams([1, 0, 0], overrides),
+    );
   });
 
   it("builds an IVFFlat index that executes", async () => {
