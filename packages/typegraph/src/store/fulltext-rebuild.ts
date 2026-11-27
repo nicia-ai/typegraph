@@ -16,7 +16,6 @@ import {
   type GraphBackend,
   type NodeRow,
   rowPropsToObject,
-  runOptionallyInTransaction,
 } from "../backend/types";
 import {
   ConfigurationError,
@@ -30,11 +29,10 @@ import {
   getSearchableFields,
 } from "./fulltext-sync";
 import {
-  enterTargetOperation,
+  enterOperation,
+  openRootTransaction,
   type OperationBackend,
-  operationEntryBackend,
   type StatementBackend,
-  type StoreTransactionBackend,
 } from "./operation-scope";
 
 /**
@@ -166,15 +164,17 @@ export async function rebuildFulltextIndex(
   return runFulltextRebuild(
     {
       read: backend,
-      // Each page's transaction opens its session where it opens, and the
-      // page's writes are that session's one operation. Without interactive
-      // transactions the page runs on the pooled root, which enters nothing.
+      // Each page's transaction opens through the mint, and the page's
+      // writes are one operation of the session it hands back: beneath a
+      // history Store the capture overlay's, never a second session over the
+      // surface that transaction hands out. Without interactive transactions
+      // the page runs on the pooled root, which enters nothing.
       runPage: (write) =>
-        runOptionallyInTransaction(
-          backend,
-          (target: GraphBackend | StoreTransactionBackend) =>
-            write(operationEntryBackend(enterTargetOperation(target))),
-        ),
+        backend.capabilities.execution.interactiveTransactions ?
+          openRootTransaction(backend, (session) =>
+            write(enterOperation(session).backend),
+          )
+        : write(backend),
     },
     ctx,
     nodeKind,

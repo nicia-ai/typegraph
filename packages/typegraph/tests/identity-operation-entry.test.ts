@@ -574,28 +574,30 @@ describe("identity and search maintenance open a session where they open their t
     expect(enteredScopes()[0]).toBe(opened[0]);
   });
 
-  it("a fulltext rebuild opens a session for each page's transaction and runs that page under it", async () => {
-    const { store } = await createIdentityStore(false);
-    clearMints();
-    const result = await store.search.rebuildFulltext("Person", {
-      pageSize: 1,
-    });
-    expect(result.processed).toBe(3);
-    // Each page's transaction, handed in where it opened: never the root,
-    // and a different transaction per page.
-    const pageTransactions = enterTargetOperationSpy.mock.calls.map(
-      ([transaction]) => transaction,
-    );
-    expect(pageTransactions.length).toBeGreaterThanOrEqual(3);
-    expect(pageTransactions).not.toContain(storeRuntime(store).backend);
-    expect(new Set(pageTransactions).size).toBe(pageTransactions.length);
-    // Each page runs under a session of its own, opened for that transaction.
-    const sessions = targetEntries().map((entry) =>
-      operationEntrySession(entry),
-    );
-    expect(sessions).not.toContain(undefined);
-    expect(new Set(sessions).size).toBe(sessions.length);
-  });
+  it.each([false, true])(
+    "a fulltext rebuild runs each page in the one session its transaction opens with (history: %s)",
+    async (history) => {
+      const { store } = await createIdentityStore(history);
+      clearMints();
+      const result = await store.search.rebuildFulltext("Person", {
+        pageSize: 1,
+      });
+      expect(result.processed).toBe(3);
+      // Each page opens its transaction through the mint, which hands the
+      // page the session the transaction opened with: beneath a history
+      // Store the capture overlay's, never a second session over the surface
+      // its transaction hands out.
+      expect(enterTargetOperationSpy).not.toHaveBeenCalled();
+      const pageSessions = rootTransactionSessions.map(
+        (session) => session as TransactionSession,
+      );
+      expect(pageSessions).toHaveLength(3);
+      expect(new Set(pageSessions).size).toBe(3);
+      for (const session of pageSessions) {
+        expect(session.recorded.binding !== undefined).toBe(history);
+      }
+    },
+  );
 
   it("a contribution rebuild opens one session for the transaction the engine opens", async () => {
     const { store } = await createIdentityStore(false);
