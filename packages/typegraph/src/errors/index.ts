@@ -1955,19 +1955,9 @@ export type TransactionRolledBackErrorDetails = Readonly<{
    *   TypeGraph's own after the callback returned, or the callback's — was
    *   refused because the transaction was already aborted (`25P02`);
    * - `"driver"`: the driver refused to commit because a statement of the
-   *   transaction had failed, and rolled back instead (postgres-js);
-   * - `"statement-failure"`: a statement of the transaction failed and the
-   *   database ended the transaction with it (SQLite: a trigger's
-   *   `RAISE(ROLLBACK)`, an `ON CONFLICT ROLLBACK` constraint, or an error
-   *   SQLite answers by rolling back), as the driver's engine-state flag
-   *   (read before every statement where it reflects the engine) or SQLite
-   *   itself answered right after the failure (on Durable Object storage,
-   *   which cannot be asked, any SQL failure counts; a typed TypeGraph
-   *   refusal never does). Every later statement of the transaction is
-   *   refused with this error and TypeGraph sends no `COMMIT`.
+   *   transaction had failed, and rolled back instead (postgres-js).
    */
-  detectedBy:
-    "commit-reply" | "refused-statement" | "driver" | "statement-failure";
+  detectedBy: "commit-reply" | "refused-statement" | "driver";
   /**
    * Whether TypeGraph observed an engine error in the transaction; when it
    * did, the first one is the `cause`. `false` when the failure that aborted
@@ -1987,10 +1977,7 @@ export type TransactionRolledBackErrorDetails = Readonly<{
  * client-side timeout that abandoned a statement which then failed on the
  * server): every later statement is refused, and the database answers the
  * closing `COMMIT` with `ROLLBACK`. TypeGraph reads that reply and rejects
- * with this error instead of reporting success. On SQLite, some failures end
- * the transaction in the engine (a trigger's `RAISE(ROLLBACK)`): TypeGraph
- * refuses every later statement of the transaction with this error, so none
- * runs in autocommit, and rejects the transaction with it. Nothing the transaction wrote
+ * with this error instead of reporting success. Nothing the transaction wrote
  * was saved. `cause` is the first engine error the transaction observed, if
  * any (`details.causeObserved`).
  */
@@ -2010,7 +1997,7 @@ export class TransactionRolledBackError extends TypeGraphError {
         details,
         category: "system",
         suggestion:
-          "A database error inside a PostgreSQL transaction ends it, even when the callback catches the error or a client-side timeout abandoned the statement; on SQLite a trigger's RAISE(ROLLBACK) and some engine errors end it too. Let the error propagate, or run the failing statement inside a savepoint and roll back to it before continuing; then re-run the transaction.",
+          "A database error inside a PostgreSQL transaction ends it, even when the callback catches the error or a client-side timeout abandoned the statement. Let the error propagate, or run the failing statement inside a savepoint and roll back to it before continuing; then re-run the transaction.",
         cause: options?.cause,
       },
     );
@@ -2028,11 +2015,7 @@ export type TransactionOutcomeUnknownErrorDetails = Readonly<{
    * - `"transaction-ended"`: the callback returned, but the marker TypeGraph
    *   set when the native handle was read was gone before its `COMMIT`, so
    *   the session was no longer inside the transaction TypeGraph opened.
-   *   TypeGraph sent no `COMMIT`. On SQLite, the driver's engine-state flag
-   *   reported the transaction ended although no statement TypeGraph ran had
-   *   failed (a statement through the native handle, or transaction control
-   *   sent as raw SQL): every later statement of the transaction is refused
-   *   with this error, and TypeGraph sends no `COMMIT`.
+   *   TypeGraph sent no `COMMIT`.
    * - `"native-handle-released"`: the attempt failed after the native handle
    *   (or another raw-SQL port) was handed out — the transaction was
    *   aborted, or a serialization failure or deadlock rejected the callback

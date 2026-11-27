@@ -1,16 +1,16 @@
 /**
  * Every way a SQLite transaction TypeGraph opened can end without TypeGraph
- * issuing its `COMMIT` or `ROLLBACK`, each followed by a write through the
- * transaction's backend.
+ * issuing its `COMMIT` or `ROLLBACK` (SQLite itself ends it), each followed
+ * by a write through the transaction's backend.
  *
- * The rule under test is the admission rule of the transaction's view
- * (`src/backend/drizzle/execution/transaction-view.ts`): before a statement
- * starts, a driver whose own flag reflects the engine's transaction state
- * (better-sqlite3, bun:sqlite, local libSQL) is asked whether the
- * transaction is still open, so the write after the end is refused whatever
- * ended the transaction — including a route the view never sees (a statement
- * through the native handle). Nothing the transaction wrote autocommits, and
- * the transaction rejects instead of reporting success.
+ * Known defects, pinned at what TypeGraph does today: a transaction's view
+ * closes when TypeGraph ends the transaction
+ * (`src/backend/drizzle/execution/transaction-view.ts`), and nothing yet
+ * observes an end SQLite made on its own. On better-sqlite3 the write after
+ * the end runs in autocommit and persists; libSQL refuses it with the
+ * driver's own error. `correct` states the outcome a fix must reach: the
+ * later write refused with a typed error, nothing it issued saved, and the
+ * transaction rejected instead of reporting success.
  *
  * SQLite only: these routes are SQLite's (`RAISE(ROLLBACK)`, `ON CONFLICT
  * ROLLBACK`, a connection whose transaction control is shared with the
@@ -31,6 +31,10 @@ import {
   asCompiledStatementSql,
 } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
+import {
+  expectObservation,
+  type KnownDefect,
+} from "../../helpers/known-defect";
 import type { IntegrationTestContext } from "./test-context";
 
 let graphCounter = 0;
@@ -44,7 +48,11 @@ function node(graphId: string, id: string): InsertNodeParams {
   return { graphId, kind: "EeItem", id, props: { label: id } };
 }
 
-/** A settled call as its error class, `"fulfilled"` or `"untyped: …"`. */
+/**
+ * A settled call as its error class, `"fulfilled"`, or `"untyped: …"` with
+ * the first line of the driver's message (the rest carries the statement's
+ * text and parameters).
+ */
 async function outcomeOf(pending: Promise<unknown>): Promise<string> {
   try {
     await pending;
@@ -52,9 +60,52 @@ async function outcomeOf(pending: Promise<unknown>): Promise<string> {
   } catch (error) {
     return error instanceof TypeGraphError ?
         error.name
-      : `untyped: ${String(error)}`;
+      : `untyped: ${String(error).split("\n")[0]?.trim() ?? ""}`;
   }
 }
+
+/** The label every engine-ended route's marker carries. */
+const ENGINE_ENDED = "engine-ended";
+
+/**
+ * Asserts one engine-ended route's observation: `correct`, or the value each
+ * SQLite driver produces today (`today[driver]`).
+ */
+function expectEngineEnded<TValue>(
+  context: IntegrationTestContext,
+  route: string,
+  observed: TValue,
+  correct: NoInfer<TValue>,
+  today: Readonly<Record<"better-sqlite3" | "libsql", NoInfer<TValue>>>,
+): void {
+  const defects: KnownDefect<NoInfer<TValue>>[] = [
+    {
+      label: `${ENGINE_ENDED} (${route})`,
+      on: { driver: ["better-sqlite3"] },
+      today: today["better-sqlite3"],
+    },
+    {
+      label: `${ENGINE_ENDED} (${route})`,
+      on: { driver: ["libsql"] },
+      today: today.libsql,
+    },
+  ];
+  expectObservation({
+    lane: { driver: context.driver },
+    observed,
+    correct,
+    defects,
+  });
+}
+
+/** better-sqlite3's COMMIT after the engine ended the transaction. */
+const CANNOT_COMMIT =
+  "untyped: SqliteError: cannot commit - no transaction is active";
+/** libSQL's refusal of a statement on a transaction the engine ended. */
+const LIBSQL_FAILED_QUERY = "untyped: Error: Failed query:";
+/** libSQL's refusal of TypeGraph's COMMIT on that transaction. */
+const LIBSQL_TRANSACTION_CLOSED =
+  "untyped: LibsqlError: TRANSACTION_CLOSED: The transaction is closed";
 
 async function nodeIds(
   backend: GraphBackend,
@@ -120,7 +171,7 @@ function isSqliteLane(context: IntegrationTestContext): boolean {
 export function registerTransactionStatementAdmissionTests(
   context: IntegrationTestContext,
 ): void {
-  describe("a SQLite transaction that ends without TypeGraph's COMMIT or ROLLBACK", () => {
+  describe("a SQLite transaction that ends without TypeGraph's COMMIT or ROLLBACK (known defects)", () => {
     it("refuses the next write after a native statement's trigger RAISE(ROLLBACK), and saves nothing", async () => {
       if (!isSqliteLane(context)) return;
       const backend = context.getBackend();
@@ -146,17 +197,36 @@ export function registerTransactionStatementAdmissionTests(
             later = await outcomeOf(tx.insertNode(node(graphId, "later")));
           }),
         );
-        expect({
-          nativeFailed: nativeFailure.startsWith("untyped"),
-          later,
-          transaction,
-          nodes: await nodeIds(backend, graphId),
-        }).toEqual({
-          nativeFailed: true,
-          later: "TransactionOutcomeUnknownError",
-          transaction: "TransactionOutcomeUnknownError",
-          nodes: [],
-        });
+        expectEngineEnded(
+          context,
+          "native statement firing RAISE(ROLLBACK)",
+          {
+            nativeFailed: nativeFailure.startsWith("untyped"),
+            later,
+            transaction,
+            nodes: await nodeIds(backend, graphId),
+          },
+          {
+            nativeFailed: true,
+            later: "TransactionOutcomeUnknownError",
+            transaction: "TransactionOutcomeUnknownError",
+            nodes: [],
+          },
+          {
+            "better-sqlite3": {
+              nativeFailed: true,
+              later: "fulfilled",
+              transaction: CANNOT_COMMIT,
+              nodes: ["later"],
+            },
+            libsql: {
+              nativeFailed: true,
+              later: LIBSQL_FAILED_QUERY,
+              transaction: LIBSQL_TRANSACTION_CLOSED,
+              nodes: [],
+            },
+          },
+        );
       } finally {
         await removeTrigger();
       }
@@ -176,17 +246,30 @@ export function registerTransactionStatementAdmissionTests(
             later = await outcomeOf(tx.insertNode(node(graphId, "later")));
           }),
         );
-        expect({
-          later,
-          transaction,
-          nodes: await nodeIds(backend, graphId),
-        }).toEqual({
-          later: "TransactionOutcomeUnknownError",
-          transaction: "TransactionOutcomeUnknownError",
-          // The caller's own COMMIT saved what preceded it; nothing after it
-          // ran in autocommit.
-          nodes: control === "COMMIT" ? ["first"] : [],
-        });
+        expectEngineEnded(
+          context,
+          `native ${control}`,
+          { later, transaction, nodes: await nodeIds(backend, graphId) },
+          {
+            later: "TransactionOutcomeUnknownError",
+            transaction: "TransactionOutcomeUnknownError",
+            // The caller's own COMMIT saved what preceded it; nothing after
+            // it runs in autocommit.
+            nodes: control === "COMMIT" ? ["first"] : [],
+          },
+          {
+            "better-sqlite3": {
+              later: "fulfilled",
+              transaction: CANNOT_COMMIT,
+              nodes: control === "COMMIT" ? ["first", "later"] : ["later"],
+            },
+            libsql: {
+              later: LIBSQL_FAILED_QUERY,
+              transaction: LIBSQL_TRANSACTION_CLOSED,
+              nodes: control === "COMMIT" ? ["first"] : [],
+            },
+          },
+        );
       },
     );
 
@@ -206,15 +289,28 @@ export function registerTransactionStatementAdmissionTests(
             later = await outcomeOf(tx.insertNode(node(graphId, "later")));
           }),
         );
-        expect({
-          later,
-          transaction,
-          nodes: await nodeIds(backend, graphId),
-        }).toEqual({
-          later: "TransactionOutcomeUnknownError",
-          transaction: "TransactionOutcomeUnknownError",
-          nodes: control === "COMMIT" ? ["first"] : [],
-        });
+        expectEngineEnded(
+          context,
+          `${control} through executeStatement`,
+          { later, transaction, nodes: await nodeIds(backend, graphId) },
+          {
+            later: "TransactionOutcomeUnknownError",
+            transaction: "TransactionOutcomeUnknownError",
+            nodes: control === "COMMIT" ? ["first"] : [],
+          },
+          {
+            "better-sqlite3": {
+              later: "fulfilled",
+              transaction: CANNOT_COMMIT,
+              nodes: control === "COMMIT" ? ["first", "later"] : ["later"],
+            },
+            libsql: {
+              later: LIBSQL_FAILED_QUERY,
+              transaction: LIBSQL_TRANSACTION_CLOSED,
+              nodes: control === "COMMIT" ? ["first"] : [],
+            },
+          },
+        );
       },
     );
 
@@ -241,17 +337,36 @@ export function registerTransactionStatementAdmissionTests(
             later = await outcomeOf(tx.insertNode(node(graphId, "later")));
           }),
         );
-        expect({
-          conflictFailed: conflict.startsWith("untyped"),
-          later,
-          transaction,
-          nodes: await nodeIds(backend, graphId),
-        }).toEqual({
-          conflictFailed: true,
-          later: "TransactionRolledBackError",
-          transaction: "TransactionRolledBackError",
-          nodes: [],
-        });
+        expectEngineEnded(
+          context,
+          "ON CONFLICT ROLLBACK",
+          {
+            conflictFailed: conflict.startsWith("untyped"),
+            later,
+            transaction,
+            nodes: await nodeIds(backend, graphId),
+          },
+          {
+            conflictFailed: true,
+            later: "TransactionRolledBackError",
+            transaction: "TransactionRolledBackError",
+            nodes: [],
+          },
+          {
+            "better-sqlite3": {
+              conflictFailed: true,
+              later: "fulfilled",
+              transaction: CANNOT_COMMIT,
+              nodes: ["later"],
+            },
+            libsql: {
+              conflictFailed: true,
+              later: LIBSQL_FAILED_QUERY,
+              transaction: LIBSQL_TRANSACTION_CLOSED,
+              nodes: [],
+            },
+          },
+        );
       } finally {
         await executeDdl(`DROP TABLE ${table}`);
       }
@@ -301,23 +416,149 @@ export function registerTransactionStatementAdmissionTests(
             later = await outcomeOf(tx.insertNode(node(graphId, "later")));
           }),
         );
-        expect({
-          full: full.includes("SQLITE_FULL") || full.includes("full"),
-          later,
-          transaction,
-          nodes: await nodeIds(backend, graphId),
-        }).toEqual({
-          full: true,
-          later: "TransactionRolledBackError",
-          transaction: "TransactionRolledBackError",
-          nodes: [],
-        });
+        expectEngineEnded(
+          context,
+          "SQLITE_FULL",
+          {
+            full: full.includes("SQLITE_FULL") || full.includes("full"),
+            later,
+            transaction,
+            nodes: await nodeIds(backend, graphId),
+          },
+          {
+            full: true,
+            later: "TransactionRolledBackError",
+            transaction: "TransactionRolledBackError",
+            nodes: [],
+          },
+          {
+            "better-sqlite3": {
+              full: true,
+              later: "fulfilled",
+              transaction: CANNOT_COMMIT,
+              nodes: ["later"],
+            },
+            libsql: {
+              full: true,
+              later: LIBSQL_FAILED_QUERY,
+              transaction: LIBSQL_TRANSACTION_CLOSED,
+              nodes: [],
+            },
+          },
+        );
       } finally {
         await executeDdl(
           `PRAGMA max_page_count = ${requireDefined(original).max_page_count}`,
         );
         await executeDdl(`DROP TABLE ${table}`);
       }
+    });
+  });
+
+  describe("a SQLite transaction another view or a replacement transaction outlives (known defects)", () => {
+    it("refuses an adopted sibling's write once a trigger on the owning backend's write ended the transaction", async () => {
+      if (!isSqliteLane(context)) return;
+      const backend = context.getBackend();
+      const graphId = nextGraphId();
+      const removeTrigger = await installRaiseRollback(backend, graphId);
+      try {
+        const statements: Record<string, Promise<string>> = {};
+        const transaction = await outcomeOf(
+          backend.transactionWithNative(async (tx, native) => {
+            const adopted = backend.adoptTransaction(native);
+            await tx.insertNode(node(graphId, "first"));
+            // Both submitted before either settles: the owner's write fires
+            // the trigger, the sibling goes through an adoption of the same
+            // native handle.
+            statements["failing"] = outcomeOf(
+              tx.insertNode(node(graphId, "engine-rollback")),
+            );
+            statements["sibling"] = outcomeOf(
+              adopted.insertNode(node(graphId, "adopted-sibling")),
+            );
+            await Promise.all(Object.values(statements));
+          }),
+        );
+        const failing = await requireDefined(statements["failing"]);
+        expectEngineEnded(
+          context,
+          "adopted sibling after the owner's rollback",
+          {
+            failing: failing.startsWith("untyped"),
+            sibling: await requireDefined(statements["sibling"]),
+            transaction,
+            nodes: await nodeIds(backend, graphId),
+          },
+          {
+            failing: true,
+            sibling: "TransactionRolledBackError",
+            transaction: "TransactionRolledBackError",
+            nodes: [],
+          },
+          {
+            // The sibling runs in autocommit after the trigger ended the
+            // transaction, and persists.
+            "better-sqlite3": {
+              failing: true,
+              sibling: "fulfilled",
+              transaction: CANNOT_COMMIT,
+              nodes: ["adopted-sibling"],
+            },
+            libsql: {
+              failing: true,
+              sibling: LIBSQL_FAILED_QUERY,
+              transaction: LIBSQL_TRANSACTION_CLOSED,
+              nodes: [],
+            },
+          },
+        );
+      } finally {
+        await removeTrigger();
+      }
+    });
+
+    it("does not commit a replacement transaction the native handle opened after a raw ROLLBACK as the original", async () => {
+      if (!isSqliteLane(context)) return;
+      const backend = context.getBackend();
+      const graphId = nextGraphId();
+      let later = "never issued";
+      const transaction = await outcomeOf(
+        backend.transactionWithNative(async (tx, native) => {
+          await tx.insertNode(node(graphId, "first"));
+          await requireDefined(tx.executeStatement)(
+            asCompiledStatementSql(sql.raw("ROLLBACK")),
+          );
+          // A transaction of the caller's own replaces the original.
+          await runNative(native, "BEGIN");
+          later = await outcomeOf(tx.insertNode(node(graphId, "later")));
+        }),
+      );
+      expectEngineEnded(
+        context,
+        "replacement transaction",
+        { later, transaction, nodes: await nodeIds(backend, graphId) },
+        {
+          later: "TransactionOutcomeUnknownError",
+          transaction: "TransactionOutcomeUnknownError",
+          nodes: [],
+        },
+        {
+          // TypeGraph commits the caller's replacement transaction as the
+          // original and reports success.
+          "better-sqlite3": {
+            later: "fulfilled",
+            transaction: "fulfilled",
+            nodes: ["later"],
+          },
+          // The raw ROLLBACK closed the driver's transaction object, so the
+          // native BEGIN is refused and the callback rejects with it.
+          libsql: {
+            later: "never issued",
+            transaction: LIBSQL_TRANSACTION_CLOSED,
+            nodes: [],
+          },
+        },
+      );
     });
   });
 

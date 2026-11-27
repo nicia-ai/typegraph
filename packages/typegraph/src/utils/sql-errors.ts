@@ -743,27 +743,6 @@ export function isSqliteNotAuthorizedError(error: unknown): boolean {
   return false;
 }
 
-/** SQLite's message for a `BEGIN` issued while a transaction is open. */
-const SQLITE_NESTED_TRANSACTION_MESSAGE =
-  "cannot start a transaction within a transaction";
-
-/**
- * Whether SQLite refused a `BEGIN` because a transaction is already open on
- * the session. Classified by message: SQLite reports it with the generic
- * `SQLITE_ERROR` code, and its messages are not localized.
- */
-export function isSqliteNestedTransactionError(error: unknown): boolean {
-  for (const link of errorChain(error)) {
-    if (
-      messageProperty(link)?.includes(SQLITE_NESTED_TRANSACTION_MESSAGE) ===
-      true
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
 /**
  * Whether SQLite refused a write because the enclosing DEFERRED transaction's
  * read snapshot went stale before it could take the writer slot

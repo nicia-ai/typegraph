@@ -32,6 +32,7 @@
  */
 import { isDeepStrictEqual } from "node:util";
 
+import { type SQL, sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -518,7 +519,9 @@ async function installEngineRollbackTrigger(
 
 /**
  * How a write the callback issues after the engine ended (SQLite) or aborted
- * (PostgreSQL) its transaction is refused.
+ * (PostgreSQL) its transaction should be refused. On SQLite nothing observes
+ * an end the engine made on its own yet: the cases below pin today's value
+ * under {@link ENGINE_ENDED_ON_SQLITE}.
  */
 const ENGINE_ROLLBACK_LATER_REFUSAL: Readonly<
   Record<IntegrationLaneDriver, string>
@@ -531,6 +534,24 @@ const ENGINE_ROLLBACK_LATER_REFUSAL: Readonly<
   "node-postgres": "untyped driver error",
   "postgres-js": "untyped driver error",
 };
+
+/**
+ * The label of the engine-ended known defect: SQLite ended the transaction
+ * itself (a trigger's `RAISE(ROLLBACK)` on a TypeGraph statement), and a
+ * later statement of the callback still reaches the connection. On
+ * better-sqlite3 it runs in autocommit and persists; libSQL refuses it with
+ * the driver's own error.
+ */
+const ENGINE_ENDED_ON_SQLITE =
+  "engine-ended (trigger on a TypeGraph statement)";
+
+/**
+ * The label of the engine-ended known defect where the caller committed
+ * through the native handle and the callback then failed with an error the
+ * Store retries.
+ */
+const RETRY_AFTER_NATIVE_COMMIT =
+  "engine-ended (callback error after a native commit, with retry)";
 
 /** Whether `refusal` records a call that succeeded. */
 function isFulfilled(refusal: Refusal): boolean {
@@ -2198,6 +2219,8 @@ export function registerTransactionSessionHazardTests(
         },
       );
 
+      // Known defect on SQLite (see ENGINE_ENDED_ON_SQLITE): kept as the
+      // reproduction for the design that follows.
       it("refuses a write the callback issues after the engine ended its transaction, and saves nothing", async () => {
         const graph = buildGraph();
         const backend = context.getBackend();
@@ -2224,17 +2247,45 @@ export function registerTransactionSessionHazardTests(
               );
             }),
           );
-          expect({
-            failed: failed !== undefined && !isFulfilled(failed),
-            later: typedOutcome(later),
-            transaction: typedOutcome(transaction),
-            nodes: await countRows(backend, "nodes", graph.id),
-          }).toEqual({
-            failed: true,
-            later: ENGINE_ROLLBACK_LATER_REFUSAL[context.driver],
-            transaction: "TransactionRolledBackError",
-            nodes: 0,
-          });
+          expectOnLane(
+            context,
+            {
+              failed: failed !== undefined && !isFulfilled(failed),
+              later: typedOutcome(later),
+              transaction: typedOutcome(transaction),
+              nodes: await countRows(backend, "nodes", graph.id),
+            },
+            {
+              failed: true,
+              later: ENGINE_ROLLBACK_LATER_REFUSAL[context.driver],
+              transaction: "TransactionRolledBackError",
+              nodes: 0,
+            },
+            [
+              {
+                label: ENGINE_ENDED_ON_SQLITE,
+                on: { driver: ["better-sqlite3"] },
+                // The later write autocommits; COMMIT then finds no
+                // transaction.
+                today: {
+                  failed: true,
+                  later: "fulfilled",
+                  transaction: "untyped driver error",
+                  nodes: 1,
+                },
+              },
+              {
+                label: ENGINE_ENDED_ON_SQLITE,
+                on: { driver: ["libsql"] },
+                today: {
+                  failed: true,
+                  later: "untyped driver error",
+                  transaction: "untyped driver error",
+                  nodes: 0,
+                },
+              },
+            ],
+          );
         } finally {
           await removeTrigger();
         }
@@ -2263,20 +2314,116 @@ export function registerTransactionSessionHazardTests(
             }),
           );
           const sibling = await requireDefined(statements["sibling"]);
-          expect({
-            failed: !isFulfilled(await requireDefined(statements["failing"])),
-            sibling: typedOutcome(sibling),
-            transaction: isFulfilled(transaction) ? "fulfilled" : "rejected",
-            nodes: await countRows(backend, "nodes", graphId),
-          }).toEqual({
-            failed: true,
-            sibling: ENGINE_ROLLBACK_LATER_REFUSAL[context.driver],
-            transaction: "rejected",
-            nodes: 0,
-          });
+          expectOnLane(
+            context,
+            {
+              failed: !isFulfilled(await requireDefined(statements["failing"])),
+              sibling: typedOutcome(sibling),
+              transaction: isFulfilled(transaction) ? "fulfilled" : "rejected",
+              nodes: await countRows(backend, "nodes", graphId),
+            },
+            {
+              failed: true,
+              sibling: ENGINE_ROLLBACK_LATER_REFUSAL[context.driver],
+              transaction: "rejected",
+              nodes: 0,
+            },
+            [
+              {
+                label: ENGINE_ENDED_ON_SQLITE,
+                on: { driver: ["better-sqlite3"] },
+                // The sibling runs after the trigger ended the transaction,
+                // in autocommit.
+                today: {
+                  failed: true,
+                  sibling: "fulfilled",
+                  transaction: "rejected",
+                  nodes: 1,
+                },
+              },
+              {
+                label: ENGINE_ENDED_ON_SQLITE,
+                on: { driver: ["libsql"] },
+                today: {
+                  failed: true,
+                  sibling: "untyped driver error",
+                  transaction: "rejected",
+                  nodes: 0,
+                },
+              },
+            ],
+          );
         } finally {
           await removeTrigger();
         }
+      });
+
+      // Known defect on SQLite: the caller's own COMMIT through the native
+      // handle ended the transaction, and the callback then failed with an
+      // error the Store retries. Nothing observes that the attempt's writes
+      // already committed.
+      it("does not replay a callback whose retryable error followed a commit through the native handle", async () => {
+        const backend = context.getBackend();
+        if (backend.dialect !== "sqlite") return;
+        const graph = buildGraph();
+        const [store] = await createAdapterStoreWithSchema(graph, backend);
+        let attempts = 0;
+        const transaction = await refusalOf(
+          store.transaction(
+            async (tx) => {
+              attempts += 1;
+              const id = `attempt-${attempts}`;
+              await tx.nodes.HzItem.create({ label: id }, { id });
+              const native = requireDefined(
+                (tx as Readonly<{ sql?: unknown }>).sql,
+              ) as Readonly<{ run: (query: SQL) => unknown }>;
+              await native.run(drizzleSql.raw("COMMIT"));
+              // An error the Store classifies as a transaction conflict.
+              throw Object.assign(new Error("could not serialize access"), {
+                code: "40001",
+              });
+            },
+            { retry: { attempts: 2 } },
+          ),
+        );
+        expectOnLane(
+          context,
+          {
+            attempts,
+            transaction: typedOutcome(transaction),
+            nodes: await countRows(backend, "nodes", graph.id),
+          },
+          {
+            attempts: 1,
+            transaction: "TransactionOutcomeUnknownError",
+            nodes: 1,
+          },
+          [
+            {
+              label: RETRY_AFTER_NATIVE_COMMIT,
+              on: { driver: ["better-sqlite3"] },
+              // The callback is replayed, and both attempts' rows stay
+              // committed.
+              today: {
+                attempts: 2,
+                transaction: "TransactionConflictError",
+                nodes: 2,
+              },
+            },
+            {
+              label: RETRY_AFTER_NATIVE_COMMIT,
+              on: { driver: ["libsql"] },
+              // TypeGraph's COMMIT on the closed driver transaction fails, so
+              // the attempt is not replayed; the row it wrote stays
+              // committed and the outcome is the driver error.
+              today: {
+                attempts: 1,
+                transaction: "untyped driver error",
+                nodes: 1,
+              },
+            },
+          ],
+        );
       });
 
       it("refuses vector index creation through a transaction backend, open or ended, and creates no storage", async () => {

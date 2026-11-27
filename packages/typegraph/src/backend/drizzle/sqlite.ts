@@ -77,7 +77,6 @@ import {
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
-  isSqliteNestedTransactionError,
   isSqliteNotAuthorizedError,
   isSqliteWriterSlotBusy,
 } from "../../utils/sql-errors";
@@ -155,7 +154,6 @@ import {
   type TrustedImportSession,
   type VectorSearchParams,
 } from "../types";
-import { connectionStatementQueue } from "./execution/connection-statement-queue";
 import {
   type AnySqliteDatabase,
   createSqliteExecutionAdapter,
@@ -167,9 +165,7 @@ import {
   type SqliteExecutionAdapter,
   type SqliteExecutionProfile,
   type SqliteExecutionProfileHints,
-  type SqliteTransactionExecutionView,
 } from "./execution/sqlite-execution";
-import type { TransactionState } from "./execution/transaction-view";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
 import {
   copyGraphTemplateContributionMarkersStatement,
@@ -841,31 +837,22 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
    */
   nativeTransaction?: object | undefined;
   /**
-   * Whether TypeGraph asked for SQLite's writer slot when it opened this
-   * transaction (`BEGIN IMMEDIATE`). A request, not evidence: the marker gate
-   * shares the root's reads only where the driver also reports, from the
-   * engine's state, that the transaction has begun
-   * (`createTransactionBackend`). Absent for an adopted transaction and for
-   * one opened deferred.
+   * Whether TypeGraph opened this transaction asking for SQLite's writer slot
+   * (`BEGIN IMMEDIATE`). On a local libSQL client, which runs that `BEGIN`
+   * when the transaction opens, no other connection can commit while it is
+   * open, so a root marker read sees what this transaction sees even though
+   * it runs on a libSQL session of its own (`createTransactionBackend`).
+   * Absent for an adopted transaction and for one opened deferred.
    */
   requestedWriterSlot?: boolean | undefined;
   /**
    * The connection the root backend's reads run on
    * (`nativeTransactionConnection` of the root `db`). A transaction whose own
-   * handle resolves to the same connection reads what the root reads, so
-   * its marker reads share the root's cache; any other runs them on its own
+   * handle resolves to the same connection reads what the root reads, so its
+   * marker reads share the root's cache; any other runs them on its own
    * session (`createTransactionBackend`).
    */
   rootConnection: object;
-  /**
-   * Whether the runner that opened this transaction closes this view at its
-   * boundary: TypeGraph owns the transaction, so before every statement the
-   * view asks the engine whether it is still open (where the driver's flag
-   * reflects the engine). `false` for an adopted transaction, whose caller
-   * ends it and may hand over a connection in autocommit: its view keeps
-   * only the after-failure probe.
-   */
-  closedByRunner: boolean;
 }>;
 
 /** What a runner knows about an owned transaction when it binds it. */
@@ -2123,7 +2110,6 @@ export function buildSqliteEngineProfile(
             vectorStrategy,
             contributionMaterializer: ctx.contributionMaterializer,
             rootConnection,
-            closedByRunner: true,
             fenceTarget,
             lineage: provisioning.lineage,
             recordedTime: provisioning.recordedTime,
@@ -2170,7 +2156,6 @@ export function buildSqliteEngineProfile(
               vectorStrategy,
               contributionMaterializer: ctx.contributionMaterializer,
               rootConnection,
-              closedByRunner: true,
               fenceTarget,
               lineage: provisioning.lineage,
               recordedTime: provisioning.recordedTime,
@@ -2186,40 +2171,35 @@ export function buildSqliteEngineProfile(
       // accepts a `behavior` option that maps to BEGIN / BEGIN IMMEDIATE /
       // BEGIN EXCLUSIVE; "immediate" is what we need to acquire a reserved
       // write lock at the start of the transaction.
-      return runWithSerializedQueue(serializedQueue, async () =>
-        runDriverOwnedTransaction(
-          (recordEngineEnd) =>
-            db.transaction(
-              (tx) => {
-                recordSqliteEngineSavepoint(db, tx);
-                return handedToDriver(
-                  runInTransactionView(
-                    createTransactionBackend({
-                      capabilities,
-                      db: tx,
-                      operationStrategy,
-                      profileHints: { isSync },
-                      tableNames,
-                      fulltextStrategy,
-                      vectorStrategy,
-                      contributionMaterializer: ctx.contributionMaterializer,
-                      rootConnection,
-                      closedByRunner: true,
-                      fenceTarget,
-                      lineage: provisioning.lineage,
-                      recordedTime: provisioning.recordedTime,
-                      isFirstParty,
-                      // BEGIN IMMEDIATE, below.
-                      requestedWriterSlot: true,
-                    }),
-                    fn,
-                    recordEngineEnd,
-                  ),
-                );
-              },
-              { behavior: "immediate" },
-            ) as Promise<T>,
-        ),
+      return runWithSerializedQueue(
+        serializedQueue,
+        async () =>
+          db.transaction(
+            async (tx) => {
+              recordSqliteEngineSavepoint(db, tx);
+              return runInTransactionView(
+                createTransactionBackend({
+                  capabilities,
+                  db: tx,
+                  operationStrategy,
+                  profileHints: { isSync },
+                  tableNames,
+                  fulltextStrategy,
+                  vectorStrategy,
+                  contributionMaterializer: ctx.contributionMaterializer,
+                  rootConnection,
+                  fenceTarget,
+                  lineage: provisioning.lineage,
+                  recordedTime: provisioning.recordedTime,
+                  isFirstParty,
+                  // BEGIN IMMEDIATE, below.
+                  requestedWriterSlot: true,
+                }),
+                fn,
+              );
+            },
+            { behavior: "immediate" },
+          ) as Promise<T>,
       );
     }
 
@@ -2236,11 +2216,10 @@ export function buildSqliteEngineProfile(
       tx: AnySqliteDatabase,
       txIsFirstParty: boolean,
       binding: OwnedTransactionBinding = {},
-      closedByRunner = false,
     ): Readonly<{
       backend: TransactionBackend;
       route: TransactionStatementRoute;
-      drainAndClose: CloseTransactionView;
+      drainAndClose: () => Promise<void>;
     }> {
       const {
         backend: txBackend,
@@ -2261,7 +2240,6 @@ export function buildSqliteEngineProfile(
         lineage: provisioning.lineage,
         recordedTime: provisioning.recordedTime,
         isFirstParty: txIsFirstParty,
-        closedByRunner,
         ...binding,
       });
       return {
@@ -2280,30 +2258,27 @@ export function buildSqliteEngineProfile(
      * that backend's view when `fn` settles — before the runner's COMMIT /
      * ROLLBACK. See {@link runInTransactionView}.
      */
-    function runOnOwnedTransaction<T>(
+    async function runOnOwnedTransaction<T>(
       tx: AnySqliteDatabase,
       fn: (
         backend: TransactionBackend,
         route: TransactionStatementRoute,
       ) => Promise<T>,
       binding: OwnedTransactionBinding = {},
-      recordEngineEnd?: RecordEngineEnd,
     ): Promise<T> {
       const { backend, route, drainAndClose } = bindTransactionBackend(
         tx,
         isFirstParty,
         binding,
-        true,
       );
-      return runThenCloseView(
-        drainAndClose,
-        () =>
-          fn(
-            markSchemaFencedInsertEligibleUnderFence(backend, fencePlan),
-            route,
-          ),
-        recordEngineEnd,
-      );
+      try {
+        return await fn(
+          markSchemaFencedInsertEligibleUnderFence(backend, fencePlan),
+          route,
+        );
+      } finally {
+        await drainAndClose();
+      }
     }
 
     function bindPrivilegedTransactionBackend(
@@ -2320,7 +2295,6 @@ export function buildSqliteEngineProfile(
         vectorStrategy,
         contributionMaterializer: ctx.contributionMaterializer,
         rootConnection,
-        closedByRunner: false,
         fenceTarget,
         lineage: provisioning.lineage,
         recordedTime: provisioning.recordedTime,
@@ -2330,9 +2304,9 @@ export function buildSqliteEngineProfile(
 
     /**
      * Opens a transaction TypeGraph owns and runs `fn` on its backend, its
-     * native handle, and the statement route behind the backend's view.
-     * `transactionWithNative` is this minus the route; `trustedImport`
-     * issues its batches through the route, so they are admitted by the
+     * native handle, and the execution adapter behind the backend's view.
+     * `transactionWithNative` is this minus the adapter; `trustedImport`
+     * issues its batches through the adapter, so they are admitted by the
      * same view the backend's own statements are and refused once the
      * transaction ends.
      */
@@ -2344,142 +2318,140 @@ export function buildSqliteEngineProfile(
       ) => Promise<T>,
       options?: InternalTransactionOptions,
     ): Promise<T> {
-      const temporaryWrites =
-        options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
-      if (temporaryWrites && options.accessMode !== "read_only") {
-        throw new ConfigurationError(
-          "Temporary-write transactions must be semantically read-only.",
-          { dialect: "sqlite" },
-        );
-      }
-      if (transactionMode === "none") {
-        throwSqliteTransactionsDisabled(
-          "This SQLite backend does not support atomic transactions. " +
-            "Operations within a transaction are not rolled back on failure. " +
-            "Use backend.capabilities.execution.interactiveTransactions to check for transaction support, " +
-            "or use individual operations with manual error handling.",
-        );
-      }
-
-      // #134/#135: NO DDL or ensure here. The tx-scoped backend
-      // exposes raw fulltext methods without self-ensure wrappers; the
-      // single gate is `Store.transaction()`, which asserts the durable
-      // contribution marker (one cached SELECT) before this method is
-      // reached. The caller's BEGIN never carries CREATE statements.
-      if (transactionMode === "sql") {
-        return runWithSerializedQueue(serializedQueue, async () => {
-          // Not `bindTransactionBackend(...)`: this path frames the tx
-          // with manual BEGIN/COMMIT on the *outer* `db`, so it must
-          // reuse that connection's already-built `executionAdapter`
-          // rather than synthesize a fresh one for a distinct handle.
-          // Serves sync drivers AND local libsql clients before 0.18:
-          // both keep one stable connection, where raw BEGIN/COMMIT
-          // composes and Drizzle's `db.transaction()` (which for those
-          // libsql clients abandons the client's connection — fatal for
-          // `:memory:`) must be avoided.
-          const nativeTransaction = createNativeTransactionToken(
-            sqliteConnectionProbe(db),
+        const temporaryWrites =
+          options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
+        if (temporaryWrites && options.accessMode !== "read_only") {
+          throw new ConfigurationError(
+            "Temporary-write transactions must be semantically read-only.",
+            { dialect: "sqlite" },
           );
-          const bound = createTransactionBackend({
-            capabilities,
-            db,
-            executionAdapter,
-            operationStrategy,
-            profileHints: { isSync },
-            tableNames,
-            fulltextStrategy,
-            vectorStrategy,
-            contributionMaterializer: ctx.contributionMaterializer,
-            rootConnection,
-            closedByRunner: true,
-            fenceTarget,
-            lineage: provisioning.lineage,
-            recordedTime: provisioning.recordedTime,
-            isFirstParty,
-            nativeTransaction,
-          });
-          // Read-only multi-statement operations need one snapshot but must not
-          // reserve SQLite's single writer slot. Business transactions retain
-          // BEGIN IMMEDIATE so read-then-write cannot lose a lock-upgrade race.
-          await runFrameStatement(
-            options?.accessMode === "read_only" || temporaryWrites ?
-              sql`BEGIN`
-            : sql`BEGIN IMMEDIATE`,
+        }
+        if (transactionMode === "none") {
+          throwSqliteTransactionsDisabled(
+            "This SQLite backend does not support atomic transactions. " +
+              "Operations within a transaction are not rolled back on failure. " +
+              "Use backend.capabilities.execution.interactiveTransactions to check for transaction support, " +
+              "or use individual operations with manual error handling.",
           );
+        }
 
-          // Published from BEGIN succeeding to COMMIT or ROLLBACK
-          // finishing: a bind on this connection records this
-          // transaction only while it is open.
-          return publishConnectionNativeTransaction(
-            nativeTransaction,
-            async () => {
-              try {
-                // The view is ended before COMMIT and before ROLLBACK, both
-                // of which run on this same outer connection, and both
-                // inside this publication span: a statement the callback
-                // left running settles first, a later one is refused
-                // rather than landing after the frame closed, and the
-                // token is withdrawn only after the frame has ended.
-                const result = await runInTransactionView(bound, (txBackend) =>
-                  fn(
-                    markSchemaFencedInsertEligibleUnderFence(
-                      gateFulltext(
-                        txBackend,
-                        bound.contributionReadGate.assertInitialized,
-                        bound.contributionReadGate.refuseUnavailableFulltext,
+        // #134/#135: NO DDL or ensure here. The tx-scoped backend
+        // exposes raw fulltext methods without self-ensure wrappers; the
+        // single gate is `Store.transaction()`, which asserts the durable
+        // contribution marker (one cached SELECT) before this method is
+        // reached. The caller's BEGIN never carries CREATE statements.
+        if (transactionMode === "sql") {
+          return runWithSerializedQueue(serializedQueue, async () => {
+            // Not `bindTransactionBackend(...)`: this path frames the tx
+            // with manual BEGIN/COMMIT on the *outer* `db`, so it must
+            // reuse that connection's already-built `executionAdapter`
+            // rather than synthesize a fresh one for a distinct handle.
+            // Serves sync drivers AND local libsql clients before 0.18:
+            // both keep one stable connection, where raw BEGIN/COMMIT
+            // composes and Drizzle's `db.transaction()` (which for those
+            // libsql clients abandons the client's connection — fatal for
+            // `:memory:`) must be avoided.
+            const nativeTransaction = createNativeTransactionToken(
+              sqliteConnectionProbe(db),
+            );
+            const bound = createTransactionBackend({
+              capabilities,
+              db,
+              executionAdapter,
+              operationStrategy,
+              profileHints: { isSync },
+              tableNames,
+              fulltextStrategy,
+              vectorStrategy,
+              contributionMaterializer: ctx.contributionMaterializer,
+              rootConnection,
+              fenceTarget,
+              lineage: provisioning.lineage,
+              recordedTime: provisioning.recordedTime,
+              isFirstParty,
+              nativeTransaction,
+            });
+            // Read-only multi-statement operations need one snapshot but must not
+            // reserve SQLite's single writer slot. Business transactions retain
+            // BEGIN IMMEDIATE so read-then-write cannot lose a lock-upgrade race.
+            await runFrameStatement(
+              options?.accessMode === "read_only" || temporaryWrites ?
+                sql`BEGIN`
+              : sql`BEGIN IMMEDIATE`,
+            );
+
+            // Published from BEGIN succeeding to COMMIT or ROLLBACK
+            // finishing: a bind on this connection records this
+            // transaction only while it is open.
+            return publishConnectionNativeTransaction(
+              nativeTransaction,
+              async () => {
+                try {
+                  // The view is ended before COMMIT and before ROLLBACK, both
+                  // of which run on this same outer connection, and both
+                  // inside this publication span: a statement the callback
+                  // left running settles first, a later one is refused
+                  // rather than landing after the frame closed, and the
+                  // token is withdrawn only after the frame has ended.
+                  const result = await runInTransactionView(
+                    bound,
+                    (txBackend) =>
+                      fn(
+                        markSchemaFencedInsertEligibleUnderFence(
+                          gateFulltext(
+                            txBackend,
+                            bound.contributionReadGate.assertInitialized,
+                            bound.contributionReadGate
+                              .refuseUnavailableFulltext,
+                          ),
+                          fencePlan,
+                        ),
+                        db,
+                        bound.route,
                       ),
-                      fencePlan,
-                    ),
-                    db,
-                    bound.route,
-                  ),
-                );
-                await runFrameStatement(sql`COMMIT`);
-                return result;
-              } catch (error) {
-                await rollbackFrameQuietly();
-                throw error;
-              }
-            },
+                  );
+                  await runFrameStatement(sql`COMMIT`);
+                  return result;
+                } catch (error) {
+                  await rollbackFrameQuietly();
+                  throw error;
+                }
+              },
+            );
+          });
+        }
+
+        if (transactionMode === "do-sqlite") {
+          return runDoSqliteStorageTransaction(async (nativeTransaction) =>
+            runOnOwnedTransaction(
+              db,
+              (txBackend, route) => fn(txBackend, db, route),
+              { nativeTransaction },
+            ),
           );
-        });
-      }
+        }
 
-      if (transactionMode === "do-sqlite") {
-        return runDoSqliteStorageTransaction(async (nativeTransaction) =>
-          runOnOwnedTransaction(
-            db,
-            (txBackend, route) => fn(txBackend, db, route),
-            { nativeTransaction },
-          ),
-        );
-      }
-
-      // transactionMode === "drizzle". Read-only work uses a deferred snapshot;
-      // business transactions retain BEGIN IMMEDIATE for safe lock upgrades.
-      const behavior =
-        options?.accessMode === "read_only" || temporaryWrites ?
-          "deferred"
-        : "immediate";
-      return runWithSerializedQueue(serializedQueue, async () =>
-        runDriverOwnedTransaction(
-          (recordEngineEnd) =>
+        // transactionMode === "drizzle". Read-only work uses a deferred snapshot;
+        // business transactions retain BEGIN IMMEDIATE for safe lock upgrades.
+        const behavior =
+          options?.accessMode === "read_only" || temporaryWrites ?
+            "deferred"
+          : "immediate";
+        return runWithSerializedQueue(
+          serializedQueue,
+          async () =>
             db.transaction(
-              (tx) => {
+              async (tx) => {
                 recordSqliteEngineSavepoint(db, tx);
-                return handedToDriver(
-                  runOnOwnedTransaction(
-                    tx,
-                    (txBackend, route) => fn(txBackend, tx, route),
-                    { requestedWriterSlot: behavior === "immediate" },
-                    recordEngineEnd,
-                  ),
+                return runOnOwnedTransaction(
+                  tx,
+                  (txBackend, route) => fn(txBackend, tx, route),
+                  { requestedWriterSlot: behavior === "immediate" },
                 );
               },
               { behavior },
             ) as Promise<T>,
-        ),
-      );
+        );
     }
 
     return {
@@ -2560,7 +2532,8 @@ export function buildSqliteEngineProfile(
                   typeof rootClient !== "object" ||
                   rootClient === null ||
                   rootClient !== transactionClient ||
-                  readSqliteInTransaction(rootClient) !== "open"
+                  !("inTransaction" in rootClient) ||
+                  rootClient.inTransaction !== true
                 ) {
                   throw new ConfigurationError(
                     "Schema adoption requires the active transaction on this backend's exact SQLite connection.",
@@ -2836,25 +2809,6 @@ export function buildSqliteEngineProfile(
 }
 
 /**
- * Ends a transaction's view: see `TransactionView.drainAndClose`. Resolves to
- * the transaction's outcome when the engine ended it before the boundary.
- */
-type CloseTransactionView = SqliteTransactionExecutionView["drainAndClose"];
-
-/**
- * Records the error a transaction whose COMMIT / ROLLBACK the driver issues
- * must reject with, because the engine had already ended it: see
- * {@link runDriverOwnedTransaction}.
- */
-type RecordEngineEnd = (outcome: unknown) => void;
-
-/**
- * A transaction-scoped backend plus the hook that ends its view of the
- * connection. Every runner TypeGraph owns awaits `drainAndClose` before it
- * issues COMMIT / ROLLBACK (or lets the driver issue them); an adopted
- * transaction never calls it, because its caller ends the transaction.
- */
-/**
  * How a session that issues statements of its own on a transaction (trusted
  * import) reaches it through the transaction's view, like the backend's own
  * statements.
@@ -2870,106 +2824,34 @@ type TransactionStatementRoute = Readonly<{
   enterView: () => Promise<void>;
 }>;
 
+/**
+ * A transaction-scoped backend plus the hook that ends its view of the
+ * connection. Every runner TypeGraph owns awaits `drainAndClose` before it
+ * issues COMMIT / ROLLBACK (or lets the driver issue them); an adopted
+ * transaction never calls it, because its caller ends the transaction.
+ */
 type BoundTransactionBackend = Readonly<{
   backend: InternalOperationBackend;
   route: TransactionStatementRoute;
   /** The marker gate `backend` uses, admitted through the same view. */
   contributionReadGate: ContributionMaterializer;
-  drainAndClose: CloseTransactionView;
+  drainAndClose: () => Promise<void>;
 }>;
 
 /**
- * Runs `run` and ends the view `drainAndClose` closes once it settles,
- * whichever way: statements `run` left running settle first, and any issued
- * afterwards are refused, so nothing reaches the connection after this
- * transaction's COMMIT / ROLLBACK.
- *
- * When the engine ended the transaction before the boundary (a statement
- * failed and took the transaction with it) and `run` returned, this rejects
- * with the view's `TransactionRolledBackError` instead, so the runner sends
- * no COMMIT; when `run` threw, its error stands. Either way the error is
- * handed to `recordEngineEnd`, for a runner whose driver then fails its own
- * COMMIT / ROLLBACK on the transaction that no longer exists.
+ * Runs `fn` on a bound transaction backend and ends the backend's view once
+ * `fn` settles, whichever way: statements `fn` left running settle first, and
+ * any issued afterwards are refused, so nothing reaches the connection after
+ * this transaction's COMMIT / ROLLBACK.
  */
-async function runThenCloseView<T>(
-  drainAndClose: CloseTransactionView,
-  run: () => Promise<T>,
-  recordEngineEnd?: RecordEngineEnd,
-): Promise<T> {
-  // `run` is invoked inside the promise whose settlement ends the view, so a
-  // callback that throws synchronously (rather than rejecting) ends it too.
-  const settled = await new Promise<T>((resolve) => {
-    resolve(run());
-  }).then(
-    (value) => ({ threw: false, value }) as const,
-    (error: unknown) => ({ threw: true, error }) as const,
-  );
-  const engineEnd = await drainAndClose();
-  if (engineEnd === undefined) {
-    if (settled.threw) throw settled.error;
-    return settled.value;
-  }
-  const outcome = settled.threw ? settled.error : engineEnd;
-  recordEngineEnd?.(outcome);
-  throw outcome;
-}
-
-/**
- * Runs `fn` on a bound transaction backend, ending the backend's view once
- * `fn` settles: see {@link runThenCloseView}.
- */
-function runInTransactionView<T>(
+async function runInTransactionView<T>(
   bound: BoundTransactionBackend,
   fn: (backend: InternalOperationBackend) => Promise<T>,
-  recordEngineEnd?: RecordEngineEnd,
 ): Promise<T> {
-  return runThenCloseView(
-    bound.drainAndClose,
-    () => fn(bound.backend),
-    recordEngineEnd,
-  );
-}
-
-/**
- * Runs a transaction whose COMMIT / ROLLBACK the driver issues (Drizzle's
- * `db.transaction`). Once the engine has ended the transaction, the driver's
- * COMMIT or ROLLBACK fails too — libSQL refuses either on a closed
- * transaction — and that failure would replace the outcome the callback
- * layer settled on ({@link runThenCloseView}); this rejects with that
- * outcome instead.
- */
-/**
- * `attempt`, the promise a transaction callback hands to the driver whose
- * `transaction()` runs it, marked handled where it is created. The driver
- * awaits it, and its outcome reaches the caller through the driver; but a
- * driver that cannot await an asynchronous callback (better-sqlite3's
- * synchronous `transaction()`, which commits as the callback returns and
- * then throws because it returned a promise) drops it, and the attempt's
- * rejection — the view's ended outcome at its boundary, for one — would
- * otherwise surface as an unhandled rejection after the caller already got
- * the driver's error.
- */
-function handedToDriver<T>(attempt: Promise<T>): Promise<T> {
-  attempt.catch(ignoreDroppedAttempt);
-  return attempt;
-}
-
-/** Swallows a dropped attempt's rejection: see {@link handedToDriver}. */
-function ignoreDroppedAttempt(): void {
-  // Intentionally empty: the caller's outcome is the driver's.
-}
-
-async function runDriverOwnedTransaction<T>(
-  open: (recordEngineEnd: RecordEngineEnd) => Promise<T>,
-): Promise<T> {
-  // At most one entry: the attempt's callback layer settles once.
-  const recordedOutcomes: unknown[] = [];
   try {
-    return await open((outcome) => {
-      recordedOutcomes.push(outcome);
-    });
-  } catch (error) {
-    throw recordedOutcomes.length === 0 ? error : recordedOutcomes[0];
+    return await fn(bound.backend);
+  } finally {
+    await bound.drainAndClose();
   }
 }
 
@@ -2978,52 +2860,34 @@ function createTransactionBackend(
 ): BoundTransactionBackend {
   // A fresh view per transaction (and per retried attempt): the runner closes
   // it at the boundary, and a later transaction on the same connection gets
-  // its own. Its statements join the one queue of the connection the
-  // transaction runs on, shared with every other view of that connection.
-  // Where the driver's flag reflects the engine, the view asks it before
-  // every statement starts; elsewhere it asks after an SQL failure. Either
-  // way a transaction that ended without TypeGraph's COMMIT or ROLLBACK
-  // refuses every later statement instead of letting it autocommit.
+  // its own.
   const sessionAdapter =
     options.executionAdapter ??
     createSqliteExecutionAdapter(options.db, {
       profileHints: options.profileHints,
     });
-  const driverState = sqliteDriverTransactionState(options.db);
-  const view = createSqliteTransactionExecutionView(sessionAdapter, {
-    queue: connectionStatementQueue(sqliteConnectionIdentity(options.db)),
-    engineState:
-      options.closedByRunner && driverState?.reflectsEngine === true ?
-        driverState.read
-      : undefined,
-    stateAfterFailure: () =>
-      sqliteTransactionStateAfterFailure(driverState, sessionAdapter),
-  });
+  const view = createSqliteTransactionExecutionView(sessionAdapter);
   const txExecutionAdapter = view.adapter;
   // Marker reads are admitted through this transaction's view, and
-  // administration is refused. Where the transaction is proven to run on the
-  // root's own connection, or on a libSQL session of its own that holds the
-  // writer slot (no other connection can commit while it is open), its reads
-  // share the root materializer's cache: the root reads what this
-  // transaction reads. Running on the root's connection is proven by the
-  // connection identity the native-transaction record resolves for the
-  // handle, not assumed from the driver: a caller's transaction on a second
-  // connection to the same WAL database keeps a snapshot the root's reads do
-  // not see. Holding the slot is proven, not requested: TypeGraph asked for
-  // `BEGIN IMMEDIATE` and the driver reports, from the engine's own state,
-  // that the transaction has begun. A remote libSQL client sends its BEGIN
-  // with the first statement and reports a stream rather than the engine,
-  // so a marker read there could run on the root before the BEGIN. Every
-  // other transaction (that one, a caller's adopted transaction on a session
-  // or connection of its own, one opened deferred) can see other than the
-  // root reads, so its marker reads run on its own session, with a cache of
-  // their own that never outlives it — as PostgreSQL's do.
+  // administration is refused. A transaction shares the root materializer's
+  // cache only where the root reads what it reads: its handle resolves to the
+  // root's own connection (the connection identity the native-transaction
+  // record names, not an assumption about the driver: a caller's transaction
+  // on a second connection to the same WAL database keeps a snapshot the
+  // root's reads do not see), or it runs on a local libSQL session of its
+  // own that TypeGraph opened asking for the writer slot (no other connection
+  // can commit while it is open; a local client runs its `BEGIN IMMEDIATE`
+  // when the transaction opens, before this bind). Every other transaction
+  // (a caller's adopted transaction on a session or connection of its own,
+  // one opened deferred, one on a remote libSQL client, which sends its
+  // `BEGIN` with the first statement) reads markers on its own session, with
+  // a cache of its own that never outlives it, as PostgreSQL's transactions
+  // do.
   const sharesRootMarkerReads =
     ownLibsqlSession(options.db) === undefined ?
       nativeTransactionConnection(options.db) === options.rootConnection
     : options.requestedWriterSlot === true &&
-      driverState?.reflectsEngine === true &&
-      driverState.read() === "open";
+      isLocalLibsqlClient(sqliteHandleClient(options.db));
   const txContributionMaterializer = admitContributionReadsThroughView(
     sharesRootMarkerReads ?
       options.contributionMaterializer
@@ -3118,6 +2982,22 @@ function nativeTransactionConnection(db: AnySqliteDatabase): object {
  * session pins (`session.tx`), shared by every savepoint of that transaction;
  * `undefined` for any other handle.
  */
+/**
+ * The libSQL transaction handle `db` executes on when that is a driver
+ * session of its own, apart from the connection the root backend's reads use:
+ * the handle a Drizzle libSQL transaction object (or a savepoint of one)
+ * pins, or the client of a Drizzle database opened over a libSQL
+ * transaction. `undefined` for every other SQLite handle (better-sqlite3,
+ * bun:sqlite, sql.js, Durable Object storage, a libSQL client, and the
+ * manual `BEGIN` / `COMMIT` frame).
+ */
+function ownLibsqlSession(db: AnySqliteDatabase): object | undefined {
+  const pinned = pinnedLibsqlTransaction(db);
+  if (pinned !== undefined) return pinned;
+  const client = sqliteHandleClient(db);
+  return isLibsqlTransaction(client) ? client : undefined;
+}
+
 function pinnedLibsqlTransaction(db: AnySqliteDatabase): object | undefined {
   if (!isSqliteTransactionHandle(db)) return undefined;
   const pinned = (db as unknown as Readonly<{ session?: { tx?: unknown } }>)
@@ -3150,182 +3030,30 @@ function sqliteNativeHandle(db: AnySqliteDatabase): NativeHandle {
         kind: "pinned",
         handle: db,
         pinned,
-        // Proof 2 asks whether the handle still denotes the transaction it
-        // was opened for: a libSQL transaction handle never hosts a later
-        // one, so only a handle known to have ended is retired. Whether a
-        // statement may still run on it is the view's question, not this one.
-        isOpen: () => libsqlSessionState(pinned, db) !== "ended",
+        // A libSQL transaction handle reports `closed` once its transaction
+        // has ended, committed, rolled back or ended by the engine, and
+        // refuses every statement from then on.
+        isOpen: () => !(pinned as Readonly<{ closed: boolean }>).closed,
       };
 }
 
 /**
- * The connection a SQLite handle's statements reach, as the
- * native-transaction record resolves it (`sqliteNativeHandle`): the
- * per-transaction libSQL handle a libSQL transaction object pins, and
- * otherwise the driver client or Durable Object storage. THE identity whose
- * statement queue every view of the handle's connection shares.
+ * Whether the driver reports a transaction open on `client` right now. A
+ * read that throws (a closed database) is not a confirmation.
  */
-function sqliteConnectionIdentity(db: AnySqliteDatabase): object {
-  return pinnedLibsqlTransaction(db) ?? nativeTransactionConnection(db);
-}
-
-/**
- * What a driver's transaction flag reports, and whether it reflects the
- * engine's own transaction state — whether its `"open"` is ever an answer,
- * so a transaction view may read it before every statement.
- */
-type SqliteDriverTransactionFlag = Readonly<{
-  read: () => TransactionState;
-  reflectsEngine: boolean;
-}>;
-
-/**
- * What the driver's own flag says about the transaction the SQLite handle
- * `db` runs in: THE one reading of a driver's transaction flag, which the
- * transaction view (before every statement where it reflects the engine,
- * otherwise after a statement fails), the marker gate (whether the writer
- * slot is held) and the native-transaction proofs 2 and 4 consume.
- *
- * | Driver | Flag | Reflects the engine? |
- * | --- | --- | --- |
- * | better-sqlite3, bun:sqlite | `inTransaction` (the connection's autocommit state) | yes |
- * | local libSQL transaction (`file:`) | `closed` (`!inTransaction` of the transaction's connection) | yes |
- * | remote libSQL transaction (`http`, `ws`), or a Drizzle database over a libSQL transaction handle | `closed` (whether the stream or handle was closed) | only `closed: true`; an open stream is `"unknown"` |
- * | sql.js, Durable Object storage, `sqlite-proxy`, a local libSQL client before 0.18 | none | no flag (`undefined`) |
- *
- * A read that throws (a closed database) answers `"unknown"`.
- */
-function sqliteDriverTransactionState(
-  db: AnySqliteDatabase,
-): SqliteDriverTransactionFlag | undefined {
-  const session = ownLibsqlSession(db);
-  if (session !== undefined) {
-    return {
-      read: () => libsqlSessionState(session, db),
-      reflectsEngine: isLocalLibsqlClient(sqliteHandleClient(db)),
-    };
-  }
-  const client = sqliteHandleClient(db);
-  if (!reportsConnectionTransactionState(client)) return undefined;
-  return { read: () => readSqliteInTransaction(client), reflectsEngine: true };
-}
-
-/**
- * What the libSQL transaction handle `session` that `db` executes on says
- * about its transaction: `closed` is final, and an open handle is `"open"`
- * only where `closed` is the engine's state — a local client's transaction,
- * whose `closed` is its connection's `!inTransaction`. A remote client's
- * `closed` reports its stream: the server can end the transaction (a
- * `RAISE(ROLLBACK)`) while the stream stays open.
- */
-function libsqlSessionState(
-  session: object,
-  db: AnySqliteDatabase,
-): TransactionState {
+function readSqliteInTransaction(client: object): boolean {
   try {
-    if ((session as Readonly<{ closed: unknown }>).closed === true) {
-      return "ended";
-    }
+    return (client as Readonly<{ inTransaction?: unknown }>).inTransaction ===
+      true;
   } catch {
-    return "unknown";
-  }
-  return isLocalLibsqlClient(sqliteHandleClient(db)) ? "open" : "unknown";
-}
-
-/**
- * Whether the transaction `db` runs in is still open, asked by its view
- * right after a statement fails: the driver's flag where it reflects the
- * engine ({@link sqliteDriverTransactionState}), and otherwise the engine
- * itself, on the session the transaction runs on
- * ({@link askSqliteEngineForTransaction}).
- */
-function sqliteTransactionStateAfterFailure(
-  driverState: SqliteDriverTransactionFlag | undefined,
-  session: SqliteExecutionAdapter,
-): TransactionState | Promise<TransactionState> {
-  const reported = driverState?.read() ?? "unknown";
-  return reported === "unknown" ?
-      askSqliteEngineForTransaction(session)
-    : reported;
-}
-
-/**
- * Asks SQLite on `session` whether a transaction is open: `BEGIN` fails
- * with "cannot start a transaction within a transaction" inside one, and
- * opens one outside it — which is rolled back at once, so the question
- * leaves no transaction behind. Any other failure (a driver that refuses raw
- * transaction control, such as Durable Object storage, or a remote client
- * that refuses a statement on a stream whose transaction ended) answers
- * `"unknown"`.
- */
-async function askSqliteEngineForTransaction(
-  session: SqliteExecutionAdapter,
-): Promise<TransactionState> {
-  try {
-    await session.executeRun(sql`BEGIN`);
-  } catch (error) {
-    return isSqliteNestedTransactionError(error) ? "open" : "unknown";
-  }
-  try {
-    await session.executeRun(sql`ROLLBACK`);
-  } catch {
-    // The view refuses every later statement either way.
-  }
-  return "ended";
-}
-
-/**
- * The libSQL transaction handle `db` executes on when that is a driver
- * session of its own, apart from the connection the root backend's reads use:
- * the handle a Drizzle libSQL transaction object (or a savepoint of one)
- * pins, or the client of a Drizzle database opened over a libSQL
- * transaction. `undefined` for every other SQLite handle — better-sqlite3,
- * bun:sqlite, sql.js, Durable Object storage, a libSQL client, and the
- * manual `BEGIN` / `COMMIT` frame — each of which runs on the root's own
- * connection, so a root read sees what its transaction sees.
- */
-function ownLibsqlSession(db: AnySqliteDatabase): object | undefined {
-  const pinned = pinnedLibsqlTransaction(db);
-  if (pinned !== undefined) return pinned;
-  const client = sqliteHandleClient(db);
-  return isLibsqlTransaction(client) ? client : undefined;
-}
-
-/**
- * Whether `client` reports its connection's transaction state:
- * better-sqlite3's and bun:sqlite's boolean `inTransaction`.
- */
-function reportsConnectionTransactionState(client: unknown): client is object {
-  return (
-    (isBetterSqlite3Client(client) || isBunSqliteClient(client)) &&
-    typeof (client as Readonly<{ inTransaction?: unknown }>).inTransaction ===
-      "boolean"
-  );
-}
-
-/**
- * The connection's transaction state as `client`'s `inTransaction` reports
- * it; a read that throws (a closed database) or a non-boolean answers
- * `"unknown"`.
- */
-function readSqliteInTransaction(client: object): TransactionState {
-  try {
-    const inTransaction: unknown = (
-      client as Readonly<{ inTransaction?: unknown }>
-    ).inTransaction;
-    if (typeof inTransaction !== "boolean") return "unknown";
-    return inTransaction ? "open" : "ended";
-  } catch {
-    return "unknown";
+    return false;
   }
 }
 
 /**
  * How the driver confirms that a transaction the engine opened on `db` is
- * still open (proof 4): the connection's own state
- * ({@link sqliteDriverTransactionState}), read on the client `db` executes
- * on (a transaction object's session client, or a database's `$client`),
- * and only an `"open"` answer confirms. `undefined` for a driver that
+ * still open (proof 4): better-sqlite3's and bun:sqlite's `inTransaction`,
+ * the connection's own autocommit state. `undefined` for a driver that
  * reports none (`@libsql/client` before 0.18 hides its connection, sql.js
  * and Durable Object storage expose no transaction state): its token is never
  * honoured through the connection.
@@ -3333,11 +3061,18 @@ function readSqliteInTransaction(client: object): TransactionState {
 function sqliteConnectionProbe(
   db: AnySqliteDatabase,
 ): ConnectionTransactionProbe | undefined {
-  const client = sqliteHandleClient(db);
-  if (!reportsConnectionTransactionState(client)) return undefined;
+  const client = (db as Readonly<{ $client?: unknown }>).$client;
+  if (
+    (!isBetterSqlite3Client(client) && !isBunSqliteClient(client)) ||
+    typeof (client as Readonly<{ inTransaction?: unknown }>).inTransaction !==
+      "boolean"
+  ) {
+    return undefined;
+  }
+  const driverClient = client as object;
   return {
     connection: nativeTransactionConnection(db),
-    isTransactionOpen: () => readSqliteInTransaction(client) === "open",
+    isTransactionOpen: () => readSqliteInTransaction(driverClient),
   };
 }
 

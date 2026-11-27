@@ -4,14 +4,15 @@
  *
  * A failing statement can end a SQLite transaction in the engine itself (a
  * trigger's `RAISE(ROLLBACK)`); a statement that reaches the connection
- * afterwards runs in autocommit. The transaction's view must observe the end
- * before any later statement reaches the driver: a sibling submitted in the
- * same turn as the failing statement included, and on a driver whose own
- * transaction flag does not report the engine's state.
+ * afterwards runs in autocommit. Nothing observes such an end yet: the cases
+ * that need it are known defects pinned at today's value (`correct` states
+ * the outcome a fix must reach), kept as the reproductions for the design
+ * that follows. The marker-read and failure-without-end cases hold today.
  */
 import type { Client } from "@libsql/client";
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
+import { drizzle as drizzleSqliteProxy } from "drizzle-orm/sqlite-proxy";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createSqliteBackend } from "../../../src/backend/drizzle/sqlite";
@@ -22,8 +23,12 @@ import type {
 } from "../../../src/backend/types";
 import { TypeGraphError } from "../../../src/errors";
 import { sql } from "../../../src/query/sql-fragment";
-import { asCompiledRowsSql } from "../../../src/query/sql-intent";
+import {
+  asCompiledRowsSql,
+  asCompiledStatementSql,
+} from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
+import { expectObservation } from "../../helpers/known-defect";
 import {
   createRemoteLibsqlDouble,
   type RemoteLibsqlDouble,
@@ -34,6 +39,9 @@ import {
 } from "./libsql-temporary-database";
 
 afterEach(cleanupTemporaryFiles);
+
+/** The label every pinned case here carries. */
+const ENGINE_ENDED = "engine-ended";
 
 const GRAPH_ID = "engine_end";
 const ROLLBACK_ID = "engine-rollback";
@@ -111,16 +119,34 @@ describe("a SQLite transaction the engine ended", () => {
           await Promise.all(Object.values(statements));
         }),
       );
-      expect({
-        failing: await statements["failing"],
-        sibling: await statements["sibling"],
-        transaction,
-        nodes: await nodeIds(backend),
-      }).toEqual({
-        failing: "untyped driver error",
-        sibling: "TransactionRolledBackError",
-        transaction: "TransactionRolledBackError",
-        nodes: [],
+      expectObservation({
+        lane: { driver: "better-sqlite3", profile: "async" },
+        observed: {
+          failing: await statements["failing"],
+          sibling: await statements["sibling"],
+          transaction,
+          nodes: await nodeIds(backend),
+        },
+        correct: {
+          failing: "untyped driver error",
+          sibling: "TransactionRolledBackError",
+          transaction: "TransactionRolledBackError",
+          nodes: [],
+        },
+        defects: [
+          {
+            label: `${ENGINE_ENDED} (same-turn sibling, async profile)`,
+            on: {},
+            // The sibling runs in autocommit after the trigger ended the
+            // transaction, and persists.
+            today: {
+              failing: "untyped driver error",
+              sibling: "fulfilled",
+              transaction: "untyped driver error",
+              nodes: ["sibling"],
+            },
+          },
+        ],
       });
     } finally {
       await backend.close();
@@ -145,15 +171,33 @@ describe("a SQLite transaction the engine ended", () => {
             );
           }),
         );
-        expect({
-          ...statements,
-          transaction,
-          nodes: await nodeIds(backend),
-        }).toEqual({
-          failing: "untyped driver error",
-          later: "TransactionRolledBackError",
-          transaction: "TransactionRolledBackError",
-          nodes: [],
+        expectObservation({
+          lane: { driver: "libsql", client: "remote" },
+          observed: {
+            failing: statements["failing"],
+            later: statements["later"],
+            transaction,
+            nodes: await nodeIds(backend),
+          },
+          correct: {
+            failing: "untyped driver error",
+            later: "TransactionRolledBackError",
+            transaction: "TransactionRolledBackError",
+            nodes: [],
+          },
+          defects: [
+            {
+              label: `${ENGINE_ENDED} (remote libSQL, trigger)`,
+              on: {},
+              // The later write runs in autocommit on the stream, and persists.
+              today: {
+                failing: "untyped driver error",
+                later: "fulfilled",
+                transaction: "untyped driver error",
+                nodes: ["later"],
+              },
+            },
+          ],
         });
       });
     });
@@ -226,5 +270,89 @@ describe("a SQLite transaction the engine ended", () => {
         }
       });
     });
+  });
+
+  // sqlite-proxy over a real database: the proxy applies a raw COMMIT and the
+  // reply is lost on the way back, so the caller sees a failure for a
+  // statement SQLite applied.
+  it("reports an unknown outcome when the reply to a raw COMMIT the engine applied is lost", async () => {
+    const client = new Database(":memory:");
+    try {
+      const dropNextCommitReply = { armed: false };
+      const database = drizzleSqliteProxy((text, parameters, method) => {
+        const params = parameters as unknown[];
+        const statement = client.prepare(text);
+        if (/^\s*COMMIT\b/i.test(text) && dropNextCommitReply.armed) {
+          dropNextCommitReply.armed = false;
+          statement.run(...params);
+          return Promise.reject(
+            new Error("the connection closed before the reply arrived"),
+          );
+        }
+        if (!statement.reader) {
+          statement.run(...params);
+          return Promise.resolve({ rows: [] });
+        }
+        // Drizzle's query builder (lowercase SQL) maps positional rows;
+        // TypeGraph's own statements read rows by column name.
+        const positional = /^(?:select|insert|update|delete|with) /.test(text);
+        if (method === "get") {
+          const row: unknown =
+            positional ?
+              statement.raw().get(...params)
+            : statement.get(...params);
+          return Promise.resolve({
+            rows: row ?? (positional ? [] : undefined),
+          } as never);
+        }
+        return Promise.resolve({
+          rows:
+            positional ?
+              statement.raw().all(...params)
+            : statement.all(...params),
+        });
+      });
+      const backend = createSqliteBackend(database);
+      await requireDefined(backend.bootstrapTables)();
+      let commit = "never issued";
+      const transaction = await outcomeOf(
+        backend.transaction(async (tx) => {
+          await tx.insertNode(nodeRow("first"));
+          dropNextCommitReply.armed = true;
+          // The callback catches the lost reply and returns.
+          commit = await outcomeOf(
+            requireDefined(tx.executeStatement)(
+              asCompiledStatementSql(sql.raw("COMMIT")),
+            ),
+          );
+        }),
+      );
+      expectObservation({
+        lane: { driver: "sqlite-proxy" },
+        observed: { commit, transaction, nodes: await nodeIds(backend) },
+        correct: {
+          commit: "untyped driver error",
+          transaction: "TransactionOutcomeUnknownError",
+          // SQLite applied the COMMIT.
+          nodes: ["first"],
+        },
+        defects: [
+          {
+            label: `${ENGINE_ENDED} (lost COMMIT reply, sqlite-proxy)`,
+            on: {},
+            // TypeGraph then sends its own COMMIT, which finds no transaction:
+            // the transaction rejects with the driver error although the
+            // row committed.
+            today: {
+              commit: "untyped driver error",
+              transaction: "untyped driver error",
+              nodes: ["first"],
+            },
+          },
+        ],
+      });
+    } finally {
+      client.close();
+    }
   });
 });

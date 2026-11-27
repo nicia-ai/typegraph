@@ -9104,7 +9104,7 @@ export class TransactionRolledBackError extends TypeGraphError {
 // @public
 type TransactionRolledBackErrorDetails = Readonly<{
     conflict: boolean;
-    detectedBy: "commit-reply" | "refused-statement" | "driver" | "statement-failure";
+    detectedBy: "commit-reply" | "refused-statement" | "driver";
     causeObserved: boolean;
 }>;
 
