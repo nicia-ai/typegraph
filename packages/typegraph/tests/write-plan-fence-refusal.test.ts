@@ -13,8 +13,9 @@
  *
  * The statement counter is what separates a refusal from a rollback: the
  * throw aborts the transaction either way, so "the row still says Alice" is
- * true even if the UPDATE ran. `updateNodeSet` never being CALLED is the
- * property under test.
+ * true even if the UPDATE ran. Neither the set update's dry-run
+ * (`previewNodeSetUpdate`) nor its write (`updateNodeSet`) being CALLED is
+ * the property under test.
  *
  * Named mutation: replace the `throw` in `NODE_SET_UPDATE_FENCE_APPLIERS`
  * (`write-fences.ts`) with a `return` → the refusal case fails twice over,
@@ -81,11 +82,12 @@ function writeContext(backend: GraphBackend): WritePlanContext {
 }
 
 interface SetUpdateCounts {
+  previewNodeSetUpdate: number;
   updateNodeSet: number;
 }
 
 /**
- * Counts `updateNodeSet` on the backend AND on the transaction target it hands
+ * Counts `previewNodeSetUpdate` and `updateNodeSet` on the backend AND on the transaction target it hands
  * out — the session runs inside the write transaction, so counting only the
  * outer object would see nothing.
  */
@@ -93,17 +95,22 @@ function withSetUpdateCount(backend: GraphBackend): Readonly<{
   backend: GraphBackend;
   counts: SetUpdateCounts;
 }> {
-  const counts: SetUpdateCounts = { updateNodeSet: 0 };
+  const counts: SetUpdateCounts = { previewNodeSetUpdate: 0, updateNodeSet: 0 };
 
   function wrap<T extends GraphBackend | TransactionBackend>(target: T): T {
     // Called unbound: the drizzle backends build their members as closures
     // over the factory's state, so none of them reads `this`.
+    const originalPreview = requireDefined(target.previewNodeSetUpdate);
     const original = requireDefined(target.updateNodeSet);
     // Derived, never spread: a fixture built by copying a backend is the #435
     // defect written into the double the store under test then runs against, and
     // the derivation seam is what carries the source's serialized-resource
     // verdict onto the wrapper.
     return deriveBackend(target, {
+      previewNodeSetUpdate: (params) => {
+        counts.previewNodeSetUpdate += 1;
+        return originalPreview(params);
+      },
       updateNodeSet: (params) => {
         counts.updateNodeSet += 1;
         return original(params);
@@ -187,7 +194,7 @@ describe("a fence the row work's statement cannot carry", () => {
       expect(failure.fence).toBe("validityLowerBound");
       expect(failure.kind).toBe("nodeSetUpdate");
       // Refused BEFORE the row work, not rolled back after it.
-      expect(counts.updateNodeSet).toBe(0);
+      expect(counts).toEqual({ previewNodeSetUpdate: 0, updateNodeSet: 0 });
       expect(await propsOf(raw)).toEqual({ name: "Alice" });
     } finally {
       await raw.close();
@@ -209,7 +216,7 @@ describe("a fence the row work's statement cannot carry", () => {
       );
 
       expect(result).toEqual({ affectedCount: 1 });
-      expect(counts.updateNodeSet).toBe(1);
+      expect(counts).toEqual({ previewNodeSetUpdate: 1, updateNodeSet: 1 });
       expect(await propsOf(raw)).toEqual({ name: "Renamed" });
     } finally {
       await raw.close();

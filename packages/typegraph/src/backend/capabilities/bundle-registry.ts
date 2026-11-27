@@ -1414,11 +1414,11 @@ export const UNBUNDLED_OPTIONAL_MEMBERS = {
     bundle: "trustedImport",
     ceiling: 1,
   },
-  compareAndSetNode: {
+  previewNodeSetUpdate: {
     kind: "deferred",
     workstream: "WS5b",
     bundle: "batchEntityWrite",
-    ceiling: 6,
+    ceiling: 2,
   },
   updateNodeSet: {
     kind: "deferred",
@@ -1494,7 +1494,7 @@ export const WS5B_SEED_BUNDLES = {
     "insertNodeNoReturn",
     "insertNodeIfAbsent",
     "insertEdgeNoReturn",
-    "compareAndSetNode",
+    "previewNodeSetUpdate",
     "updateNodeSet",
     "updateResolvedNodesBatch",
   ],

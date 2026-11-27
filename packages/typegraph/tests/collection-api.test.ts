@@ -80,27 +80,27 @@ function observeNodeSetPlans(
     target: T,
   ): T {
     return deriveBackend<T, Partial<T>>(target, {
-      updateNodeSet(params) {
+      previewNodeSetUpdate(params) {
         plans.push(
           params.candidateIds.chunks
             .filter((chunk) => chunk.kind === "text")
             .map((chunk) => chunk.value)
             .join(""),
         );
-        return requireDefined(target.updateNodeSet)(params);
+        return requireDefined(target.previewNodeSetUpdate)(params);
       },
     } as ExactBackendOverlay<T, Partial<T>>);
   }
 
   return deriveBackend(baseBackend, {
-    updateNodeSet(params) {
+    previewNodeSetUpdate(params) {
       plans.push(
         params.candidateIds.chunks
           .filter((chunk) => chunk.kind === "text")
           .map((chunk) => chunk.value)
           .join(""),
       );
-      return requireDefined(baseBackend.updateNodeSet)(params);
+      return requireDefined(baseBackend.previewNodeSetUpdate)(params);
     },
     transaction: (fn, options) =>
       baseBackend.transaction((target) => fn(wrapTarget(target)), options),
@@ -278,10 +278,10 @@ describe("Node Collections (SQLite)", () => {
       });
     });
 
-    it("refuses a backend without the dedicated guarded-write port", async () => {
+    it("refuses a backend without the set-update dry-run port", async () => {
       const unsupported = createStore(
         testGraph,
-        projectBackendWithout(backend, ["compareAndSetNode"]),
+        projectBackendWithout(backend, ["previewNodeSetUpdate"]),
       );
       const person = await unsupported.nodes.Person.create({ name: "Alice" });
 

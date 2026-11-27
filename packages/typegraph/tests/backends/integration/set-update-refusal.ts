@@ -1,48 +1,42 @@
 /**
- * A set update refused by schema validation inside `store.transaction()`
- * leaves nothing behind.
+ * A set update refused inside `store.transaction()` leaves nothing behind.
  *
- * `updateWhere` and `compareAndSet` run their UPDATE first and validate the
- * after-images it returns. When a returned row violates the schema the call
- * throws `ValidationError`. A caller that catches that refusal and lets its
- * transaction commit must find the database — rows, recorded history, the
- * receipt, hooks and every sidecar — exactly as it was before the call.
- *
- * Every case here is a known defect (#948): the UPDATE is not undone when
- * validation refuses, so the caught refusal commits the schema-invalid row
- * while the sidecars the call never rebuilt keep describing the old one. Each
- * case runs its setup and the refused call as ordinary assertions and checks
- * the whole end state in one observation with `expectObservation`
- * (`tests/helpers/known-defect.ts`): the correct value, and the exact value
- * #948 produces on every lane today. The repair flips each case to a failure
- * naming the fix; any other change to the end state fails it as a changed
- * defect, so a broken setup or an unrelated error can no longer pass it.
+ * `updateWhere` and `compareAndSet` read and lock their rows in a dry-run,
+ * validate every after-image it returns, and only then write exactly those
+ * rows. A refusal — the schema, the normalization check, the uniqueness
+ * verdict across the resolved set — is raised before the write. A caller that
+ * catches it and lets its transaction commit must find the database — rows,
+ * recorded history, the receipt, hooks and every sidecar — exactly as it was
+ * before the call (#948). Each case checks the whole end state in one
+ * assertion.
  */
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createStore,
   defineGraph,
   defineNode,
   embedding,
+  type GraphBackend,
   searchable,
+  UniquenessError,
   ValidationError,
 } from "../../../src";
+import {
+  deriveBackend,
+  projectGraphBackend,
+} from "../../../src/backend/derive-backend";
+import {
+  rowPropsToObject,
+  type TransactionBackend,
+} from "../../../src/backend/types";
 import { computeUniqueKey } from "../../../src/constraints";
+import { DatabaseOperationError } from "../../../src/errors";
 import { buildKindRegistry } from "../../../src/registry";
 import { uniquenessClaimAxis } from "../../../src/store/claims/axis";
 import { requireDefined } from "../../../src/utils/presence";
-import {
-  type DefectScope,
-  expectObservation,
-} from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
-
-/** #948 reproduces on every lane: a scope naming no facet covers them all. */
-const ON_EVERY_LANE: DefectScope = {};
-
-/** The issue tracking the defect every case in this file pins. */
-const KNOWN_DEFECT = "known defect #948";
 
 const SET_UPDATE_VERBS = ["updateWhere", "compareAndSet"] as const;
 
@@ -120,6 +114,68 @@ const vectorRefusalGraph = defineGraph({
   edges: {},
 });
 
+const TieredAccount = defineNode("TieredAccount", {
+  schema: z.object({
+    name: z.string(),
+    tier: z.string().default("basic"),
+  }),
+});
+
+const normalizationGraph = defineGraph({
+  id: "set_update_refusal_normalization",
+  nodes: { TieredAccount: { type: TieredAccount } },
+  edges: {},
+});
+
+const RecreatedAccount = defineNode("RecreatedAccount", {
+  schema: z.object({
+    name: z.string(),
+    plan: z.enum(["free", "enterprise"]),
+  }),
+});
+
+const recreationGraph = defineGraph({
+  id: "set_update_refusal_recreation",
+  nodes: { RecreatedAccount: { type: RecreatedAccount } },
+  edges: {},
+});
+
+/**
+ * `backend`, whose transactions delete the row `id` and re-create it under the
+ * same id, at version 1 and with other properties, immediately before their
+ * set update's keyed write — after its dry-run has read and validated the
+ * original.
+ */
+function backendRecreatingBeforeSetWrite(
+  backend: GraphBackend,
+  id: string,
+): GraphBackend {
+  function recreating(target: TransactionBackend): TransactionBackend {
+    const updateNodeSet = requireDefined(target.updateNodeSet);
+    return deriveBackend(target, {
+      updateNodeSet: async (params) => {
+        await target.hardDeleteNode({
+          graphId: params.graphId,
+          kind: params.kind,
+          id,
+        });
+        await target.insertNode({
+          graphId: params.graphId,
+          kind: params.kind,
+          id,
+          props: { name: "Recreated", plan: "free" },
+        });
+        return updateNodeSet(params);
+      },
+    });
+  }
+  // Over a projection: the store's own backend object is frozen.
+  return deriveBackend(projectGraphBackend(backend), {
+    transaction: (run, options) =>
+      backend.transaction((target) => run(recreating(target)), options),
+  });
+}
+
 /** What a call threw, or `"resolved"` when it did not throw. */
 async function settle(call: Promise<unknown>): Promise<unknown> {
   return call.then(
@@ -134,27 +190,20 @@ function refusalClass(thrown: unknown): string {
 }
 
 /**
- * Asserts a case's end state: today's value under #948 on every lane, and a
- * failure naming the fix once the refusal leaves nothing behind.
+ * Asserts a case's whole end state in one observation: the state with the
+ * refused call undone.
  */
 function expectRefusal<TValue>(
-  store: Readonly<{ backend: Readonly<{ dialect: string }> }>,
   observed: TValue,
   correct: NoInfer<TValue>,
-  today: NoInfer<TValue>,
 ): void {
-  expectObservation({
-    lane: { dialect: store.backend.dialect },
-    observed,
-    correct,
-    defects: [{ label: "#948", on: ON_EVERY_LANE, today }],
-  });
+  expect(observed).toEqual(correct);
 }
 
 export function registerSetUpdateRefusalIntegrationTests(
   context: IntegrationTestContext,
 ): void {
-  describe(`a set update refused by validation leaves nothing behind (${KNOWN_DEFECT})`, () => {
+  describe("a set update refused by validation leaves nothing behind", () => {
     describe.for(SET_UPDATE_VERBS)("%s", (verb) => {
       it("does not commit the refused row, and reports the refusal through onError only", async () => {
         const events: string[] = [];
@@ -198,7 +247,6 @@ export function registerSetUpdateRefusalIntegrationTests(
           await store.nodes.RefusalAccount.getById(account.id),
         );
         expectRefusal(
-          store,
           {
             thrown: refusalClass(thrown),
             plan: stored.plan,
@@ -209,12 +257,6 @@ export function registerSetUpdateRefusalIntegrationTests(
             thrown: "ValidationError",
             plan: "free",
             version: account.meta.version,
-            events: [`start:${verb}`, "error"],
-          },
-          {
-            thrown: "ValidationError",
-            plan: "enterprise",
-            version: account.meta.version + 1,
             events: [`start:${verb}`, "error"],
           },
         );
@@ -256,7 +298,6 @@ export function registerSetUpdateRefusalIntegrationTests(
             .nodes.RefusalAccount.getById(account.id),
         );
         expectRefusal(
-          store,
           {
             thrown: refusalClass(thrown),
             recordedAdvanced: afterCommit !== beforeRefusal,
@@ -270,13 +311,6 @@ export function registerSetUpdateRefusalIntegrationTests(
             livePlan: "free",
             recordedPlan: "free",
             recordedVersion: account.meta.version,
-          },
-          {
-            thrown: "ValidationError",
-            recordedAdvanced: true,
-            livePlan: "enterprise",
-            recordedPlan: "enterprise",
-            recordedVersion: account.meta.version + 1,
           },
         );
       });
@@ -310,7 +344,6 @@ export function registerSetUpdateRefusalIntegrationTests(
           await store.nodes.RefusalAccount.getById(account.id),
         );
         expectRefusal(
-          store,
           {
             thrown: refusalClass(outcome.result),
             receiptNodes: outcome.receipt.writes.nodes,
@@ -322,12 +355,6 @@ export function registerSetUpdateRefusalIntegrationTests(
             receiptNodes: {},
             receiptTotal: 0,
             plan: "free",
-          },
-          {
-            thrown: "ValidationError",
-            receiptNodes: {},
-            receiptTotal: 0,
-            plan: "enterprise",
           },
         );
       });
@@ -393,7 +420,6 @@ export function registerSetUpdateRefusalIntegrationTests(
           where: (candidate) => candidate.name.eq("After"),
         });
         expectRefusal(
-          store,
           {
             thrown: refusalClass(thrown),
             name: stored.name,
@@ -409,14 +435,6 @@ export function registerSetUpdateRefusalIntegrationTests(
             oldKeyOwner: account.id,
             newKeyOwner: undefined,
             rowsCarryingNewName: 1,
-          },
-          {
-            thrown: "ValidationError",
-            name: "After",
-            plan: "enterprise",
-            oldKeyOwner: account.id,
-            newKeyOwner: undefined,
-            rowsCarryingNewName: 2,
           },
         );
       });
@@ -462,7 +480,6 @@ export function registerSetUpdateRefusalIntegrationTests(
           await store.nodes.SearchAccount.getById(account.id),
         );
         expectRefusal(
-          store,
           {
             thrown: refusalClass(thrown),
             bio: stored.bio,
@@ -475,13 +492,6 @@ export function registerSetUpdateRefusalIntegrationTests(
             bio: "giraffe",
             plan: "free",
             oldTermHits: [`${account.id}:giraffe`],
-            newTermHits: [],
-          },
-          {
-            thrown: "ValidationError",
-            bio: "zebra",
-            plan: "enterprise",
-            oldTermHits: [`${account.id}:zebra`],
             newTermHits: [],
           },
         );
@@ -527,7 +537,6 @@ export function registerSetUpdateRefusalIntegrationTests(
           await store.nodes.VectorAccount.getById(account.id),
         );
         expectRefusal(
-          store,
           {
             thrown: refusalClass(thrown),
             vector: [...stored.vector],
@@ -539,13 +548,6 @@ export function registerSetUpdateRefusalIntegrationTests(
             thrown: "ValidationError",
             vector: [1, 0, 0, 0],
             plan: "free",
-            nearestId: account.id,
-            nearestScore: 1,
-          },
-          {
-            thrown: "ValidationError",
-            vector: [0, 1, 0, 0],
-            plan: "enterprise",
             nearestId: account.id,
             nearestScore: 1,
           },
@@ -590,21 +592,202 @@ export function registerSetUpdateRefusalIntegrationTests(
         ).plan;
       }
       expectRefusal(
-        store,
         { thrown: refusalClass(thrown), plans },
         {
           thrown: "ValidationError",
           plans: { ownedA: "free", unowned: "free", ownedB: "free" },
         },
-        {
-          thrown: "ValidationError",
-          plans: {
-            ownedA: "enterprise",
-            unowned: "enterprise",
-            ownedB: "enterprise",
-          },
-        },
       );
+    });
+    describe.for(SET_UPDATE_VERBS)("%s", (verb) => {
+      it("refuses a rename onto another row's unique key and leaves both rows and their claims as they were", async () => {
+        const store = await context.createStore(refusalGraph);
+        const renamed = await store.nodes.RefusalAccount.create({
+          name: "Alpha",
+          plan: "free",
+        });
+        const holder = await store.nodes.RefusalAccount.create({
+          name: "Beta",
+          plan: "free",
+        });
+
+        const outcome = await store.transactionWithReceipt(async (tx) =>
+          settle(
+            verb === "updateWhere" ?
+              tx.nodes.RefusalAccount.updateWhere({
+                patch: { name: "Beta" },
+                where: (candidate) => candidate.id.eq(renamed.id),
+              })
+            : tx.nodes.RefusalAccount.compareAndSet(renamed.id, {
+                expected: { name: "Alpha" },
+                patch: { name: "Beta" },
+              }),
+          ),
+        );
+
+        const axis = uniquenessClaimAxis(
+          "RefusalAccount",
+          REFUSAL_NAME_UNIQUE.scope,
+          refusalRegistry,
+        );
+        async function claimOwner(name: string): Promise<string | undefined> {
+          const row = await store.backend.checkUnique({
+            graphId: refusalGraph.id,
+            nodeKind: axis,
+            constraintName: REFUSAL_NAME_UNIQUE.name,
+            key: computeUniqueKey(
+              { name },
+              REFUSAL_NAME_UNIQUE.fields,
+              REFUSAL_NAME_UNIQUE.collation,
+            ),
+            includeDeleted: false,
+          });
+          return row?.node_id;
+        }
+        const stored = requireDefined(
+          await store.nodes.RefusalAccount.getById(renamed.id),
+        );
+        const carryingBeta = await store.nodes.RefusalAccount.find({
+          where: (candidate) => candidate.name.eq("Beta"),
+        });
+        expectRefusal(
+          {
+            thrown:
+              outcome.result instanceof UniquenessError ?
+                "UniquenessError"
+              : String(outcome.result),
+            receiptTotal: outcome.receipt.writes.total,
+            name: stored.name,
+            version: stored.meta.version,
+            alphaOwner: await claimOwner("Alpha"),
+            betaOwner: await claimOwner("Beta"),
+            rowsCarryingBeta: carryingBeta.map((row) => row.id),
+          },
+          {
+            thrown: "UniquenessError",
+            receiptTotal: 0,
+            name: "Alpha",
+            version: renamed.meta.version,
+            alphaOwner: renamed.id,
+            betaOwner: holder.id,
+            rowsCarryingBeta: [holder.id],
+          },
+        );
+      });
+
+      it("refuses an after-image that needs schema normalization and leaves the row as it was", async () => {
+        const store = await context.createStore(normalizationGraph);
+        // Stored before the kind declared its default: the row lacks `tier`,
+        // so every after-image of it needs the default filled in.
+        await store.backend.insertNode({
+          graphId: normalizationGraph.id,
+          kind: "TieredAccount",
+          id: "tiered-legacy",
+          props: { name: "Legacy" },
+        });
+
+        const thrown = await store.transaction(async (tx) =>
+          settle(
+            verb === "updateWhere" ?
+              tx.nodes.TieredAccount.updateWhere({
+                patch: { name: "Renamed" },
+                where: (candidate) => candidate.name.eq("Legacy"),
+              })
+            : tx.nodes.TieredAccount.compareAndSet(
+                "tiered-legacy" as Parameters<
+                  typeof tx.nodes.TieredAccount.compareAndSet
+                >[0],
+                { expected: { name: "Legacy" }, patch: { name: "Renamed" } },
+              ),
+          ),
+        );
+
+        const stored = requireDefined(
+          await store.backend.getNode(
+            normalizationGraph.id,
+            "TieredAccount",
+            "tiered-legacy",
+          ),
+        );
+        expectRefusal(
+          {
+            thrown: refusalClass(thrown),
+            props: rowPropsToObject(stored.props),
+            version: stored.version,
+          },
+          {
+            thrown: "ValidationError",
+            props: { name: "Legacy" },
+            version: 1,
+          },
+        );
+      });
+
+      it("writes nothing and reports the conflict when the row is re-created under its id between the dry-run and the write", async () => {
+        const store = await context.createStore(recreationGraph);
+        const original = await store.nodes.RecreatedAccount.create({
+          name: "Original",
+          plan: "free",
+        });
+        // Untouched between the two statements: it still carries its token,
+        // and the write must leave it alone too, since the set it belongs to
+        // is refused as a whole.
+        const bystander = await store.nodes.RecreatedAccount.create({
+          name: "Bystander",
+          plan: "free",
+        });
+        // Between the dry-run and the keyed write, this transaction deletes the
+        // row and re-creates it under the same id at the same version (1),
+        // still matching the selection. Only the stored row the dry-run read
+        // can tell the two apart.
+        const recreating = createStore(
+          recreationGraph,
+          backendRecreatingBeforeSetWrite(store.backend, original.id),
+        );
+
+        const thrown = await recreating.transaction(async (tx) =>
+          settle(
+            verb === "updateWhere" ?
+              tx.nodes.RecreatedAccount.updateWhere({
+                patch: { plan: "enterprise" },
+                where: (candidate) => candidate.plan.eq("free"),
+              })
+            : tx.nodes.RecreatedAccount.compareAndSet(original.id, {
+                expected: { plan: "free" },
+                patch: { plan: "enterprise" },
+              }),
+          ),
+        );
+
+        const stored = requireDefined(
+          await store.nodes.RecreatedAccount.getById(original.id),
+        );
+        const storedBystander = requireDefined(
+          await store.nodes.RecreatedAccount.getById(bystander.id),
+        );
+        expectRefusal(
+          {
+            thrown:
+              (
+                thrown instanceof DatabaseOperationError &&
+                thrown.details.reason === "no_row_returned"
+              ) ?
+                "no_row_returned"
+              : String(thrown),
+            name: stored.name,
+            plan: stored.plan,
+            version: stored.meta.version,
+            bystander: [storedBystander.plan, storedBystander.meta.version],
+          },
+          {
+            thrown: "no_row_returned",
+            name: "Recreated",
+            plan: "free",
+            version: 1,
+            bystander: ["free", 1],
+          },
+        );
+      });
     });
   });
 }

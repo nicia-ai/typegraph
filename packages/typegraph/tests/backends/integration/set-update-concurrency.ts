@@ -50,18 +50,21 @@ const RACE_CASES: readonly Readonly<{
 ];
 
 /**
- * What a waiting set update's text in `pg_stat_activity` contains. The text
- * is cut at `track_activity_query_size` (1 kB by default), and the set update
- * opens with its key CTE, which embeds the whole candidate query, so the
- * `UPDATE` keyword can fall past the cut; the CTE's name cannot.
+ * What a waiting set update's text in `pg_stat_activity` contains. The
+ * statement that waits is the set update's locked dry-run, the first one that
+ * meets the row. The text is cut at `track_activity_query_size` (1 kB by
+ * default), and the dry-run opens with its key CTE, which embeds the whole
+ * candidate query, so what follows can fall past the cut; the CTE's name
+ * cannot.
  */
 const SET_UPDATE_TEXT = "%tg_set_keys%";
 
 /**
  * Runs `operation` on one session while another session holds `patch` on the
- * row uncommitted, and releases that writer only once the operation's UPDATE
- * is observed waiting for the row lock. The operation's snapshot therefore
- * predates the writer's commit and its write lands after it.
+ * row uncommitted, and releases that writer only once the operation's locked
+ * dry-run is observed waiting for the row lock. The operation's snapshot
+ * therefore predates the writer's commit and its read of the row lands after
+ * it.
  */
 async function raceAgainstUncommittedUpdate<Result>(
   context: IntegrationTestContext,
@@ -102,23 +105,26 @@ async function raceAgainstUncommittedUpdate<Result>(
 }
 
 /**
- * Where the replacing writer makes the set update wait. `"table"`: a SHARE
- * table lock, which an UPDATE needs a conflicting lock against before it
- * takes its snapshot but a plain read does not — so the update waits after
- * any earlier read statement and writes from a snapshot that sees the
- * replacement. `"row"`: the deleted row's own lock, which an UPDATE meets only
- * while writing — so its snapshot predates the replacement.
+ * What the replacing writer holds besides its uncommitted delete and
+ * re-create. `"table"`: also a SHARE table lock, which an UPDATE of the table
+ * waits on before it takes its snapshot. `"row"`: nothing more.
+ *
+ * Either way the set update waits at its dry-run, on the deleted row itself
+ * (`transactionid`): the dry-run locks rows as `FOR NO KEY UPDATE`, whose
+ * table lock (ROW SHARE) the SHARE lock does not exclude, so it reaches the
+ * row with a snapshot that predates the replacement. Once the writer commits,
+ * the row it locked is gone, and the write never runs on its replacement.
  */
 type ReplacementHold = "table" | "row";
 
 const REPLACEMENT_HOLD_WAIT_EVENTS: Readonly<Record<ReplacementHold, string>> =
-  { table: "relation", row: "transactionid" };
+  { table: "transactionid", row: "transactionid" };
 
 /**
  * Runs `operation` while another session holds, uncommitted, a hard delete of
  * `documentId` and a new row created under the same id — at version 1, as the
- * original — and releases that writer only once the operation's UPDATE is
- * observed waiting on `hold`.
+ * original — and releases that writer only once the operation's dry-run is
+ * observed waiting on the row.
  */
 async function raceAgainstUncommittedReplacement<Result>(
   context: IntegrationTestContext,

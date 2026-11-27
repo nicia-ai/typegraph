@@ -1327,23 +1327,6 @@ export function createRecordedBackend(
         },
       }),
 
-    ...(backend.compareAndSetNode === undefined ?
-      {}
-    : {
-        async compareAndSetNode(params) {
-          return capture((target) => {
-            const compareAndSetNode = target.compareAndSetNode;
-            if (compareAndSetNode === undefined) {
-              throw new ConfigurationError(
-                "Recorded compareAndSetNode capability disappeared inside a transaction",
-                { operation: "compareAndSetNode" },
-              );
-            }
-            return compareAndSetNode(params);
-          });
-        },
-      }),
-
     async deleteNode(params) {
       await capture((target) => target.deleteNode(params));
     },

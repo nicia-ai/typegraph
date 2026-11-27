@@ -14,7 +14,10 @@ import {
 import type {
   CompareAndSetNodeParams,
   GraphBackend,
+  PreviewNodeSetUpdateParams,
   UpdateNodeSetParams,
+  UpdateNodeSetResult,
+  UpdateWhereNodeSetParams,
 } from "../../../src/backend/types";
 import { rowPropsToObject } from "../../../src/backend/types";
 import type { QueryAst } from "../../../src/query/ast";
@@ -55,18 +58,39 @@ function compileCandidateIds(
   });
 }
 
+/**
+ * A set update through the backend port, as the store runs it: the locked
+ * dry-run, then the keyed write of exactly the rows it returned.
+ */
+async function runNodeSetUpdate(
+  backend: Pick<GraphBackend, "previewNodeSetUpdate" | "updateNodeSet">,
+  params: PreviewNodeSetUpdateParams,
+): Promise<UpdateNodeSetResult> {
+  const preview = await requireDefined(backend.previewNodeSetUpdate)(params);
+  if (preview.rows.length === 0) return { affectedCount: 0, rows: [] };
+  return requireDefined(backend.updateNodeSet)({
+    graphId: params.graphId,
+    kind: params.kind,
+    patch: params.patch,
+    ...(params.unsetProperties === undefined ?
+      {}
+    : { unsetProperties: params.unsetProperties }),
+    rows: preview.rows.map((row) => ({ id: row.id, rowToken: row.rowToken })),
+  });
+}
+
 async function updateNodeSet(
-  backend: Pick<GraphBackend, "updateNodeSet">,
-  params: UpdateNodeSetParams,
-) {
-  return requireDefined(backend.updateNodeSet)(params);
+  backend: Pick<GraphBackend, "previewNodeSetUpdate" | "updateNodeSet">,
+  params: UpdateWhereNodeSetParams,
+): Promise<UpdateNodeSetResult> {
+  return runNodeSetUpdate(backend, params);
 }
 
 async function compareAndSetNode(
-  backend: Pick<GraphBackend, "compareAndSetNode">,
+  backend: Pick<GraphBackend, "previewNodeSetUpdate" | "updateNodeSet">,
   params: CompareAndSetNodeParams,
-) {
-  return requireDefined(backend.compareAndSetNode)(params);
+): Promise<UpdateNodeSetResult> {
+  return runNodeSetUpdate(backend, params);
 }
 
 /** The messages of `error` and every cause beneath it. */
@@ -262,8 +286,10 @@ export function registerSetNodeMutationIntegrationTests(
         NodeSetUpdateWork,
         { operation: "updateWhere" }
       >;
-      expectTypeOf<CompareAndSetNodeParams>().not.toExtend<UpdateNodeSetParams>();
-      expectTypeOf<UpdateNodeSetParams>().not.toExtend<CompareAndSetNodeParams>();
+      expectTypeOf<CompareAndSetNodeParams>().not.toExtend<UpdateWhereNodeSetParams>();
+      expectTypeOf<UpdateWhereNodeSetParams>().not.toExtend<CompareAndSetNodeParams>();
+      // The keyed write is fed only by a dry-run: no selection is a write key set.
+      expectTypeOf<PreviewNodeSetUpdateParams>().not.toExtend<UpdateNodeSetParams>();
       expectTypeOf<CompareAndSetWork>().not.toExtend<UpdateWhereWork>();
       expectTypeOf<UpdateWhereWork>().not.toExtend<CompareAndSetWork>();
     });

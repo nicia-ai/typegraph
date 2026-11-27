@@ -23,7 +23,6 @@ import type {
   CheckUniqueBatchParams,
   CheckUniqueParams,
   ClaimEdgeCardinalityParams,
-  CompareAndSetNodeParams,
   CompositionClaimScope,
   ContributionMaterializationIdentity,
   CountEdgesAtEndpointParams,
@@ -55,6 +54,7 @@ import type {
   InsertSchemaParams,
   InsertUniqueParams,
   ManagedNodeCreatePlan,
+  PreviewNodeSetUpdateParams,
   PurgeEdgeClaimsParams,
   RecordContributionMaterializationParams,
   ResolvedNodeUpdateBatchParams,
@@ -177,6 +177,7 @@ import {
   buildInsertNodeWithSchemaFence,
   buildLockNodes,
   buildLockNodesForAtomicDeleteWithSchemaFence,
+  buildPreviewNodeSetUpdate,
   buildReadAtomicNodeMutationPostimages,
   buildResolvedNodeUpdateBatch,
   buildUpdateNode,
@@ -381,6 +382,14 @@ export type CommonOperationStrategy = Readonly<{
    * builders below according to its resolved `NodeRowLockPlan`.
    */
   nodeRowLockClauses: NodeRowLockClauses;
+  /**
+   * The dialect's spelling of the lock an UPDATE of a node row takes, for a
+   * set update's dry-run (PostgreSQL `FOR NO KEY UPDATE`: it excludes another
+   * writer of the row but not an edge write's `FOR KEY SHARE` on it, exactly
+   * as the UPDATE itself does). Passed, or an empty clause, by the same
+   * `NodeRowLockPlan` decision as {@link nodeRowLockClauses}.
+   */
+  nodeSetUpdateRowLock: RowLockClause;
   /** The `getNodes` read, ordered by id and locked by `rowLock`. */
   buildLockNodes: (
     graphId: string,
@@ -411,10 +420,11 @@ export type CommonOperationStrategy = Readonly<{
     ids: readonly string[],
     schemaFence: SchemaWriteFenceParams,
   ) => SQL;
-  buildUpdateNodeSet: (
-    params: CompareAndSetNodeParams | UpdateNodeSetParams,
-    timestamp: string,
+  buildPreviewNodeSetUpdate: (
+    params: PreviewNodeSetUpdateParams,
+    rowLock: RowLockClause,
   ) => SQL;
+  buildUpdateNodeSet: (params: UpdateNodeSetParams, timestamp: string) => SQL;
   buildResolvedNodeUpdateBatch: (
     params: ResolvedNodeUpdateBatchParams,
     timestamp: string,
@@ -914,7 +924,9 @@ const CLAIM_PURGE_LOCKS_ROWS = {
   sqlite: false,
 } satisfies Record<SqlDialect, boolean>;
 
-function postgresRowLock(strength: "FOR KEY SHARE" | "FOR UPDATE") {
+function postgresRowLock(
+  strength: "FOR KEY SHARE" | "FOR NO KEY UPDATE" | "FOR UPDATE",
+) {
   return (of?: readonly string[]): SQL =>
     of === undefined || of.length === 0 ?
       sql.raw(strength)
@@ -923,7 +935,7 @@ function postgresRowLock(strength: "FOR KEY SHARE" | "FOR UPDATE") {
       );
 }
 
-const EMPTY_ROW_LOCK: RowLockClause = () => sql.empty();
+export const EMPTY_ROW_LOCK: RowLockClause = () => sql.empty();
 
 /**
  * Clauses that lock nothing: for an engine that admits one writer at a time,
@@ -950,6 +962,12 @@ export const NODE_ROW_LOCK_CLAUSES = {
   },
   sqlite: NO_NODE_ROW_LOCK_CLAUSES,
 } satisfies Record<SqlDialect, NodeRowLockClauses>;
+
+/** See {@link CommonOperationStrategy.nodeSetUpdateRowLock}. */
+const NODE_SET_UPDATE_ROW_LOCK = {
+  postgres: postgresRowLock("FOR NO KEY UPDATE"),
+  sqlite: EMPTY_ROW_LOCK,
+} satisfies Record<SqlDialect, RowLockClause>;
 
 function createCommonOperationStrategy(
   tables: Tables,
@@ -1170,6 +1188,7 @@ function createCommonOperationStrategy(
       ...(fulltextStrategy === undefined ? [] : (["fulltext"] as const)),
     ],
     nodeRowLockClauses: NODE_ROW_LOCK_CLAUSES[dialect],
+    nodeSetUpdateRowLock: NODE_SET_UPDATE_ROW_LOCK[dialect],
     buildConvergeEdgeCreate: (params, endpointLock) =>
       buildConvergeEdgeCreate(tables, params, endpointLock),
     buildAtomicConvergeEdges: (params, endpointLock) =>
@@ -1368,10 +1387,13 @@ function createCommonOperationStrategy(
       nodes: nodePrimaryKeyConstraint(tables.nodes),
       edges: edgePrimaryKeyConstraint(tables.edges),
     },
-    buildUpdateNodeSet(
-      params: CompareAndSetNodeParams | UpdateNodeSetParams,
-      timestamp: string,
+    buildPreviewNodeSetUpdate(
+      params: PreviewNodeSetUpdateParams,
+      rowLock: RowLockClause,
     ): SQL {
+      return buildPreviewNodeSetUpdate(tables, dialect, params, rowLock);
+    },
+    buildUpdateNodeSet(params: UpdateNodeSetParams, timestamp: string): SQL {
       return buildUpdateNodeSet(tables, dialect, params, timestamp);
     },
     buildResolvedNodeUpdateBatch(params, timestamp): SQL {

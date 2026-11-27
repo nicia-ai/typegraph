@@ -84,6 +84,7 @@ async function seededStore(backend: GraphBackend, count: number) {
 
 /** The backend members a set update's claim maintenance reaches, in order. */
 const CLAIM_MEMBERS = [
+  "previewNodeSetUpdate",
   "updateNodeSet",
   "checkUniqueBatch",
   "hardDeleteUniquesByNodeIds",
@@ -177,10 +178,11 @@ describe("set-update uniqueness validation", () => {
     );
 
     expect(stored?.code).toBe("code-0");
-    // The row write ran (its after-images are what the check reads); the
-    // persisted-claim probe and the rebuild never did.
+    // The dry-run ran (its after-images are what the check reads); the row
+    // write, the persisted-claim probe and the rebuild never did.
     expect(counts).toEqual({
-      updateNodeSet: 1,
+      previewNodeSetUpdate: 1,
+      updateNodeSet: 0,
       checkUniqueBatch: 0,
       hardDeleteUniquesByNodeIds: 0,
       insertUniqueBatch: 0,

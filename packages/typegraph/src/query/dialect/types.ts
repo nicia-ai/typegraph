@@ -798,6 +798,23 @@ export interface DialectAdapter {
  */
 type BuiltinDialectMembers = Readonly<{
   /**
+   * The entries of a JSON object bound as ONE parameter (text keys, text
+   * values) as a relation for a `FROM` clause: one row per entry, its key in
+   * the column `key` and its value in the column `value` of `alias`, with the
+   * same single placeholder whatever the object's size. For a statement that
+   * joins over a bound map rather than testing membership in a list.
+   *
+   * @example
+   * SQLite: json_each(?) AS alias
+   * PostgreSQL: jsonb_each_text(CAST(? AS jsonb)) AS alias(key, value)
+   */
+  textMapParameterRows: (
+    this: void,
+    packedMap: SqlFragment,
+    alias: SqlFragment,
+  ) => SqlFragment;
+
+  /**
    * Gives a text expression the collation TypeGraph declares its key columns
    * with, so a `DISTINCT`, `GROUP BY` or comparison over a projected id tells
    * ids apart exactly as the primary key does, whatever collation the

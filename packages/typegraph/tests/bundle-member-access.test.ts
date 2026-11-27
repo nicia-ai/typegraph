@@ -89,15 +89,20 @@ const REASONED_FLOOR = 133;
 // write overlay, declared at its live count: 239 -> 244 live, 245 -> 250
 // declared. Its batch embedding delete shares the batch sync's
 // `deleteEmbedding`/`deleteEmbeddingBatch` choice, so those counts hold.
-const DEFERRED_LIVE_TOTAL = 244;
-const DEFERRED_DECLARED_TOTAL = 250;
+// The set update (#948) drops `compareAndSetNode` for the dry-run
+// `previewNodeSetUpdate`, read by the entry check and the transaction-target
+// check beside `updateNodeSet`, and the recorded-capture overlays wrap only
+// the keyed write: 244 -> 240 live, 250 -> 246 declared.
+const DEFERRED_LIVE_TOTAL = 240;
+const DEFERRED_DECLARED_TOTAL = 246;
 const EXCLUDED_COUNT = 5;
 // Lineage source selection reads the backend's own `lineage` once instead of
 // twice (the read-set fence binds it for its key-delta filter): 387 -> 386.
 // One `deleteEdgesBatch` read left the edge write pipeline: 386 -> 385.
 // Node bulkHardDelete (#460): one `findEdgesConnectedToNodes` and five
 // `hardDeleteNodesBatch` reads: 385 -> 391.
-const TOTAL_ROW_COUNT = 391;
+// The set update (#948): four fewer reads, as above: 391 -> 387.
+const TOTAL_ROW_COUNT = 387;
 const ANNOTATED_RESIDUE_KEYS = [
   "backend/migrate-recorded-time.ts:168#executeStatement",
   "backend/migrate-recorded-time.ts:175#executeStatement",

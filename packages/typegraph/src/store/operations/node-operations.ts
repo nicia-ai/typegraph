@@ -330,6 +330,7 @@ import {
   type NodeDeleteRequest,
   nodeDeleteRequiresPortablePath,
   type NodeInsertSyncItem,
+  nodeSetUpdateUnsupportedError,
   readEdgesConnectedToNodes,
 } from "./node-write-pipeline";
 import {
@@ -6497,9 +6498,10 @@ function normalizeCompareAndSetExpectations(
 }
 
 /**
- * Executes an atomic, set-based update of current nodes. The backend returns
- * every after-image so the Store can validate the complete rows before
- * rebuilding all derived sidecars inside the same transaction.
+ * Executes an atomic, set-based update of current nodes. The backend's locked
+ * dry-run returns every after-image so the Store can validate the complete
+ * rows before it writes any of them, then rebuild all derived sidecars inside
+ * the same transaction (see `applyNodeSetUpdate`).
  */
 export async function executeNodeSetUpdate<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -6522,20 +6524,11 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
       { code: "SET_UPDATE_TRANSACTIONS_REQUIRED", kind },
     );
   }
-  if (operation === "updateWhere" && backend.updateNodeSet === undefined) {
-    throw new ConfigurationError(
-      "This backend does not support set-based node updates",
-      { code: "SET_UPDATE_UNSUPPORTED", kind },
-    );
-  }
   if (
-    operation === "compareAndSet" &&
-    backend.compareAndSetNode === undefined
+    backend.previewNodeSetUpdate === undefined ||
+    backend.updateNodeSet === undefined
   ) {
-    throw new ConfigurationError(
-      "This backend does not support node compare-and-set",
-      { code: "COMPARE_AND_SET_UNSUPPORTED", kind },
-    );
+    throw nodeSetUpdateUnsupportedError(operation, kind);
   }
   if (Object.keys(inputPatch).length === 0) {
     throw new ValidationError(`${operation}() patch must not be empty`, {

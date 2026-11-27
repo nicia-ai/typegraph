@@ -711,9 +711,10 @@ const CASES: Record<keyof WriteSession, Case> = {
       "upsertEmbeddingBatch",
     ],
     row: "updateNodeSet",
-    // The set update writes its row FIRST — the after-images its claims are
-    // computed from are not knowable before the statement runs — so every claim
-    // here is a post-row one, and the fans still follow them.
+    // The set update writes its row before its claims: it validates the
+    // dry-run's after-images first, but releases and re-takes the claims only
+    // once the keyed write has landed, so every claim here is a post-row one,
+    // and the fans still follow them.
     postRowClaims: ["hardDeleteUniquesByNodeIds", "insertUniqueBatch"],
     postRowFans: ["upsertFulltextBatch", "upsertEmbeddingBatch"],
     plan: NODE_PLAN,

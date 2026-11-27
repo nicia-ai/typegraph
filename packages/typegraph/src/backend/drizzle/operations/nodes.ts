@@ -2,7 +2,10 @@ import { type SQL, sql } from "drizzle-orm";
 
 import { CompilerInvariantError } from "../../../errors";
 import { getDialect } from "../../../query/dialect";
-import type { DialectAdapter } from "../../../query/dialect/types";
+import type {
+  BuiltinDialectAdapter,
+  DialectAdapter,
+} from "../../../query/dialect/types";
 import { jsonPointer } from "../../../query/json-pointer";
 import {
   sql as portableSql,
@@ -18,12 +21,12 @@ import type {
   AtomicNodeResolvedUpdateEntry,
 } from "../../capabilities/atomic-mutation-program";
 import type {
-  CompareAndSetNodeParams,
   DeleteNodeParams,
   HardDeleteNodeParams,
   HardDeleteNodesBatchParams,
   InsertNodeParams,
   NodePropertyExpectation,
+  PreviewNodeSetUpdateParams,
   ResolvedNodeUpdateBatchParams,
   SchemaWriteFenceParams,
   SqlDialect,
@@ -1085,27 +1088,67 @@ function buildNodeExpectationPredicate(
 }
 
 /**
- * The relations the set update introduces, by preferred name (see
- * {@link buildUpdateNodeSet}). They are resolved per schema through
+ * The relations the set update's statements introduce, by preferred name (see
+ * {@link buildPreviewNodeSetUpdate}). They are resolved per schema through
  * {@link statementRelationNames}, so a configured table carrying one of these
  * names is never shadowed.
  */
 const SET_KEYS = "tg_set_keys";
 const SET_SELECTED = "tg_set_selected";
 const SET_CANDIDATES = "tg_set_candidates";
-const SET_RELATIONS = [SET_KEYS, SET_SELECTED, SET_CANDIDATES] as const;
+const SET_KEY_ROWS = "tg_set_key_rows";
+const SET_RELATIONS = [
+  SET_KEYS,
+  SET_SELECTED,
+  SET_CANDIDATES,
+  SET_KEY_ROWS,
+] as const;
 
 /** The column aliases of the set update's key CTE. */
 const SET_KEY_GRAPH_ID = "tg_set_key_graph_id";
 const SET_KEY_KIND = "tg_set_key_kind";
 const SET_KEY_ID = "tg_set_key_id";
+const SET_KEY_TOKEN = "tg_set_key_token";
+
+/** The column the dry-run projects each row's token under. */
+export const SET_ROW_TOKEN_COLUMN = "tg_set_row_token";
+
+type SetRelationNames = Readonly<
+  Record<(typeof SET_RELATIONS)[number], string>
+>;
 
 /**
- * Builds one set-based update over candidate ids selected by the shared query
- * compiler. It is one statement on purpose: the candidates are read in the
- * same snapshot the UPDATE writes from, so the rows selected are the rows
- * written, and a direct call on an autocommit connection is as atomic as one
- * inside a transaction.
+ * The token naming one stored node row: its id, version and stored properties,
+ * as JSON text. THE one spelling of "the row the dry-run read" — the dry-run
+ * projects it and the keyed write compares against it, so the two cannot
+ * disagree about what makes a row the same row. JSON encoding keeps the three
+ * parts apart, and the stored properties are part of it so that a row deleted
+ * and re-created under the same id at the same version is told apart unless
+ * it is identical in every property the after-image is computed from.
+ *
+ * `relation` qualifies the columns; omitted, they resolve against the
+ * statement's single target table.
+ */
+function setRowToken(
+  adapter: DialectAdapter,
+  nodes: Tables["nodes"],
+  relation?: string,
+): SqlFragment {
+  const column = (name: string): SqlFragment =>
+    relation === undefined ?
+      portableSql.identifier(name)
+    : portableSql`${portableSql.identifier(relation)}.${portableSql.identifier(name)}`;
+  return portableSql`CAST(${adapter.textJsonArray([
+    column(nodes.id.name),
+    column(nodes.version.name),
+    column(nodes.props.name),
+  ])} AS TEXT)`;
+}
+
+/**
+ * The key CTE both set-update statements open with: one `(graph, kind, id)`
+ * row per distinct id `source` yields — with the row token `token` names,
+ * for the keyed write.
  *
  * The graph/kind fences are written as columns of the key subquery, not as
  * constant predicates on the nodes table. A constant `graph_id = ? AND
@@ -1117,27 +1160,70 @@ const SET_KEY_ID = "tg_set_key_id";
  * planner does not flatten, so it cannot fold the constants back onto the
  * nodes table — the same fences reach the nodes table only as join keys. The
  * nodes table then has no range for stale statistics to shrink, and every
- * alternative to keyed lookups has to scan the whole table once. The write
- * phase is therefore bounded by one table scan plus constant work per
- * candidate, and never rescans, while ids are unique within a graph across
- * kinds: a lookup by `(graph_id, id)` checks the kind afterwards, so an id
- * that K other kinds of the graph hold can cost K more index entries. Which side PostgreSQL takes follows its
- * estimate of the candidate count: estimated small, each candidate is looked
- * up by `(graph_id, id)` or the primary key; estimated large — as when the
- * graph and the kind are each in the statistics but never together, so their
- * frequencies are multiplied — the keys are hashed against one sequential
- * scan, even for one actual candidate. The fences themselves are unchanged: a
- * row is written only when its graph, kind and id equal a key's.
+ * alternative to keyed lookups has to scan the whole table once.
+ *
+ * `id` may carry any collation (a direct port caller writes its own candidate
+ * SQL), and that collation would decide both this DISTINCT and the match on
+ * the nodes table: SQLite's `NOCASE` would collapse two ids that differ only
+ * by case into one key, and a case-insensitive PostgreSQL collation would
+ * match a non-candidate twin. The key column's own collation makes both use
+ * the primary key's equality.
+ *
+ * The keys are a CTE so that `source` is evaluated once on every engine:
+ * SQLite codes a row-value IN that drives a prefix of an index twice (once to
+ * walk the primary key, once to test the whole row value) and would run an
+ * inlined source once per coding. PostgreSQL inlines the CTE as the subquery
+ * it is, so its plan is unchanged.
  */
-export function buildUpdateNodeSet(
-  tables: Tables,
-  dialect: "sqlite" | "postgres",
-  params: CompareAndSetNodeParams | UpdateNodeSetParams,
-  timestamp: string,
+function setKeysCte(
+  adapter: BuiltinDialectAdapter,
+  dialect: SqlDialect,
+  relationNames: SetRelationNames,
+  scope: Readonly<{ graphId: string; kind: string }>,
+  source: SqlFragment,
+  id: SqlFragment,
+  token?: SqlFragment,
 ): SQL {
-  const { nodes } = tables;
-  const adapter = getDialect(dialect);
-  const patchedProps = toDrizzleSql(
+  return toDrizzleSql(
+    adapter.singleEvaluationCte(
+      portableSql.identifier(relationNames[SET_KEYS]),
+      portableSql`
+              SELECT DISTINCT
+                CAST(${scope.graphId} AS TEXT) AS ${portableSql.identifier(SET_KEY_GRAPH_ID)},
+                CAST(${scope.kind} AS TEXT) AS ${portableSql.identifier(SET_KEY_KIND)},
+                ${adapter.keyText(id)} AS ${portableSql.identifier(SET_KEY_ID)}${
+                  token === undefined ?
+                    portableSql.empty()
+                  : portableSql`,
+                ${token} AS ${portableSql.identifier(SET_KEY_TOKEN)}`
+                }
+              FROM ${source}
+            `,
+    ),
+    dialect,
+  );
+}
+
+/** The key CTE's columns, qualified. */
+function setKeyColumns(relationNames: SetRelationNames) {
+  const keys = sql.identifier(relationNames[SET_KEYS]);
+  return {
+    keys,
+    graphId: sql`${keys}.${sql.identifier(SET_KEY_GRAPH_ID)}`,
+    kind: sql`${keys}.${sql.identifier(SET_KEY_KIND)}`,
+    id: sql`${keys}.${sql.identifier(SET_KEY_ID)}`,
+    token: sql`${keys}.${sql.identifier(SET_KEY_TOKEN)}`,
+  } as const;
+}
+
+/** The patched properties, from one builder call shared by both statements. */
+function setPatchedProps(
+  adapter: DialectAdapter,
+  dialect: SqlDialect,
+  nodes: Tables["nodes"],
+  params: Pick<UpdateNodeSetParams, "patch" | "unsetProperties">,
+): SQL {
+  return toDrizzleSql(
     adapter.jsonSetProperties(
       portableSql.identifier(nodes.props.name),
       params.patch,
@@ -1145,6 +1231,41 @@ export function buildUpdateNodeSet(
     ),
     dialect,
   );
+}
+
+/**
+ * Builds the locked dry-run of a set update over candidate ids selected by the
+ * shared query compiler: every live row the selection names, with its
+ * after-image and its row token (see {@link setRowToken}), writing nothing.
+ *
+ * It is one statement on purpose: the candidates are read in the same
+ * snapshot the rows are read and locked from, so the rows selected are the
+ * rows returned. `rowLock` is the clause the backend's node-row lock plan
+ * gives (PostgreSQL `FOR NO KEY UPDATE`, the lock an UPDATE of these rows
+ * takes; empty where writers already serialize), so the keyed write that
+ * follows in the same transaction finds them unchanged by any other session.
+ *
+ * The write phase this statement keeps bounded is the read of the nodes
+ * table, and {@link setKeysCte} explains why that read is keyed: it is bounded
+ * by one table scan plus constant work per candidate, and never rescans,
+ * while ids are unique within a graph across kinds: a lookup by `(graph_id,
+ * id)` checks the kind afterwards, so an id that K other kinds of the graph
+ * hold can cost K more index entries. Which side PostgreSQL takes follows its
+ * estimate of the candidate count: estimated small, each candidate is looked
+ * up by `(graph_id, id)` or the primary key; estimated large — as when the
+ * graph and the kind are each in the statistics but never together, so their
+ * frequencies are multiplied — the keys are hashed against one sequential
+ * scan, even for one actual candidate. The fences themselves are unchanged: a
+ * row is read only when its graph, kind and id equal a key's.
+ */
+export function buildPreviewNodeSetUpdate(
+  tables: Tables,
+  dialect: SqlDialect,
+  params: PreviewNodeSetUpdateParams,
+  rowLock: RowLockClause,
+): SQL {
+  const { nodes } = tables;
+  const adapter = getDialect(dialect);
   const propsColumn = portableSql.identifier(nodes.props.name);
   const expectedPredicates =
     params.operation === "compareAndSet" ?
@@ -1170,84 +1291,145 @@ export function buildUpdateNodeSet(
   // Resolved names are plain lowercase identifiers, emitted unquoted as the
   // candidates alias always was.
   const candidates = portableSql.raw(relationNames[SET_CANDIDATES]);
-  const keys = sql.identifier(relationNames[SET_KEYS]);
-  const keyGraphId = sql`${keys}.${sql.identifier(SET_KEY_GRAPH_ID)}`;
-  const keyKind = sql`${keys}.${sql.identifier(SET_KEY_KIND)}`;
-  const keyId = sql`${keys}.${sql.identifier(SET_KEY_ID)}`;
-  // The candidate query may project its ids under any collation (a direct
-  // port caller writes its own SQL), and that collation would decide both
-  // this DISTINCT and the match on the nodes table: SQLite's `NOCASE` would
-  // collapse two ids that differ only by case into one key, and a
-  // case-insensitive PostgreSQL collation would match a non-candidate twin.
-  // The key column's own collation makes both use the primary key's equality.
-  const candidateKeyId = adapter.keyText(
-    portableSql`${candidates}.${portableSql.identifier(params.candidateIdColumn)}`,
-  );
-  // The keys are a CTE so that the candidate query is evaluated once on every
-  // engine: SQLite codes the version-keyed row-value IN below twice (once to
-  // walk the primary key, once to test the whole row value) and would run an
-  // inlined candidate query once per coding. PostgreSQL inlines the CTE as the
-  // subquery it is, so its plan is unchanged.
-  const keysCte = toDrizzleSql(
-    adapter.singleEvaluationCte(
-      portableSql.identifier(relationNames[SET_KEYS]),
-      portableSql`
-              SELECT DISTINCT
-                CAST(${params.graphId} AS TEXT) AS ${portableSql.identifier(SET_KEY_GRAPH_ID)},
-                CAST(${params.kind} AS TEXT) AS ${portableSql.identifier(SET_KEY_KIND)},
-                ${candidateKeyId} AS ${portableSql.identifier(SET_KEY_ID)}
-              FROM (${params.candidateIds}) AS ${candidates}
-            `,
-    ),
+  const key = setKeyColumns(relationNames);
+  const keysCte = setKeysCte(
+    adapter,
     dialect,
+    relationNames,
+    params,
+    portableSql`(${params.candidateIds}) AS ${candidates}`,
+    portableSql`${candidates}.${portableSql.identifier(params.candidateIdColumn)}`,
   );
 
   // The candidate query is evaluated once, against the statement's snapshot,
-  // and yields only ids. Under PostgreSQL READ COMMITTED a target row a
-  // concurrent writer changes and commits while this UPDATE waits for its lock
-  // is re-checked against the outer conditions only, never against the
+  // and yields only ids. Under PostgreSQL READ COMMITTED a row a concurrent
+  // writer changes and commits while this statement waits for its lock is
+  // re-checked against the outer conditions only, never against the
   // candidate predicates — so for `updateWhere`, whose `where` / `exists` /
-  // `candidates` selectors live in that query, matching on the id alone writes
-  // a patch selected from the row's previous state. Pairing each candidate id
-  // with the version the snapshot held makes the write conditional on the row
-  // being exactly the one the selectors chose: every row write bumps
-  // `version` (a tombstone is fenced by `deleted_at IS NULL` below), so a row
-  // changed since the snapshot is skipped and absent from the after-images.
-  // The re-check follows the row's own version chain, so a row deleted and
-  // re-created under the same id — whose version starts again and can equal
-  // the snapshot's — is a different row and is never written either.
+  // `candidates` selectors live in that query, matching on the id alone reads
+  // a row selected from its previous state. Pairing each candidate id with
+  // the version the snapshot held makes the read conditional on the row being
+  // exactly the one the selectors chose: every row write bumps `version` (a
+  // tombstone is fenced by `deleted_at IS NULL` below), so a row changed since
+  // the snapshot is skipped and absent from the preview. The re-check follows
+  // the row's own version chain, so a row deleted and re-created under the
+  // same id — whose version starts again and can equal the snapshot's — is a
+  // different row and is never read either.
   //
   // `compareAndSet` keeps the id match. Its candidate query selects by id,
   // which a concurrent write cannot falsify, and its guard is the `expected`
-  // predicates above, which the outer UPDATE re-checks on the target row, so a
-  // concurrent change to an unrelated property must not fail it.
+  // predicates above, which the lock re-checks on the row, so a concurrent
+  // change to an unrelated property must not fail it.
   const candidateMatch =
     params.operation === "compareAndSet" ?
       sql`
         (${nodes.graphId}, ${nodes.kind}, ${nodes.id}) IN (
-                SELECT ${keyGraphId}, ${keyKind}, ${keyId}
-                FROM ${keys}
+                SELECT ${key.graphId}, ${key.kind}, ${key.id}
+                FROM ${key.keys}
               )
       `
     : sql`
       (${nodes.graphId}, ${nodes.kind}, ${nodes.id}, ${nodes.version}) IN (
               SELECT ${qualifiedColumn(selected, nodes.graphId)}, ${qualifiedColumn(selected, nodes.kind)}, ${qualifiedColumn(selected, nodes.id)}, ${qualifiedColumn(selected, nodes.version)}
-              FROM ${keys}
+              FROM ${key.keys}
               JOIN ${nodes} AS ${sql.identifier(selected)}
-                ON ${qualifiedColumn(selected, nodes.graphId)} = ${keyGraphId}
-               AND ${qualifiedColumn(selected, nodes.kind)} = ${keyKind}
-               AND ${qualifiedColumn(selected, nodes.id)} = ${keyId}
+                ON ${qualifiedColumn(selected, nodes.graphId)} = ${key.graphId}
+               AND ${qualifiedColumn(selected, nodes.kind)} = ${key.kind}
+               AND ${qualifiedColumn(selected, nodes.id)} = ${key.id}
             )
     `;
   return sql`
     ${keysCte}
-    UPDATE ${nodes}
-    SET ${quotedColumn(nodes.props)} = ${patchedProps},
-        ${quotedColumn(nodes.updatedAt)} = ${timestamp},
-        ${quotedColumn(nodes.version)} = ${quotedColumn(nodes.version)} + 1
+    SELECT ${nodes.graphId},
+           ${nodes.kind},
+           ${nodes.id},
+           ${setPatchedProps(adapter, dialect, nodes, params)} AS ${quotedColumn(nodes.props)},
+           ${nodes.version},
+           ${nodes.validFrom},
+           ${nodes.validTo},
+           ${nodes.createdAt},
+           ${nodes.updatedAt},
+           ${nodes.deletedAt},
+           ${toDrizzleSql(setRowToken(adapter, nodes), dialect)} AS ${sql.identifier(SET_ROW_TOKEN_COLUMN)}
+    FROM ${nodes}
     WHERE ${nodes.deletedAt} IS NULL
       ${expectedPredicate}
       AND ${candidateMatch}
+    ${rowLock()}
+  `;
+}
+
+/**
+ * Builds the keyed write of a set update: the patch, applied to exactly the
+ * rows a {@link buildPreviewNodeSetUpdate} returned, all or nothing.
+ *
+ * The rows are bound as ONE value, a JSON object from each id to its row
+ * token, so the statement binds a constant number of parameters however many
+ * rows it writes. The key CTE carries both: the id drives a keyed lookup of
+ * each row, as in the dry-run, and the token, compared on the row that lookup
+ * found, makes the match exact (see {@link setRowToken}). The trailing count
+ * compares how many keyed rows still carry their token with how many were
+ * validated: when any row was changed, deleted or re-created since the
+ * dry-run, the count is short, the statement writes no row, and the caller
+ * reports the mismatch — a row the caller did not validate is never written,
+ * and neither is part of a set it refused.
+ *
+ * The `SET` clause is the dry-run's after-image expression
+ * ({@link setPatchedProps}) over the same stored row, so the row written is
+ * the row validated.
+ */
+export function buildUpdateNodeSet(
+  tables: Tables,
+  dialect: SqlDialect,
+  params: UpdateNodeSetParams,
+  timestamp: string,
+): SQL {
+  const { nodes } = tables;
+  const adapter = getDialect(dialect);
+  const relationNames = statementRelationNames(tables, SET_RELATIONS);
+  const selected = relationNames[SET_SELECTED];
+  const keyRows = portableSql.identifier(relationNames[SET_KEY_ROWS]);
+  const key = setKeyColumns(relationNames);
+  // Built entry by entry rather than through `Object.fromEntries`, so no id
+  // is ever read as an object's special key: each entry is JSON as written.
+  const packedRows = `{${params.rows
+    .map((row) => `${JSON.stringify(row.id)}:${JSON.stringify(row.rowToken)}`)
+    .join(",")}}`;
+  const keysCte = setKeysCte(
+    adapter,
+    dialect,
+    relationNames,
+    params,
+    adapter.textMapParameterRows(portableSql`${packedRows}`, keyRows),
+    portableSql`${keyRows}.${portableSql.identifier("key")}`,
+    portableSql`${keyRows}.${portableSql.identifier("value")}`,
+  );
+  const targetToken = toDrizzleSql(setRowToken(adapter, nodes), dialect);
+  const selectedToken = toDrizzleSql(
+    setRowToken(adapter, nodes, selected),
+    dialect,
+  );
+  return sql`
+    ${keysCte}
+    UPDATE ${nodes}
+    SET ${quotedColumn(nodes.props)} = ${setPatchedProps(adapter, dialect, nodes, params)},
+        ${quotedColumn(nodes.updatedAt)} = ${timestamp},
+        ${quotedColumn(nodes.version)} = ${quotedColumn(nodes.version)} + ${sql.raw(String(NODE_VERSION_INCREMENT))}
+    WHERE ${nodes.deletedAt} IS NULL
+      AND (${nodes.graphId}, ${nodes.kind}, ${nodes.id}, ${targetToken}) IN (
+            SELECT ${key.graphId}, ${key.kind}, ${key.id}, ${key.token}
+            FROM ${key.keys}
+          )
+      AND (
+            SELECT COUNT(*)
+            FROM ${key.keys}
+            JOIN ${nodes} AS ${sql.identifier(selected)}
+              ON ${qualifiedColumn(selected, nodes.graphId)} = ${key.graphId}
+             AND ${qualifiedColumn(selected, nodes.kind)} = ${key.kind}
+             AND ${qualifiedColumn(selected, nodes.id)} = ${key.id}
+            WHERE ${qualifiedColumn(selected, nodes.deletedAt)} IS NULL
+              AND ${selectedToken} = ${key.token}
+          ) = ${params.rows.length}
     RETURNING *
   `;
 }

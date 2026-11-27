@@ -32,7 +32,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "updateNode",
   "upsertHeterogeneousNodes",
   "updateResolvedNodesBatch",
-  "compareAndSetNode",
+  "previewNodeSetUpdate",
   "updateNodeSet",
   "deleteNode",
   "hardDeleteNode",
