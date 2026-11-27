@@ -48,17 +48,27 @@ export function registerLibsqlIntegrationLane(
           const serializedClient = createClient({
             url: `file:${serializedPath}`,
           });
+          const serializedOptions = {
+            schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
+            ...(overrides?.tableNames === undefined ?
+              {}
+            : { tables: createSqliteTables(overrides.tableNames) }),
+          } as const;
           const { backend: serializedBackend } = await createLibsqlBackend(
             serializedClient,
-            {
-              schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
-              ...(overrides?.tableNames === undefined ?
-                {}
-              : { tables: createSqliteTables(overrides.tableNames) }),
-            },
+            serializedOptions,
           );
           return {
             backend: serializedBackend,
+            // The factory again over the same local client: a second
+            // wrapper, not a derivation of `backend`.
+            createWrapper: async () => {
+              const { backend: wrapper } = await createLibsqlBackend(
+                serializedClient,
+                serializedOptions,
+              );
+              return wrapper;
+            },
             close: async () => {
               await serializedBackend.close();
               serializedClient.close();

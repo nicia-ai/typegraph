@@ -32,13 +32,27 @@ export function registerSqliteIntegrationLane(
         // so nothing a provenance test does reaches the suite's own fixture.
         createSerializedBackend: (overrides) => {
           refuseUnsupportedSerializedBackendCapabilities(LANE_NAME, overrides);
-          const { backend } = createLocalSqliteBackend({
+          const serializedOptions = {
             schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
             ...(overrides?.tableNames === undefined ?
               {}
             : { tables: createSqliteTables(overrides.tableNames) }),
+          } as const;
+          const { backend, db: serializedDb } =
+            createLocalSqliteBackend(serializedOptions);
+          return Promise.resolve({
+            backend,
+            // The batteries-included factory over the same better-sqlite3
+            // handle: a second wrapper, not a derivation of `backend`.
+            createWrapper: () =>
+              Promise.resolve(
+                createSqliteBackend(serializedDb, {
+                  ...serializedOptions,
+                  executionProfile: { isSync: true },
+                }),
+              ),
+            close: () => backend.close(),
           });
-          return Promise.resolve({ backend, close: () => backend.close() });
         },
       };
     },
