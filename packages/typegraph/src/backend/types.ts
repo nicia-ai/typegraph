@@ -4625,6 +4625,20 @@ export type ReleaseUniquesByOwnerParams = Readonly<{
   keep: readonly KeptUniqueClaim[];
 }>;
 
+/**
+ * Parameters for listing the live claim keys one owner holds under one
+ * constraint, at every axis: what an owner release reads when the claims it
+ * keeps under that constraint do not fit one statement's bind budget.
+ */
+export type OwnerClaimKeysParams = Readonly<{
+  graphId: string;
+  /** The claim owner's concrete kind (`uniques.concrete_kind`). */
+  concreteKind: string;
+  /** The claim owner's node id (`uniques.node_id`). */
+  nodeId: string;
+  constraintName: string;
+}>;
+
 /** Parameters for permanently clearing uniqueness sidecars by node identity. */
 export type HardDeleteUniquesByNodeIdsParams = Readonly<{
   graphId: string;

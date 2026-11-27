@@ -1297,9 +1297,13 @@ const FORGOTTEN_EXPORT_DEBT: Readonly<Record<string, ForgottenExportDebt>> = {
     count: 1093,
     sha256: "16893d3b27648d4ce64565f98d3b49c04a1ecf627a773ddb35a680482dfac92a",
   },
+  // `CommonOperationStrategy.buildOwnerClaimKeys` takes
+  // `OwnerClaimKeysParams` (the owner release's read for a constraint whose
+  // kept claims exceed one statement), which `./backend` exports: the engine
+  // entrypoint, the only one rendering the strategy, gains that one name (+1).
   "./adapters/drizzle/engine": {
-    count: 354,
-    sha256: "3da41f174d0b69758343c037670bb7486319e4b6d792fd9fefea4afc576cd9cc",
+    count: 355,
+    sha256: "a795a164fdcb9e79676a0848a7ea5f6bd0c2718830c61af03db280c5d7b427eb",
   },
   // #956: the Drizzle index-table types its builders name
   // (`EdgeIndexTable`, `NodeIndexTable`, `NamedSqlWrapper`) are now exported

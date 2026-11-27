@@ -3590,6 +3590,14 @@ export type OptionalKeys<T> = {
 }[keyof T];
 
 // @public
+export type OwnerClaimKeysParams = Readonly<{
+    graphId: string;
+    concreteKind: string;
+    nodeId: string;
+    constraintName: string;
+}>;
+
+// @public
 export type PartialBundleBinding<M extends OptionalGraphBackendMember> = Readonly<Partial<Pick<GraphBackend, M>>> & Readonly<{
     [BUNDLE_BINDING]: true;
 }>;

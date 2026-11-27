@@ -10,6 +10,7 @@ import type {
   DeleteUniqueParams,
   HardDeleteUniquesByNodeIdsParams,
   InsertUniqueParams,
+  OwnerClaimKeysParams,
   ReleaseUniquesByOwnerParams,
   SqlDialect,
 } from "../../types";
@@ -495,6 +496,26 @@ export function buildReleaseUniquesByOwner(
       AND ${uniques.concreteKind} = ${params.concreteKind}
       AND ${uniques.nodeId} = ${params.nodeId}
       AND ${uniques.deletedAt} IS NULL${constraintTerm}${keepTerm}
+  `;
+}
+
+/**
+ * Builds the SELECT of the live claim keys one owner holds under one
+ * constraint, at every axis (`key` column; a key held at two axes appears
+ * twice). Served by the `(graph_id, concrete_kind, node_id)` owner index.
+ */
+export function buildOwnerClaimKeys(
+  tables: Tables,
+  params: OwnerClaimKeysParams,
+): SQL {
+  const { uniques } = tables;
+  return sql`
+    SELECT ${uniques.key} AS key FROM ${uniques}
+    WHERE ${uniques.graphId} = ${params.graphId}
+      AND ${uniques.concreteKind} = ${params.concreteKind}
+      AND ${uniques.nodeId} = ${params.nodeId}
+      AND ${uniques.constraintName} = ${params.constraintName}
+      AND ${uniques.deletedAt} IS NULL
   `;
 }
 

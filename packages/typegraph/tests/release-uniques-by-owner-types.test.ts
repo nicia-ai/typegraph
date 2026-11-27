@@ -12,6 +12,7 @@ import type { CommonOperationStrategy } from "../src/backend/drizzle/operations/
 import type {
   GraphBackend,
   KeptUniqueClaim,
+  OwnerClaimKeysParams,
   ReleaseUniquesByOwnerParams,
   TransactionBackend,
 } from "../src/backend/index";
@@ -43,6 +44,13 @@ function strategyWithoutBuilderIsRefused(
   return candidate;
 }
 
+function strategyWithoutKeyReadIsRefused(
+  candidate: Omit<CommonOperationStrategy, "buildOwnerClaimKeys">,
+): CommonOperationStrategy {
+  // @ts-expect-error -- `buildOwnerClaimKeys` is required
+  return candidate;
+}
+
 describe("releaseUniquesByOwner is required of a hand-written backend", () => {
   it("a backend without the member is not a GraphBackend", () => {
     expectTypeOf(
@@ -59,6 +67,12 @@ describe("releaseUniquesByOwner is required of a hand-written backend", () => {
   it("an operation strategy without the builder is not a CommonOperationStrategy", () => {
     expectTypeOf(
       strategyWithoutBuilderIsRefused,
+    ).returns.toEqualTypeOf<CommonOperationStrategy>();
+  });
+
+  it("an operation strategy without the owner key read is not a CommonOperationStrategy", () => {
+    expectTypeOf(
+      strategyWithoutKeyReadIsRefused,
     ).returns.toEqualTypeOf<CommonOperationStrategy>();
   });
 
@@ -90,5 +104,16 @@ describe("releaseUniquesByOwner is required of a hand-written backend", () => {
     expectTypeOf<
       ReturnType<CommonOperationStrategy["buildReleaseUniquesByOwner"]>
     >().toEqualTypeOf<SQL>();
+    expectTypeOf<
+      CommonOperationStrategy["buildOwnerClaimKeys"]
+    >().parameters.toEqualTypeOf<[params: OwnerClaimKeysParams]>();
+    expectTypeOf<OwnerClaimKeysParams>().toEqualTypeOf<
+      Readonly<{
+        graphId: string;
+        concreteKind: string;
+        nodeId: string;
+        constraintName: string;
+      }>
+    >();
   });
 });

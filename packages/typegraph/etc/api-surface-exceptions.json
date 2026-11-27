@@ -273,6 +273,14 @@
   },
   {
     "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "buildOwnerClaimKeys",
+    "kind": "required-member-added",
+    "reason": "`buildOwnerClaimKeys` builds the read behind the bundled backends' required `releaseUniquesByOwner` (#1011) for a constraint whose kept claims alone exceed one statement's bind budget: the release reads the owner's live keys under it and gives back those outside its complete kept list, because splitting that list across statements would let one statement release a key another keeps. A hand-assembled operation strategy must supply it beside `buildReleaseUniquesByOwner`; the bundled strategy builders provide it.",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
     "declaration": "GraphBackend",
     "member": "releaseUniquesByOwner",
     "kind": "required-member-added",

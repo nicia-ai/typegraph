@@ -424,6 +424,7 @@ export type {
   NodeRow,
   NodeRowLock,
   NormalizedColumnKind,
+  OwnerClaimKeysParams,
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
   QueryExecutionBackend,

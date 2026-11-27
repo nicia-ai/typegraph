@@ -502,6 +502,7 @@ type CommonOperationStrategy = Readonly<{
     buildInsertUniqueBatch: (entries: readonly InsertUniqueParams[]) => SQL;
     buildDeleteUnique: (params: DeleteUniqueParams, timestamp: string) => SQL;
     buildReleaseUniquesByOwner: (params: ReleaseUniquesByOwnerParams, timestamp: string) => SQL;
+    buildOwnerClaimKeys: (params: OwnerClaimKeysParams) => SQL;
     buildHardDeleteUniquesByNode: (graphId: string, concreteKind: string, nodeId: string) => SQL;
     buildHardDeleteUniquesByNodeIds: (params: HardDeleteUniquesByNodeIdsParams) => SQL;
     buildHardDeleteUniquesByConcreteKind: (params: HardDeleteUniquesByConcreteKindParams) => SqlFragment;
@@ -10065,6 +10066,14 @@ type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "o
 
 // @public
 type NullCheckOp = "isNull" | "isNotNull";
+
+// @public
+type OwnerClaimKeysParams = Readonly<{
+    graphId: string;
+    concreteKind: string;
+    nodeId: string;
+    constraintName: string;
+}>;
 
 // @public
 class Placeholder {

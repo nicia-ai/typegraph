@@ -15,14 +15,23 @@
  * records every statement prepared on the connection and asserts the release
  * statements' bind counts directly.
  *
+ * A constraint whose kept claims alone exceed the budget cannot be split: the
+ * statement carrying one part of its kept list would release the keys another
+ * part keeps. The backend reads the owner's live keys under that constraint
+ * and gives back exactly those outside its complete kept list.
+ *
  * REVERT CHECK: building the release as one statement fails the 33-constraint
  * case on its bind count (103 > 100); restoring the `AND NOT (...)` chain per
- * kept claim fails the 1000-claim case with SQLite's expression-depth error.
+ * kept claim fails the 1000-claim case with SQLite's expression-depth error;
+ * restoring the split by constraint alone fails the 48-claim case with
+ * `CompilerInvariantError` (101 > 96 binds for one constraint).
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { defineGraph, defineNode } from "../src";
+import { createPostgresBackend } from "../src/backend/drizzle/postgres";
+import { createLocalPgliteBackend } from "../src/backend/postgres/pglite";
 import { createLocalSqliteBackend } from "../src/backend/sqlite/local";
 import {
   type GraphBackend,
@@ -156,6 +165,64 @@ function keptClaims(count: number): readonly string[] {
   ).toSorted((left, right) => compareStrings(left, right));
 }
 
+/**
+ * Seeds one owner with 48 kept and 3 stale claims under one constraint (a
+ * kept and a stale one also at a second axis) and a kept and a stale claim
+ * under a second. Returns the release of both constraints, and the claims it
+ * must leave live.
+ */
+async function seedWideConstraint(
+  backend: GraphBackend,
+): Promise<
+  Readonly<{ release: () => Promise<void>; expected: readonly string[] }>
+> {
+  const wide = constraintName(0);
+  const narrow = constraintName(1);
+  const kept = Array.from({ length: 48 }, (_, index) => `kept${index}`);
+  const claims = [
+    // Every kept key, one of them also at a second axis, and three stale
+    // keys (one at the second axis only) the release must give back.
+    ...kept.map((key) => ({ axis: "Item", constraint: wide, key })),
+    { axis: "LegacyItem", constraint: wide, key: "kept47" },
+    { axis: "Item", constraint: wide, key: "stale0" },
+    { axis: "Item", constraint: wide, key: "stale1" },
+    { axis: "LegacyItem", constraint: wide, key: "stale2" },
+    // A second constraint that fits one statement.
+    { axis: "Item", constraint: narrow, key: "keptN" },
+    { axis: "Item", constraint: narrow, key: "staleN" },
+  ];
+  for (const held of claims) {
+    await backend.insertUnique({
+      graphId: GRAPH_ID,
+      nodeKind: held.axis,
+      constraintName: held.constraint,
+      key: held.key,
+      nodeId: "owner",
+      concreteKind: "Item",
+    });
+  }
+
+  const release = () =>
+    backend.releaseUniquesByOwner({
+      graphId: GRAPH_ID,
+      concreteKind: "Item",
+      nodeId: "owner",
+      constraintNames: [wide, narrow],
+      keep: [
+        ...kept.map((key) => ({ constraintName: wide, key })),
+        { constraintName: narrow, key: "keptN" },
+      ],
+    });
+  return {
+    release,
+    expected: [
+      ...kept.map((key) => `${wide}:${key}`),
+      `${wide}:kept47`,
+      `${narrow}:keptN`,
+    ].toSorted((left, right) => compareStrings(left, right)),
+  };
+}
+
 describe("releaseUniquesByOwner statement limits", () => {
   it("splits a release of 33 kept constraints under a 100-bind budget", async () => {
     const { backend, client } = await createBudgetedBackend(100);
@@ -183,6 +250,34 @@ describe("releaseUniquesByOwner statement limits", () => {
 
     expect(binds).toEqual([4 + 1000 + 2 * 1000]);
     expect(await liveOwnerClaims(backend)).toEqual(keptClaims(1000));
+  });
+
+  it("releases one constraint keeping 48 claims under a 100-bind budget, and keeps every one of them", async () => {
+    const { backend, client } = await createBudgetedBackend(100);
+    const { release, expected } = await seedWideConstraint(backend);
+
+    const binds = await releaseStatementBinds(client, release);
+
+    // Keeping 48 claims in one list would bind 4 + 1 + 2 × 48 = 101.
+    expect(binds.length).toBeGreaterThan(0);
+    expect(binds.filter((count) => count > 100)).toEqual([]);
+    expect(await liveOwnerClaims(backend)).toEqual(expected);
+  });
+
+  it("releases one constraint keeping 48 claims under a 100-bind budget on PGlite", async () => {
+    const local = await createLocalPgliteBackend({ vector: false });
+    openBackends.push(local.backend);
+    const backend = createPostgresBackend(local.db, {
+      vector: false,
+      capabilities: { maxBindParameters: 100 },
+    });
+    await createInitializedStore(graph, backend);
+
+    const { release, expected } = await seedWideConstraint(backend);
+
+    await release();
+
+    expect(await liveOwnerClaims(backend)).toEqual(expected);
   });
 
   it("issues no statement for an empty constraint list", async () => {
