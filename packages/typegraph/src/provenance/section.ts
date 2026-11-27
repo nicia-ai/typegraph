@@ -25,12 +25,7 @@ import {
   runExclusiveSection,
   runSharedSection,
 } from "../store/native-transaction-state";
-import {
-  enterTransactionOperation,
-  type Operation,
-  operationEntrySession,
-} from "../store/operation-scope";
-import { requireDefined } from "../utils/presence";
+import { transactionContextNativeState } from "../store/operation-scope";
 
 /** Whether a call writes (a verb) or only reads support. */
 export type ProvenanceSectionMode = "exclusive" | "shared";
@@ -65,27 +60,24 @@ function overlappingProvenanceCallError(
  * `tx` runs on, in `mode`, or refuses `operation` before `fn` runs, so a
  * refused call issues no statement and the transaction stays usable.
  *
- * `fn` gets the operation entered from `tx` for the call's own reads: one
- * operation of the session the context carries.
+ * The refusal is decided on the context session's native state without
+ * entering an operation, so `fn` runs the call's other refusals (its locks)
+ * and enters the call's one operation after them
+ * (`enterTransactionOperation`), as every privileged call does.
  */
 export function runInProvenanceSection<T>(
-  tx: Parameters<typeof enterTransactionOperation>[0],
+  tx: Parameters<typeof transactionContextNativeState>[0],
   call: Readonly<{
     graphId: string;
     operation: string;
     mode: ProvenanceSectionMode;
   }>,
-  fn: (operation: Operation) => Promise<T>,
+  fn: () => Promise<T>,
 ): Promise<T> {
-  const operation = enterTransactionOperation(tx);
-  const session = requireDefined(
-    operationEntrySession(operation),
-    "an operation entered from a transaction context belongs to its session",
-  );
   const run =
     call.mode === "exclusive" ? runExclusiveSection : runSharedSection;
   return run(
-    session.native,
+    transactionContextNativeState(tx),
     {
       key: `provenance-transition\u0000${call.graphId}`,
       operation: call.operation,
@@ -96,6 +88,6 @@ export function runInProvenanceSection<T>(
         runningOperation,
         call.graphId,
       ),
-    () => fn(operation),
+    fn,
   );
 }

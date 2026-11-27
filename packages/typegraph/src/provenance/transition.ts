@@ -7,7 +7,10 @@ import {
 } from "../backend/types";
 import type { GraphDef } from "../core/define-graph";
 import { ConfigurationError, NodeNotFoundError } from "../errors";
-import { type Operation } from "../store/operation-scope";
+import {
+  enterTransactionOperation,
+  type Operation,
+} from "../store/operation-scope";
 import { cascadeDeletionOrder } from "../store/operations/composition-cascade";
 import { type NodeDeletePolicy } from "../store/operations/node-write-pipeline";
 import {
@@ -419,11 +422,11 @@ async function transitionInTransaction<
   return runInProvenanceSection(
     tx,
     { graphId: scope.graphId, operation, mode: "exclusive" },
-    (transitionOperation) =>
+    () =>
       transitionInExclusiveSection<G, FactKind, JustificationKind>(
         scope,
         tx,
-        transitionOperation,
+        enterTransactionOperation(tx),
         uniqueSources,
         retracted,
         operation,

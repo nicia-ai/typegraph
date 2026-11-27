@@ -92,9 +92,12 @@ export function believedFactsInCallerTransaction<
   return runInProvenanceSection(
     tx,
     { graphId: scope.graphId, operation, mode: "shared" },
-    async (readOperation) => {
+    async () => {
       await acquireCallerTransactionReadLocks(tx, operation);
-      return readBelievedFacts<G, FactKind>(scope, readOperation);
+      return readBelievedFacts<G, FactKind>(
+        scope,
+        enterTransactionOperation(tx),
+      );
     },
   );
 }
@@ -161,10 +164,10 @@ export async function assertFactsHold<
       operation: ASSERT_HOLDS_OPERATION,
       mode: "shared",
     },
-    async (readOperation) => {
+    async () => {
       await acquireCapabilityWriteLocks(tx, ASSERT_HOLDS_OPERATION);
       const graph = await loadSupportClosure(
-        readOperation.backend,
+        enterTransactionOperation(tx).backend,
         scope.registry,
         scope.graphId,
         scope.config,
