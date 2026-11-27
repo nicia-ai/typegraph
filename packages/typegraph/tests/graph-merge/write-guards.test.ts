@@ -26,17 +26,18 @@ import { asBranchId } from "../../src/graph-merge/types";
 describe("writeWouldChangeRow (faithful to the re-validating write)", () => {
   const schema = z.object({ name: z.string(), mrn: z.string() });
 
-  it("DATA-LOSS GUARD: a committed-only key the schema strips counts as a CHANGE", () => {
+  it("a committed-only key the schema does not declare is kept, so it is no CHANGE", () => {
     // The committed row carries `legacy`, which the current schema does not declare.
-    // The real write re-validates {...committed, ...planned} -> strips `legacy` -> the
-    // stored row changes. A structural merge would wrongly call this a no-op.
+    // The real write re-validates {...committed, ...planned} and stores every
+    // property the plan does not carry as stored, so `legacy` survives and the
+    // stored row is unchanged.
     expect(
       writeWouldChangeRow(
         schema,
         { name: "Alice", mrn: "M1", legacy: "KEEP-ME" },
         { name: "Alice", mrn: "M1" },
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("no-op: an exactly-equal re-add does not change the row", () => {

@@ -230,11 +230,13 @@ import {
   ResolvedMutationSetMoved,
   unsupportedResolvedMutationSet,
 } from "../resolved-mutation-set";
-import { type NodeRow, rowToEdge, rowToNode } from "../row-mappers";
 import {
-  encodeStoredDatesFor,
-  reviveStoredDateProps,
-} from "../stored-date-revival";
+  revalidatingWriteParts,
+  validateCreateProps,
+  validateRevalidatingWrite,
+} from "../revalidating-write";
+import { type NodeRow, rowToEdge, rowToNode } from "../row-mappers";
+import { encodeStoredDatesFor } from "../stored-date-revival";
 import {
   type BulkOperationHookContext,
   compareAndSetAbsent,
@@ -1526,7 +1528,8 @@ function draftNodeCreate<G extends GraphDef>(
   const validatedProps =
     options?.propsPreValidated === true ?
       input.props
-    : validateNodeProps(nodeKind.schema, input.props, {
+    : validateCreateProps(nodeKind.schema, input.props, {
+        entityType: "node",
         kind,
         operation: "create",
       });
@@ -1807,9 +1810,10 @@ function prepareNodeCreatesFold<G extends GraphDef>(
 
 /**
  * The exact props an update would persist: the caller's partial input merged
- * over the current props and run through the kind's Zod schema (defaults
- * applied, values normalized). Also returns the resolved registration so
- * callers need not look it up again. Operates on PARSED props so both the write
+ * over the current props and validated as a whole through the kind's Zod
+ * schema, storing the schema's output for every property the input states and
+ * the stored value for every other ({@link validateRevalidatingWrite}). Also
+ * returns the resolved registration so callers need not look it up again. Operates on PARSED props so both the write
  * path (which parses the row) and the coalesce dirty-check (which may compare
  * against a batch-local running value, never a row) share one validation.
  */
@@ -1821,11 +1825,15 @@ function computeNodeUpdate<G extends GraphDef>(
   inputProps: Partial<Record<string, unknown>>,
 ) {
   const registration = getNodeRegistration(ctx.graph, kind);
-  const schema = registration.type.schema;
-  const validatedProps = validateNodeProps(
-    schema,
-    { ...reviveStoredDateProps(schema, existingProps), ...inputProps },
-    { kind, operation: "update", id },
+  const { retained, stated } = revalidatingWriteParts(
+    existingProps,
+    inputProps,
+  );
+  const validatedProps = validateRevalidatingWrite(
+    registration.type.schema,
+    retained,
+    stated,
+    { entityType: "node", kind, operation: "update", id },
   );
   return { registration, validatedProps };
 }
@@ -4689,6 +4697,14 @@ function resolveExistingGetOrCreateLeg<G extends GraphDef>(
 type ExistingGetOrCreateMatch = Readonly<{
   existing: BackendNodeRow;
   validatedProps: Record<string, unknown>;
+  /**
+   * The props the caller stated, before validation: what a revising leg
+   * hands the update, so each stated property is parsed once, as a create
+   * parses it, and every property the caller did not state keeps its stored
+   * value (`validateRevalidatingWrite`). `validatedProps` is the create
+   * parse's output, which parsed again would re-run its transforms.
+   */
+  statedProps: Record<string, unknown>;
   leg: ExistingGetOrCreateLeg;
 }>;
 
@@ -4707,7 +4723,7 @@ async function writeOwedExistingGetOrCreateLeg<G extends GraphDef>(
   entry: OperationEntry,
   match: ExistingGetOrCreateMatch,
 ): Promise<GetOrCreateResult> {
-  const { existing, validatedProps, leg } = match;
+  const { existing, statedProps, leg } = match;
   if (leg.leg === "found") {
     await runCompositionAttachmentWritePlan(
       ctx,
@@ -4726,7 +4742,7 @@ async function writeOwedExistingGetOrCreateLeg<G extends GraphDef>(
     {
       kind: existing.kind,
       id: existing.id as UpdateNodeInput["id"],
-      props: validatedProps,
+      props: statedProps,
     },
     entry,
     {
@@ -4919,7 +4935,7 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
 
       const moves: DecidedAttachmentMove[] = [];
       const transitions: NodeClaimTransition[] = [];
-      for (const { existing, validatedProps, leg } of owed) {
+      for (const { existing, statedProps, leg } of owed) {
         const { kind, id } = existing;
         // Re-read under the lock: the row the leg was resolved from was read
         // lock-free.
@@ -4953,7 +4969,7 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
         }
         if (leg.leg === "revise") {
           const { registration, validatedProps: nextProps } =
-            resolveNodeUpdateProps(ctx, current, validatedProps);
+            resolveNodeUpdateProps(ctx, current, statedProps);
           transitions.push(
             nodeClaimTransition(current, nextProps, registration.unique ?? []),
           );
@@ -6759,6 +6775,7 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
               uniqueConstraints,
               patch,
               unsetProperties,
+              statedPatch: inputPatch,
               candidateIds,
               candidateIdColumn,
               expected,
@@ -6770,6 +6787,7 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
               uniqueConstraints,
               patch,
               unsetProperties,
+              statedPatch: inputPatch,
               candidateIds,
               candidateIdColumn,
             },
@@ -8277,6 +8295,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
     return applyExistingGetOrCreateLeg(ctx, entry, {
       existing: existingRow,
       validatedProps,
+      statedProps: props,
       leg: resolveExistingGetOrCreateLeg(ctx, existingRow, {
         ifExists,
         partOf,
@@ -8989,6 +9008,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
         index,
         existing,
         validatedProps,
+        statedProps: requireDefined(items[index]).props,
         leg: resolveExistingGetOrCreateLeg(ctx, existing, {
           ifExists,
           partOf: partOfAt(index),

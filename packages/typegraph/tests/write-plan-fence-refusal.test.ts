@@ -135,6 +135,7 @@ function setUpdateWork(
     uniqueConstraints: [],
     patch: { name: "Renamed" },
     unsetProperties: [],
+    statedPatch: { name: "Renamed" },
     candidateIds: asCompiledSelectSql(sql`
       SELECT id AS n_id
       FROM ${createSqlSchema(backend.tableNames).nodesTable}

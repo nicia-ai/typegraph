@@ -15,7 +15,13 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { defineEdge, defineGraph, defineNode } from "../../../src";
+import {
+  defineEdge,
+  defineGraph,
+  defineNode,
+  ValidationError,
+} from "../../../src";
+import { STORED_PROPERTY_INVALID_CODE } from "../../../src/errors";
 import { requireDefined } from "../../../src/utils/presence";
 import { type IntegrationTestContext } from "./test-context";
 
@@ -176,16 +182,29 @@ export function registerStoredDateRevalidationIntegrationTests(
       expect(updated.checkedAt).toBe(REVIEWED.toISOString());
     });
 
-    it("node update still refuses a date its schema rewrites on every parse, rather than rewriting it", async () => {
+    it("node update refuses, naming the property, a stored date its schema rewrites on every parse, rather than rewriting it", async () => {
       const store = await context.createStore(datedGraph);
       const document = await store.nodes.StampedDoc.create({
         title: "a",
         stampedAt: PUBLISHED,
       });
       const stored = document.stampedAt;
-      await expect(
-        store.nodes.StampedDoc.update(document.id, { title: "a2" }),
-      ).rejects.toThrow(/expected date, received string/u);
+      // An `.overwrite()` on the date blocks revival, so the stored text is not
+      // valid input to its own schema: the update, which does not state it,
+      // is refused with the typed stored-property issue.
+      const refusal = await store.nodes.StampedDoc.update(document.id, {
+        title: "a2",
+      }).then(
+        () => "updated",
+        (error: unknown) => error,
+      );
+      expect(refusal).toBeInstanceOf(ValidationError);
+      expect((refusal as ValidationError).details.issues).toEqual([
+        expect.objectContaining({
+          path: "stampedAt",
+          code: STORED_PROPERTY_INVALID_CODE,
+        }),
+      ]);
       const read = await store.nodes.StampedDoc.getById(document.id);
       expect(read?.title).toBe("a");
       expect(read?.stampedAt).toBe(stored);

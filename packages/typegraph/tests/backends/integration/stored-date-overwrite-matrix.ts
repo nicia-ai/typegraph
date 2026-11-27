@@ -4,15 +4,13 @@
  *
  * An update merges its patch over the stored props and parses the result, so
  * a stored date's text is turned back into a `Date` first
- * (`reviveStoredDates`). This change does not alter what that re-parse does
- * under an `.overwrite()`, a `.catch()` or any other wrapper: every write
- * path that re-validates a stored row behaves exactly as on main, including
- * where main is wrong (an `.overwrite()` on a wrapper shifts an untouched date
- * on every update; see the known-defect marker in `date-property-writes.ts`).
- * Re-running the schema over values a write does not touch is the defect
- * class the update-validation change removes. Import, which refused every
- * exported date on main, now revives the document's stored text by the same
- * decision, so it parses a stored row exactly as an update re-parses one.
+ * (`reviveStoredDates`). The parse validates the untouched date; it does not
+ * rewrite it: a property the write does not state is stored as it was
+ * stored, so neither an `.overwrite()` nor a `.catch()` fallback changes it
+ * (`revalidateWrite`). Main stored the parse's output instead, and the cells
+ * where that rewrote the date are listed in `FIXED_BY_UPDATE_RULE`. Import,
+ * which refused every exported date on main, revives the document's stored
+ * text by the same decision and stores the document as carried.
  *
  * Each kind here differs from the others in one wrapper and one check, and
  * each case states the outcome per write path: an update of an unrelated
@@ -175,7 +173,7 @@ type CaseCodes = `${OutcomeCode} ${OutcomeCode} ${number} ${OutcomeCode}`;
 /**
  * What main observed for each case, recorded by running this matrix against
  * main's source. The first three codes (update, updateWhere, validateStore)
- * must be unchanged in every case. Several are defects main has and this
+ * are unchanged in every case but the ones `FIXED_BY_UPDATE_RULE` lists. Several are defects main has and this
  * change leaves alone: an identity `.overwrite()` on the date or on an object
  * or array holding it refuses every update and is reported by
  * `validateStore`; under a `.catch()` the refused stored text is replaced by
@@ -237,19 +235,43 @@ const MAIN_OBSERVED: Readonly<Record<string, CaseCodes>> = {
 };
 
 /**
- * The outcome every case must have: main's update, updateWhere and
- * validateStore codes unchanged, and an import that parses the stored row as
- * that update re-parses it. Where the update revives the date (it keeps it,
- * `K`, or a wrapper's `.overwrite()` shifts it, `S`), the import does the
- * same; where the update leaves the text unrevived, the import is refused or
- * falls back exactly as main's was.
+ * The cells the update rule changes: a write that re-validates a stored row
+ * stores every property it does not state as it was stored, and an import
+ * writes a document's stored row as stored. Where main's re-parse rewrote the
+ * untouched date — a `.catch()` substituting its fallback for the unrevived
+ * text (`F`), a shifting `.overwrite()` on a wrapper (`S`), or the after-image
+ * check refusing the set update that shift made non-canonical (`R`) — every
+ * write path now keeps it (`K`). Every other cell is main's, including each
+ * refusal of a date whose `.overwrite()` blocks revival (`R R 1 R`): the
+ * stored text is not valid input to its own schema, so the update is refused.
+ */
+const FIXED_BY_UPDATE_RULE: Readonly<Record<string, CaseCodes>> = {
+  catch_identityOverwriteOnDate: "K K 0 K",
+  catch_shiftingOverwriteOnDate: "K K 0 K",
+  catch_shiftingOverwriteOnWrapper: "K K 0 K",
+  default_shiftingOverwriteOnWrapper: "K K 0 K",
+  nonoptional_shiftingOverwriteOnWrapper: "K K 0 K",
+  nullable_shiftingOverwriteOnWrapper: "K K 0 K",
+  optional_shiftingOverwriteOnWrapper: "K K 0 K",
+  prefault_shiftingOverwriteOnWrapper: "K K 0 K",
+  readonly_shiftingOverwriteOnWrapper: "K K 0 K",
+};
+
+/**
+ * The outcome every case must have: the update rule's cell where it changes
+ * one ({@link FIXED_BY_UPDATE_RULE}); otherwise main's update, updateWhere
+ * and validateStore codes unchanged, and an import that parses the stored row
+ * as that update re-parses it — where the update keeps the date (`K`) the
+ * import does too; where the update leaves the text unrevived, the import is
+ * refused exactly as main's was.
  */
 function expectedCodes(name: string): CaseCodes {
+  const fixed = FIXED_BY_UPDATE_RULE[name];
+  if (fixed !== undefined) return fixed;
   const [update, updateWhere, violations, mainImport] = requireDefined(
     MAIN_OBSERVED[name],
   ).split(" ");
-  const importCode =
-    update === "K" || update === "S" ? update : requireDefined(mainImport);
+  const importCode = update === "K" ? update : requireDefined(mainImport);
   return `${requireDefined(update)} ${requireDefined(updateWhere)} ${requireDefined(violations)} ${importCode}` as CaseCodes;
 }
 
@@ -362,13 +384,16 @@ export function registerStoredDateOverwriteMatrixIntegrationTests(
           CASES.map(({ name }) => [name, expectedCodes(name)]),
         ),
       );
-      // The re-validating write paths deviate from main in no case.
+      // The re-validating write paths deviate from main exactly in the cells
+      // the update rule fixes.
       const deviations = CASES.flatMap(({ name }) => {
         const main = requireDefined(MAIN_OBSERVED[name]).split(" ").slice(0, 3);
         const now = requireDefined(observed[name]).split(" ").slice(0, 3);
         return main.join(" ") === now.join(" ") ? [] : [[name, now.join(" ")]];
       });
-      expect(deviations).toEqual([]);
+      expect(deviations.map(([name]) => name).toSorted()).toEqual(
+        Object.keys(FIXED_BY_UPDATE_RULE).toSorted(),
+      );
     });
 
     it("an update that states a rewriting date stores what its schema makes of it", async () => {

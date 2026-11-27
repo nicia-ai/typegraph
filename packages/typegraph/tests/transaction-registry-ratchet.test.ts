@@ -234,6 +234,11 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
     keyedBy: "other",
     reason: "Cycle guard over Zod schemas.",
   },
+  "store/revalidating-write.ts#STORED_FORM_PROPS": {
+    keyedBy: "other",
+    reason:
+      "Marks a props object as stored form; keyed by that props object, never a backend, target or context.",
+  },
   "store/savepoint-state.ts#registerSavepointState": {
     keyedBy: "other",
     reason: "Checkpoint functions.",

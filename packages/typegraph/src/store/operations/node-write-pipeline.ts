@@ -45,11 +45,10 @@ import {
   RestrictedDeleteError,
   ValidationError,
 } from "../../errors";
-import { validateNodeProps } from "../../errors/validation";
 import type { CompiledSelectSql } from "../../query/sql-intent";
 import { type KindRegistry } from "../../registry/kind-registry";
 import { canonicalEqual } from "../../schema/canonical";
-import { assertsStoredLowerBound } from "../../utils/date";
+import { assertsStoredLowerBound, storedJsonText } from "../../utils/date";
 import { claimSupport } from "../claims/backing";
 import { purgeEdgeClaims } from "../claims/edge-claims";
 import {
@@ -86,6 +85,7 @@ import {
 } from "../fulltext-sync";
 import type { OperationEntry, StatementBackend } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
+import { validateRevalidatingWrite } from "../revalidating-write";
 import { reviveStoredDateProps } from "../stored-date-revival";
 import { type NodeDeletePlan } from "../types";
 import { hardDeleteEdgeRows, softDeleteEdgeRows } from "./edge-write-pipeline";
@@ -1077,6 +1077,12 @@ type NodeSetUpdateCommonWork = Readonly<{
   uniqueConstraints: readonly UniqueConstraint[];
   patch: Readonly<Record<string, JsonValue>>;
   unsetProperties: readonly string[];
+  /**
+   * The caller's patch as stated, before it was parsed and encoded into
+   * `patch` and `unsetProperties`: the properties the write states, re-validated
+   * against each after-image ({@link validateRevalidatingWrite}).
+   */
+  statedPatch: Readonly<Record<string, unknown>>;
   candidateIds: CompiledSelectSql;
   candidateIdColumn: string;
 }>;
@@ -1213,16 +1219,20 @@ export async function applyNodeSetUpdate(
 
   const sidecarItems = result.rows.map((row) => {
     const props = rowPropsToObject(row.props);
-    const validatedProps = validateNodeProps(
+    // The after-image re-validated as a single-row update re-validates it:
+    // the stated patch over the row, every unstated property kept as stored.
+    // The statement wrote the patch as its per-property parse made it, so a
+    // stated property the whole-object parse makes differently (an
+    // object-level `.overwrite()`) is refused rather than left unnormalized.
+    // Compared as the text the backends store (`storedJsonText`), so a stated
+    // `Date` is compared by the instant it holds, as the statement wrote it.
+    const persisted = validateRevalidatingWrite(
       schema,
-      reviveStoredDateProps(schema, props),
-      {
-        kind,
-        operation: "update",
-        id: row.id,
-      },
+      props,
+      args.statedPatch,
+      { entityType: "node", kind, operation: "update", id: row.id },
     );
-    if (!canonicalEqual(validatedProps, props)) {
+    if (!canonicalEqual(JSON.parse(storedJsonText(persisted)), props)) {
       throw new ValidationError(
         `Set update would persist a non-canonical ${kind} row`,
         {
@@ -1243,7 +1253,10 @@ export async function applyNodeSetUpdate(
       kind,
       id: row.id,
       schema,
-      props: validatedProps,
+      // What the statement stored, as every re-validating write hands its
+      // derived state the stored values: equal to `persisted`, with each
+      // stored date revived as the single-row update revives it.
+      props: reviveStoredDateProps(schema, props),
       uniqueConstraints,
     };
   });

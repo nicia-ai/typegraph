@@ -1409,7 +1409,7 @@ describe.each(backendMatrix())(
       ).toEqual([active.id]);
     });
 
-    it("GUARD (base update): refuses to strip heterogeneous committed props while gap-filling base fields", async () => {
+    it("base update: gap-fills base fields and keeps heterogeneous committed props the active schema does not declare", async () => {
       cleanups = [];
       const forkPoint = await emptyStore();
       const provider = await forkOf(forkPoint);
@@ -1424,7 +1424,9 @@ describe.each(backendMatrix())(
         { id: "base-ana", props: { name: "Anna Rivera", mrn: "MRN-1" } },
       ]);
       // Public create keeps the unique index coherent; this raw backend update then
-      // simulates an older/heterogeneous committed row the active schema would strip.
+      // simulates an older/heterogeneous committed row with a key the active
+      // schema does not declare. The merge's write stores every property it
+      // does not carry as stored, so the key survives the gap-fill.
       await getStoreBackend(target).updateNode({
         graphId: target.graphId,
         kind: "Patient",
@@ -1443,11 +1445,7 @@ describe.each(backendMatrix())(
         branches: [provider],
         options: options(),
       });
-      expect(isErr(result)).toBe(true);
-      if (isErr(result)) {
-        expect(result.error.message).toMatch(/strip existing props/i);
-        expect(result.error.message).toMatch(/lossy base update/i);
-      }
+      expect(isErr(result) ? result.error.message : "merged").toBe("merged");
 
       const row = await getStoreBackend(target).getNode(
         target.graphId,
@@ -1457,7 +1455,7 @@ describe.each(backendMatrix())(
       expect(row).toBeDefined();
       const props = rowPropsToObject(requireDefined(row).props);
       expect(props["legacyCode"]).toBe("KEEP-ME");
-      expect(props["tag"]).toBeUndefined();
+      expect(props["tag"]).toBe("branch-gap");
     });
 
     it("REJECTS a branch that did not fork from forkPoint (base@V mismatch)", async () => {

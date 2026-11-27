@@ -217,8 +217,12 @@ import {
   ResolvedMutationSetMoved,
   unsupportedResolvedMutationSet,
 } from "../resolved-mutation-set";
+import {
+  revalidatingWriteParts,
+  validateCreateProps,
+  validateRevalidatingWrite,
+} from "../revalidating-write";
 import { type EdgeRow, rowToEdge } from "../row-mappers";
-import { reviveStoredDateProps } from "../stored-date-revival";
 import {
   type CompositionNodeRef,
   type CreateEdgeInput,
@@ -535,7 +539,8 @@ export async function validateAndPrepareEdgeCreate<G extends GraphDef>(
   }
 
   // Validate props with full context
-  const validatedProps = validateEdgeProps(edgeKind.schema, input.props, {
+  const validatedProps = validateCreateProps(edgeKind.schema, input.props, {
+    entityType: "edge",
     kind,
     operation: "create",
   });
@@ -2640,7 +2645,9 @@ async function assertResurrectionsAcyclic<G extends GraphDef>(
 
 /**
  * The exact props an edge update would persist: the caller's partial input
- * merged over the current props and run through the edge kind's Zod schema.
+ * merged over the current props and validated as a whole through the edge
+ * kind's Zod schema, storing the schema's output for every property the input
+ * states and the stored value for every other ({@link validateRevalidatingWrite}).
  * Operates on PARSED props so the write path and the coalesce dirty-check
  * (which may compare against a batch-local running value, never a row) share
  * one validation. Endpoints are the edge's identity and are not part of an
@@ -2654,11 +2661,15 @@ function computeEdgeUpdate<G extends GraphDef>(
   inputProps: Partial<Record<string, unknown>>,
 ): Record<string, unknown> {
   const registration = getEdgeRegistration(ctx.graph, kind);
-  const schema = registration.type.schema;
-  const validatedProps = validateEdgeProps(
-    schema,
-    { ...reviveStoredDateProps(schema, existingProps), ...inputProps },
-    { kind, operation: "update", id },
+  const { retained, stated } = revalidatingWriteParts(
+    existingProps,
+    inputProps,
+  );
+  const validatedProps = validateRevalidatingWrite(
+    registration.type.schema,
+    retained,
+    stated,
+    { entityType: "edge", kind, operation: "update", id },
   );
   const identityRefusal = edgeMatchIdentityUpdateRefusal({
     identity: registration.matchIdentity,
@@ -4876,7 +4887,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         {
           id: matchedRow.id,
           identity: { kind, fromKind, fromId, toKind, toId },
-          props: validatedProps,
+          props,
           ...(validFrom !== undefined && { validFrom }),
           ...(validTo !== undefined && { validTo }),
           ...(options?.clearValidTo === true && {
@@ -4896,7 +4907,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
                 matchedRow.kind,
                 matchedRow.id,
                 rowPropsToObject(matchedRow.props),
-                validatedProps,
+                props,
               ),
             ),
           matchOn,
@@ -4914,7 +4925,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
       {
         id: matchedRow.id,
         identity: { kind, fromKind, toKind, fromId, toId },
-        props: validatedProps,
+        props,
         ...(validFrom !== undefined && { validFrom }),
         ...(validTo !== undefined && { validTo }),
         ...(options?.clearValidTo === true && { clearValidTo: true as const }),
@@ -4940,7 +4951,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
           fromId,
           toKind,
           toId,
-          props: validatedProps,
+          props,
           ...(validFrom !== undefined && { validFrom }),
           ...(validTo !== undefined && { validTo }),
         },
@@ -5008,7 +5019,7 @@ export async function executeEdgeGetOrCreateByEndpoints<G extends GraphDef>(
         fromId,
         toKind,
         toId,
-        props: validatedProps,
+        props,
         ...(validFrom !== undefined && { validFrom }),
         ...(validTo !== undefined && { validTo }),
       };
@@ -5145,6 +5156,8 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     toKind: string;
     toId: string;
     validatedProps: Record<string, unknown>;
+    /** The props the caller stated: what a write leg hands the store to validate. */
+    statedProps: Record<string, unknown>;
     matchProps: Record<string, unknown>;
     compositeKey: string;
     endpointKey: string;
@@ -5159,7 +5172,8 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     if (item.clearValidTo === true) {
       assertClearValidToSupported(backend, "edge");
     }
-    const validatedProps = validateEdgeProps(edgeKind.schema, item.props, {
+    const validatedProps = validateCreateProps(edgeKind.schema, item.props, {
+      entityType: "edge",
       kind,
       operation: "create",
     });
@@ -5200,6 +5214,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
       toKind: item.toKind,
       toId: item.toId,
       validatedProps,
+      statedProps: item.props,
       matchProps,
       compositeKey,
       endpointKey,
@@ -5467,6 +5482,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
     row: BackendEdgeRow;
     isDeleted: boolean;
     validatedProps: Record<string, unknown>;
+    statedProps: Record<string, unknown>;
     fromKind: string;
     fromId: string;
     toKind: string;
@@ -5533,7 +5549,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
             fromId: entry.fromId,
             toKind: entry.toKind,
             toId: entry.toId,
-            props: entry.validatedProps,
+            props: entry.statedProps,
             ...(entry.validFrom !== undefined && {
               validFrom: entry.validFrom,
             }),
@@ -5551,6 +5567,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           row: bestRow,
           isDeleted: liveRow === undefined,
           validatedProps: entry.validatedProps,
+          statedProps: entry.statedProps,
           fromKind: entry.fromKind,
           fromId: entry.fromId,
           toKind: entry.toKind,
@@ -5621,7 +5638,7 @@ export async function executeEdgeBulkGetOrCreateByEndpoints<G extends GraphDef>(
           toKind: entry.toKind,
           toId: entry.toId,
         },
-        props: entry.validatedProps,
+        props: entry.statedProps,
         ...(entry.validFrom !== undefined && {
           validFrom: entry.validFrom,
         }),

@@ -1455,6 +1455,9 @@ export type StoreAnalysisCursorStaleErrorDetails = Readonly<{
 }>;
 
 // @public
+export const STORED_PROPERTY_INVALID_CODE = "STORED_PROPERTY_INVALID";
+
+// @public
 export class StoreNotInitializedError extends TypeGraphError {
     constructor(graphId: string, reason: StoreNotInitializedReason, options?: {
         cause?: unknown;

@@ -270,6 +270,21 @@ export const SQL_IDENTIFIER_TOO_LONG_CODE = "SQL_IDENTIFIER_TOO_LONG";
 export const ENTITY_ALREADY_EXISTS_CODE = "ENTITY_ALREADY_EXISTS";
 
 /**
+ * The stable {@link ValidationIssue.code} of a write refused because a property
+ * it does not state holds a stored value its own schema refuses.
+ *
+ * A write that leaves a row behind an existing one (an update, an upsert over
+ * an existing row, a set update, an import or merge of stored rows) validates
+ * the whole row it leaves, but stores every property it does not state as it
+ * was stored. When the row fails validation at such a property, and that
+ * property's stored value is not valid input to its own schema (a
+ * type-changing transform, a constraint tightened since the row was written,
+ * an undeclared key under a `.strict()` schema), the issue carries this code
+ * and its `path` names the property.
+ */
+export const STORED_PROPERTY_INVALID_CODE = "STORED_PROPERTY_INVALID";
+
+/**
  * Details for ValidationError.
  */
 export type ValidationErrorDetails = Readonly<{

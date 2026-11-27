@@ -188,13 +188,13 @@ import {
 } from "../store/operations/write-transaction";
 import { runRecordedTransactionSavepoint } from "../store/recorded-capture";
 import { type GraphWriteLock } from "../store/recorded-capture/clock";
+import { revalidateWrite } from "../store/revalidating-write";
 import {
   storeBackend,
   storeCaptureEnabled,
   storeRuntime,
 } from "../store/runtime-port";
 import { type Store } from "../store/store";
-import { reviveStoredDateProps } from "../store/stored-date-revival";
 import { type CompositionNodeRef } from "../store/types";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
@@ -6125,9 +6125,9 @@ function importEdgeInsertWork(
 /**
  * The props an import strategy persists, refused when they hold a `Date` no
  * backend can store as a date (`unstorableDateIssue`, the decision the
- * store's own writes make). `persisted` is what the strategy writes — the
- * parsed props, or under `onUnknownProperty: "allow"` the original ones
- * verbatim — and `parsed` is the schema's reading of them, so a year-0000
+ * store's own writes make). `persisted` is what the import writes — the
+ * document's props as carried, with any property it lacks filled as the
+ * schema makes it — and `parsed` is the schema's reading of them, so a year-0000
  * `Date` stated in memory and one a coercing schema produces from text are
  * both refused. Once stored, such a value made every date predicate,
  * ordering or typed read of the property fail on PostgreSQL.
@@ -6151,23 +6151,17 @@ export function validateImportProperties(
   | { success: true; data: Record<string, unknown> }
   | { success: false; error: string } {
   try {
-    // An interchange document carries props in their STORED form — what
-    // `exportGraph` read from the row — so a `z.date()` property holds the
-    // ISO text the store wrote for its `Date`. Revive that text with the one
-    // decision every re-validating write makes before parsing; any other
-    // value, including non-canonical date text, is parsed (and refused) as
-    // stated. A revived `Date` serializes back to the same bytes, so every
-    // strategy below persists the document's text unchanged.
-    const properties = reviveStoredDateProps(schema, documentProperties);
-
     // Get the schema's known keys
     const knownKeys = new Set(Object.keys(schema.shape));
 
     // Check for unknown properties
-    const unknownKeys = Object.keys(properties).filter(
+    const unknownKeys = Object.keys(documentProperties).filter(
       (key) => !knownKeys.has(key),
     );
 
+    // The document's props once the strategy has dealt with its unknown keys:
+    // refused under "error", removed under "strip", kept under "allow".
+    let retained: Record<string, unknown> = documentProperties;
     if (unknownKeys.length > 0) {
       switch (unknownStrategy) {
         case "error": {
@@ -6177,55 +6171,39 @@ export function validateImportProperties(
           };
         }
         case "strip": {
-          // Remove unknown properties
           // Data-keyed: `knownKeys` are schema-declared property names.
           const stripped = createDataKeyedBag<unknown>();
           for (const key of knownKeys) {
-            if (hasOwnKey(properties, key)) {
-              stripped[key] = properties[key];
+            if (hasOwnKey(documentProperties, key)) {
+              stripped[key] = documentProperties[key];
             }
           }
-          // Validate stripped properties
-          const result = schema.safeParse(stripped);
-          if (!result.success) {
-            return {
-              success: false,
-              error: formatZodError(result.error),
-            };
-          }
-          return storableImportProperties(result.data, result.data);
+          retained = stripped;
+          break;
         }
         case "allow": {
-          // Validate the known fields, then return the ORIGINAL properties
-          // verbatim — unknown keys preserved, known values byte-for-byte —
-          // except that a revived stored date stays the `Date`: it persists
-          // as the same text, and a uniqueness claim keyed off the text
-          // instead of the `Date` would not match the claim the store's own
-          // writes take, so a duplicate date would be accepted.
-          // Exported data already carries post-transform values, so
-          // re-applying schema transforms here would corrupt every
-          // export→import round trip whose transforms are not idempotent.
-          // "allow" is the fidelity-preserving strategy; "strip" (and the
-          // create path) remain the normalizing ones.
-          const result = schema.safeParse(properties);
-          if (!result.success) {
-            return {
-              success: false,
-              error: formatZodError(result.error),
-            };
-          }
-          return storableImportProperties(properties, result.data);
+          break;
         }
       }
     }
 
-    // No unknown properties - standard validation
-    const result = schema.safeParse(properties);
-    if (!result.success) {
-      return { success: false, error: formatZodError(result.error) };
+    // An interchange document carries props in their STORED form — what
+    // `exportGraph` read from the row — so it is re-validated as a write
+    // that states nothing (`revalidateWrite`): its date text revived by the
+    // decision every re-validating write makes, the whole object parsed
+    // through the kind's schema, and every property it carries persisted as
+    // it carries it. A schema step that rewrites a value (a transform, an
+    // `.overwrite()`, a `.catch()` fallback) is not applied again to a value
+    // the store already wrote, so an export/import round trip keeps every
+    // byte; a property the document lacks is filled as the schema makes it
+    // (a `.default()`) under every strategy. A revived date stays the `Date`: it persists as the
+    // same text, and a uniqueness claim keyed off the text instead of the
+    // `Date` would not match the claim the store's own writes take.
+    const outcome = revalidateWrite(schema, retained, {});
+    if (!outcome.success) {
+      return { success: false, error: formatZodError(outcome.error) };
     }
-
-    return storableImportProperties(result.data, result.data);
+    return storableImportProperties(outcome.persisted, outcome.parsed);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { success: false, error: `Validation error: ${message}` };

@@ -1759,15 +1759,14 @@ describe("Interchange import property fidelity", () => {
     expect(result.success).toBe(true);
     expect(result.nodes.created).toBe(1);
 
-    // "allow" is the fidelity-preserving strategy: the schema validates the
-    // known fields, but the given properties are persisted byte-for-byte —
-    // no transform re-application, no default injection — so an
-    // export→import round trip cannot mutate stored values (a re-applied
-    // non-idempotent transform would corrupt them). Use "strip" for a
-    // normalizing import.
+    // "allow" keeps the unknown properties. Under every strategy the given
+    // properties are persisted byte-for-byte — no transform re-application —
+    // so an export→import round trip cannot mutate stored values (a
+    // re-applied non-idempotent transform would corrupt them). A property the
+    // document lacks is filled as the schema makes it, as every write fills it.
     const document = await store.nodes.Doc.getById("d1" as never);
     expect(document?.title).toBe("  hello  ");
-    expect((document as unknown as { status?: string }).status).toBeUndefined();
+    expect((document as unknown as { status?: string }).status).toBe("draft");
     expect((document as unknown as { extra?: string }).extra).toBe("keepme");
   });
 });

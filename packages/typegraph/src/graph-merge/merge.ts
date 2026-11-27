@@ -19,6 +19,7 @@ import {
 import { lockStoreWriteFence } from "../store/operations/write-fence-prelude";
 import { storeWritersTakeGraphWriteFence } from "../store/operations/write-transaction";
 import { recordedAnchorOwner } from "../store/recorded-anchor-origin";
+import { revalidateWrite, storedFormProps } from "../store/revalidating-write";
 import { resolveEvolvedTransactionStore } from "../store/runtime-port";
 import { reviveStoredDateProps } from "../store/stored-date-revival";
 import type { TransactionContext } from "../store/types";
@@ -2671,26 +2672,22 @@ type MergeGraphRows = Readonly<{
  * in ({@link assertNoUnattachedRequiredParts}).
  */
 /**
- * The rows of a merge apply with their written props revived for the
- * target's schema ({@link revivedPlannedProps}): both executors carry
- * STORED-form props — the live plan the branch's reads, the replayed
- * artifact its wire props — and write them as input, which `z.date()`
- * refuses as text. A revived `Date` writes back the same bytes.
+ * The rows of a merge apply with their written props marked as stored form
+ * ({@link storedFormProps}): both executors carry STORED-form props — the
+ * live plan the branch's reads, the replayed artifact its wire props — so the
+ * store re-validates each write's after-image as a whole and persists every
+ * property as the plan carries it, its date text revived as every
+ * re-validating write revives it. A schema step that rewrites a value is not
+ * applied again to a value the branch's store already wrote.
  */
-function revivedMergeGraphRows<G extends GraphDef>(
-  target: Store<G>,
-  rows: MergeGraphRows,
-): MergeGraphRows {
+function storedFormMergeGraphRows(rows: MergeGraphRows): MergeGraphRows {
   return {
     ...rows,
     nodePhase: {
       ...rows.nodePhase,
       upserts: rows.nodePhase.upserts.map((upsert) => ({
         ...upsert,
-        props: revivedPlannedProps(
-          nodeSchemaFor(target, upsert.kind),
-          upsert.props,
-        ),
+        props: storedFormProps(upsert.props),
       })),
     },
     edgeUpserts: rows.edgeUpserts.map((upsert) =>
@@ -2698,13 +2695,7 @@ function revivedMergeGraphRows<G extends GraphDef>(
         upsert
       : {
           ...upsert,
-          item: {
-            ...upsert.item,
-            props: revivedPlannedProps(
-              edgeSchemaFor(target, upsert.kind),
-              upsert.item.props,
-            ),
-          },
+          item: { ...upsert.item, props: storedFormProps(upsert.item.props) },
         },
     ),
   };
@@ -2719,7 +2710,7 @@ async function applyGraphRows<G extends GraphDef>(
   deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy,
   decision: IdentityDecisionProvenance | undefined,
 ): Promise<Readonly<{ nodes: number; retracted: number; edges: number }>> {
-  const rows = revivedMergeGraphRows(target, storedRows);
+  const rows = storedFormMergeGraphRows(storedRows);
   const txBackend = operation.backend;
   // Authoritative re-verification, before any row work below: a part
   // attached to a deleted whole after the branch point (and neither deleted
@@ -5768,12 +5759,6 @@ async function preflightWireMergeWrites<G extends GraphDef>(
         `The incremental merge plan found committed node "${upsert.id}" with props that do not validate against the active schema.`,
         { kind: upsert.kind, id: upsert.id, role: "node" },
       );
-      if (analysis.stripsCurrentProps && analysis.schemaWouldChange) {
-        throw invalidPlanForTarget(
-          `The incremental merge plan would strip existing props while updating committed node "${upsert.id}".`,
-          { kind: upsert.kind, id: upsert.id, role: "node" },
-        );
-      }
     }
   }
 
@@ -5860,12 +5845,6 @@ async function preflightWireMergeWrites<G extends GraphDef>(
         `The incremental merge plan found committed edge "${upsert.id}" with props that do not validate against the active schema.`,
         { kind: upsert.kind, id: upsert.id, role: "edge" },
       );
-      if (analysis.stripsCurrentProps && analysis.schemaWouldChange) {
-        throw invalidPlanForTarget(
-          `The incremental merge plan would strip existing props while updating committed edge "${upsert.id}".`,
-          { kind: upsert.kind, id: upsert.id, role: "edge" },
-        );
-      }
     }
     if (
       current !== undefined &&
@@ -6729,12 +6708,12 @@ type PropsSchema = z.ZodType;
 type RevalidatingWriteAnalysis =
   | Readonly<{
       status: "valid";
-      /** Whether TypeGraph's re-validating write would change persisted bytes. */
+      /**
+       * Whether TypeGraph's write would change persisted bytes. The write keeps
+       * every current property the plan does not carry, declared or not, so
+       * no planned write strips a current property.
+       */
       storageWouldChange: boolean;
-      /** Whether declared schema fields would change, ignoring unknown stored keys. */
-      schemaWouldChange: boolean;
-      /** Whether the write would drop current props not preserved by the schema. */
-      stripsCurrentProps: boolean;
     }>
   | Readonly<{ status: "invalid" }>;
 
@@ -6763,11 +6742,12 @@ function edgeSchemaFor<G extends GraphDef>(
 }
 
 /**
- * Models TypeGraph's re-validating update semantics for one row —
- * `schema.safeParse({...current, ...planned})`, then storing the parsed result —
- * so `mergeIncremental()` can route each planned write to create / update / skip /
- * error from INSIDE the target transaction, where `current` is the row the commit
- * will actually overwrite.
+ * Models TypeGraph's write of a planned row for one row — the planned
+ * STORED-form props over `current`, re-validated as a whole and persisted as
+ * carried (`revalidateWrite` with nothing stated, the rule the store applies
+ * to the merge's stored-form writes) — so `mergeIncremental()` can route each
+ * planned write to create / update / skip / error from INSIDE the target
+ * transaction, where `current` is the row the commit will actually overwrite.
  */
 function analyzeRevalidatingWrite(
   schema: PropsSchema | undefined,
@@ -6776,41 +6756,29 @@ function analyzeRevalidatingWrite(
 ): RevalidatingWriteAnalysis {
   const merged = { ...current, ...planned };
   if (schema === undefined) {
-    const storageWouldChange =
-      canonicalizeProps(merged) !== canonicalizeProps(current);
     return {
       status: "valid",
-      storageWouldChange,
-      schemaWouldChange: storageWouldChange,
-      stripsCurrentProps: false,
+      storageWouldChange:
+        canonicalizeProps(merged) !== canonicalizeProps(current),
     };
   }
-
-  // Stored-form props: the store's write revives their date text before it
-  // parses, so the analysis does too, and reports the change a rewriting
-  // `.overwrite()` the revived date is parsed through would make.
-  const currentParsed = schema.safeParse(
-    reviveStoredDateProps(schema, { ...current }),
-  );
-  const mergedParsed = schema.safeParse(reviveStoredDateProps(schema, merged));
-  if (!currentParsed.success || !mergedParsed.success) {
+  const currentWrite = revalidateWrite(schema, current, {});
+  const mergedWrite = revalidateWrite(schema, merged, {});
+  if (!currentWrite.success || !mergedWrite.success) {
     return { status: "invalid" };
   }
-  const normalizedCurrent = currentParsed.data as Record<string, unknown>;
-  const normalizedMerged = mergedParsed.data as Record<string, unknown>;
   return {
     status: "valid",
     storageWouldChange:
-      canonicalizeProps(normalizedMerged) !== canonicalizeProps(current),
-    schemaWouldChange:
-      canonicalizeProps(normalizedMerged) !==
-      canonicalizeProps(normalizedCurrent),
-    stripsCurrentProps:
-      canonicalizeProps(normalizedCurrent) !== canonicalizeProps(current),
+      canonicalizeProps(mergedWrite.persisted) !== canonicalizeProps(current),
   };
 }
 
-/** Mutation postimages must survive the existing executor's revalidation unchanged. */
+/**
+ * Mutation postimages must survive the merge executor's write unchanged: a
+ * postimage the target's schema does not accept, or one the write would
+ * complete (a property it lacks filled by a `.default()`), is refused.
+ */
 export function assertStableMergePostimage(
   schema: PropsSchema | undefined,
   props: Readonly<Record<string, unknown>>,
@@ -6944,12 +6912,6 @@ async function validateIncrementalNodeWrites<G extends GraphDef>(
       `mergeIncremental() found an existing committed node "${write.id}" (kind "${write.kind}") whose current props do not validate against the active schema.`,
       { id: write.id, kind: write.kind },
     );
-    if (analysis.stripsCurrentProps && analysis.schemaWouldChange) {
-      throw new MergeError(
-        `mergeIncremental() would update committed node "${write.id}" (kind "${write.kind}") but the write would strip existing props outside the active schema (lossy base update).`,
-        { details: { id: write.id, kind: write.kind } },
-      );
-    }
   }
 }
 
@@ -7088,12 +7050,6 @@ async function validateIncrementalEdgeWrites<G extends GraphDef>(
       `mergeIncremental() found an existing committed edge "${edge.id}" (kind "${edge.kind}") whose current props do not validate against the active schema.`,
       { id: edge.id, kind: edge.kind },
     );
-    if (analysis.stripsCurrentProps && analysis.schemaWouldChange) {
-      throw new MergeError(
-        `mergeIncremental() would update committed edge "${edge.id}" (kind "${edge.kind}") but the write would strip existing props outside the active schema.`,
-        { details: { id: edge.id, kind: edge.kind } },
-      );
-    }
   }
 }
 

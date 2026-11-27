@@ -117,6 +117,7 @@ export {
   SQL_IDENTIFIER_TOO_LONG_CODE,
   StaleVersionError,
   type StaleVersionErrorDetails,
+  STORED_PROPERTY_INVALID_CODE,
   StoreNotInitializedError,
   type StoreNotInitializedErrorDetails,
   type StoreNotInitializedReason,

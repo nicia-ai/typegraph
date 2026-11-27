@@ -698,6 +698,10 @@ const CASES: Record<keyof WriteSession, Case> = {
               email: "k-revised@example.com",
             },
             unsetProperties: [],
+            statedPatch: {
+              title: "set-revised",
+              email: "k-revised@example.com",
+            },
             candidateIds: candidates,
             candidateIdColumn: "n_id",
           },

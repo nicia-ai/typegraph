@@ -24,7 +24,6 @@ import {
   trustedImportGraph,
 } from "../../../src/interchange";
 import { requireDefined } from "../../../src/utils/presence";
-import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
 
 const PUBLISHED = new Date("2024-01-02T03:04:05.678Z");
@@ -775,38 +774,22 @@ export function registerDatePropertyWriteIntegrationTests(
         at: PUBLISHED,
       });
       const stored = new Date(PUBLISHED.getTime() + DAY_MS).toISOString();
-      const shiftedAgain = new Date(
-        PUBLISHED.getTime() + 2 * DAY_MS,
-      ).toISOString();
       expect(document.at).toBe(stored);
       const exported = await exportGraph(source);
-      const lane = { dialect: source.backend.dialect };
 
-      // An update re-parses the untouched stored date through the wrapper's
-      // `.overwrite()`, which shifts it again; main does the same. The
-      // update-validation change writes the stored value back for a key the
-      // patch does not state, and flips this marker.
+      // The update re-validates the whole row, but stores the untouched date
+      // as it was stored: the wrapper's `.overwrite()` does not shift it
+      // again (main shifted it on every update).
       const updated = await source.nodes.ShiftedDateDoc.update(document.id, {
         title: "a2",
       });
-      expectObservation({
-        lane,
-        observed: {
-          title: updated.title,
-          at: updated.at as unknown as string,
-        },
-        correct: { title: "a2", at: stored },
-        defects: [
-          {
-            label: "update re-parses an untouched stored value",
-            on: {},
-            today: { title: "a2", at: shiftedAgain },
-          },
-        ],
-      });
+      expect({
+        title: updated.title,
+        at: updated.at as unknown as string,
+      }).toEqual({ title: "a2", at: stored });
 
-      // Import parses the document's stored row as an update re-parses one,
-      // so the same `.overwrite()` shifts the exported date. Main refused the
+      // Import writes the document's stored row as stored: the same
+      // `.overwrite()` does not shift the exported date. Main refused the
       // row instead (every exported date was refused).
       const target = await context.createStore(
         buildEdgeCaseGraph("date_property_shifted_target"),
@@ -816,21 +799,10 @@ export function registerDatePropertyWriteIntegrationTests(
         onUnknownProperty: "error",
       });
       const [imported] = await target.nodes.ShiftedDateDoc.find();
-      expectObservation({
-        lane,
-        observed: {
-          errors: result.errors.length,
-          at: imported?.at as unknown as string | undefined,
-        },
-        correct: { errors: 0, at: stored },
-        defects: [
-          {
-            label: "import re-parses a stored value",
-            on: {},
-            today: { errors: 0, at: shiftedAgain },
-          },
-        ],
-      });
+      expect({
+        errors: result.errors.length,
+        at: imported?.at as unknown as string | undefined,
+      }).toEqual({ errors: 0, at: stored });
     });
   });
 }

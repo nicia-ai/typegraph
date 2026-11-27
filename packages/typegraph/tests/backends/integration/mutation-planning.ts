@@ -936,10 +936,18 @@ export function registerMutationPlanningIntegrationTests(
       });
     });
 
-    it("refuses postimages that the native wire codec would reject or transform again", async () => {
+    it("applies a postimage as stored, and refuses one its schema does not accept", async () => {
       const Unstable = defineNode("Unstable", {
         schema: z.object({
+          // Not idempotent: the candidate stores "once!", which the apply
+          // writes as stored rather than parsing it again into "once!!".
           name: z.string().transform((value) => `${value}!`),
+          // Type-changing: the candidate stores the length, which is not
+          // valid input to the string schema, so the postimage is refused.
+          size: z
+            .string()
+            .transform((value) => value.length)
+            .optional(),
         }),
       });
       const unstable = defineGraph({
@@ -951,7 +959,7 @@ export function registerMutationPlanningIntegrationTests(
       const builder = await createMutationPlanBuilder(store, "unstable");
       for (const planningScope of ["candidate", "full"] as const) {
         const result = await builder
-          .createNode("Unstable", "new", { name: "once" })
+          .createNode("Unstable", "sized", { name: "once", size: "abc" })
           .plan({ makeBackend, planningScope });
         expect(result).toMatchObject({
           success: false,
@@ -963,9 +971,20 @@ export function registerMutationPlanningIntegrationTests(
       }
       expect(
         await store.nodes.Unstable.getById(
-          "new" as Parameters<typeof store.nodes.Unstable.getById>[0],
+          "sized" as Parameters<typeof store.nodes.Unstable.getById>[0],
         ),
       ).toBeUndefined();
+
+      const plan = unwrap(
+        await builder
+          .createNode("Unstable", "new", { name: "once" })
+          .plan({ makeBackend }),
+      );
+      unwrap(await applyMergePlan(store, plan));
+      const node = await store.nodes.Unstable.getById(
+        "new" as Parameters<typeof store.nodes.Unstable.getById>[0],
+      );
+      expect(node?.name).toBe("once!");
     });
 
     it("honors a persisted authoring fence instead of rebasing an older request", async () => {

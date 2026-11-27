@@ -79,11 +79,18 @@ export function unrecognizedOptionKeyIssues(
 export function zodIssuesToValidationIssues(
   error: ZodError,
 ): ValidationIssue[] {
-  return error.issues.map((issue) => ({
+  return error.issues.map((issue) => zodIssueToValidationIssue(issue));
+}
+
+/** One Zod issue in ValidationIssue format. */
+export function zodIssueToValidationIssue(
+  issue: ZodError["issues"][number],
+): ValidationIssue {
+  return {
     path: issue.path.join("."),
     message: issue.message,
     code: issue.code,
-  }));
+  };
 }
 
 /**

@@ -32,7 +32,6 @@ import {
   planMerge,
 } from "../../../src/graph-merge";
 import { isErr, isOk, unwrap } from "../../../src/graph-merge/result";
-import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
 
 const PUBLISHED = new Date("2024-01-02T03:04:05.678Z");
@@ -289,23 +288,11 @@ export function registerDatePropertyMergeIntegrationTests(
       const merged = await merge(base, [fork]);
       expect(isErr(merged) ? merged.error.message : "merged").toBe("merged");
       const [row] = await base.nodes.MergedShiftedDoc.find();
-      // The merge writes the branch's stored row through the target's schema,
-      // so the wrapper's `.overwrite()` shifts the date again, as an update of
-      // another property does. Main refused the write instead (every dated
-      // row was refused).
-      expectObservation({
-        lane: { dialect: base.backend.dialect },
-        // Reads return the stored text, typed as the schema's `Date`.
-        observed: row?.at as unknown as string | undefined,
-        correct: stored,
-        defects: [
-          {
-            label: "merge re-parses a stored value",
-            on: {},
-            today: new Date(PUBLISHED.getTime() + 2 * DAY_MS).toISOString(),
-          },
-        ],
-      });
+      // The merge writes the branch's stored row as stored, after validating it
+      // through the target's schema, so the wrapper's `.overwrite()` does not
+      // shift the date again. Main refused the write instead (every dated row
+      // was refused). Reads return the stored text, typed as the schema's `Date`.
+      expect(row?.at as unknown as string | undefined).toBe(stored);
     });
   });
 }

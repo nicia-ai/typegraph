@@ -17,12 +17,11 @@
  *    props object through `.optional()`, `.nullable()`, `.default()`,
  *    `.prefault()`, `.catch()`, `.readonly()` and `.nonoptional()` wrappers,
  *    the shape of a nested `z.object()`, or the element of a `z.array()`,
- *    with no `.overwrite()` check on the schema under those wrappers (one
- *    rewrites its value on every parse, so it would rewrite the revived,
- *    untouched value). An `.overwrite()` on a wrapper is not consulted: the
- *    revived value is parsed through it, so a rewriting one changes an
- *    untouched date on every update. That re-parse of values the caller did
- *    not touch is the deferred update-validation design, not this one;
+ *    with no `.overwrite()` check on the schema under those wrappers. An
+ *    `.overwrite()` on a wrapper is not consulted: the revived value is
+ *    parsed through it. Either way the parse only validates an untouched
+ *    value; what a re-validating write stores for it is the stored value
+ *    (`revalidateWrite`), so a rewriting check never reaches it;
  *  - the stored value is portable timestamp text ({@link isPortableTimestamp}):
  *    exactly the text the store writes for a `Date` it accepts (canonical UTC
  *    ISO in the years 0001 to 9999), so the revived `Date` serializes back to
@@ -30,9 +29,8 @@
  *
  * Every other value is returned as stored: a non-canonical string (which
  * `z.date()` still refuses, as before), a value under a union, record, tuple,
- * intersection, lazy schema or pipe (`z.date().transform(…)` included — what a
- * transform's output re-parses to is the deferred update-validation design,
- * not this one), and every property the schema does not declare. Nothing else
+ * intersection, lazy schema or pipe (`z.date().transform(…)` included), and
+ * every property the schema does not declare. Nothing else
  * about validation changes: the caller still parses the result through the
  * complete kind schema, and a caller's own input is never passed here.
  *
@@ -81,8 +79,8 @@ type SchemaDef = Readonly<{
 
 /**
  * Whether a schema carries an `.overwrite()` check: one that replaces the
- * value on every parse, so parsing a revived stored value again would rewrite
- * the untouched property instead of keeping it.
+ * value on every parse. Nothing at or below one is revived, so its stored text
+ * is parsed as stored (and refused by a `z.date()`), as it always was.
  */
 function hasOverwriteCheck(schema: z.ZodType): boolean {
   const checks = (schema.def as SchemaDef).checks ?? [];
@@ -123,8 +121,8 @@ function reviveObject(
 export function reviveStoredDates(schema: z.ZodType, value: unknown): unknown {
   const unwrapped = unwrapTransparentWrappers(schema);
   // A schema that rewrites its value on every parse — on the date itself or on
-  // an object or array holding it — would rewrite a revived stored value, so
-  // nothing at or below it is revived and the re-parse refuses as before.
+  // an object or array holding it — is not revived through, so the re-parse
+  // refuses its stored text as before.
   if (hasOverwriteCheck(unwrapped)) return value;
   const def = unwrapped.def as SchemaDef;
   if (unwrapped.type === "date") {
