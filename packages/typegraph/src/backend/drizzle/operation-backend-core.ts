@@ -283,6 +283,40 @@ function chunkByWeight<T>(
   return chunks;
 }
 
+/**
+ * The binds an owner release spends besides its constraints: the graph id,
+ * the owner pair and the release timestamp.
+ */
+const OWNER_CLAIM_RELEASE_FIXED_PARAM_COUNT = 4;
+
+/**
+ * Splits one owner release into statements that each fit the bind budget.
+ *
+ * The split is by constraint: each statement names a set of constraints and
+ * carries exactly the kept claims of those constraints, so a claim a write
+ * keeps under one constraint is never released by the statement that names
+ * another. A constraint costs one bind for its name and two per claim it
+ * keeps. An empty constraint list releases nothing and issues no statement.
+ */
+function chunkOwnerClaimRelease(
+  params: ReleaseUniquesByOwnerParams,
+  maxBindParameters: number,
+): readonly ReleaseUniquesByOwnerParams[] {
+  const constraints = [...new Set(params.constraintNames)].map((name) => ({
+    name,
+    keep: params.keep.filter((kept) => kept.constraintName === name),
+  }));
+  return chunkByWeight(
+    constraints,
+    maxBindParameters - OWNER_CLAIM_RELEASE_FIXED_PARAM_COUNT,
+    (constraint) => 1 + 2 * constraint.keep.length,
+  ).map((chunk) => ({
+    ...params,
+    constraintNames: chunk.map((constraint) => constraint.name),
+    keep: chunk.flatMap((constraint) => constraint.keep),
+  }));
+}
+
 function chunkAtomicNodeEntriesByClaimWork(
   entries: readonly AtomicNodeBatchEntry[],
   maxBindParameters: number,
@@ -5989,12 +6023,12 @@ export function createCommonOperationBackend(
     async releaseUniquesByOwner(
       params: ReleaseUniquesByOwnerParams,
     ): Promise<void> {
-      if (params.constraintNames.length === 0) return;
-      const query = operationStrategy.buildReleaseUniquesByOwner(
-        params,
-        nowIso(),
-      );
-      await execution.execRun(query);
+      const timestamp = nowIso();
+      for (const chunk of chunkOwnerClaimRelease(params, maxBindParameters)) {
+        await execution.execRun(
+          operationStrategy.buildReleaseUniquesByOwner(chunk, timestamp),
+        );
+      }
     },
 
     async hardDeleteUniquesByNodeIds(
