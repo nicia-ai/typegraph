@@ -5186,6 +5186,7 @@ type NativeTransactionState = Readonly<{
 }> & {
     [READ_ONLY_SCOPES]: readonly string[];
     [CONNECTION]: object | undefined;
+    readonly [SERIALIZED_BY]: object | undefined;
 };
 
 // @public
@@ -7077,6 +7078,9 @@ type SelectiveField = Readonly<{
     isSystemField: boolean;
     valueType?: ValueType | undefined;
 }>;
+
+// @public (undocumented)
+const SERIALIZED_BY: unique symbol;
 
 // @public
 type SerializedClosures = Readonly<{
