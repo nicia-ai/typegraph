@@ -33,6 +33,7 @@ import { afterEach, beforeEach, describe } from "vitest";
 
 import { createAdapterStoreWithSchema } from "../../src";
 import type { AdapterBackend } from "../../src/backend/types";
+import type { ReopenableStorage } from "../helpers/reopenable-storage";
 import type {
   TracedConnection,
   TracedTableNames,
@@ -126,6 +127,8 @@ type IntegrationTestSuiteOptions<TIsolatedTransaction> = Readonly<{
   openTracedConnection: (
     tableNameSets: readonly TracedTableNames[],
   ) => Promise<TracedConnection>;
+  /** See {@link IntegrationTestContext.openReopenableStorage}. */
+  openReopenableStorage: () => Promise<ReopenableStorage>;
 }>;
 
 /**
@@ -216,6 +219,7 @@ export function createIntegrationTestSuite<
       serverLaneConcurrency: options.serverLaneConcurrency ?? false,
       driver: options.driver,
       openTracedConnection: options.openTracedConnection,
+      openReopenableStorage: options.openReopenableStorage,
     } as const satisfies IntegrationTestContext;
 
     beforeEach(async () => {
