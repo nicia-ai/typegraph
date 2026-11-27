@@ -41,8 +41,11 @@
 import { type z } from "zod";
 
 import { objectSchemaShape } from "../core/kind-schema";
+import { ValidationError } from "../errors";
+import { validateNodeProps } from "../errors/validation";
 import { isPortableTimestamp } from "../utils/date";
 import { isPlainObject } from "../utils/object";
+import { err, ok, type Result } from "../utils/result";
 
 /** The schema wrappers whose input is their inner schema's input. */
 const TRANSPARENT_WRAPPER_TYPES: ReadonlySet<string> = new Set([
@@ -142,4 +145,39 @@ export function reviveStoredDateProps(
   props: Record<string, unknown>,
 ): Record<string, unknown> {
   return reviveStoredDates(schema, props) as Record<string, unknown>;
+}
+
+/**
+ * A node row's STORED props as the kind's schema validates them: stored date
+ * text revived ({@link reviveStoredDateProps}), then parsed through the
+ * complete kind schema.
+ *
+ * THE one reading of stored props that a path derives a uniqueness key from.
+ * A claim's key is derived from validated props only, because the stored
+ * form of a value is not the value a write claimed: a `Date` is stored as its
+ * ISO text, and PostgreSQL's JSONB returns an object's keys in its own order.
+ * A path that has only the stored row — a provenance revival, a lookup asking
+ * whether a released claim's node still holds the key, a merge plan's probe —
+ * keys what this returns, never the stored text.
+ *
+ * Returns the {@link ValidationError} rather than throwing it, so a caller
+ * that can answer without the key (a lookup that treats the row as no longer
+ * holding it) decides what an unreadable row means for it.
+ */
+export function parseStoredNodeProps(
+  schema: z.ZodType,
+  props: Record<string, unknown>,
+  context: Readonly<{ kind: string; id: string }>,
+): Result<Record<string, unknown>, ValidationError> {
+  try {
+    return ok(
+      validateNodeProps(schema, reviveStoredDateProps(schema, props), {
+        ...context,
+        operation: "update",
+      }) as Record<string, unknown>,
+    );
+  } catch (error) {
+    if (error instanceof ValidationError) return err(error);
+    throw error;
+  }
 }

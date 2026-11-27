@@ -99,7 +99,7 @@ export function uniqueConstraintNameForBucket(key: string): string | undefined {
 
 /**
  * Builds the exact-match signature for one unique constraint from a node's
- * field values, or `undefined` when ANY of the constraint's fields is `null` /
+ * VALIDATED props (see {@link blockNodes}'s `uniqueKeyProps`), or `undefined` when ANY of the constraint's fields is `null` /
  * `undefined` (a partial key cannot establish exact-match equality, and — since
  * the introspection snapshot does not expose a constraint's `where` predicate —
  * skipping absent values keeps a partial unique constraint from silently
@@ -115,10 +115,9 @@ export function uniqueConstraintNameForBucket(key: string): string | undefined {
  * `computeUniqueKey` does not, so distinct rows were silently over-merged).
  */
 function constraintSignature(
-  node: Node<NodeType>,
+  props: Record<string, unknown>,
   constraint: UniqueIntrospection,
 ): string | undefined {
-  const props = node as unknown as Record<string, unknown>;
   for (const field of constraint.fields) {
     // Own-key read: a constraint over a prototype-named field ("toString")
     // must see an absent value as absent here, exactly as computeUniqueKey
@@ -151,6 +150,7 @@ function bucketKeysFor(
   node: Node<NodeType>,
   block: ResolveConfig["block"],
   constraints: readonly UniqueIntrospection[],
+  uniqueKeyProps: Record<string, unknown> | undefined,
 ): readonly string[] {
   const keys: string[] = [];
 
@@ -160,7 +160,10 @@ function bucketKeysFor(
   }
 
   for (const constraint of constraints) {
-    const signature = constraintSignature(node, constraint);
+    const signature =
+      uniqueKeyProps === undefined ? undefined : (
+        constraintSignature(uniqueKeyProps, constraint)
+      );
     if (signature !== undefined) {
       keys.push(`${UNIQUE_KEY_PREFIX}${KEY_PART_SEPARATOR}${signature}`);
     }
@@ -181,6 +184,12 @@ function bucketKeysFor(
  * @param uniqueConstraints The kind's `unique` constraints from
  *   `store.introspect().kinds[k].unique`. Pass an empty array when blocking
  *   should rely on `block()` alone.
+ * @param uniqueKeyProps The props of the node at `index` in `newNodes` as its
+ *   kind's schema validates them —
+ *   the props the store keys a uniqueness claim from — or `undefined` when
+ *   they do not validate, in which case the node gets no unique-constraint
+ *   bucket. Defaults to the node's own fields, for nodes that already hold
+ *   validated values.
  * @returns A map from bucket key → that bucket's nodes. Iteration order of the
  *   returned map is the lexicographic order of bucket keys, and each bucket's
  *   node list is sorted by `node.id`, so the result is a pure, order-independent
@@ -191,14 +200,20 @@ export function blockNodes<K extends NodeType>(
   newNodes: readonly Node<K>[],
   resolveConfig: Pick<ResolveConfig, "block">,
   uniqueConstraints: readonly UniqueIntrospection[] = [],
+  uniqueKeyProps: (
+    node: Node<K>,
+    index: number,
+  ) => Record<string, unknown> | undefined = (node) =>
+    node,
 ): Map<string, Node<K>[]> {
   const buckets = new Map<string, Node<K>[]>();
 
-  for (const node of newNodes) {
+  for (const [index, node] of newNodes.entries()) {
     for (const key of bucketKeysFor(
       node,
       resolveConfig.block,
       uniqueConstraints,
+      uniqueConstraints.length === 0 ? undefined : uniqueKeyProps(node, index),
     )) {
       const bucket = buckets.get(key);
       if (bucket === undefined) {

@@ -21,6 +21,7 @@ import {
   assertEdgeIdentityMatches,
   edgeIdentityFromRow,
 } from "../store/operations/edge-identity";
+import { parseStoredNodeProps } from "../store/stored-date-revival";
 import { type ValidityEndMutation } from "../store/types";
 import { isInvertedValidityWindow, isPortableTimestamp } from "../utils/date";
 import { createDataKeyedBag } from "../utils/object";
@@ -739,24 +740,54 @@ function observationsAsCandidates(
   };
 }
 
+/**
+ * The claim keys the mutated rows would hold, grouped for the probe. Each
+ * row's keys are derived from its stored props as its kind's schema validates
+ * them ({@link parseStoredNodeProps}) — the props a write claims from — so a
+ * probed key is the key a holder's claim was written under, never the stored
+ * text of the value.
+ *
+ * @throws ValidationError when a mutated row's stored props do not validate:
+ *   the keys it would claim cannot be derived.
+ */
 function uniquenessProbes<G extends GraphDef>(
   target: Store<G>,
   nodes: readonly NodeRow[],
 ) {
   return groupNodeUniquenessProbes(
     target.registry,
-    nodes.map((row) => ({
-      kind: row.kind,
-      entries: nodeClaimEntries(
-        target.registry,
-        row.kind,
-        row.id,
-        parseRowProps(row.props),
-        target.graph.nodes[row.kind]?.unique ?? [],
-        "create",
-      ),
-    })),
+    nodes.map((row) => {
+      const registration = target.graph.nodes[row.kind];
+      const constraints = registration?.unique ?? [];
+      const stored = { ...parseRowProps(row.props) };
+      return {
+        kind: row.kind,
+        entries: nodeClaimEntries(
+          target.registry,
+          row.kind,
+          row.id,
+          registration === undefined || constraints.length === 0 ?
+            stored
+          : validatedRowProps(registration.type.schema, row, stored),
+          constraints,
+          "create",
+        ),
+      };
+    }),
   );
+}
+
+function validatedRowProps(
+  schema: z.ZodType,
+  row: NodeRow,
+  stored: Record<string, unknown>,
+): Record<string, unknown> {
+  const parsed = parseStoredNodeProps(schema, stored, {
+    kind: row.kind,
+    id: row.id,
+  });
+  if (!parsed.success) throw parsed.error;
+  return parsed.data;
 }
 
 async function planMutationSteps<G extends GraphDef>(

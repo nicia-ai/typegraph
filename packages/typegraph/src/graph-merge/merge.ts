@@ -18,6 +18,7 @@ import { lockStoreWriteFence } from "../store/operations/write-fence-prelude";
 import { storeWritersTakeGraphWriteFence } from "../store/operations/write-transaction";
 import { recordedAnchorOwner } from "../store/recorded-anchor-origin";
 import { resolveEvolvedTransactionStore } from "../store/runtime-port";
+import { parseStoredNodeProps } from "../store/stored-date-revival";
 import type { TransactionContext } from "../store/types";
 import { groupBy } from "../utils/array";
 import { nowIso } from "../utils/date";
@@ -364,6 +365,34 @@ type AnyNodeId = NodeId<NodeType>;
  * off the node (`node.name`), so the props must be spread at the top level with
  * `kind`/`id` alongside — exactly the runtime shape `Node<NodeType>` carries.
  */
+/**
+ * The validated props each staged node's unique-constraint signature is keyed
+ * from: its staged (stored) props as the kind's schema validates them, the
+ * props a write claims from — so a blocking bucket is keyed exactly as the
+ * claim the commit takes. A node whose props do not validate has none.
+ */
+function uniqueKeyPropsOf<G extends GraphDef>(
+  target: Store<G>,
+  kind: string,
+  items: readonly StagedNewNode[],
+): (
+  node: Node<NodeType>,
+  index: number,
+) => Record<string, unknown> | undefined {
+  const schema = target.graph.nodes[kind]?.type.schema;
+  const validated = items.map((staged) => {
+    if (schema === undefined) return;
+    const parsed = parseStoredNodeProps(
+      schema,
+      { ...staged.node.props },
+      { kind, id: staged.node.id },
+    );
+    return parsed.success ? parsed.data : undefined;
+  });
+  // `blockNodes` is handed `items` mapped one-to-one, in order.
+  return (_node, index) => validated[index];
+}
+
 function asNode(staged: StagedNewNode): Node<NodeType> {
   return {
     kind: staged.node.kind,
@@ -796,7 +825,12 @@ async function generateAllCandidates<G extends GraphDef>(
           introspectionKinds,
           kind,
         );
-        const blocks = blockNodes(nodes, resolveConfig, uniqueConstraints);
+        const blocks = blockNodes(
+          nodes,
+          resolveConfig,
+          uniqueConstraints,
+          uniqueKeyPropsOf(target, kind, items),
+        );
         const keylessConfig = keylessConfigFor(resolveConfig);
         const scope: SourceScope = {
           kind,

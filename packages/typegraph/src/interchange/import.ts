@@ -2057,7 +2057,10 @@ function recordNodeOutcome(
 type NodeImportCandidate = Readonly<{
   node: InterchangeNode;
   schemaEntry: NodeSchemaEntry;
+  /** The props written: the parse, or the document's verbatim under "allow". */
   props: Record<string, unknown>;
+  /** The schema's parse of the props, which every claim is keyed from. */
+  claimProps: Record<string, unknown>;
   draft: NodeCreateDraft;
 }>;
 
@@ -2148,6 +2151,7 @@ async function processNodeSlice(
       node,
       schemaEntry,
       props: propsResult.data,
+      claimProps: propsResult.parsed,
       draft: {
         kind: node.kind,
         id: node.id,
@@ -2155,7 +2159,8 @@ async function processNodeSlice(
         idProvided: true,
         nodeKind: schemaEntry.registration.type,
         uniqueConstraints: schemaEntry.registration.unique ?? [],
-        validatedProps: propsResult.data,
+        // The cache priming keys claims from it, so it is the parse.
+        validatedProps: propsResult.parsed,
         // NodeCreateDraft.validFrom is string | undefined (never null) — it
         // only feeds batch validation-cache priming, which never inspects
         // it, so normalizing the explicit-NULL sentinel away here is inert.
@@ -2203,7 +2208,7 @@ async function processNodeSlice(
   const overlaidSession = frame.overlaidSession(reads);
   const accepted: NodeImportCandidate[] = [];
   for (const candidate of candidates) {
-    const { node, schemaEntry, props } = candidate;
+    const { node, schemaEntry, props, claimProps } = candidate;
     const uniqueConstraints = schemaEntry.registration.unique ?? [];
     const existing = await validationBackend.getNode(
       graphId,
@@ -2245,6 +2250,7 @@ async function processNodeSlice(
             existing,
             schema: schemaEntry.registration.type.schema,
             validatedProps: props,
+            claimProps,
             uniqueConstraints,
             windowFence: updateWindow.value,
             windowEndFrame: frame,
@@ -2257,8 +2263,7 @@ async function processNodeSlice(
             registerAppliedNodeUpdate(
               node.kind,
               node.id,
-              rowPropsToObject(existing.props),
-              props,
+              claimProps,
               uniqueConstraints,
             );
           }
@@ -2294,7 +2299,7 @@ async function processNodeSlice(
         { graphId, registry, backend: validationBackend },
         node.kind,
         node.id,
-        props,
+        claimProps,
         uniqueConstraints,
       );
       await checkDisjointnessConstraint(
@@ -2309,7 +2314,12 @@ async function processNodeSlice(
     }
 
     registerPendingNode(buildImportInsertParams(graphId, node, props));
-    registerPendingUniqueEntries(node.kind, node.id, props, uniqueConstraints);
+    registerPendingUniqueEntries(
+      node.kind,
+      node.id,
+      claimProps,
+      uniqueConstraints,
+    );
     accepted.push(candidate);
   }
 
@@ -2330,7 +2340,7 @@ async function processNodeSlice(
           registry,
           candidate.node,
           candidate.schemaEntry.registration,
-          candidate.props,
+          { written: candidate.props, claimed: candidate.claimProps },
         ),
       ),
     );
@@ -2386,23 +2396,28 @@ function importNodeCreateWork(
   registry: KindRegistry,
   node: InterchangeNode,
   registration: NodeRegistration,
-  props: Record<string, unknown>,
+  props: Readonly<{
+    /** The props the row is written with. */
+    written: Record<string, unknown>;
+    /** The schema's parse of them, which the claims are keyed from. */
+    claimed: Record<string, unknown>;
+  }>,
 ): NodeCreateWork {
   const claim = {
     kind: node.kind,
     id: node.id,
-    props,
+    props: props.claimed,
     constraints: registration.unique ?? [],
   } satisfies NodeClaimItem;
   return {
-    params: buildImportInsertParams(graphId, node, props),
+    params: buildImportInsertParams(graphId, node, props.written),
     claim,
     claimPlan: planNodeCreateClaims({ graphId, registry }, claim),
     sideEffects: {
       kind: node.kind,
       id: node.id,
       schema: registration.type.schema,
-      props,
+      props: props.written,
       uniqueConstraints: registration.unique ?? [],
     },
     projections: [],
@@ -2681,6 +2696,7 @@ async function updateImportedNode(
     existing: LiveNodeRow;
     schema: z.ZodType;
     validatedProps: Record<string, unknown>;
+    claimProps: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
     windowFence: ValidityLowerBoundFence;
     windowEndFrame: NodeWindowEndFrame;
@@ -2708,6 +2724,7 @@ async function updateImportedNode(
               existing: args.existing,
               schema: args.schema,
               validatedProps: args.validatedProps,
+              claimProps: args.claimProps,
               uniqueConstraints: args.uniqueConstraints,
               ...(node.validTo !== undefined && { validTo: node.validTo }),
             },
@@ -3234,6 +3251,7 @@ async function processNode(
           existing,
           schema: registration.type.schema,
           validatedProps: propsResult.data,
+          claimProps: propsResult.parsed,
           uniqueConstraints,
           windowFence: updateWindow.value,
           windowEndFrame: frame,
@@ -3263,7 +3281,7 @@ async function processNode(
       { graphId, registry, backend: frame.target },
       node.kind,
       node.id,
-      propsResult.data,
+      propsResult.parsed,
       uniqueConstraints,
     );
     await checkDisjointnessConstraint(
@@ -3279,13 +3297,10 @@ async function processNode(
   // The RETURNING single-insert shape, whose row this path discards, because
   // that is the statement this leg emitted before the migration.
   await frame.session.createNode(
-    importNodeCreateWork(
-      graphId,
-      registry,
-      node,
-      registration,
-      propsResult.data,
-    ),
+    importNodeCreateWork(graphId, registry, node, registration, {
+      written: propsResult.data,
+      claimed: propsResult.parsed,
+    }),
   );
 
   return { status: "created" };
@@ -6130,25 +6145,40 @@ function importEdgeInsertWork(
  * `Date` stated in memory and one a coercing schema produces from text are
  * both refused. Once stored, such a value made every date predicate,
  * ordering or typed read of the property fail on PostgreSQL.
+ *
+ * Both are returned: `data` is written, and `parsed` is what a node's
+ * uniqueness claims are keyed from. A claim's key is derived from validated
+ * props only, so a value the document states as text (an exported date, an
+ * object in another key order) claims the key a create of the same value
+ * claims.
  */
 function storableImportProperties(
   persisted: Record<string, unknown>,
-  parsed: unknown,
-):
-  | { success: true; data: Record<string, unknown> }
-  | { success: false; error: string } {
+  parsed: Record<string, unknown>,
+): ImportPropertiesResult {
   const issue = unstorableDateIssue(persisted) ?? unstorableDateIssue(parsed);
-  if (issue === undefined) return { success: true, data: persisted };
+  if (issue === undefined) return { success: true, data: persisted, parsed };
   return { success: false, error: `${issue.path}: ${issue.message}` };
 }
+
+/**
+ * An import strategy's verdict on one entity's properties: the props it
+ * persists (`data`) and the schema's parse of them (`parsed`), or the
+ * refusal.
+ */
+type ImportPropertiesResult =
+  | Readonly<{
+      success: true;
+      data: Record<string, unknown>;
+      parsed: Record<string, unknown>;
+    }>
+  | Readonly<{ success: false; error: string }>;
 
 export function validateImportProperties(
   properties: Record<string, unknown>,
   schema: z.ZodObject<z.ZodRawShape>,
   unknownStrategy: UnknownPropertyStrategy,
-):
-  | { success: true; data: Record<string, unknown> }
-  | { success: false; error: string } {
+): ImportPropertiesResult {
   try {
     // Get the schema's known keys
     const knownKeys = new Set(Object.keys(schema.shape));

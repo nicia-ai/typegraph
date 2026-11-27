@@ -97,6 +97,7 @@ export { registerOntologyEquivalenceIntegrationTests } from "./ontology-equivale
 export { registerOntologyTighteningIntegrationTests } from "./ontology-tightening";
 export { registerOntologyTypedSubsumptionIntegrationTests } from "./ontology-typed-subsumption";
 export { registerOrderingIntegrationTests } from "./ordering";
+export { registerOwnerClaimReleaseIntegrationTests } from "./owner-claim-release";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-property";
 export { registerPaginationSystemColumnIntegrationTests } from "./pagination-system-columns";

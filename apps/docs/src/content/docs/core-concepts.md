@@ -857,6 +857,25 @@ TypeScript requires both `scope` and `collation`. An untyped caller that omits
 - `"binary"`: Case-sensitive comparison
 - `"caseInsensitive"`: Case-insensitive comparison
 
+### How a unique value is claimed and released
+
+A node reserves each unique value it holds as a claim row keyed by the value.
+The key is computed from the props the write validated, by one function, on
+every path that claims or looks up a value: create, update, upsert, import,
+`updateWhere()`, graph merge, resurrection, `findByConstraint()` and
+`getOrCreateByConstraint()`. A date is keyed from its `Date`, never from the
+ISO text the row stores, and an object from its validated key order, never
+from the order PostgreSQL's `jsonb` returns. A path that starts from a stored
+row (a provenance reopen, for example) validates it through the kind's schema
+first.
+
+A claim is released by the node that holds it. An update gives back every
+claim the node holds under the constraint other than the key it now claims,
+and a delete gives back all of them, without recomputing the key an earlier
+write took. A claim keyed in an older form is released the same way. Two
+cases this does not repair are described in
+[Limitations](/limitations#uniqueness-claims-keyed-in-another-form).
+
 ## Type Inference
 
 TypeGraph infers TypeScript types from Zod schemas—you never duplicate type definitions.

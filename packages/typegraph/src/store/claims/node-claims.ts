@@ -21,6 +21,7 @@ import {
 } from "../../backend/capabilities/resolve";
 import {
   type InsertUniqueParams,
+  type KeptUniqueClaim,
   type NodeInsertClaim,
   type UniqueConstraintBackend,
   type UniqueRow,
@@ -295,9 +296,9 @@ export function refuseNodeCreateClaimError(
  * declared. Both the CREATE seam's `withNodeCreateClaimsIssuedBy` and the
  * transition seam's {@link claimUniqueKeysThen} reuse it — a resurrect's plan
  * can carry a disjointness entry exactly as a create's claim list does (see
- * {@link planNodeClaimReinsert}), so the transition seam needs the same
+ * {@link planNodeClaimTransition}), so the transition seam needs the same
  * translation the create seam always did. For a plan whose claims are all
- * uniqueness (an in-place update's diff), `mapClaimRefusal` finds no
+ * uniqueness (an in-place update's), `mapClaimRefusal` finds no
  * disjointness entry to remap and rethrows the original `UniquenessError`
  * unchanged, so this is a no-op there.
  */
@@ -956,35 +957,81 @@ export function alreadyAppliedRowWrite(): Promise<undefined> {
 }
 
 /**
- * Releases the claims a node being deleted holds — the LIFECYCLE shape: every
- * claim this node owns for each applying constraint's key, at whatever axis the
- * claim sits on.
+ * Which live claims a node gives back: those it holds under
+ * `constraintNames` other than the `keep` claims a write has just made its
+ * own.
+ *
+ * It names the OWNER's claims, never a key: no release recomputes the key an
+ * earlier write claimed, so a claim is given back whatever form it was keyed
+ * in — a legacy raw-text date, an object whose stored key order differs from
+ * the order the claiming write stated, or any form a future key derivation
+ * stops producing.
  */
-export async function deleteUniquenessEntries(
+export type OwnerClaimRelease = Readonly<{
+  constraintNames: readonly string[];
+  keep: readonly KeptUniqueClaim[];
+}>;
+
+/**
+ * THE lifecycle release: gives back the live claims node `(kind, id)` holds,
+ * as {@link OwnerClaimRelease} names them, at whatever axis each sits on.
+ *
+ * Every path that gives a claim back goes through here or through a hard
+ * delete of the owner's claims (a node hard delete, a set update's or a
+ * resolved write's purge, {@link hardDeleteClaimsByNodeIds}) — both select
+ * claims by owner, so no release depends on how a key was formed. The only
+ * key-addressed release left is the compensation in
+ * {@link claimUniqueKeysThen}, which undoes the exact rows the same write just
+ * took.
+ */
+async function releaseOwnerClaims(
   ctx: UniquenessContext,
   kind: string,
   id: string,
-  props: Record<string, unknown>,
+  release: OwnerClaimRelease,
+): Promise<void> {
+  if (release.constraintNames.length === 0) return;
+  await ctx.backend.releaseUniquesByOwner({
+    graphId: ctx.graphId,
+    concreteKind: kind,
+    nodeId: id,
+    constraintNames: release.constraintNames,
+    keep: release.keep,
+  });
+}
+
+/**
+ * Releases every claim a node being soft-deleted holds under the kind's claim
+ * sites: a delete gives back everything a create wrote, both families, at
+ * every axis, in whatever form an earlier write keyed it. Reads no props —
+ * the sites name the constraints and the owner names the claims. A kind with
+ * no claim site issues no statement.
+ */
+export async function releaseNodeClaims(
+  ctx: UniquenessContext,
+  kind: string,
+  id: string,
   constraints: readonly UniqueConstraint[],
 ): Promise<void> {
-  // The create extent: a delete gives back everything a create wrote, so the
-  // release must be read from the wider of the two lists.
-  await releaseOwnedUniqueKeys(
-    ctx,
-    kind,
-    id,
-    nodeClaimEntries(ctx.registry, kind, id, props, constraints, "create"),
-  );
+  await releaseOwnerClaims(ctx, kind, id, {
+    constraintNames: nodeClaimSites(
+      ctx.registry,
+      kind,
+      constraints,
+      "create",
+    ).map((site) => site.constraintName),
+    keep: [],
+  });
 }
 
 /**
  * Drops EVERY claim a set of nodes holds under one concrete kind, key-blind, so
  * the rebuild that follows can re-claim from the after-images.
  *
- * The key-blind drop is what a set update needs and the per-key
- * {@link deleteUniquenessEntries} cannot give it: the statement rewrote whole
- * rows without reading their before-images, so nobody knows which keys those
- * rows used to hold. It drops BOTH families — every claim the owner pair holds —
+ * Like {@link releaseNodeClaims} it selects the claims by owner, never by
+ * key: the statement rewrote whole rows without reading their before-images,
+ * and no release recomputes a key in any case. Unlike it, the drop is
+ * permanent rather than a tombstone, and it drops BOTH families — every claim the owner pair holds —
  * which is why the rebuild must go back through {@link withNodeCreateClaimsBatch}
  * rather than a uniqueness-only reinsert.
  *
@@ -1013,201 +1060,97 @@ export async function hardDeleteClaimsByNodeIds(
 }
 
 /**
- * A single constraint's sidecar transition, decided by a plan builder and
- * carried out by {@link withNodeClaimTransition}.
- *
- * The two keys move at DIFFERENT times relative to the primary row write, so
- * they are named for when they move rather than for old/new:
- * `claim` is reserved BEFORE the write (it is the write's conflict gate),
- * `release` is given up AFTER it (it is history the write supersedes).
- */
-type PendingUniqueMutation = Readonly<{
-  constraintName: string;
-  /** The key to give up once the primary write lands; undefined = none. */
-  release: string | undefined;
-  /**
-   * The entry to reserve before the primary write; undefined = none, either
-   * because the constraint stopped applying or because {@link probeUniqueKey}
-   * found this node already holding it live. It is the whole entry rather than
-   * a bare key so the compensation names the row this transition wrote instead
-   * of re-deriving which axis that was, and so the refusal reads the placement
-   * and class the entry's site decided.
-   */
-  claim: NodeClaimEntry | undefined;
-}>;
-
-/**
  * The sidecar transition a node write owes, decided but not yet performed.
+ *
+ * The two halves move at DIFFERENT times relative to the primary row write:
+ * `claims` are reserved BEFORE the write (they are its conflict gate),
+ * `release` is given up AFTER it (it is history the write supersedes).
  *
  * Opaque to its holder on purpose: the only thing a caller does with a plan is
  * hand it to {@link withNodeClaimTransition} together with the primary row
  * write it belongs to.
  */
-export type UniquenessUpdatePlan = readonly PendingUniqueMutation[];
+export type UniquenessUpdatePlan = Readonly<{
+  /**
+   * The entries to reserve before the primary write: every applying key this
+   * node does not already hold live ({@link probeUniqueKey}). Whole entries,
+   * so the compensation names the rows this transition wrote instead of
+   * re-deriving their axis, and the refusal reads the placement and class each
+   * entry's site decided.
+   */
+  claims: readonly NodeClaimEntry[];
+  /** The owner's claims to give up once the primary write lands. */
+  release: OwnerClaimRelease;
+}>;
 
 /**
- * Decides the claim changes a node's new props require, WITHOUT writing any of
- * them.
+ * One existing node row's claim transition: the props it is about to hold,
+ * already validated, and whether it is coming back into existence.
  *
- * Preflights EVERY changed constraint before anything is written. A node can
- * carry several unique constraints; probing them one at a time as they are
- * applied would let a later constraint's conflict throw after earlier sidecars
- * already moved. Probing all of them first means a refusal here happens with
- * zero writes, and the probes are independent per `constraintName`, so one
- * constraint's verdict is unaffected by the others' still-unapplied changes.
+ * `restores` is `true` for a tombstone being revived and for a row that does
+ * not exist yet: such a row owes the claims a create owes, disjointness
+ * included. A live row being updated owes its uniqueness claims alone.
  *
- * Handles the cases where a constraint starts applying, stops applying, or
- * keeps applying under a different key.
- *
- * @throws UniquenessError if an updated value is already held by another node
+ * There is deliberately no before-image: what the row held is read from the
+ * claim relation by owner, never recomputed from the props it held.
  */
-async function planNodeClaimUpdate(
-  ctx: UniquenessProbeContext,
-  kind: string,
-  id: string,
-  oldProps: Record<string, unknown>,
-  newProps: Record<string, unknown>,
-  constraints: readonly UniqueConstraint[],
-): Promise<UniquenessUpdatePlan> {
-  // Both sides of the diff are read from the one entries function, so the key
-  // a release names is computed exactly the way the key a claim names is.
-  const oldKeys = new Map(
-    nodeClaimEntries(
-      ctx.registry,
-      kind,
-      id,
-      oldProps,
-      constraints,
-      "update",
-    ).map((entry) => [entry.constraintName, entry.key]),
-  );
-  const newEntries = new Map(
-    nodeClaimEntries(ctx.registry, kind, id, newProps, constraints, "update")
-      .filter((entry): entry is UniquenessClaimEntry =>
-        isUniquenessClaimEntry(entry),
-      )
-      .map((entry) => [entry.constraintName, entry]),
-  );
-
-  const pending: PendingUniqueMutation[] = [];
-  for (const constraint of constraints) {
-    const oldKey = oldKeys.get(constraint.name);
-    const newEntry = newEntries.get(constraint.name);
-
-    // No change - constraint didn't apply and still doesn't
-    if (oldKey === undefined && newEntry === undefined) continue;
-
-    // Key is the same and the constraint still applies - nothing to do
-    if (oldKey !== undefined && oldKey === newEntry?.key) continue;
-
-    // Probe the new key: refuse a value another node holds, and note a value
-    // this node somehow holds already so the transition neither re-claims nor
-    // releases it.
-    const alreadyHeld =
-      newEntry === undefined ? false : (
-        await probeUniqueKey(ctx, kind, id, newEntry)
-      );
-
-    pending.push({
-      constraintName: constraint.name,
-      release: oldKey,
-      claim: newEntry === undefined || alreadyHeld ? undefined : newEntry,
-    });
-  }
-
-  return pending;
-}
+export type NodeClaimTransition = Readonly<{
+  kind: string;
+  id: string;
+  restores: boolean;
+  props: Record<string, unknown>;
+  constraints: readonly UniqueConstraint[];
+}>;
 
 /**
- * The plan a RESURRECTING write needs: every applying constraint re-reserved
- * from scratch, uniqueness AND disjointness alike.
+ * Decides one row's claim transition, writing nothing.
  *
- * A tombstoned node holds no live reservations — {@link deleteUniquenessEntries}
- * released them at soft-delete time, reading the wider `"create"` extent that
- * already covers both families — so the diff-based {@link planNodeClaimUpdate}
- * cannot be used here: it would skip an unchanged key and leave the revived
- * node holding NO reservation, letting a later create (of this node's own key,
- * or of a disjoint partner under this node's id) silently duplicate the value.
+ * Every applying key is probed BEFORE anything is written: a key another node
+ * holds is refused here with zero writes, and a key this node already holds
+ * live is kept rather than claimed again (so an update that moves no key
+ * issues no reservation, and a backend that cannot roll a claim back with its
+ * row is not refused for it). The release then gives up every other claim the
+ * owner holds under the kind's uniqueness constraints — the key it moved off,
+ * the claim of a constraint that stopped applying, and a claim an earlier
+ * writer keyed in another form alike.
  *
- * Reads its entries at `"resurrect"`, the {@link NodeClaimOperation} that owes
- * the same disjointness sites a create owes (see `nodeClaimSites`) — a
- * resurrect brings a node back into existence under its kind exactly as a
- * create does, so it owes the same cross-kind claim. A disjointness entry can
- * never already be held by THIS node (its own reservation was released at
- * soft-delete time, and nothing else could have taken it under this node's
- * OWN id/kind pair), so unlike a uniqueness entry it needs no "already held by
- * myself" probe — it is claimed fresh, exactly as a create claims it fresh.
+ * A restoring row additionally claims its disjointness entries fresh: its own
+ * reservation was released when it was tombstoned, and nothing else could
+ * have taken it under this node's OWN id/kind pair.
  *
- * @throws UniquenessError if a key this node held was taken while it was
- *   tombstoned
- * @throws DisjointError if a disjoint partner now holds this id (translated by
- *   {@link claimUniqueKeysThen} from the `UniquenessError` `insertUnique`
- *   itself reports)
+ * @throws UniquenessError if an applying key is held by another node
+ * @throws DisjointError if a disjoint partner holds this id (translated by
+ *   {@link claimUniqueKeysThen} when the claim is issued)
  */
-export async function planNodeClaimReinsert(
+export async function planNodeClaimTransition(
   ctx: UniquenessProbeContext,
-  kind: string,
-  id: string,
-  props: Record<string, unknown>,
-  constraints: readonly UniqueConstraint[],
+  transition: NodeClaimTransition,
 ): Promise<UniquenessUpdatePlan> {
-  const pending: PendingUniqueMutation[] = [];
+  const { kind, id, props, constraints } = transition;
+  const claims: NodeClaimEntry[] = [];
+  const keep: KeptUniqueClaim[] = [];
   for (const entry of nodeClaimEntries(
     ctx.registry,
     kind,
     id,
     props,
     constraints,
-    "resurrect",
+    transition.restores ? "resurrect" : "update",
   )) {
-    const alreadyHeld =
-      isUniquenessClaimEntry(entry) ?
-        await probeUniqueKey(ctx, kind, id, entry)
-      : false;
-
-    pending.push({
-      constraintName: entry.constraintName,
-      release: undefined,
-      claim: alreadyHeld ? undefined : entry,
-    });
+    if (!isUniquenessClaimEntry(entry)) {
+      claims.push(entry);
+      continue;
+    }
+    keep.push({ constraintName: entry.constraintName, key: entry.key });
+    if (!(await probeUniqueKey(ctx, kind, id, entry))) claims.push(entry);
   }
-  return pending;
-}
-
-/**
- * One existing node row's claim transition: the props its live reservations
- * were taken for, and the props it is about to hold.
- *
- * `heldProps` is `undefined` for a TOMBSTONE, which holds no reservation — the
- * soft delete released them — and so cannot be diffed.
- */
-export type NodeClaimTransition = Readonly<{
-  kind: string;
-  id: string;
-  heldProps: Record<string, unknown> | undefined;
-  props: Record<string, unknown>;
-  constraints: readonly UniqueConstraint[];
-}>;
-
-/**
- * Decides one existing row's claim transition, writing nothing.
- *
- * Two shapes behind one seam. A live row diffs its old and new keys
- * ({@link planNodeClaimUpdate}); a restored tombstone cannot, because the diff
- * would skip an unchanged key and leave the revived node holding NO
- * reservation, so it re-reserves every applying key
- * ({@link planNodeClaimReinsert}). Both refuse a conflict before returning,
- * and both hand the caller a plan only {@link withNodeClaimTransition} may
- * carry out.
- */
-export function planNodeClaimTransition(
-  ctx: UniquenessProbeContext,
-  transition: NodeClaimTransition,
-): Promise<UniquenessUpdatePlan> {
-  const { kind, id, heldProps, props, constraints } = transition;
-  return heldProps === undefined ?
-      planNodeClaimReinsert(ctx, kind, id, props, constraints)
-    : planNodeClaimUpdate(ctx, kind, id, heldProps, props, constraints);
+  return {
+    claims,
+    release: {
+      constraintNames: constraints.map((constraint) => constraint.name),
+      keep,
+    },
+  };
 }
 
 /**
@@ -1217,10 +1160,12 @@ export function planNodeClaimTransition(
  *
  * The set is judged in order, as the state it produces rather than one row at
  * a time against the stored claims alone: a later row's probe does not see a
- * key an earlier row of the set gives up, and does see a key an earlier row
+ * claim an earlier row of the set gives up, and does see a key an earlier row
  * takes. Each row's verdict is {@link planNodeClaimTransition}'s own, reached
  * through a probe that reads the stored claims with the earlier rows'
- * decided transitions laid over them.
+ * decided transitions laid over them. A release is laid over by OWNER, as
+ * {@link releaseOwnerClaims} performs it: a claim the owner gives up reads as
+ * free whatever key it holds.
  *
  * @throws UniquenessError when a row would hold a key that a node outside the
  *   set, or an earlier row of it, holds
@@ -1229,8 +1174,15 @@ export async function assertNodeClaimTransitionsAvailable(
   ctx: UniquenessProbeContext,
   transitions: readonly NodeClaimTransition[],
 ): Promise<void> {
-  const released = new Set<string>();
+  // Per (constraint, owner) given up by an earlier row: the keys it keeps.
+  const released = new Map<string, ReadonlySet<string>>();
   const claimed = new Map<string, UniqueRow>();
+  const releasedByOwner = (row: UniqueRow): boolean => {
+    const kept = released.get(
+      encodeTupleKey([row.constraint_name, row.concrete_kind, row.node_id]),
+    );
+    return kept !== undefined && !kept.has(row.key);
+  };
   const pendingContext: UniquenessProbeContext = {
     ...ctx,
     backend: {
@@ -1241,39 +1193,17 @@ export async function assertNodeClaimTransitionsAvailable(
         if (pending !== undefined) return pending;
         const stored = await ctx.backend.checkUnique(params);
         if (stored === undefined) return;
-        // A release gives up every reservation its owner holds for the key,
-        // whatever axis the row sits on (see `releaseOwnedUniqueKeys`).
-        return (
-            released.has(
-              encodeTupleKey([
-                stored.constraint_name,
-                stored.key,
-                stored.concrete_kind,
-                stored.node_id,
-              ]),
-            )
-          ) ?
-            undefined
-          : stored;
+        return releasedByOwner(stored) ? undefined : stored;
       },
     },
   };
 
   for (const transition of transitions) {
     const { kind, id } = transition;
-    for (const mutation of await planNodeClaimTransition(
-      pendingContext,
-      transition,
-    )) {
-      if (mutation.release !== undefined) {
-        released.add(
-          encodeTupleKey([mutation.constraintName, mutation.release, kind, id]),
-        );
-      }
-      // A disjointness claim's key is this row's own id at its pair's axis:
-      // registered like any other, it can only ever answer this row.
-      const claim = mutation.claim;
-      if (claim === undefined) continue;
+    const plan = await planNodeClaimTransition(pendingContext, transition);
+    // A disjointness claim's key is this row's own id at its pair's axis:
+    // registered like any other, it can only ever answer this row.
+    for (const claim of plan.claims) {
       claimed.set(
         encodeTupleKey([claim.axis, claim.constraintName, claim.key]),
         {
@@ -1287,53 +1217,38 @@ export async function assertNodeClaimTransitionsAvailable(
         },
       );
     }
+    for (const constraintName of plan.release.constraintNames) {
+      const kept = new Set(
+        plan.release.keep
+          .filter((entry) => entry.constraintName === constraintName)
+          .map((entry) => entry.key),
+      );
+      released.set(encodeTupleKey([constraintName, kind, id]), kept);
+      // A key an EARLIER row of the set claimed for this owner and this row
+      // gives up is given up too.
+      for (const [target, row] of claimed) {
+        if (releasedByOwner(row)) claimed.delete(target);
+      }
+    }
   }
 }
 
-/** One reservation a release names. */
-type ReleasableKey = Readonly<{ constraintName: string; key: string }>;
-
-/**
- * A reservation a write actually took, remembered together with the claim axis
- * it was written at so the compensation can name the same row rather than
- * re-deriving it.
- */
-type ClaimedKey = ReleasableKey & Readonly<{ axis: string }>;
-
-/**
- * LIFECYCLE release: gives up every reservation THIS node holds for each
- * `(constraintName, key)`, in plan order, whatever axis the reservation sits
- * on.
- *
- * Scoping to the owner pair `(concreteKind, id)` rather than to the axis is
- * what lets a claim written under an older axis be released by newer code, and
- * what keeps a namesake — same id, different kind — holding its own.
- */
-async function releaseOwnedUniqueKeys(
-  ctx: UniquenessContext,
-  kind: string,
-  id: string,
-  keys: readonly ReleasableKey[],
-): Promise<void> {
-  for (const entry of keys) {
-    await ctx.backend.deleteUnique({
-      graphId: ctx.graphId,
-      constraintName: entry.constraintName,
-      key: entry.key,
-      concreteKind: kind,
-      nodeId: id,
-    });
-  }
-}
+/** A reservation a write took, with the axis it was written at. */
+type ClaimedKey = Readonly<{
+  axis: string;
+  constraintName: string;
+  key: string;
+}>;
 
 /**
  * COMPENSATING release: undoes exactly the rows a failed write just claimed —
  * the owner's reservation AT the axis it claimed on, and nothing else.
  *
- * Deliberately narrower than {@link releaseOwnedUniqueKeys}: a rollback must
- * touch neither a reservation at another axis that predates this write nor one
- * another node holds. Conflating the two would make a refused write strip
- * claims it never took.
+ * Deliberately narrower than {@link releaseOwnerClaims}: a rollback must
+ * touch neither a reservation that predates this write nor one another node
+ * holds. Conflating the two would make a refused write strip claims it never
+ * took. It is keyed because it undoes rows this same write keyed a moment ago,
+ * never a claim an earlier write took.
  */
 async function releaseClaimedUniqueKeys(
   ctx: UniquenessContext,
@@ -1358,7 +1273,7 @@ async function releaseClaimedUniqueKeys(
  * the reservations if that write does not land.
  *
  * Each claim statement runs through {@link issuingClaims} — a resurrect's plan
- * can carry a disjointness entry ({@link planNodeClaimReinsert}), and a foreign
+ * can carry a disjointness entry ({@link planNodeClaimTransition}), and a foreign
  * owner of THAT reservation must surface as `DisjointError`, not the raw
  * `UniquenessError` `insertUnique` reports for every family alike.
  */
@@ -1372,14 +1287,12 @@ async function claimUniqueKeysThen<T>(
 ): Promise<T> {
   const claimed: ClaimedKey[] = [];
   try {
-    for (const mutation of plan) {
-      const claim = mutation.claim;
-      if (claim === undefined) continue;
+    for (const claim of plan.claims) {
       await issuingClaims([claim], () =>
         ctx.backend.insertUnique({
           graphId: ctx.graphId,
           nodeKind: claim.axis,
-          constraintName: mutation.constraintName,
+          constraintName: claim.constraintName,
           key: claim.key,
           nodeId: id,
           concreteKind: kind,
@@ -1387,7 +1300,7 @@ async function claimUniqueKeysThen<T>(
       );
       claimed.push({
         axis: claim.axis,
-        constraintName: mutation.constraintName,
+        constraintName: claim.constraintName,
         key: claim.key,
       });
     }
@@ -1480,13 +1393,7 @@ export async function withNodeClaimTransition<T>(
   plan: UniquenessUpdatePlan,
   gatedWrite: () => Promise<T>,
 ): Promise<T> {
-  const refusal = claimFenceRefusal(
-    ctx,
-    ctx.backend,
-    plan.flatMap((mutation) =>
-      mutation.claim === undefined ? [] : [mutation.claim],
-    ),
-  );
+  const refusal = claimFenceRefusal(ctx, ctx.backend, plan.claims);
   if (refusal !== undefined) throw refusal;
 
   const result = await claimUniqueKeysThen(
@@ -1497,15 +1404,6 @@ export async function withNodeClaimTransition<T>(
     plan,
     gatedWrite,
   );
-  await releaseOwnedUniqueKeys(
-    ctx,
-    kind,
-    id,
-    plan.flatMap((mutation) =>
-      mutation.release === undefined ?
-        []
-      : [{ constraintName: mutation.constraintName, key: mutation.release }],
-    ),
-  );
+  await releaseOwnerClaims(ctx, kind, id, plan.release);
   return result;
 }
