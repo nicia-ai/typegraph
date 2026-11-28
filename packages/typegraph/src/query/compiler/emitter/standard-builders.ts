@@ -58,6 +58,8 @@ import {
 import {
   compileFieldValue,
   compilePredicateExpression,
+  extractFulltextMatchPredicates,
+  extractVectorSimilarityPredicates,
   type PredicateCompilerContext,
 } from "../predicates";
 import {
@@ -1816,6 +1818,7 @@ export function buildStandardHybridCandidateCte(
 type RelevanceSortValueInput = Readonly<{
   /** Whether the statement's result rows are groups (`isAggregatedStatement`). */
   aggregated: boolean;
+  ast: QueryAst;
   dialect: DialectAdapter;
   fusion: HybridFusionOptions | undefined;
 }>;
@@ -1861,10 +1864,21 @@ function compileRelevancePerMatchValue(
     }
     case "hybrid_score": {
       const score = compileHybridRrfScore(input.fusion);
-      // COALESCE scores a row matched by neither leg 0, which a match can
-      // also score under a zero weight. A row whose optional side is absent
-      // has no candidate and no score: NULL, which sorts it last.
-      if (key.nulls === undefined) return score;
+      // COALESCE scores a row matched by neither leg 0, which a match also
+      // scores under zero `fuseWith()` weights. A row whose searched optional
+      // side is absent has no candidate and no score: NULL, which sorts it
+      // last. (`fuseWith()` requires both legs on one alias; legs on two
+      // aliases fuse under the default weights, where every match scores
+      // above 0.)
+      const searchedAlias = getHybridTargetAlias(
+        extractVectorSimilarityPredicates(input.ast.predicates)[0],
+        extractFulltextMatchPredicates(input.ast.predicates)[0],
+      );
+      if (
+        searchedAlias === undefined ||
+        !optionalRelevanceTargets(input.ast).has(searchedAlias)
+      )
+        return score;
       return sql`CASE WHEN ${readColumn(HYBRID_CANDIDATES_CTE_ALIAS, "node_id")} IS NULL THEN NULL ELSE ${score} END`;
     }
     case "hybrid_node_id": {
@@ -1901,7 +1915,6 @@ function compileRelevanceSortValue(
 
 type BuildStandardRelevanceOrderByInput = RelevanceSortValueInput &
   Readonly<{
-    ast: QueryAst;
     /** `describeRelevanceOrder(ast)`; never empty. */
     keys: readonly RelevanceSortKey[];
   }>;

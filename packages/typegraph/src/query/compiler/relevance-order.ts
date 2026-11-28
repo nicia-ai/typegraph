@@ -76,12 +76,7 @@ export function describeRelevanceOrder(
  * value from that row and sorts it last.
  */
 export function optionalRelevanceTargets(ast: QueryAst): ReadonlySet<string> {
-  const targets = new Set(
-    [
-      ...extractVectorSimilarityPredicates(ast.predicates),
-      ...extractFulltextMatchPredicates(ast.predicates),
-    ].map((predicate) => predicate.field.alias),
-  );
+  const targets = relevanceTargets(ast);
   return new Set(
     ast.traversals
       .filter(
@@ -99,6 +94,16 @@ function relevanceSortSources(
   if (vector) return ["vector_distance"];
   if (fulltext) return ["fulltext_rank"];
   return [];
+}
+
+/** The aliases the statement's fulltext and vector predicates target. */
+function relevanceTargets(ast: QueryAst): ReadonlySet<string> {
+  return new Set(
+    [
+      ...extractVectorSimilarityPredicates(ast.predicates),
+      ...extractFulltextMatchPredicates(ast.predicates),
+    ].map((predicate) => predicate.field.alias),
+  );
 }
 
 /**

@@ -13,9 +13,10 @@
  * predicate selecting the same targets, so the contract the relevance query
  * is held to is the one the ordinary query already keeps.
  *
- * Paging such a query is pinned at today's value, not fixed here: a search's
- * keyset cursor does not carry its relevance order, on every query with a
- * search, which the search-pagination change (PR #1006) owns.
+ * Two hazards main has on every search are pinned at today's value, not fixed
+ * here: a search's keyset cursor does not carry its relevance order, and on
+ * SQLite a zero-norm embedding ranks nearest in a cosine top-k. The
+ * search-pagination change (PR #1006) owns both.
  */
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -81,9 +82,35 @@ type RelevanceKind = "fulltext" | "vector" | "hybrid";
 type ArticleAccessor = Readonly<{
   $fulltext: Readonly<{ matches: (query: string, k: number) => Predicate }>;
   embedding: Readonly<{
-    similarTo: (queryEmbedding: readonly number[], k: number) => Predicate;
+    similarTo: (
+      queryEmbedding: readonly number[],
+      k: number,
+      options?: Readonly<{ minScore?: number }>,
+    ) => Predicate;
   }>;
 }>;
+
+/**
+ * A search no article passes: no article contains "zebra", and every
+ * embedding is one axis, at cosine similarity 0.5 from `[1, 1, 1, 1]`.
+ */
+function missingPredicate(kind: RelevanceKind, article: ArticleAccessor) {
+  const fulltext = article.$fulltext.matches("zebra", 10);
+  const vector = article.embedding.similarTo([1, 1, 1, 1], 10, {
+    minScore: 0.9,
+  });
+  switch (kind) {
+    case "fulltext": {
+      return fulltext;
+    }
+    case "vector": {
+      return vector;
+    }
+    case "hybrid": {
+      return fulltext.and(vector);
+    }
+  }
+}
 
 /** The search every case runs; each matches only `MATCHING_TITLE`. */
 function relevancePredicate(kind: RelevanceKind, article: ArticleAccessor) {
@@ -181,6 +208,108 @@ export function registerOptionalTraversalRelevanceIntegrationTests(
       ]);
     });
 
+    it("keeps the start row when a vector predicate on an optional target is ranked with a fulltext predicate on a required alias", async (ctx) => {
+      skipUnlessSupported("hybrid", ctx);
+      // The fulltext leg reaches "One match" through its climate article.
+      // The vector leg ranks "Museum opening hours" first, which "One match"
+      // did not write, so its optional side is absent.
+      const rows = await store
+        .query()
+        .from("Article", "source")
+        .whereNode("source", (source) =>
+          source.$fulltext.matches("climate", 10),
+        )
+        .traverse("authoredBy", "writtenBy")
+        .to("Person", "p")
+        .optionalTraverse("authoredBy", "e", { direction: "in" })
+        .to("Article", "article")
+        .whereNode("article", (article) =>
+          article.embedding.similarTo([0, 1, 0, 0], 1),
+        )
+        .select((select) => ({
+          person: select.p.name,
+          article: select.article?.title,
+        }))
+        .execute();
+
+      expect(rows).toEqual([{ person: ONE_MATCH, article: undefined }]);
+    });
+
+    it("orders a start row whose two optional searched sides are both absent after every row either leg matched", async (ctx) => {
+      skipUnlessSupported("hybrid", ctx);
+      // Each search sits on its own optional traversal, joined inside it.
+      // "No articles" matched neither leg and scores below both others.
+      const rows = await authorsWithOptionalArticle()
+        .whereNode("article", (article) =>
+          article.$fulltext.matches("climate", 10),
+        )
+        .optionalTraverse("authoredBy", "other", {
+          direction: "in",
+          from: "p",
+        })
+        .to("Article", "otherArticle")
+        .whereNode("otherArticle", (article) =>
+          article.embedding.similarTo([0, 1, 0, 0], 1),
+        )
+        .orderBy("p", "name", "desc")
+        .select((select) => ({
+          person: select.p.name,
+          article: select.article?.title,
+          other: select.otherArticle?.title,
+        }))
+        .execute();
+
+      expect(rows).toEqual([
+        { person: ONE_MATCH, article: MATCHING_TITLE, other: undefined },
+        { person: ALL_MISS, article: undefined, other: "Museum opening hours" },
+        { person: NO_ARTICLES, article: undefined, other: undefined },
+      ]);
+    });
+
+    it("keeps a zero-norm embedding out of the cosine top-k on an optional side (pinned: SQLite ranks it nearest)", async (ctx) => {
+      skipUnlessSupported("vector", ctx);
+      // A zero vector has no cosine distance. SQLite computes NULL and ranks
+      // it nearest, so it takes the top-1 slot from the matching article and
+      // then ties every absent side. Main has the same cut, which the
+      // search-pagination change (PR #1006) replaces.
+      const zero = await store.nodes.Person.create({ name: "Zero vector" });
+      const blank = await store.nodes.Article.create({
+        title: "Blank",
+        body: "ordinary corpus text",
+        category: "optional-relevance",
+        published: true,
+        embedding: [0, 0, 0, 0],
+      });
+      await store.edges.authoredBy.create(blank, zero, {});
+
+      const rows = await relevanceQuery("vector")
+        .orderBy("p", "name")
+        .execute();
+
+      expectObservation({
+        lane: { dialect: store.backend.dialect },
+        observed: rows,
+        correct: [
+          { person: ONE_MATCH, article: MATCHING_TITLE },
+          { person: ALL_MISS, article: undefined },
+          { person: NO_ARTICLES, article: undefined },
+          { person: "Zero vector", article: undefined },
+        ],
+        defects: [
+          {
+            label: "PR #1006",
+            on: { dialect: ["sqlite"] },
+            today: [
+              { person: ALL_MISS, article: undefined },
+              { person: NO_ARTICLES, article: undefined },
+              { person: ONE_MATCH, article: undefined },
+              { person: "Zero vector", article: "Blank" },
+            ],
+          },
+        ],
+      });
+    });
+
     for (const kind of ["fulltext", "vector", "hybrid"] as const) {
       describe(`${kind} predicate`, () => {
         it("keeps a start row with no target and one whose targets all fail, once each, with the optional side absent", async (ctx) => {
@@ -207,6 +336,32 @@ export function registerOptionalTraversalRelevanceIntegrationTests(
           const rows = await relevanceQuery(kind).limit(1).execute();
 
           expect(rows).toEqual([EXPECTED_ROWS[0]]);
+        });
+
+        it("keeps every start row through limit(), first(), count() and exists() when no target matches", async (ctx) => {
+          skipUnlessSupported(kind, ctx);
+          const query = authorsWithOptionalArticle()
+            .whereNode("article", (article) => missingPredicate(kind, article))
+            .orderBy("p", "name")
+            .select((select) => ({
+              person: select.p.name,
+              article: select.article?.title,
+            }));
+
+          expect({
+            "limit(2)": await query.limit(2).execute(),
+            "first()": await query.first(),
+            "count()": await query.count(),
+            "exists()": await query.exists(),
+          }).toEqual({
+            "limit(2)": [
+              { person: ALL_MISS, article: undefined },
+              { person: NO_ARTICLES, article: undefined },
+            ],
+            "first()": { person: ALL_MISS, article: undefined },
+            "count()": 3,
+            "exists()": true,
+          });
         });
 
         it("selects the same rows in the same order through every terminal", async (ctx) => {
