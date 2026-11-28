@@ -10,6 +10,8 @@ import type {
   DeleteUniqueParams,
   HardDeleteUniquesByNodeIdsParams,
   InsertUniqueParams,
+  OwnerClaimKeysParams,
+  ReleaseUniquesByOwnerParams,
   SqlDialect,
 } from "../../types";
 import {
@@ -452,6 +454,67 @@ export function buildDeleteUnique(
       AND ${uniques.nodeId} = ${params.nodeId}
       AND ${uniques.constraintName} = ${params.constraintName}
       AND ${uniques.key} = ${params.key}${axisTerm}
+      AND ${uniques.deletedAt} IS NULL
+  `;
+}
+
+/**
+ * Builds the soft DELETE that releases the live claims one node holds, by
+ * owner rather than by key — see {@link ReleaseUniquesByOwnerParams}.
+ *
+ * An empty `constraintNames` releases nothing; the backend issues no statement
+ * for it. The owner predicate is served by the
+ * `(graph_id, concrete_kind, node_id)` owner index. The kept claims are one
+ * flat row-value list, so the predicate's depth does not grow with the number
+ * of claims kept; the backend sizes each statement to its bind budget.
+ */
+export function buildReleaseUniquesByOwner(
+  tables: Tables,
+  params: ReleaseUniquesByOwnerParams,
+  timestamp: string,
+): SQL {
+  const { uniques } = tables;
+  const constraintTerm =
+    params.constraintNames.length === 0 ?
+      sql` AND 1 = 0`
+    : sql` AND ${uniques.constraintName} IN (${sql.join(
+        params.constraintNames.map((name) => sql`${name}`),
+        sql`, `,
+      )})`;
+  const keepTerm =
+    params.keep.length === 0 ?
+      sql``
+    : sql` AND (${uniques.constraintName}, ${uniques.key}) NOT IN (VALUES ${sql.join(
+        params.keep.map((kept) => sql`(${kept.constraintName}, ${kept.key})`),
+        sql`, `,
+      )})`;
+
+  return sql`
+    UPDATE ${uniques}
+    SET ${quotedColumn(uniques.deletedAt)} = ${timestamp}
+    WHERE ${uniques.graphId} = ${params.graphId}
+      AND ${uniques.concreteKind} = ${params.concreteKind}
+      AND ${uniques.nodeId} = ${params.nodeId}
+      AND ${uniques.deletedAt} IS NULL${constraintTerm}${keepTerm}
+  `;
+}
+
+/**
+ * Builds the SELECT of the live claim keys one owner holds under one
+ * constraint, at every axis (`key` column; a key held at two axes appears
+ * twice). Served by the `(graph_id, concrete_kind, node_id)` owner index.
+ */
+export function buildOwnerClaimKeys(
+  tables: Tables,
+  params: OwnerClaimKeysParams,
+): SQL {
+  const { uniques } = tables;
+  return sql`
+    SELECT ${uniques.key} AS key FROM ${uniques}
+    WHERE ${uniques.graphId} = ${params.graphId}
+      AND ${uniques.concreteKind} = ${params.concreteKind}
+      AND ${uniques.nodeId} = ${params.nodeId}
+      AND ${uniques.constraintName} = ${params.constraintName}
       AND ${uniques.deletedAt} IS NULL
   `;
 }

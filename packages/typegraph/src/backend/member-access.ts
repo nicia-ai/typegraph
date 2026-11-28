@@ -144,6 +144,7 @@ const BACKEND_MEMBER_ACCESS = {
   insertUnique: "write",
   insertUniqueBatch: "write",
   deleteUnique: "write",
+  releaseUniquesByOwner: "write",
   hardDeleteUniquesByNodeIds: "write",
   hardDeleteUniquesByConcreteKind: "write",
   claimEdgeCardinality: "write",

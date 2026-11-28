@@ -55,12 +55,11 @@ import { purgeEdgeClaims } from "../claims/edge-claims";
 import {
   alreadyAppliedRowWrite,
   createUniquenessContext,
-  deleteUniquenessEntries,
   hardDeleteClaimsByNodeIds,
   type NodeClaimContext,
   type NodeClaimTransition,
-  planNodeClaimReinsert,
   planNodeClaimTransition,
+  releaseNodeClaims,
   type UniquenessUpdatePlan,
   withNodeClaimTransition,
   withNodeCreateClaimsBatch,
@@ -688,22 +687,26 @@ function planNodeUpdateUniqueness(
 
 /**
  * THE claim transition one existing row's update owes, read off the row: a
- * tombstone holds no reservation, a live row holds its current props'.
- * Shared by the update itself and by a batch that judges several updates
- * before writing any of them, so the two cannot read a row differently.
+ * tombstone being restored owes a create's claims, a live row its uniqueness
+ * claims. Shared by the update itself and by a batch that judges several
+ * updates before writing any of them, so the two cannot read a row
+ * differently. `props` are the props the row is about to hold, which the
+ * claim keys are derived from. A live row carries its stored props as read
+ * back, so the transition compares the key the row holds with the key it is
+ * about to hold, both rendered by the key owner (see
+ * {@link NodeClaimTransition}).
  */
 export function nodeClaimTransition(
   existing: NodeRow,
   props: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
 ): NodeClaimTransition {
+  const target = { kind: existing.kind, id: existing.id, props, constraints };
+  if (existing.deleted_at !== undefined) return { ...target, restores: true };
   return {
-    kind: existing.kind,
-    id: existing.id,
-    heldProps:
-      existing.deleted_at === undefined ? parseRowProps(existing) : undefined,
-    props,
-    constraints,
+    ...target,
+    restores: false,
+    storedProps: parseRowProps(existing),
   };
 }
 
@@ -888,38 +891,13 @@ export async function applyResolvedNodeUpdateBatch(
 }
 
 /**
- * The props a soft delete releases uniqueness entries for: the ones the row
- * holds once its tombstone is written, not the pre-image's.
- *
- * An ordinary property update takes no per-graph lock, so it can commit
- * between the pre-image read and the tombstone. The tombstone statement is
- * what locks the row: read after it, the stored props are final for this
- * transaction, and a release computed from them cannot leave the key that
- * update moved the node to claimed by a tombstone. A kind with no unique
- * constraint keys nothing off its props and is not read again.
- */
-async function readTombstonedNodeProps(
-  ctx: NodeWriteContext,
-  existing: LiveNodeRow,
-  uniqueConstraints: readonly UniqueConstraint[],
-  backend: Backend,
-): Promise<Record<string, unknown>> {
-  if (uniqueConstraints.length === 0) return parseRowProps(existing);
-  const tombstoned = await backend.getNode(
-    ctx.graphId,
-    existing.kind,
-    existing.id,
-  );
-  return parseRowProps(tombstoned ?? existing);
-}
-
-/**
  * Applies a node soft delete: delete-behavior enforcement, the tombstone
  * write, then removal of uniqueness entries, embeddings, and fulltext.
  * Requires a {@link LiveNodeRow}: deleting an already-tombstoned row would
  * re-run sidecar cleanup against entries the first delete already removed.
- * The uniqueness release reads the row again after the tombstone
- * ({@link readTombstonedNodeProps}).
+ * The claims are released by owner ({@link releaseNodeClaims}), so the release
+ * reads no props: whatever an update committed between the pre-image read and
+ * the tombstone, the claims the row holds are the ones given back.
  */
 export async function applyNodeSoftDelete(
   ctx: NodeWriteContext,
@@ -944,16 +922,10 @@ export async function applyNodeSoftDelete(
     kind,
     id,
   });
-  await deleteUniquenessEntries(
+  await releaseNodeClaims(
     uniquenessContext(ctx, backend),
     kind,
     id,
-    await readTombstonedNodeProps(
-      ctx,
-      args.existing,
-      args.uniqueConstraints,
-      backend,
-    ),
     args.uniqueConstraints,
   );
   await deleteNodeEmbeddings(
@@ -1008,11 +980,14 @@ export async function applyNodeHardDelete(
 }
 
 /**
- * Reopens a soft-deleted node with its stored props (no merge, no
- * re-validation): re-checks and re-inserts uniqueness entries (the delete
- * removed them), clears the tombstone, then re-syncs embeddings and fulltext.
+ * Reopens a soft-deleted node with its stored props (no merge; the row is
+ * written back as stored): re-checks and re-takes its claims (the delete
+ * released them), clears the tombstone, then re-syncs embeddings and fulltext.
  * Used by provenance to reinstate a fact whose currency is restored. Returns
  * the reopened row.
+ *
+ * The claims are keyed from the value the row stores, by the key owner, which
+ * keys its date text as a create of the same date does; nothing is re-parsed.
  *
  * @throws {UniquenessError} when a unique key the node held was taken by
  *   another node while it was tombstoned.
@@ -1033,13 +1008,13 @@ export async function applyNodeResurrect(
   // this tombstone first makes it match zero rows — and the reservations that
   // revival is entitled to are the peer's, not this caller's.
   // `withNodeClaimTransition` gives them back when the gate refuses.
-  const plan = await planNodeClaimReinsert(
-    uniquenessContext(ctx, backend),
+  const plan = await planNodeClaimTransition(uniquenessContext(ctx, backend), {
     kind,
     id,
+    restores: true,
     props,
-    args.uniqueConstraints,
-  );
+    constraints: args.uniqueConstraints,
+  });
   const row = await withNodeClaimTransition(
     uniquenessContext(ctx, backend),
     ctx.operation,

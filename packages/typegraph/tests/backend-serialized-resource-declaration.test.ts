@@ -322,6 +322,72 @@ describe("declaring a serialized resource", () => {
   });
 });
 
+/**
+ * A declaration whose fields are accessors on its prototype: a class instance
+ * satisfies `SerializedResourceDeclaration` structurally, but owns no
+ * enumerable property, so a spread of it is `{}`.
+ */
+class SharedDeclaration {
+  readonly #mode = "shared" as const;
+  readonly #resource: object;
+
+  constructor(resource: object) {
+    this.#resource = resource;
+  }
+
+  get mode(): "shared" {
+    return this.#mode;
+  }
+
+  get resource(): object {
+    return this.#resource;
+  }
+}
+
+describe("declaring a serialized resource through prototype accessors", () => {
+  it("applies a class-instance declaration on both factories and guards the pair it names", () => {
+    const connection = { name: "the caller's one connection" };
+    const declaration = new SharedDeclaration(connection);
+    expect(Object.keys(declaration)).toEqual([]);
+
+    withUndialedPool({}, (pool) => {
+      const pairs = [
+        [
+          createSqliteBackend(createUnidentifiableSqliteDatabase(), {
+            serializedResource: declaration,
+          }),
+          createSqliteBackend(createUnidentifiableSqliteDatabase(), {
+            serializedResource: declaration,
+          }),
+        ],
+        [
+          createPostgresBackend(drizzlePostgres(pool), {
+            vector: false,
+            serializedResource: declaration,
+          }),
+          createPostgresBackend(drizzlePostgres(pool), {
+            vector: false,
+            serializedResource: declaration,
+          }),
+        ],
+      ] as const;
+
+      for (const [first, second] of pairs) {
+        expect(backendResourceProvenance(first)).toBe("serialized");
+        expect(sharesSerializedTransactionResource(first, second)).toBe(true);
+        // The contention guard sees the two wrappers as one resource.
+        const held = acquireSerializedStreamLease(first, "export-snapshot");
+        expect(held).toMatchObject({ acquired: true, resource: connection });
+        expect(acquireSerializedStreamLease(second, "import-stream")).toEqual({
+          acquired: false,
+          heldBy: "export-snapshot",
+        });
+        if (held.acquired) held.release();
+      }
+    });
+  });
+});
+
 describe("declaring a backend independent", () => {
   it("lifts the shared-resource refusal between two backends over one handle", async () => {
     // Detection marks both of these — they really are one better-sqlite3 handle

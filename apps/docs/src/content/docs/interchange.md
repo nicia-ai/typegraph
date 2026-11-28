@@ -1010,6 +1010,17 @@ await importGraph(store, data, { onUnknownProperty: "allow" });
 // Behavior depends on your database and schema strictness
 ```
 
+A row that carries an unknown property is written with the document's
+properties verbatim, and a node's uniqueness claims and an edge's match
+identity are keyed from those written values, a node's in the same canonical
+rendering a create keys (a date's text as the date, an object in its schema's
+key order). A value whose schema parse differs
+from its text keys as the text: an edge identity field given `"REF"` under
+`z.string().toLowerCase()` does not collide with a create of `"REF"` (which
+stores and keys `"ref"`), and a later `update()` of that edge is refused as a
+change of an identity field. See
+[Limitations](/limitations#uniqueness-claims-keyed-in-another-form).
+
 ## Backup and Restore
 
 ### Creating Backups

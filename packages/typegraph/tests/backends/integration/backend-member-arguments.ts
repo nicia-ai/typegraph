@@ -244,6 +244,15 @@ export const WRITE_MEMBER_ARGUMENTS: {
       concreteKind: "RotPerson",
     },
   ],
+  releaseUniquesByOwner: (f) => [
+    {
+      graphId: f.graphId,
+      concreteKind: "RotPerson",
+      nodeId: "p1",
+      constraintNames: ["rot_person_email"],
+      keep: [],
+    },
+  ],
   hardDeleteUniquesByNodeIds: (f) => [
     { graphId: f.graphId, concreteKind: "RotPerson", nodeIds: ["p1"] },
   ],

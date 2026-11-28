@@ -34,7 +34,10 @@
  *    (`@libsql/client` before 0.18, sql.js, Durable Object storage) never has
  *    its token honoured through the connection; only the opener's own bind
  *    records it ({@link recordOpenedNativeTransaction}), and only until its
- *    span ends.
+ *    span ends. Which connection a handle runs on is the one answer
+ *    `resolveConnectionIdentity` (`transaction-resource.ts`) also gives the
+ *    serialized-resource audit; naming the same connection is never itself
+ *    proof of the same transaction, only the live token on it is.
  *
  * Without proof a binding records nothing and the Store gives each of its
  * sessions a state of its own: wrongly sharing is the worse error, wrongly
@@ -122,6 +125,12 @@ export type NativeHandle =
       kind: "connection";
       handle: object;
       connection: object;
+      /**
+       * Whether `connection` was detected on the handle's own driver
+       * client. Only such a connection can verify a token (proof 4): one a
+       * backend declared is a claim, not a fact read off this session.
+       */
+      detected: boolean;
     }>;
 
 /** Bound transaction backend → the native transaction (or token) it runs on. */
@@ -228,7 +237,9 @@ export function identifyNativeTransaction(
     }
     case "connection": {
       // Proof 4: the token the engine published on the connection, only
-      // while the driver confirms it is still the open transaction.
+      // while the driver confirms it is still the open transaction, and
+      // only through a connection detected on this handle's own client.
+      if (!handle.detected) return undefined;
       const published = PUBLISHED_TOKENS.get(handle.connection);
       return published !== undefined && isTokenLive(published) ?
           published
