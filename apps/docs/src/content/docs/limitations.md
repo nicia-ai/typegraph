@@ -837,17 +837,22 @@ collides with the other:
   nodes) and update the holder again. Until then,
   `getOrCreateByConstraint()` does not resurrect a soft-deleted holder whose
   released claim has the other form, and creates a new node instead.
-- **Dates the stored-row reading cannot reach.** A date under `z.lazy()`, a
-  union, or a pipe such as `z.string().pipe(z.coerce.date())` is read from a
-  stored row as its ISO text, while a create keys the `Date`. Such a value
-  imported under `onUnknownProperty: "allow"`, or revived by a provenance
-  reopen, holds a text-keyed claim a create of the same date does not collide
-  with, and `getOrCreateByConstraint()` creates a new node rather than
-  resurrecting a soft-deleted holder of it. Releases are unaffected.
+- **Object claims written in another key order before this release.** A
+  `.default()` or `.catch()` object whose literal states its keys in another
+  order than its schema was claimed in the literal's order and is now claimed
+  in the schema's. A create of the same value is admitted beside such a
+  claim until the holder's next write that moves the value or releases its
+  claims (an update to another value, a soft delete, a retraction). Move the
+  holder's value off and back with two updates to re-key it at once.
+- **Dates under a union whose branches disagree.** A date under
+  `z.union([z.date(), z.string()])` is read from a stored row as its ISO text,
+  while a create keys the `Date`. Such a value imported under
+  `onUnknownProperty: "allow"`, or revived by a provenance reopen, holds a
+  text-keyed claim a create of the same date does not collide with. Releases
+  are unaffected.
 - **Values imported verbatim.** An import under `onUnknownProperty: "allow"`
   keys a node's claims and an edge's match identity from the document's text,
-  with dates revived and `z.object()` values put back in their schema's key
-  order. A value whose schema parse otherwise differs from that text, such as
+  a node's in the canonical rendering a create keys. A value whose schema parse otherwise differs from that text, such as
   an identity field the schema lower-cases, does not collide with a create of
   the same value.
 - **Values whose validated key order follows their input.** A `z.record()`

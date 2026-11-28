@@ -862,14 +862,25 @@ TypeScript requires both `scope` and `collation`. An untyped caller that omits
 A node reserves each unique value it holds as a claim row keyed by the value
 the row stores, by one function, on every path that claims or looks up a
 value: create, update, upsert, import, `updateWhere()`, graph merge,
-resurrection, `findByConstraint()` and `getOrCreateByConstraint()`. A write
-keys the props it validated. A path that starts from a stored row (the row an
-update replaces, a tombstone a provenance reopen or `getOrCreateByConstraint()`
-revives, a merge's after-image) keys the stored props with the two
-differences between a stored value and its validated form undone: `z.date()`
-text is read back as a `Date`, and each `z.object()` value is put back in
-its schema's key order, which a PostgreSQL `jsonb` column does not keep. It
-never parses them through the schema again.
+resurrection, `findByConstraint()` and `getOrCreateByConstraint()`. That
+function reads each unique field through the kind's schema and keys one
+canonical rendering of its value, so a write's validated props and the same
+row read back from storage key identically:
+
+- **A date** keys the same as a `Date` and as its stored ISO text: at a
+  top-level field as the JSON-quoted ISO text, nested inside an object or array
+  as the ISO text in that value's JSON. This holds through `.optional()`,
+  `.nullable()`, `.default()` and similar wrappers, `z.lazy()`, a pipe whose
+  output is a date (`z.string().pipe(z.coerce.date())`), and a union whose
+  other branches are `null` or `undefined`.
+- **An object** at a `z.object()` position keys with its declared keys in the
+  schema's order, then its undeclared keys, whatever order it was given in
+  (including a `.default()` literal and a PostgreSQL `jsonb` column's
+  order).
+
+Nothing is parsed through the schema again, so a transform never runs twice.
+A value under a `.transform()`, a `z.record()`, or a union whose branches
+read it differently keys as given.
 
 A claim is released by the node that holds it. An update gives back every
 claim the node holds under the constraint other than the key it now claims,
