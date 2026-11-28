@@ -16,13 +16,18 @@
  * engine published on that connection.
  */
 import { drizzle as drizzleSqliteProxy } from "drizzle-orm/sqlite-proxy";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { type AnySqliteDatabase } from "../src/backend/drizzle/execution";
 import {
   createSqliteBackend,
   sqliteConnectionIdentity,
 } from "../src/backend/drizzle/sqlite";
+import type * as NativeTransactionHandleModule from "../src/backend/native-transaction-handle";
+import {
+  type NativeHandle,
+  recordNativeTransactionHandle,
+} from "../src/backend/native-transaction-handle";
 import {
   type ConnectionIdentity,
   resolveBackendAudit,
@@ -33,6 +38,36 @@ import {
 import { openTransactionSession } from "../src/store/operation-scope";
 import { expectObservation } from "./helpers/known-defect";
 import { createTestDatabase } from "./test-utils";
+
+// The recorder is wrapped, not replaced: every bind still records exactly as
+// in production, and a test reads what a real bind handed it.
+vi.mock("../src/backend/native-transaction-handle", async (importOriginal) => {
+  const original = await importOriginal<typeof NativeTransactionHandleModule>();
+  return {
+    ...original,
+    recordNativeTransactionHandle: vi.fn(
+      original.recordNativeTransactionHandle,
+    ),
+  };
+});
+
+/**
+ * The connection the native-transaction record was handed by the latest bind
+ * of `db`; fails when no bind of it reached the recorder, or reached it as
+ * another kind of handle.
+ */
+function recordedConnectionOf(db: object): object {
+  const handle: NativeHandle | undefined = vi
+    .mocked(recordNativeTransactionHandle)
+    .mock.calls.map(([, recorded]) => recorded)
+    .findLast((recorded) => recorded.handle === db);
+  if (handle?.kind !== "connection") {
+    throw new Error(
+      `expected a bind of this handle to record a connection, got ${handle?.kind ?? "no record"}`,
+    );
+  }
+  return handle.connection;
+}
 
 /** A SQLite database whose driver no detection predicate recognizes. */
 function createUnidentifiableSqliteDatabase(): AnySqliteDatabase {
@@ -114,14 +149,14 @@ describe("one connection identity for the audit and the native record", () => {
 
     expect(sharesSerializedTransactionResource(first, second)).toBe(true);
     expect(auditedResource(first)).toBe(resource);
-    // The native record named each wrapper's own handle here before the
-    // two consumers shared one decision.
-    expect(sqliteConnectionIdentity(firstDb, declaration)?.connection).toBe(
-      resource,
-    );
-    expect(sqliteConnectionIdentity(secondDb, declaration)?.connection).toBe(
-      resource,
-    );
+    // What a real bind hands the native record, so the factory's wiring of
+    // the declaration into the bind is under test, not only the decision.
+    // The record named each wrapper's own handle here before the two
+    // consumers shared one decision.
+    first.adoptTransaction(firstDb);
+    second.adoptTransaction(secondDb);
+    expect(recordedConnectionOf(firstDb)).toBe(resource);
+    expect(recordedConnectionOf(secondDb)).toBe(resource);
   });
 
   it("names the detected client for a better-sqlite3 database and a transaction object over it", async () => {
