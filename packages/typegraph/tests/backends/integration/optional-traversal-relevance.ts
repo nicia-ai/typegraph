@@ -331,11 +331,19 @@ export function registerOptionalTraversalRelevanceIntegrationTests(
           );
         });
 
-        it("applies limit() after the relevance order, keeping the matched row", async (ctx) => {
+        it("applies limit() after the relevance order, keeping the matched row and then an absent side", async (ctx) => {
           skipUnlessSupported(kind, ctx);
-          const rows = await relevanceQuery(kind).limit(1).execute();
+          // Two rows, so the second can only be a start row the optional
+          // side left absent: an inner join returns the match alone.
+          const rows = await relevanceQuery(kind)
+            .orderBy("p", "name")
+            .limit(2)
+            .execute();
 
-          expect(rows).toEqual([EXPECTED_ROWS[0]]);
+          expect(rows).toEqual([
+            { person: ONE_MATCH, article: MATCHING_TITLE },
+            { person: ALL_MISS, article: undefined },
+          ]);
         });
 
         it("keeps every start row through limit(), first(), count() and exists() when no target matches", async (ctx) => {
