@@ -956,9 +956,19 @@ persisted a `validTo` below the new row's `validFrom`).
 The bound is read — and so restated — when the document states a `validFrom` to
 compare against it, or a lone `validTo` to check for an inverted window. A
 document that states **neither** makes no claim about the row's window, so its
-properties update is not fenced on the bound and a concurrent recreate that only
-moved the bound does not refuse it. This matches `store.nodes.*.update` exactly:
-a write asserts what its decision read, and nothing more.
+properties update is not fenced on the bound. This matches
+`store.nodes.*.update` exactly: a write asserts what its decision read, and
+nothing more.
+
+A node update is also fenced on the row's `version`, whatever the document
+states: the uniqueness transition the import plans for the row is computed from
+the row it probed, so the write lands only on that row. Any write another
+session commits to the row between the probe and the write — an ordinary
+update included — makes the node update match no row, and the row is reported
+with the prefix below instead of being overwritten. Before this fence, such a
+row was overwritten with the document's props while its uniqueness claims were
+planned for the row the import had probed, which could leave a unique value
+the row stores unclaimed.
 
 A write that matches no row is reported per row, so an import whose earlier
 rows are already written is not aborted for it:
