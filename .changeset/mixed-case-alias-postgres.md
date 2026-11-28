@@ -1,5 +1,0 @@
----
-"@nicia-ai/typegraph": patch
----
-
-A node alias containing an uppercase letter now works on PostgreSQL in full-text, vector (exact and `{ approximate: true }`) and hybrid queries and in the late-materialized page of an `orderBy()` + `limit()` query (#952). Every alias CTE and alias column is declared unquoted (`cte_Doc`, `Doc_id`), which PostgreSQL folds to lower case, but three builders read them quoted (`"cte_Doc"."Doc_id"`), which PostgreSQL keeps as written: the relevance subquery that scopes search candidates, the candidate list of an approximate vector index scan, and the top-K page of late materialization. PostgreSQL raised `relation "cte_Doc" does not exist` or `missing FROM-clause entry for table "cte_Friend"`; SQLite resolves names without regard to case and ran them. Those reads are now spelled like their declarations, and `readAliasColumn` no longer takes a spelling, so an alias column can only be read as it is declared. A subgraph walk with `edgeWindows` likewise now joins its windowed-edge CTE by the unquoted name it declares; that name is lower case, so its behavior does not change.
