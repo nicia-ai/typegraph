@@ -1258,6 +1258,9 @@ export class ConfigurationError extends TypeGraphError {
     });
 }
 
+// @public (undocumented)
+const CONNECTION: unique symbol;
+
 // @public
 type ConstrainedCardinality = Exclude<Cardinality, "many">;
 
@@ -2650,6 +2653,9 @@ type EndpointNotFoundErrorDetails = Readonly<{
     nodeKind: string;
     nodeId: string;
 }>;
+
+// @public (undocumented)
+const ENGINE_OPENED: unique symbol;
 
 // @public (undocumented)
 const ENGINE_RECORDED_READ_SOURCE: unique symbol;
@@ -5633,7 +5639,11 @@ const NATIVE_TRANSACTION_STATE: unique symbol;
 // @public
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
-}>;
+}> & {
+    [READ_ONLY_SCOPES]: readonly string[];
+    [CONNECTION]: object | undefined;
+    readonly [ENGINE_OPENED]: boolean;
+};
 
 // @public
 type NeighborNodeOrderField<G extends GraphDef> = {
@@ -6837,6 +6847,9 @@ type ReachableNode = Readonly<{
 type ReachableOptions<G extends GraphDef> = BaseTraversalOptions<G> & Readonly<{
     excludeSource?: boolean;
 }>;
+
+// @public (undocumented)
+const READ_ONLY_SCOPES: unique symbol;
 
 // @public
 type ReadConstraintFenceViolationsParams = Readonly<{

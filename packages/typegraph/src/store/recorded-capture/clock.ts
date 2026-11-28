@@ -43,6 +43,8 @@ import {
   isSerializationFailure,
   withRecordedRelationsPrecondition,
 } from "../../utils/sql-errors";
+import { isBackendNativeTransactionReadOnly } from "../native-transaction-state";
+import { refuseReadOnlyTransactionWrite } from "../native-transaction-state";
 import { recordedAnchorOwner } from "../recorded-anchor-origin";
 import { executeStatement } from "./guards";
 
@@ -745,6 +747,12 @@ const ENSURED_ORIGINS_RELATIONS = new WeakSet<object>();
  * Returns a graph's durable revision-origin nonce, creating it exactly once.
  * The unique graph-id row makes concurrent first readers converge on the
  * winner's origin rather than manufacturing incompatible anchors.
+ *
+ * Inside a read-only scope TypeGraph opened on the caller's transaction
+ * `target` runs in, it only reads: no relation DDL (which PostgreSQL refuses
+ * in a read-only transaction even when the relation exists, aborting the
+ * caller's transaction), and a graph with no origin yet is refused with the
+ * read-only refusal rather than minted.
  */
 export async function ensureRevisionOrigin(
   target: RevisionOriginBackend,
@@ -752,6 +760,15 @@ export async function ensureRevisionOrigin(
   schema: SqlSchema,
   graphId: string,
 ): Promise<string> {
+  if (isBackendNativeTransactionReadOnly(target)) {
+    const existing = await readRevisionOrigin(target, schema, graphId);
+    if (existing !== undefined) return existing;
+    refuseReadOnlyTransactionWrite(
+      "store.allocationOwner()",
+      graphId,
+      "Read the allocation owner once outside the read-only transaction, or open it read-write: this graph has no revision origin yet, and minting one is a write.",
+    );
+  }
   await ensureRevisionOriginsRelation(target, verdict);
   return ensureRevisionOriginRow(target, schema, graphId);
 }

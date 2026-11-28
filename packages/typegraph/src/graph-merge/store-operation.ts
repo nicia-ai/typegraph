@@ -15,7 +15,10 @@ import { asRecordedInstant } from "../core/temporal";
 import { type JsonValue } from "../core/types";
 import { storeOperationsTableName } from "../query/compiler/schema";
 import { sql } from "../query/sql-fragment";
-import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
+import {
+  asCompiledRowsSql,
+  asCompiledWriteStatementSql,
+} from "../query/sql-intent";
 import {
   enterTransactionOperation,
   type OperationBackend,
@@ -497,7 +500,7 @@ export async function operateStore<G extends GraphDef>(
         const serialized = JSON.stringify(evidence);
         const { executeStatement } = requireOperationStatementMembers(backend);
         await executeStatement(
-          asCompiledStatementSql(sql`
+          asCompiledWriteStatementSql(sql`
             INSERT INTO ${sql.identifier(storeOperationsTableName(store.revisionSchema))}
               (graph_id, origin, scope, idempotency_key, operation_digest, evidence)
             VALUES (${store.graphId}, ${request.target.owner.origin}, ${request.target.scope}, ${request.idempotencyKey}, ${operationDigest}, ${serialized})

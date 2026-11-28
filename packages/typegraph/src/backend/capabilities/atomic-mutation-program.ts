@@ -8,6 +8,7 @@
  * prevents each new operation from inventing another provenance WeakMap.
  */
 import { ConfigurationError } from "../../errors";
+import { assertBackendWritable } from "../read-only-write-gate";
 import type {
   ClaimEdgeCardinalityParams,
   EdgeConvergenceMatch,
@@ -728,10 +729,18 @@ function instrumentAtomicMutationProgramExecutors(
     ) => unknown;
     const instrumented = new Proxy(callable, {
       apply(sourceExecutor, thisArgument, argumentsList) {
-        reportAtomicMutationProgramDispatch(
-          target,
-          descriptor.variant(argumentsList[0]),
-        );
+        const variant = descriptor.variant(argumentsList[0]);
+        // A program runs its statements without going through a backend
+        // member, so it asks the read-only gate's question itself, of the
+        // exact resource it was registered on.
+        try {
+          assertBackendWritable(target, `atomic ${variant} program`);
+        } catch (error) {
+          return Promise.reject(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }
+        reportAtomicMutationProgramDispatch(target, variant);
         return Reflect.apply(sourceExecutor, thisArgument, argumentsList);
       },
     });

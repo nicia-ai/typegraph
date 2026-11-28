@@ -33,7 +33,7 @@ import {
 import { type SqlSchema } from "../query/compiler/schema";
 import { getDialect } from "../query/dialect";
 import { sql, type SqlFragment } from "../query/sql-fragment";
-import { asCompiledRowsSql } from "../query/sql-intent";
+import { asCompiledRowsSql, asCompiledWriteRowsSql } from "../query/sql-intent";
 import { readGraphAllocationOwner } from "../store/allocation-owner";
 import { type OperationEntry } from "../store/operation-scope";
 import { assertRecordedAnchorOrigin } from "../store/recorded-anchor-origin";
@@ -1277,7 +1277,7 @@ export async function pruneIdentityTransitionsForContext<G extends GraphDef>(
         rawTarget.execute<
           Readonly<{ recorded_revision: unknown; restored_at: unknown }>
         >(
-          asCompiledRowsSql(sql`
+          asCompiledWriteRowsSql(sql`
             DELETE FROM ${ctx.schema.identityTransitionsTable}
             WHERE graph_id = ${ctx.graphId}
               AND recorded_revision < ${targetRevision}

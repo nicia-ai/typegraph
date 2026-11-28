@@ -32,7 +32,11 @@ import {
   type PropsDateValue,
 } from "../utils/date";
 import { readOwnProperty } from "../utils/object";
-import { serializedStreamRefusal, withImportStreamLease } from "./import";
+import {
+  refuseImportIntoReadOnlyTransaction,
+  serializedStreamRefusal,
+  withImportStreamLease,
+} from "./import";
 import { exportStreamBackend } from "./stream-source";
 import type {
   GraphData,
@@ -614,6 +618,7 @@ export async function trustedImportGraphStream<G extends GraphDef>(
   chunks:
     AsyncIterable<GraphInterchangeChunk> | Iterable<GraphInterchangeChunk>,
 ): Promise<TrustedImportResult> {
+  refuseImportIntoReadOnlyTransaction(store, "trustedImportGraphStream()");
   rejectUnsupportedStoreFeatures(store);
   const backend = storeBackend(store);
   const trustedImport = backend.trustedImport;

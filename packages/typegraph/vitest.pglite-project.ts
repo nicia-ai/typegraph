@@ -62,6 +62,7 @@ export const PGLITE_TEST_FILES = [
   "tests/optimistic-tier.test.ts",
   "tests/projection-prepare-checked-statement.test.ts",
   "tests/provenance-lock-order.test.ts",
+  "tests/read-only-trace-parity.test.ts",
   "tests/recorded-capture-write-parity.test.ts",
   "tests/recorded-time-transaction-threading.test.ts",
   "tests/release-uniques-by-owner-chunking.test.ts",

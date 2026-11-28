@@ -104,8 +104,8 @@ const ANNOTATED_RESIDUE_KEYS = [
   "identity/sql-target.ts:101#executeStatement",
   "identity/sql-target.ts:155#executeStatement",
   "store/recorded-capture/guards.ts:78#executeStatement",
-  "store/recorded-capture/guards.ts:95#executeStatement",
-  "store/recorded-capture/guards.ts:240#executeStatement",
+  "store/recorded-capture/guards.ts:99#executeStatement",
+  "store/recorded-capture/guards.ts:244#executeStatement",
 ] as const;
 
 function rowKey(

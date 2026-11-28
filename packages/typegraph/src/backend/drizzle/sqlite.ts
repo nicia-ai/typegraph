@@ -108,12 +108,17 @@ import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
   type ConnectionTransactionProbe,
   createNativeTransactionToken,
+  identifyNativeTransaction,
   type NativeHandle,
   publishConnectionNativeTransaction,
   recordEngineSavepoint,
   recordNativeTransactionHandle,
   recordOpenedNativeTransaction,
 } from "../native-transaction-handle";
+import {
+  assertBackendWritable,
+  gateBackendUnderConstruction,
+} from "../read-only-write-gate";
 import {
   REVISION_JOURNAL_ENTITY,
   type RevisionJournalEntity,
@@ -836,6 +841,23 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
    */
   nativeTransaction?: object | undefined;
   /**
+   * Whether the backend gates its fulltext members on the durable
+   * contribution marker (`gateFulltext`): a business transaction does, the
+   * privileged schema-write one does not.
+   */
+  gatesFulltext?: boolean | undefined;
+  /**
+   * Whether the backend carries the read-only write gate
+   * (`read-only-write-gate.ts`); `true` when absent. An adoption of a handle
+   * always does: it cannot know whether the transaction it binds is inside a
+   * read-only scope. A transaction the engine opens read-write passes
+   * `false`: its backend is reached only by the unit that opened it, whose
+   * context refuses each write inside any read-only scope later opened on
+   * the transaction (a read-only savepoint of a Store built over its
+   * `tx.sql`), so it constructs nothing for the gate.
+   */
+  readOnlyGate?: boolean | undefined;
+  /**
    * The root backend's own `serializedResource` declaration, so the native
    * transaction record names the connection the audit names
    * (`resolveConnectionIdentity`).
@@ -1326,7 +1348,42 @@ export function createSqliteBackend(
   db: AnySqliteDatabase,
   options: SqliteBackendOptions = {},
 ): AdapterBackend<AnySqliteDatabase> {
-  return createSqlBackend(buildSqliteEngineProfile(db, options));
+  // Captured once: the profile's audit and this backend's native record read
+  // the same declaration (`captureSerializedResourceDeclaration`).
+  const serializedResource = captureSerializedResourceDeclaration(
+    options.serializedResource,
+  );
+  const profile = buildCapturedSqliteEngineProfile(
+    db,
+    options,
+    serializedResource,
+  );
+  // Built over a caller's transaction object, every statement of this
+  // backend, and every savepoint it opens, runs in that object's native
+  // transaction: recorded as for a bind, so a Store over this backend reaches
+  // that transaction's state before a write of its own opens a savepoint. A
+  // database handle names a connection, which runs many transactions over its
+  // life, so a backend over one is a root backend: it is bound to a
+  // transaction only when it is built while a transaction the engine opened
+  // is published on that connection (proof 4, the handle a better-sqlite3
+  // transaction hands its callback as `tx.sql`), and only until that
+  // transaction ends. Only a backend bound to a native transaction carries the
+  // read-only write gate (`read-only-write-gate.ts`); a root backend runs
+  // every member as it would without it, whatever its connection has open.
+  const handle = sqliteNativeHandle(db, serializedResource);
+  if (isSqliteTransactionHandle(db)) {
+    const backend = createSqlBackend(profile, { overNativeTransaction: true });
+    recordNativeTransactionHandle(backend, handle);
+    return backend;
+  }
+  const publishedTransaction =
+    handle.kind === "connection" ?
+      identifyNativeTransaction(handle)
+    : undefined;
+  if (publishedTransaction === undefined) return createSqlBackend(profile);
+  const backend = createSqlBackend(profile, { overNativeTransaction: true });
+  recordOpenedNativeTransaction(backend, publishedTransaction);
+  return backend;
 }
 
 /**
@@ -1343,14 +1400,28 @@ export function buildSqliteEngineProfile(
   db: AnySqliteDatabase,
   options: SqliteBackendOptions = {},
 ): SqlEngineProfile<AnySqliteDatabase> {
+  return buildCapturedSqliteEngineProfile(
+    db,
+    options,
+    captureSerializedResourceDeclaration(options.serializedResource),
+  );
+}
+
+/**
+ * {@link buildSqliteEngineProfile} with the `serializedResource` declaration
+ * already captured, so a factory that also records the handle itself reads
+ * one capture.
+ */
+function buildCapturedSqliteEngineProfile(
+  db: AnySqliteDatabase,
+  options: SqliteBackendOptions,
+  serializedResource: SerializedResourceDeclaration | undefined,
+): SqlEngineProfile<AnySqliteDatabase> {
   assertNoLegacyTransactionCapability(options.capabilities);
   // Resolved before the backend exists so marking below is a lookup, never
   // work that could fail after wrappers already observed an unmarked backend.
   // A `serializedResource` declaration that contradicts detection is refused
   // here too, before any object a caller could hold has been built.
-  const serializedResource = captureSerializedResourceDeclaration(
-    options.serializedResource,
-  );
   const resourceAudit = resolveDeclaredBackendResource(
     getSerializedSqliteConnection(db),
     serializedResource,
@@ -2102,6 +2173,10 @@ export function buildSqliteEngineProfile(
             lineage: provisioning.lineage,
             recordedTime: provisioning.recordedTime,
             isFirstParty,
+            // A schema-write unit is read-write and opened by a member of this
+            // backend, which a gated backend refuses before it opens: its own
+            // backend carries no gate.
+            readOnlyGate: false,
             nativeTransaction,
           });
           await runFrameStatement(sql`BEGIN IMMEDIATE`);
@@ -2147,6 +2222,10 @@ export function buildSqliteEngineProfile(
             lineage: provisioning.lineage,
             recordedTime: provisioning.recordedTime,
             isFirstParty,
+            // A schema-write unit is read-write and opened by a member of this
+            // backend, which a gated backend refuses before it opens: its own
+            // backend carries no gate.
+            readOnlyGate: false,
             nativeTransaction,
           });
           return fn(txBackend);
@@ -2177,6 +2256,10 @@ export function buildSqliteEngineProfile(
                 lineage: provisioning.lineage,
                 recordedTime: provisioning.recordedTime,
                 isFirstParty,
+                // A schema-write unit is read-write and opened by a member of this
+                // backend, which a gated backend refuses before it opens: its own
+                // backend carries no gate.
+                readOnlyGate: false,
               });
               return fn(txBackend);
             },
@@ -2198,6 +2281,7 @@ export function buildSqliteEngineProfile(
       tx: AnySqliteDatabase,
       txIsFirstParty: boolean,
       nativeTransaction?: object,
+      readOnlyGate = true,
     ): TransactionBackend {
       const txBackend = createTransactionBackend({
         capabilities,
@@ -2214,12 +2298,10 @@ export function buildSqliteEngineProfile(
         recordedTime: provisioning.recordedTime,
         isFirstParty: txIsFirstParty,
         nativeTransaction,
+        gatesFulltext: true,
+        readOnlyGate,
       });
-      return gateFulltext(
-        txBackend,
-        ctx.contributionMaterializer.assertInitialized,
-        ctx.contributionMaterializer.refuseUnavailableFulltext,
-      );
+      return txBackend;
     }
 
     function bindPrivilegedTransactionBackend(
@@ -2307,6 +2389,8 @@ export function buildSqliteEngineProfile(
                 recordedTime: provisioning.recordedTime,
                 isFirstParty,
                 nativeTransaction,
+                gatesFulltext: true,
+                readOnlyGate: options?.accessMode === "read_only",
               });
               // Read-only multi-statement operations need one snapshot but must not
               // reserve SQLite's single writer slot. Business transactions retain
@@ -2326,11 +2410,7 @@ export function buildSqliteEngineProfile(
                   try {
                     const result = await fn(
                       markSchemaFencedInsertEligibleUnderFence(
-                        gateFulltext(
-                          txBackend,
-                          ctx.contributionMaterializer.assertInitialized,
-                          ctx.contributionMaterializer.refuseUnavailableFulltext,
-                        ),
+                        txBackend,
                         fencePlan,
                       ),
                       db,
@@ -2350,7 +2430,12 @@ export function buildSqliteEngineProfile(
             return runDoSqliteStorageTransaction(async (nativeTransaction) =>
               fn(
                 markSchemaFencedInsertEligibleUnderFence(
-                  bindTransactionBackend(db, isFirstParty, nativeTransaction),
+                  bindTransactionBackend(
+                    db,
+                    isFirstParty,
+                    nativeTransaction,
+                    options?.accessMode === "read_only",
+                  ),
                   fencePlan,
                 ),
                 db,
@@ -2368,7 +2453,12 @@ export function buildSqliteEngineProfile(
                   recordSqliteEngineSavepoint(db, tx, serializedResource);
                   return fn(
                     markSchemaFencedInsertEligibleUnderFence(
-                      bindTransactionBackend(tx, isFirstParty),
+                      bindTransactionBackend(
+                        tx,
+                        isFirstParty,
+                        undefined,
+                        options?.accessMode === "read_only",
+                      ),
                       fencePlan,
                     ),
                     tx,
@@ -2458,6 +2548,12 @@ export function buildSqliteEngineProfile(
                 }
 
                 const backend = bindPrivilegedTransactionBackend(externalTx);
+                // An adoption of a handle TypeGraph opened read-only is refused
+                // before its first statement: it fences and commits the schema.
+                assertBackendWritable(
+                  backend,
+                  "backend.adoptSchemaWriteTransaction()",
+                );
                 if (!(await backend.tableExists(tableNames.nodes))) {
                   throw new ConfigurationError(
                     "Schema adoption requires TypeGraph bootstrap storage before the caller transaction.",
@@ -2732,7 +2828,7 @@ function createTransactionBackend(
   // only ASSERTS the durable marker (SELECT, never DDL) and can't poison
   // anything on rollback. The shared per-instance cache means a slot
   // confirmed once stays a pure `Set.has` inside every later transaction.
-  const txBackend = createSqliteOperationBackend({
+  const operationBackend = createSqliteOperationBackend({
     capabilities: downgradeAtomicBatch(options.capabilities),
     db: options.db,
     executionAdapter: txExecutionAdapter,
@@ -2746,6 +2842,24 @@ function createTransactionBackend(
     lineage: options.lineage,
     recordedTime: options.recordedTime,
   });
+  // Gated before anything is recorded on it: every write member refuses
+  // inside a read-only scope on the native transaction recorded below
+  // (`read-only-write-gate.ts`). The gate is the outermost member layer, so
+  // a refused fulltext write never reaches the marker read `gateFulltext`
+  // puts in front of it.
+  const fulltextGated =
+    options.gatesFulltext === true ?
+      gateFulltext(
+        operationBackend,
+        options.contributionMaterializer.assertInitialized,
+        options.contributionMaterializer.refuseUnavailableFulltext,
+        "outside",
+      )
+    : operationBackend;
+  const txBackend =
+    options.readOnlyGate === false ?
+      fulltextGated
+    : gateBackendUnderConstruction(fulltextGated);
   recordSqliteNativeTransaction(txBackend, options);
   return options.isFirstParty ? markFirstPartyFactory(txBackend) : txBackend;
 }
@@ -2844,9 +2958,9 @@ function sqliteNativeHandle(
     kind: "pinned",
     handle: db,
     pinned,
-        // A libSQL transaction handle reports `closed` once its transaction
-        // has ended, committed, rolled back or ended by the engine, and
-        // refuses every statement from then on.
+    // A libSQL transaction handle reports `closed` once its transaction
+    // has ended, committed, rolled back or ended by the engine, and
+    // refuses every statement from then on.
     isOpen: () => !(pinned as Readonly<{ closed: boolean }>).closed,
   };
 }
@@ -2857,40 +2971,50 @@ function sqliteNativeHandle(
  */
 function readSqliteInTransaction(client: object): boolean {
   try {
-    return (client as Readonly<{ inTransaction?: unknown }>).inTransaction ===
-      true;
+    return (
+      (client as Readonly<{ inTransaction?: unknown }>).inTransaction === true
+    );
   } catch {
     return false;
   }
 }
 
 /**
- * How the driver confirms that a transaction the engine opened on `db` is
- * still open (proof 4): better-sqlite3's and bun:sqlite's `inTransaction`,
- * the connection's own autocommit state. `undefined` for a driver that
- * reports none (`@libsql/client` before 0.18 hides its connection, sql.js
- * and Durable Object storage expose no transaction state): its token is never
- * honoured through the connection.
+ * The connection a transaction the engine opens on `db` runs on, and how the
+ * driver confirms that it is still open (proof 4): better-sqlite3's and
+ * bun:sqlite's `inTransaction`, the connection's own autocommit state.
+ * `isTransactionOpen` is `undefined` for a driver that reports none
+ * (`@libsql/client` before 0.18 hides its connection, sql.js and Durable
+ * Object storage expose no transaction state): its token is never honoured
+ * through the connection, and an adoption on that connection during the
+ * transaction's span is refused while a read-only scope is open on it
+ * (`resolveNativeTransactionConnection`).
  */
 function sqliteConnectionProbe(
   db: AnySqliteDatabase,
   serializedResource: SerializedResourceDeclaration | undefined,
-): ConnectionTransactionProbe | undefined {
+): ConnectionTransactionProbe {
+  // The connection the record names, the one the audit names too: detected
+  // on this very client, else the backend's `shared` declaration, else the
+  // handle itself (`resolveConnectionIdentity`).
+  const identity = sqliteConnectionIdentity(db, serializedResource);
+  const connection = identity?.connection ?? db;
   const client = (db as Readonly<{ $client?: unknown }>).$client;
   if (
+    identity?.source !== "detected" ||
     (!isBetterSqlite3Client(client) && !isBunSqliteClient(client)) ||
     typeof (client as Readonly<{ inTransaction?: unknown }>).inTransaction !==
       "boolean"
   ) {
-    return undefined;
+    // No confirmation: the token is never published on the connection, so
+    // nothing joins it through the connection. A declared connection is a
+    // claim, never proof of a transaction; it still holds a read-only scope,
+    // which only ever refuses.
+    return { connection, isTransactionOpen: undefined };
   }
   const driverClient = client as object;
-  // The connection the record publishes the token on: the one the audit
-  // names, detected on this very client.
-  const identity = sqliteConnectionIdentity(db, serializedResource);
-  if (identity?.source !== "detected") return undefined;
   return {
-    connection: identity.connection,
+    connection,
     isTransactionOpen: () => readSqliteInTransaction(driverClient),
   };
 }

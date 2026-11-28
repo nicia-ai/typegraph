@@ -91,7 +91,8 @@ export function backendDerivationRoot(backend: object): object {
 export type ExactBackendOverlay<T extends object, O extends Partial<T>> = O &
   Readonly<Record<Exclude<keyof O, keyof T>, never>>;
 
-function isGraphCommandPort(value: unknown): value is GraphCommandPort {
+/** Whether `value` is a command port (`GraphBackend.commands`). */
+export function isGraphCommandPort(value: unknown): value is GraphCommandPort {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Readonly<Record<string, unknown>>;
   return (
@@ -101,9 +102,18 @@ function isGraphCommandPort(value: unknown): value is GraphCommandPort {
   );
 }
 
+/**
+ * What a derivation keeps of its source's atomic-batch declaration: nothing
+ * (a decoration that may bypass a member the registered program also
+ * bypasses), a session declaration (a transparent wrapper of one open
+ * transaction), or the declaration as it stands (a backend its factory is
+ * still assembling, which registers the evidence on the derived object).
+ */
+type AtomicBatchCarry = "downgrade" | "session" | "declaration";
+
 function resolveDerivedCapabilities(
   capabilities: unknown,
-  preserveAtomicSession: boolean,
+  carry: AtomicBatchCarry,
 ): unknown {
   if (typeof capabilities !== "object" || capabilities === null) return;
   const capabilityMembers = capabilities as Readonly<
@@ -114,7 +124,8 @@ function resolveDerivedCapabilities(
   const executionMembers = execution as Readonly<Record<PropertyKey, unknown>>;
   if (!("atomicBatch" in executionMembers)) return;
   const typed = capabilityMembers as BackendCapabilities;
-  return preserveAtomicSession && typed.execution.atomicBatch === "session" ?
+  if (carry === "declaration") return typed;
+  return carry === "session" && typed.execution.atomicBatch === "session" ?
       typed
     : downgradeAtomicBatch(typed);
 }
@@ -122,7 +133,7 @@ function resolveDerivedCapabilities(
 function deriveExecutionCapabilities(
   base: object,
   overrides: object,
-  preserveAtomicSession: boolean,
+  carry: AtomicBatchCarry,
 ): unknown {
   const overridesCapabilities = Object.hasOwn(overrides, "capabilities");
   const capabilities =
@@ -131,7 +142,7 @@ function deriveExecutionCapabilities(
     : (Reflect.get(base, "capabilities", base) as unknown);
   return resolveDerivedCapabilities(
     capabilities,
-    preserveAtomicSession && !overridesCapabilities,
+    overridesCapabilities ? "downgrade" : carry,
   );
 }
 
@@ -146,14 +157,24 @@ function carryDerivedCommandPortMetadata(
   overrides: object,
 ): void {
   if (!Object.hasOwn(overrides, "commands")) return;
-  const baseCommands: unknown = Reflect.get(base, "commands");
-  const overrideCommands: unknown = Reflect.get(overrides, "commands");
+  carrySameSessionCommandPortMetadata(
+    Reflect.get(base, "commands"),
+    Reflect.get(overrides, "commands"),
+  );
+}
+
+/** Carries a command port's session metadata onto a same-session decoration of it. */
+function carrySameSessionCommandPortMetadata(
+  baseCommands: unknown,
+  derivedCommands: unknown,
+): void {
   if (
+    baseCommands !== derivedCommands &&
     isGraphCommandPort(baseCommands) &&
-    isGraphCommandPort(overrideCommands) &&
-    baseCommands.session === overrideCommands.session
+    isGraphCommandPort(derivedCommands) &&
+    baseCommands.session === derivedCommands.session
   ) {
-    carryGraphCommandPortSessionMetadata(baseCommands, overrideCommands);
+    carryGraphCommandPortSessionMetadata(baseCommands, derivedCommands);
   }
 }
 
@@ -176,18 +197,58 @@ function carryDerivedCommandPortMetadata(
  * declare, so the looser bound cannot smuggle a member onto a surface that
  * withholds it.
  */
+/**
+ * How a derived backend presents a member it reads off its source rather
+ * than its overlay: the value itself, or a decoration of it. Called at most
+ * once per member value: the derived object keeps what it returned for as
+ * long as the source carries the same value, so a member read twice is the
+ * same object, and a member nothing reads costs nothing.
+ */
+export type BackendMemberView = (member: string, value: unknown) => unknown;
+
+/**
+ * `view` over `base`'s members, each decorated once per source value
+ * (`BackendMemberView`). `undefined` when there is no view.
+ */
+function cachedMemberView(
+  view: BackendMemberView | undefined,
+): ((property: PropertyKey, value: unknown) => unknown) | undefined {
+  if (view === undefined) return undefined;
+  const decorated = new Map<
+    string,
+    Readonly<{ source: unknown; value: unknown }>
+  >();
+  return (property, value) => {
+    if (typeof property !== "string") return value;
+    const cached = decorated.get(property);
+    if (cached !== undefined && cached.source === value) return cached.value;
+    const presented = view(property, value);
+    // A member the view leaves as it is (a read, a value) keeps no entry: it
+    // is the same object on every read anyway, and a Store's projection reads
+    // every member once.
+    if (presented === value) return value;
+    if (property === "commands") {
+      carrySameSessionCommandPortMetadata(value, presented);
+    }
+    decorated.set(property, { source: value, value: presented });
+    return presented;
+  };
+}
+
 function deriveBackendInternal<
   T extends object,
   const O extends Partial<T> = Partial<T>,
 >(
   base: T,
   overrides: ExactBackendOverlay<T, O>,
-  preserveAtomicSession: boolean,
+  carry: AtomicBatchCarry,
+  memberView?: BackendMemberView,
 ): T {
+  const present = cachedMemberView(memberView);
   const derivedCapabilities = deriveExecutionCapabilities(
     base,
     overrides,
-    preserveAtomicSession,
+    carry,
   );
   // A Proxy may not report a different value for a non-writable,
   // non-configurable data property on its target. Bundled backends are often
@@ -209,7 +270,8 @@ function deriveBackendInternal<
       if (hasOverlayProperty(property)) {
         return Reflect.get(overrides, property, overrides);
       }
-      return Reflect.get(base, property, base);
+      const value: unknown = Reflect.get(base, property, base);
+      return present === undefined ? value : present(property, value);
     },
 
     has(_targetObject, property) {
@@ -244,9 +306,14 @@ function deriveBackendInternal<
         return { ...descriptor, configurable: true };
       }
       const descriptor = Reflect.getOwnPropertyDescriptor(base, property);
-      return descriptor === undefined ? undefined : (
+      if (descriptor === undefined) return;
+      return present === undefined || !("value" in descriptor) ?
           { ...descriptor, configurable: true }
-        );
+        : {
+            ...descriptor,
+            value: present(property, descriptor.value),
+            configurable: true,
+          };
     },
 
     set(_targetObject, property, value) {
@@ -275,7 +342,10 @@ function deriveBackendInternal<
   carrySchemaFencedInsertEligibility(decoratedBackend, base);
   carrySerializationFailureClassifier(decoratedBackend, base);
   carryDerivedCommandPortMetadata(base, overrides);
-  recordBackendDerivation(decoratedBackend, base);
+  // A backend still under construction is never handed out: the derived
+  // object stands in for it, so it is the root of its own derivation chain,
+  // as the source would have been (`deriveBackendUnderConstruction`).
+  if (carry !== "declaration") recordBackendDerivation(decoratedBackend, base);
   return decoratedBackend;
 }
 
@@ -283,7 +353,7 @@ export function deriveBackend<
   T extends object,
   const O extends Partial<T> = Partial<T>,
 >(base: T, overrides: ExactBackendOverlay<T, O>): T {
-  return deriveBackendInternal(base, overrides, false);
+  return deriveBackendInternal(base, overrides, "downgrade");
 }
 
 /**
@@ -299,7 +369,38 @@ export function deriveTransactionSessionBackend<
   T extends TransactionBackend,
   const O extends Partial<T> = Partial<T>,
 >(base: T, overrides: ExactBackendOverlay<T, O>): T {
-  return deriveBackendInternal(base, overrides, true);
+  return deriveBackendInternal(base, overrides, "session");
+}
+
+/**
+ * Decorates a backend its factory is still assembling, before the factory
+ * registers any exact-object execution evidence (an atomic SQL transport,
+ * its mutation programs) or records a native transaction on it. The derived
+ * object keeps the source's atomic-batch declaration, root or session, as it
+ * stands: the factory registers the evidence that backs the declaration on
+ * the returned object, never on the source, so the declaration and its
+ * evidence stay on one object. The source is never handed out, so the derived
+ * object is not recorded as derived from it: it is the root of its own
+ * derivation chain ({@link backendDerivationRoot}), as the source would have
+ * been. Only a factory that does exactly that may call this; every other
+ * decoration goes through {@link deriveBackend}.
+ *
+ * `memberView` presents each member the derived object reads off `base`
+ * (`BackendMemberView`): a decoration applied to every member by name, at
+ * the cost of the members actually read, instead of an overlay built for
+ * every member up front.
+ *
+ * @internal
+ */
+export function deriveBackendUnderConstruction<
+  T extends object,
+  const O extends Partial<T> = Partial<T>,
+>(
+  base: T,
+  overrides: ExactBackendOverlay<T, O>,
+  memberView?: BackendMemberView,
+): T {
+  return deriveBackendInternal(base, overrides, "declaration", memberView);
 }
 
 /** Public name for the audited, decoration-only backend derivation seam. */
@@ -328,7 +429,7 @@ export function projectBackend<
     const value = Reflect.get(base, key) as unknown;
     const projectedValue =
       key === "capabilities" ?
-        (resolveDerivedCapabilities(value, false) ?? value)
+        (resolveDerivedCapabilities(value, "downgrade") ?? value)
       : value;
     return [[key, projectedValue] as const];
   });

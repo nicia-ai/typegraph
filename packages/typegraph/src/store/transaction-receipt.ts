@@ -13,7 +13,11 @@ import type {
   IDENTITY_WRITE_NAMES,
 } from "./collection-surface";
 import { EDGE_WRITE_NAMES, NODE_WRITE_NAMES } from "./collection-surface";
-import { refuseReadOnlyTransactionWrite } from "./operations/write-transaction";
+import {
+  isNativeTransactionReadOnly,
+  type NativeTransactionState,
+} from "./native-transaction-state";
+import { refuseReadOnlyTransactionWrite } from "./native-transaction-state";
 import type {
   CompositionCascadedPart,
   EdgeWrites,
@@ -72,6 +76,13 @@ type IdentityWriteCounterName = Exclude<
 >;
 
 export type TransactionReceiptRecorder = Readonly<{
+  /**
+   * The native transaction state this recorder's write gate asks at each
+   * write (its {@link TransactionWriteAccess}), or `undefined` for a recorder
+   * that never refuses for access. A context whose recorder already asks its
+   * own session's state needs no second gate.
+   */
+  accessNative: NativeTransactionState | undefined;
   recordNode: (kind: string, count: number) => void;
   recordEdge: (kind: string, count: number) => void;
   recordIdentity: (kind: IdentityWriteCounterName, count: number) => void;
@@ -110,8 +121,10 @@ export type TransactionReceiptRecorder = Readonly<{
    * The one gate in front of every write a transaction context offers, named
    * by `operation` (`tx.nodes.<Kind>.create()`, `tx.identity.assertSame()`,
    * …). Throws {@link ConfigurationError} once {@link seal} has been called,
-   * and refuses every write of a transaction opened with
-   * `accessMode: "read_only"` (`refuseReadOnlyTransactionWrite`). Invoked
+   * and, for a recorder built with a {@link TransactionWriteAccess}, refuses
+   * every write while the session's native transaction is read-only
+   * (`isNativeTransactionReadOnly`, refused by
+   * `refuseReadOnlyTransactionWrite`). Invoked
    * at the top of every wrapped write method, before the live write issues
    * any statement, so neither write reaches the backend: a post-seal write
    * would persist uncounted, and a read-only one would write on SQLite and
@@ -121,14 +134,15 @@ export type TransactionReceiptRecorder = Readonly<{
 }>;
 
 /**
- * The access a transaction was opened with, as the receipt recorder gates
- * writes on it: read-only only when the transaction was opened with
- * `accessMode: "read_only"`, for the graph the refusal names.
+ * What a transaction context's write gate asks at each write: the state of
+ * the native transaction its session runs on, read by
+ * `isNativeTransactionReadOnly`, and the graph a refusal names. A recorder
+ * built without one never refuses for access.
  */
-export type TransactionWriteAccess =
-  Readonly<{ readOnly: false }> | Readonly<{ readOnly: true; graphId: string }>;
-
-const READ_WRITE_ACCESS: TransactionWriteAccess = { readOnly: false };
+export type TransactionWriteAccess = Readonly<{
+  graphId: string;
+  native: NativeTransactionState;
+}>;
 
 type WrappedMethod = (...args: unknown[]) => Promise<unknown>;
 
@@ -230,7 +244,7 @@ interface WriteCounters {
 }
 
 export function createTransactionReceiptRecorder(
-  access: TransactionWriteAccess = READ_WRITE_ACCESS,
+  access?: TransactionWriteAccess,
 ): TransactionReceiptRecorder {
   const counters: WriteCounters = {
     nodes: createCountBucket(),
@@ -248,6 +262,7 @@ export function createTransactionReceiptRecorder(
   let sealed = false;
 
   return {
+    accessNative: access?.native,
     recordNode(kind, count): void {
       increment(counters.nodes, kind, count);
       counters.total += count;
@@ -324,7 +339,7 @@ export function createTransactionReceiptRecorder(
           },
         );
       }
-      if (access.readOnly) {
+      if (access !== undefined && isNativeTransactionReadOnly(access.native)) {
         refuseReadOnlyTransactionWrite(
           operation,
           access.graphId,
@@ -335,9 +350,18 @@ export function createTransactionReceiptRecorder(
   };
 }
 
+/**
+ * Which surface a gated write was called on, as its refusal names it:
+ * `tx.nodes.<Kind>.create()` on a transaction context,
+ * `store.nodes.<Kind>.create()` on a Store whose own writes run inside a
+ * caller's native transaction.
+ */
+export type WriteSurfaceOwner = "tx" | "store";
+
 export function wrapTransactionIdentity<G extends GraphDef>(
   identity: IdentityFacade<G>,
   recorder: TransactionReceiptRecorder,
+  owner: WriteSurfaceOwner = "tx",
 ): IdentityFacade<G> {
   return {
     classes: (options) => identity.classes(options),
@@ -351,19 +375,19 @@ export function wrapTransactionIdentity<G extends GraphDef>(
     transitionsOf: (ref, options) => identity.transitionsOf(ref, options),
     replay: (ref, options) => identity.replay(ref, options),
     async assertSame(a, b, window) {
-      recorder.assertWritable("tx.identity.assertSame()");
+      recorder.assertWritable(`${owner}.identity.assertSame()`);
       const result = await identity.assertSame(a, b, window);
       recorder.recordIdentity("sameAssertions", 1);
       return result;
     },
     async assertDifferent(a, b, window) {
-      recorder.assertWritable("tx.identity.assertDifferent()");
+      recorder.assertWritable(`${owner}.identity.assertDifferent()`);
       const result = await identity.assertDifferent(a, b, window);
       recorder.recordIdentity("differentAssertions", 1);
       return result;
     },
     async bulkAssertSame(pairs) {
-      recorder.assertWritable("tx.identity.bulkAssertSame()");
+      recorder.assertWritable(`${owner}.identity.bulkAssertSame()`);
       // Count the pairs the facade snapshotted (one result per pair), never a
       // separate read of the caller's array: a second read can disagree with
       // the snapshot, and the caller may mutate the array while the write is
@@ -373,31 +397,31 @@ export function wrapTransactionIdentity<G extends GraphDef>(
       return result;
     },
     async bulkAssertDifferent(pairs) {
-      recorder.assertWritable("tx.identity.bulkAssertDifferent()");
+      recorder.assertWritable(`${owner}.identity.bulkAssertDifferent()`);
       const result = await identity.bulkAssertDifferent(pairs);
       recorder.recordIdentity("differentAssertions", result.length);
       return result;
     },
     async retractAssertion(id) {
-      recorder.assertWritable("tx.identity.retractAssertion()");
+      recorder.assertWritable(`${owner}.identity.retractAssertion()`);
       const result = await identity.retractAssertion(id);
       recorder.recordIdentity("retractions", 1);
       return result;
     },
     async retractSameAssertion(a, b) {
-      recorder.assertWritable("tx.identity.retractSameAssertion()");
+      recorder.assertWritable(`${owner}.identity.retractSameAssertion()`);
       const result = await identity.retractSameAssertion(a, b);
       recorder.recordIdentity("retractions", 1);
       return result;
     },
     async retractDifferentAssertion(a, b) {
-      recorder.assertWritable("tx.identity.retractDifferentAssertion()");
+      recorder.assertWritable(`${owner}.identity.retractDifferentAssertion()`);
       const result = await identity.retractDifferentAssertion(a, b);
       recorder.recordIdentity("retractions", 1);
       return result;
     },
     async bulkRetractAssertions(ids) {
-      recorder.assertWritable("tx.identity.bulkRetractAssertions()");
+      recorder.assertWritable(`${owner}.identity.bulkRetractAssertions()`);
       const count = ids.length;
       const result = await identity.bulkRetractAssertions(ids);
       recorder.recordIdentity("retractions", count);
@@ -485,6 +509,7 @@ function wrapWriteCollection<T extends object, M extends string>(
   surface: WriteIntentSurface<M>,
   record: (kind: string, count: number) => void,
   assertWritable: (operation: string) => void,
+  owner: WriteSurfaceOwner,
 ): T {
   return memoizedProxyGet(
     collection,
@@ -496,7 +521,7 @@ function wrapWriteCollection<T extends object, M extends string>(
       const wrapped: WrappedMethod = async (...args) => {
         // Reject before the live write: a context retained past its callback
         // must not persist a row the already-snapshotted receipt cannot count.
-        assertWritable(`tx.${surface.entity}.${kind}.${property}()`);
+        assertWritable(`${owner}.${surface.entity}.${kind}.${property}()`);
         // Pin the intent count at call time: a caller may mutate a bulk input
         // array while the write is in flight, and the backend has already
         // snapshotted the items. Recording still waits for resolution so a
@@ -528,6 +553,42 @@ function wrapCollections<T extends object>(
   );
 }
 
+/** Node collections whose writes pass `recorder`'s gate and count into it. */
+export function wrapNodeCollections<G extends GraphDef>(
+  nodes: GraphNodeCollections<G>,
+  recorder: TransactionReceiptRecorder,
+  owner: WriteSurfaceOwner = "tx",
+): GraphNodeCollections<G> {
+  return wrapCollections(nodes, (collection, kind) =>
+    wrapWriteCollection(
+      collection,
+      kind,
+      NODE_WRITE_SURFACE,
+      recorder.recordNode,
+      recorder.assertWritable,
+      owner,
+    ),
+  );
+}
+
+/** Edge collections whose writes pass `recorder`'s gate and count into it. */
+export function wrapEdgeCollections<G extends GraphDef>(
+  edges: GraphEdgeCollections<G>,
+  recorder: TransactionReceiptRecorder,
+  owner: WriteSurfaceOwner = "tx",
+): GraphEdgeCollections<G> {
+  return wrapCollections(edges, (collection, kind) =>
+    wrapWriteCollection(
+      collection,
+      kind,
+      EDGE_WRITE_SURFACE,
+      recorder.recordEdge,
+      recorder.assertWritable,
+      owner,
+    ),
+  );
+}
+
 export function wrapTransactionCollections<G extends GraphDef>(
   nodes: GraphNodeCollections<G>,
   edges: GraphEdgeCollections<G>,
@@ -537,23 +598,7 @@ export function wrapTransactionCollections<G extends GraphDef>(
   edges: GraphEdgeCollections<G>;
 }> {
   return {
-    nodes: wrapCollections(nodes, (collection, kind) =>
-      wrapWriteCollection(
-        collection,
-        kind,
-        NODE_WRITE_SURFACE,
-        recorder.recordNode,
-        recorder.assertWritable,
-      ),
-    ),
-    edges: wrapCollections(edges, (collection, kind) =>
-      wrapWriteCollection(
-        collection,
-        kind,
-        EDGE_WRITE_SURFACE,
-        recorder.recordEdge,
-        recorder.assertWritable,
-      ),
-    ),
+    nodes: wrapNodeCollections(nodes, recorder),
+    edges: wrapEdgeCollections(edges, recorder),
   };
 }

@@ -18,7 +18,10 @@ import {
 import { sqlValueList } from "../../query/compiler/predicate-utils";
 import { type SqlSchema } from "../../query/compiler/schema";
 import { sql, type SqlFragment } from "../../query/sql-fragment";
-import { asCompiledRowsSql } from "../../query/sql-intent";
+import {
+  asCompiledRowsSql,
+  asCompiledWriteRowsSql,
+} from "../../query/sql-intent";
 import { chunk } from "../../utils/array";
 import { isPresent } from "../../utils/presence";
 import { getEdgeRowsByIds } from "../edge-fetch";
@@ -97,7 +100,7 @@ async function closeOpenReturning(
 ): Promise<ReadonlyMap<string, boolean>> {
   const kindFilter = kind === undefined ? sql`` : sql`AND kind = ${kind}`;
   const rows = await target.execute<ClosedRow>(
-    asCompiledRowsSql(sql`
+    asCompiledWriteRowsSql(sql`
       UPDATE ${table}
       SET recorded_to = ${recordedRevision}
       WHERE graph_id = ${graphId}

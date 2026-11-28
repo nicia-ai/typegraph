@@ -1061,6 +1061,9 @@ class ConfigurationError extends TypeGraphError {
     });
 }
 
+// @public (undocumented)
+const CONNECTION: unique symbol;
+
 // @public
 export type ConstrainedCardinality = Exclude<Cardinality, "many">;
 
@@ -2266,6 +2269,9 @@ type EndpointKindErased<Endpoint> = Endpoint extends string ? false : Endpoint e
 type EndpointKinds<Endpoint> = Extract<Endpoint, {
     kind: string;
 }>["kind"];
+
+// @public (undocumented)
+const ENGINE_OPENED: unique symbol;
 
 // @public (undocumented)
 const ENGINE_RECORDED_READ_SOURCE: unique symbol;
@@ -4791,7 +4797,11 @@ const NATIVE_TRANSACTION_STATE: unique symbol;
 // @public
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
-}>;
+}> & {
+    [READ_ONLY_SCOPES]: readonly string[];
+    [CONNECTION]: object | undefined;
+    readonly [ENGINE_OPENED]: boolean;
+};
 
 // @public
 export type NeighborNodeOrderField<G extends GraphDef> = {
@@ -5948,6 +5958,9 @@ export type ReachableNode = Readonly<{
 export type ReachableOptions<G extends GraphDef> = BaseTraversalOptions<G> & Readonly<{
     excludeSource?: boolean;
 }>;
+
+// @public (undocumented)
+const READ_ONLY_SCOPES: unique symbol;
 
 // @public
 type ReadConstraintFenceViolationsParams = Readonly<{

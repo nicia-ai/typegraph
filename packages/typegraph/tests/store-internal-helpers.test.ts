@@ -659,6 +659,7 @@ describe("backend overlay wrappers", () => {
         return Promise.resolve();
       },
       () => Promise.reject(new Error("Unexpected unavailable fulltext")),
+      "outside",
     );
 
     await gated.execute(asCompiledRowsSql(sql`SELECT 1`));

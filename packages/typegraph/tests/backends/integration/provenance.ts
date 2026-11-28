@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   asNodeId,
   ConfigurationError,
+  createAdapterStore,
   createAdapterStoreWithSchema,
   createStoreWithSchema,
   defineEdge,
@@ -16,6 +17,8 @@ import {
   deriveBackend,
   projectBackendWithout,
 } from "../../../src/backend/derive-backend";
+import { createPostgresTransactionBackend } from "../../../src/backend/postgres";
+import { createSqliteBackend } from "../../../src/backend/sqlite";
 import type {
   AdapterBackend,
   GraphBackend,
@@ -1536,4 +1539,82 @@ export function registerProvenanceIntegrationTests(
       expect(outcome.result.receipt.writes.total).toBe(4);
     });
   });
+
+  // better-sqlite3 hands `tx.sql` out as the database itself, not a
+  // transaction object, so there is no backend over its transaction to build.
+  describe.runIf(context.driver !== "better-sqlite3")(
+    "provenance on a Store over a read-only transaction's handle",
+    () => {
+      it("refuses retract and assertHolds at the read-write unit they open in the read-only transaction, which stays usable", async () => {
+        const { store } = await seedStore(context);
+        // A history store withholds tx.sql, so a plain store over the same
+        // graph opens the read-only transaction.
+        const [plain] = await createAdapterStoreWithSchema(
+          provenanceGraph,
+          context.getBackend(),
+        );
+        const outcome = await plain.transaction(
+          async (tx) => {
+            const overTransaction = createAdapterStore(
+              provenanceGraph,
+              backendOverTransaction(
+                requireDefined((tx as Readonly<{ sql?: unknown }>).sql),
+              ),
+              { history: true },
+            );
+            const provenance = createRetractionCapability(
+              overTransaction,
+              config,
+            );
+            const retract = await captureRejection(
+              provenance.retract({ kind: "Source", id: "live-source" }),
+            );
+            const assertHolds = await captureRejection(
+              overTransaction.transaction((inner) =>
+                provenance.assertHolds(inner, [
+                  { kind: "Fact", id: "live-fact" },
+                ]),
+              ),
+            );
+            return {
+              retract,
+              assertHolds,
+              live: await tx.nodes.Fact.getById(asNodeId("live-fact")),
+            };
+          },
+          { accessMode: "read_only" },
+        );
+        // Each opens a read-write store.transaction() on the Store over the
+        // read-only transaction, which is refused as it opens.
+        for (const [operation, refusal] of [
+          ["store.transaction()", outcome.retract],
+          ["store.transaction()", outcome.assertHolds],
+        ] as const) {
+          expect(refusal).toBeInstanceOf(UnsupportedBackendCapabilityError);
+          expect(
+            (refusal as UnsupportedBackendCapabilityError).details,
+          ).toMatchObject({
+            operation,
+            capability: "write transaction access",
+            accessMode: "read_only",
+          });
+        }
+        expect(outcome.live?.id).toBe("live-fact");
+        expect(
+          sortedIds(await createRetractionCapability(store, config).holding()),
+        ).toEqual(["live-fact"]);
+      });
+    },
+  );
+
+  /** As `backendOverTransaction` in `read-only-transaction-writes.ts`. */
+  function backendOverTransaction(handle: unknown): AdapterBackend<unknown> {
+    return context.driver === "libsql" ?
+        (createSqliteBackend(handle as never, {
+          executionProfile: { isSync: false, transactionMode: "drizzle" },
+        }) as AdapterBackend<unknown>)
+      : (createPostgresTransactionBackend(
+          handle as never,
+        ) as AdapterBackend<unknown>);
+  }
 }

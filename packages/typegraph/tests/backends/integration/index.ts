@@ -113,6 +113,11 @@ export { registerQueryHookIntegrationTests } from "./query-hooks";
 export { registerQueryTerminalIntegrationTests } from "./query-terminals";
 export { registerReadEfficiencyIntegrationTests } from "./read-efficiency";
 export { registerReadEntryPointIntegrationTests } from "./read-entry-points";
+export {
+  registerReadOnlyBackendGateIntegrationTests,
+  registerReadOnlyBackendMemberIntegrationTests,
+} from "./read-only-backend-gate";
+export { registerReadOnlyOverlapIntegrationTests } from "./read-only-overlap";
 export { registerReadOnlyTransactionWritesIntegrationTests } from "./read-only-transaction-writes";
 export { registerReadOperationRoutingIntegrationTests } from "./read-operation-routing";
 export { registerReadSetFenceIntegrationTests } from "./read-set-fence";

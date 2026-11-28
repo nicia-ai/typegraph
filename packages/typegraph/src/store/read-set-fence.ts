@@ -20,10 +20,10 @@ import {
   ReadSetUnverifiableError,
   UnsupportedBackendCapabilityError,
 } from "../errors";
+import { refuseReadOnlyTransactionWrite } from "./native-transaction-state";
 import type { Operation } from "./operation-scope";
 import { lockStoreWriteFence } from "./operations/write-fence-prelude";
 import {
-  refuseReadOnlyTransactionWrite,
   storeWritersTakeGraphWriteFence,
   type WriteTransactionContext,
 } from "./operations/write-transaction";

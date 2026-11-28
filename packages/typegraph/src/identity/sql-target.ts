@@ -17,7 +17,7 @@ import {
 } from "../backend/types";
 import { ConfigurationError } from "../errors";
 import { type SqlFragment } from "../query/sql-fragment";
-import { asCompiledStatementSql } from "../query/sql-intent";
+import { asCompiledWriteStatementSql } from "../query/sql-intent";
 import { recordedBindParamBudget } from "../store/recorded-capture/relations";
 import { isSqliteStaleSnapshotError } from "../utils/sql-errors";
 
@@ -152,7 +152,7 @@ export async function executeIdentityStatement(
 ): Promise<void> {
   requireStatementTarget(target);
   try {
-    await target.executeStatement(asCompiledStatementSql(statement));
+    await target.executeStatement(asCompiledWriteStatementSql(statement));
   } catch (error) {
     // Every identity relation writer runs through here, so translating at this
     // one seam covers the whole surface — the fold, the derived-relation

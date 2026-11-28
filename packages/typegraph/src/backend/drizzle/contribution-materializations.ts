@@ -40,6 +40,7 @@ import {
 } from "../../query/sql-intent";
 import { sortedReplacer } from "../../schema/canonical";
 import { sha256Hex } from "../../utils/hash";
+import { requireDefined } from "../../utils/presence";
 import { errorChain, isMissingTableError } from "../../utils/sql-errors";
 import {
   isOptimisticRetryTier,
@@ -52,7 +53,11 @@ import {
   resolveWriteFencePlan,
   type WriteFenceTarget,
 } from "../capabilities/write-fence";
-import { deriveTransactionSessionBackend } from "../derive-backend";
+import {
+  deriveTransactionSessionBackend,
+  type ExactBackendOverlay,
+} from "../derive-backend";
+import { assertBackendWritable } from "../read-only-write-gate";
 import { formatPostgresTimestamp, nowIso } from "../row-mappers";
 import {
   DEPLOYMENT_CONTRIBUTION_GRAPH_ID,
@@ -469,12 +474,21 @@ function unquoteSqliteIdentifier(
   return isQuoted ? identifier.slice(1, -1) : identifier;
 }
 
+/**
+ * Runs before a gated fulltext WRITE asserts its marker: the read-only write
+ * gate's question for the member about to run (`assertBackendWritable`),
+ * so inside a read-only scope the write refuses before the marker read.
+ */
+export type BeforeFulltextWrite = (member: string) => void;
+
 async function executeGatedFulltext<T>(
   graphId: string,
   assert: (graphId: string) => Promise<void>,
   refuseUnavailable: RefuseUnavailableFulltext,
   execute: () => Promise<T>,
+  beforeWrite?: () => void,
 ): Promise<T> {
+  beforeWrite?.();
   await assert(graphId);
   try {
     return await execute();
@@ -490,11 +504,13 @@ async function executeGatedFulltext<T>(
  * a (cached) SELECT — never DDL — so it is safe inside an open
  * transaction. The single source of the gating contract: both the
  * non-tx backend and the tx-scoped {@link gateFulltext} consume it.
+ * `beforeWrite`, when given, runs first in every write method.
  */
 export function gateFulltextMethods(
   source: GatableFulltextBackend,
   assert: (graphId: string) => Promise<void>,
   refuseUnavailable: RefuseUnavailableFulltext,
+  beforeWrite?: BeforeFulltextWrite,
 ): Partial<GatableFulltextBackend> {
   // Only assign an override when the raw method exists, so the "wrap
   // only what's defined" rule stays obvious instead of hiding behind
@@ -511,6 +527,11 @@ export function gateFulltextMethods(
         assert,
         refuseUnavailable,
         () => raw(params),
+        beforeWrite === undefined ? undefined : (
+          () => {
+            beforeWrite("upsertFulltext");
+          }
+        ),
       );
     };
   }
@@ -522,6 +543,11 @@ export function gateFulltextMethods(
         assert,
         refuseUnavailable,
         () => raw(params),
+        beforeWrite === undefined ? undefined : (
+          () => {
+            beforeWrite("deleteFulltext");
+          }
+        ),
       );
     };
   }
@@ -536,6 +562,11 @@ export function gateFulltextMethods(
         assert,
         refuseUnavailable,
         () => raw(params),
+        beforeWrite === undefined ? undefined : (
+          () => {
+            beforeWrite("upsertFulltextBatch");
+          }
+        ),
       );
     };
   }
@@ -548,6 +579,11 @@ export function gateFulltextMethods(
         assert,
         refuseUnavailable,
         () => raw(params),
+        beforeWrite === undefined ? undefined : (
+          () => {
+            beforeWrite("deleteFulltextBatch");
+          }
+        ),
       );
     };
   }
@@ -566,8 +602,16 @@ export function gateFulltextMethods(
   // table even for graphs that declare no `searchable()` fields.
   const rawHardDelete = source.hardDeleteNode;
   gated.hardDeleteNode = async (params) => {
-    await executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
-      rawHardDelete(params),
+    await executeGatedFulltext(
+      params.graphId,
+      assert,
+      refuseUnavailable,
+      () => rawHardDelete(params),
+      beforeWrite === undefined ? undefined : (
+        () => {
+          beforeWrite("hardDeleteNode");
+        }
+      ),
     );
   };
   // Its batched form deletes from the fulltext table too, so it is gated
@@ -575,8 +619,16 @@ export function gateFulltextMethods(
   if (source.hardDeleteNodesBatch) {
     const raw = source.hardDeleteNodesBatch;
     gated.hardDeleteNodesBatch = async (params) =>
-      executeGatedFulltext(params.graphId, assert, refuseUnavailable, () =>
-        raw(params),
+      executeGatedFulltext(
+        params.graphId,
+        assert,
+        refuseUnavailable,
+        () => raw(params),
+        beforeWrite === undefined ? undefined : (
+          () => {
+            beforeWrite("hardDeleteNodesBatch");
+          }
+        ),
       );
   }
   return gated;
@@ -588,16 +640,42 @@ export function gateFulltextMethods(
  * self-ensure); a transaction that never touches fulltext never
  * asserts, so non-fulltext transactions stay free of any fulltext-init
  * requirement.
+ *
+ * Where the read-only write gate (`read-only-write-gate.ts`) sits is
+ * `writeGate`: `"outside"` when the caller gates the result, so a refused
+ * write never reaches this overlay; `"beneath"` when `tx` is already gated,
+ * so its write members would refuse only after the marker read this overlay
+ * runs first, and the overlay asks the gate's question of the derived object
+ * before the read instead.
  */
-export function gateFulltext(
-  tx: TransactionBackend,
+export function gateFulltext<T extends TransactionBackend>(
+  tx: T,
   assert: (graphId: string) => Promise<void>,
   refuseUnavailable: RefuseUnavailableFulltext,
-): TransactionBackend {
-  return deriveTransactionSessionBackend<TransactionBackend>(
+  writeGate: "outside" | "beneath",
+): T {
+  // The overlay names only fulltext members `TransactionBackend` declares,
+  // each with its own signature, so it is an exact overlay of any `T`.
+  if (writeGate === "outside") {
+    return deriveTransactionSessionBackend<T>(
+      tx,
+      gateFulltextMethods(tx, assert, refuseUnavailable) as ExactBackendOverlay<
+        T,
+        Partial<T>
+      >,
+    );
+  }
+  const holder: { gated: T | undefined } = { gated: undefined };
+  holder.gated = deriveTransactionSessionBackend<T>(
     tx,
-    gateFulltextMethods(tx, assert, refuseUnavailable),
+    gateFulltextMethods(tx, assert, refuseUnavailable, (member) => {
+      assertBackendWritable(
+        requireDefined(holder.gated),
+        `backend.${member}()`,
+      );
+    }) as ExactBackendOverlay<T, Partial<T>>,
   );
+  return holder.gated;
 }
 
 // ============================================================

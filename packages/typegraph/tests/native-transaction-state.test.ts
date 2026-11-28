@@ -17,9 +17,15 @@ import {
   recordEngineSavepoint,
   recordNativeTransactionHandle,
   recordOpenedNativeTransaction,
+  resolveNativeTransactionConnection,
   resolveNativeTransactionHandle,
 } from "../src/backend/native-transaction-handle";
-import { resolveNativeTransactionState } from "../src/store/native-transaction-state";
+import {
+  backendReadOnlyScopeGraph,
+  isNativeTransactionReadOnly,
+  openReadOnlyScope,
+  resolveNativeTransactionState,
+} from "../src/store/native-transaction-state";
 import {
   openTransactionSession,
   type StoreTransactionBackend,
@@ -235,6 +241,39 @@ describe("native transaction record of a connection token (proof 4)", () => {
     });
     expect(resolveNativeTransactionHandle(opener)).toBeUndefined();
   });
+
+  it("records the connection a bind of a handle runs on, proof or not, along the derivation chain; never for a pinned handle or the engine's own bind of a transaction it opened", () => {
+    const connection = { connection: true };
+    const unproven = bindOnConnection(connection);
+    expect(resolveNativeTransactionHandle(unproven)).toBeUndefined();
+    expect(resolveNativeTransactionConnection(unproven)).toBe(connection);
+    expect(
+      resolveNativeTransactionConnection(deriveBackend(unproven, {})),
+    ).toBe(connection);
+    const pooled = { pooledClient: true };
+    const transactionObject = boundBackend();
+    recordNativeTransactionHandle(transactionObject, {
+      kind: "transaction",
+      handle: { begin: 1 },
+      connection: pooled,
+    });
+    expect(resolveNativeTransactionConnection(transactionObject)).toBe(pooled);
+    const token = createNativeTransactionToken({
+      connection,
+      isTransactionOpen: undefined,
+    });
+    const opener = boundBackend();
+    recordOpenedNativeTransaction(opener, token);
+    expect(resolveNativeTransactionConnection(opener)).toBeUndefined();
+    const pinned = boundBackend();
+    recordNativeTransactionHandle(pinned, {
+      kind: "pinned",
+      handle: { begin: 2 },
+      pinned: { pinned: true },
+      isOpen: () => true,
+    });
+    expect(resolveNativeTransactionConnection(pinned)).toBeUndefined();
+  });
 });
 
 describe("native transaction record of a nested handle", () => {
@@ -314,6 +353,112 @@ describe("native transaction state", () => {
     expect(resolveNativeTransactionState(unrecorded)).not.toBe(
       resolveNativeTransactionState(unrecorded),
     );
+  });
+
+  it("learns the connection of a state first resolved without one from a later binding that names it, so a scope opened after holds the connection", () => {
+    const handle = { begin: 2 };
+    const connection = { pooledClient: true };
+    const first = boundBackend();
+    recordNativeTransactionHandle(first, { kind: "transaction", handle });
+    const state = resolveNativeTransactionState(first);
+    const second = boundBackend();
+    recordNativeTransactionHandle(second, {
+      kind: "transaction",
+      handle,
+      connection,
+    });
+    expect(resolveNativeTransactionState(second)).toBe(state);
+    // A session on the same connection whose state nothing ties to `state`.
+    const unproven = boundBackend();
+    recordNativeTransactionHandle(unproven, {
+      kind: "connection",
+      handle: { unproven: true },
+      connection,
+      detected: false,
+    });
+    const release = openReadOnlyScope(state, "graph");
+    expect(
+      isNativeTransactionReadOnly(resolveNativeTransactionState(unproven)),
+    ).toBe(true);
+    expect(backendReadOnlyScopeGraph(unproven)).toBe("graph");
+    release();
+    expect(backendReadOnlyScopeGraph(unproven)).toBeUndefined();
+  });
+
+  it("never reads another transaction's read-only scope on its connection for a transaction the engine opened", async () => {
+    const connection = { connection: true };
+    const readOnly = createNativeTransactionToken({
+      connection,
+      isTransactionOpen: undefined,
+    });
+    const other = createNativeTransactionToken({
+      connection,
+      isTransactionOpen: undefined,
+    });
+    const readOnlyOpener = boundBackend();
+    recordOpenedNativeTransaction(readOnlyOpener, readOnly);
+    const otherOpener = boundBackend();
+    recordOpenedNativeTransaction(otherOpener, other);
+    await publishConnectionNativeTransaction(readOnly, () => {
+      const release = openReadOnlyScope(
+        resolveNativeTransactionState(readOnlyOpener),
+        "graph",
+      );
+      // The other transaction is proven by its own token: the scope on the
+      // connection is not its, so neither its sessions nor its backend read
+      // as read-only. A bind nothing proved on that connection does.
+      expect({
+        otherSession: isNativeTransactionReadOnly(
+          resolveNativeTransactionState(otherOpener),
+        ),
+        otherBackend: backendReadOnlyScopeGraph(otherOpener),
+        unprovenBind: backendReadOnlyScopeGraph(bindOnConnection(connection)),
+      }).toEqual({
+        otherSession: false,
+        otherBackend: undefined,
+        unprovenBind: "graph",
+      });
+      release();
+      return Promise.resolve();
+    });
+  });
+
+  it("reads a read-only scope through the connection for a session on it whose state is not the scope's, without sharing the state", async () => {
+    const connection = { connection: true };
+    const token = createNativeTransactionToken({
+      connection,
+      isTransactionOpen: undefined,
+    });
+    const opener = boundBackend();
+    recordOpenedNativeTransaction(opener, token);
+    const elsewhere = bindOnConnection({ connection: "another" });
+    await publishConnectionNativeTransaction(token, () => {
+      const openerState = resolveNativeTransactionState(opener);
+      const adopted = resolveNativeTransactionState(
+        bindOnConnection(connection),
+      );
+      expect(adopted).not.toBe(openerState);
+      expect(isNativeTransactionReadOnly(adopted)).toBe(false);
+      const release = openReadOnlyScope(openerState, "graph");
+      expect(isNativeTransactionReadOnly(adopted)).toBe(true);
+      expect(
+        isNativeTransactionReadOnly(resolveNativeTransactionState(elsewhere)),
+      ).toBe(false);
+      release();
+      expect(isNativeTransactionReadOnly(adopted)).toBe(false);
+      // Scopes nest, and a second release of one scope releases nothing of
+      // another still open.
+      const outer = openReadOnlyScope(openerState, "graph");
+      const inner = openReadOnlyScope(openerState, "graph");
+      inner();
+      inner();
+      expect(isNativeTransactionReadOnly(adopted)).toBe(true);
+      expect(isNativeTransactionReadOnly(openerState)).toBe(true);
+      outer();
+      expect(isNativeTransactionReadOnly(adopted)).toBe(false);
+      expect(isNativeTransactionReadOnly(openerState)).toBe(false);
+      return Promise.resolve();
+    });
   });
 
   it("is shared by the sessions of one engine transaction, and by no session of another", async () => {

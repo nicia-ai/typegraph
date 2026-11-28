@@ -26,7 +26,7 @@ import type {
   VectorStrategy,
 } from "../query/dialect/vector-strategy";
 import { sql, type SqlFragment } from "../query/sql-fragment";
-import { asCompiledStatementSql } from "../query/sql-intent";
+import { asCompiledWriteStatementSql } from "../query/sql-intent";
 import { parseSerializedSchema } from "../schema/manager";
 import type { SerializedSchema } from "../schema/types";
 import { nowIso } from "../utils/date";
@@ -695,7 +695,7 @@ async function executeDeleteStatements(
   statements: readonly SqlFragment[],
 ): Promise<void> {
   for (const statement of statements) {
-    await target.executeStatement(asCompiledStatementSql(statement));
+    await target.executeStatement(asCompiledWriteStatementSql(statement));
   }
 }
 

@@ -2386,11 +2386,112 @@ every node and edge collection write, every `tx.identity` write, `tx.writeNodeUp
 store on every backend, so the transaction stays usable: reads after it run, and the transaction
 commits.
 
+The read-only fact belongs to the native transaction from the moment the callback starts until
+that transaction ends (its `COMMIT` or `ROLLBACK`, or the `RELEASE` of a savepoint), not to the
+`tx` object, so every TypeGraph context over that transaction refuses the same way, with the same
+error, before any statement, a write left floating after the callback settled included:
+
+| Reached through | Refused as |
+| --- | --- |
+| `store.withTransaction(tx.sql)` | every collection and identity write and `writeNodeUpsertBatch()`, with the same `operation` names as on `tx` |
+| `store.withRecordedTransaction(tx.sql, fn)` | the same writes inside `fn`, and `applyMergePlanInTransaction()` with that context |
+| `store.withRecordedTransaction(tx.sql, fn)` on a history store | `store.withRecordedTransaction()`, before `fn` runs (it fences its writes first) |
+| `store.withEvolvedTransaction(tx.sql, plan, fn)` | `store.withEvolvedTransaction()`, before `fn` runs, for every plan |
+| a Store over `createPostgresTransactionBackend(tx.sql)`, or over `createSqliteBackend(tx.sql)` on a libSQL transaction | the Store's own members that write, named by the member and before they read their arguments: its `store.nodes`, `store.edges` and `store.identity` writes (`store.nodes.Person.create()`), `clear()`, `evolve()`, `deprecateKinds()`, `undeprecateKinds()`, `removeKinds()`, `materializeRemovals()`, `materializeIndexes()`, `materializeSystemIndexes()`, `refreshStatistics()`, `reembedVectorField()`, `repairContributions()`, `rebuildContribution()`, `pruneRecordedInstants()`, `rotateAllocationOwner()`, `rebuildIdentityClosure(store)`, `importGraph()`, `importGraphStream()`, `trustedImportGraphStream()`, and a read-write `store.transaction()` or `transactionWithReceipt()` as it opens, before its fences or a history store's isolation check, so `merge()`, `applyMergePlan()` and the other graph-merge writes are refused at the unit they open |
+
+What guarantees the refusal is the backend, not the Store: every backend object over the transaction
+refuses each of its members that can write or run DDL, before any statement, whatever reached it.
+That is the transaction's own backend and every backend derived from it, and every adoption of its
+native handle: a backend built over `tx.sql`, or adopted over it with
+`backend.adoptTransaction(tx.sql)` or `adoptSchemaWriteTransaction(tx.sql)`. Its refusal is the same
+error, with an `operation` that names the backend member (`backend.upsertFulltextBatch()`). So an entry
+point that takes a backend and knows nothing of the read-only transaction is refused as well:
+`createAdapterStoreWithSchema()`, `migrateSchema()` or `rollbackSchema()` over such a backend, or
+`store.search.rebuildFulltext()` on a Store over it. Which backend members write is one table typed
+over every backend member name, so a new member does not compile until it is classified; a
+transaction opener is a write unless it opens a read-only transaction. Atomic mutation programs are
+refused when they dispatch, and the writes TypeGraph runs through a raw-SQL member (identity
+relations, recorded history, retention pruning, removal cleanup,
+`repairInvertedValidityWindows({ mode: "apply" })`) are marked as writes and refused the same way.
+Reads run: `branch()` from such a Store reads it, and a revision origin the graph has not minted yet
+is refused rather than minted, since minting is a write.
+
+The root backend is not part of it. A call another flow makes on the root backend, or on a Store
+over it, while the read-only transaction is open runs as it does without a read-only transaction,
+whatever the root's connection is running meanwhile, and so does a root call awaited inside the
+callback. Over a PostgreSQL pool that call runs on a connection of its own. On a SQLite driver
+that runs every transaction on the database's one connection (better-sqlite3, `@libsql/client`
+before 0.18, sql.js, Durable Object storage), a root write admitted through the root's serialized
+queue waits for the read-only transaction to end, while a root member that runs its statements on
+the connection as it is called (`refreshStatistics()`, `executeDdl()`, the `ensure*` provisioning
+members, the materialization records, and a bulk write's statistics refresh among them) runs them
+inside the read-only transaction's span, as it always has. That interleaving is a known limit of
+one-connection SQLite drivers, not something the read-only scope changes; keep root maintenance out
+of the span of a read-only transaction on those drivers.
+
+A backend you write yourself gets the Store's refusals but no refusal of its own members: nothing
+ties its objects to a native transaction.
+
+A read-only `store.transaction()` on a Store over a caller's read-write transaction runs as a
+savepoint of that transaction, and issues the same statements as any other unit there: TypeGraph
+leaves the caller's transaction's access mode alone, so the savepoint is read-write at the engine and
+the read-only scope alone refuses TypeGraph's writes in it. Every context and backend over the
+caller's transaction refuses TypeGraph writes until the savepoint ends and accepts them again
+afterwards. A write that another call on the same transaction (under `Promise.all`, say) reaches
+while the savepoint is open is refused too, before any statement; one that was already past its
+refusal when the savepoint opened completes. That includes a read-write `store.transaction()` that
+is already open on the same caller's transaction when the read-only one opens beside it: its later
+writes are refused, so it rejects, and what it wrote before the refusal follows the caller's
+transaction rather than the unit (on node-postgres and PGlite it commits with the caller's
+transaction; postgres-js rolls it back with the unit). Do not overlap a read-write and a read-only
+unit on one caller's transaction. Only a `store.transaction()` you open read-only opens
+that scope. TypeGraph's own read-only units on such a Store (an export's snapshot, the confirm read
+of `getOrCreateByEndpoints()`, an algorithm's working table) open none and issue only their own
+statements, so they never refuse or end a call that overlaps them. A native read-only
+transaction the Store did not open (your own `db.transaction(fn, { accessMode: "read only" })`)
+carries no read-only fact: TypeGraph writes through it as before, so PostgreSQL rejects the write
+and aborts the transaction, and SQLite has no read-only transaction to refuse it.
+
+Until the transaction ends, the driver connection it runs on holds the read-only fact too. A
+connection runs one transaction at a time, so a context TypeGraph cannot tie to the transaction is
+still refused when its statements would run on that connection: an adoption of `tx.sql` on a driver
+that cannot report whether a transaction is open (`@libsql/client` before 0.18, sql.js, Durable
+Object storage), a context you bound in an earlier transaction on the same better-sqlite3
+connection, or a savepoint you open yourself with `tx.sql.transaction(...)` on node-postgres, which
+keeps the pooled client. A backend you build over `tx.sql` where `tx.sql` is the database handle
+itself is a root backend unless the driver proves the transaction: on better-sqlite3, which reports
+an open transaction, one built while the transaction is open is bound to it until it ends, since its
+statements run inside it. That holds wherever it is built: the handle is the same database object
+inside the callback and in another flow, so a backend another flow builds over it then is refused
+too. On
+`@libsql/client` before 0.18, sql.js and Durable Object storage nothing ties it to the transaction,
+so it runs as a root backend does.
+
+Which connection a handle runs on is decided the same way the serialized-resource audit decides
+it: the client the driver is detected on, else the resource a
+`serializedResource: { mode: "shared", resource }` declaration names. On a driver TypeGraph cannot
+detect (`sqlite-proxy`), two backends declaring the same resource are therefore one connection here
+too. A declaration names the connection but proves no transaction, so an adoption of the second
+backend's own handle (`store.withTransaction(db)` on a Store over it) is never joined to a read-only
+transaction opened through the first; while that transaction is open, the adoption's writes are
+refused before any statement, and once it ends the same adoption writes. The second backend's root
+runs as it does without a read-only transaction. Without a declaration nothing ties the two
+handles to one connection, and the adoption writes.
+
+A savepoint you open yourself and hand to `withTransaction()` is refused the same way on
+better-sqlite3, libSQL and PGlite, whose drivers show which transaction it runs in. On postgres-js
+it gets a client of its own that TypeGraph cannot tie to the read-only transaction, so the engine
+decides: in a read-only transaction PostgreSQL rejects its writes (SQLSTATE `25006`) and the driver
+rolls your savepoint back. In a read-only `store.transaction()` that runs as a savepoint of your
+read-write transaction the engine accepts them, and they commit with your transaction.
+
 The refusal covers what TypeGraph writes. A statement issued through the native `tx.sql` handle is
-not checked: PostgreSQL rejects a write there and aborts the transaction (which then rejects with
-`TransactionOutcomeUnknownError`, even if the callback caught the refusal, since the callback read
-`tx.sql`), while SQLite, whose
-transaction is not read-only at the engine, runs it and commits it.
+not checked by TypeGraph. In a read-only transaction TypeGraph opened, PostgreSQL rejects a write
+there and aborts the transaction (which then rejects with `TransactionOutcomeUnknownError`, even if
+the callback caught the refusal, since the callback read `tx.sql`). In a read-only
+`store.transaction()` that runs as a savepoint of your read-write transaction, the engine runs the
+statement and it commits with your transaction, on every dialect. SQLite, which has no read-only
+transaction at the engine, runs the statement and commits it in either case.
 
 #### Overlapping calls in one transaction
 
