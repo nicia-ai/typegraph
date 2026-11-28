@@ -165,6 +165,7 @@ export {
   storeQueryBackend,
   storeRuntime,
   transactionAssertWritable,
+  transactionChildSurface,
   type TransactionDeleteNodeWithPolicy,
   transactionDeleteNodeWithPolicy,
 } from "../store/runtime-port";

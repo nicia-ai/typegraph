@@ -153,8 +153,9 @@ function routeOperationsThroughRecordingHandles(
   const spies = [
     vi
       .spyOn(operationScope, "enterOperation")
-      .mockImplementation((scope: operationScope.EntryScope) =>
-        recordingEntry(enterOperation(scope), false),
+      .mockImplementation(
+        (scope: operationScope.EntryScope, parent?: operationScope.Operation) =>
+          recordingEntry(enterOperation(scope, parent), false),
       ),
     vi
       .spyOn(operationScope, "enterTransactionOperation")

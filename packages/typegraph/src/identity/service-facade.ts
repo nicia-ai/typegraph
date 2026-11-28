@@ -9,8 +9,10 @@ import { getDialect } from "../query/dialect";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import {
+  enterCall,
   enterOperation,
   type EntryScope,
+  exitCall,
   type OperationEntry,
   operationEntryBackend,
   type StatementBackend,
@@ -1381,10 +1383,21 @@ export function createIdentityFacade<G extends GraphDef>(
   source: IdentityFacadeSource<G>,
 ): IdentityFacade<G> {
   const ctx = source.context;
-  /** One mutation call: its operation, entered, runs `fn` in the write executor. */
-  function mutate<T>(fn: IdentityMutationBody<T>): Promise<T> {
-    const call = enterIdentityCall(source);
-    return runIdentityMutation(call.ctx, fn, call.entry);
+  /**
+   * One mutation call: its operation, entered and counted as running on its
+   * session until it settles, runs `fn` in the write executor.
+   */
+  async function mutate<T>(fn: IdentityMutationBody<T>): Promise<T> {
+    const entry = enterCall(enterOperation(source.scope));
+    try {
+      return await runIdentityMutation(
+        source.callContext(operationEntryBackend(entry)),
+        fn,
+        entry,
+      );
+    } finally {
+      exitCall(entry);
+    }
   }
   return {
     ...createIdentityReadFacade(source),

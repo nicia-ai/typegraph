@@ -208,6 +208,7 @@ import {
   type OperationEntry,
   operationEntryBackend,
   type OperationScoped,
+  runOperationUnit,
   type StatementBackend,
 } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
@@ -4455,6 +4456,20 @@ function edgeHardDeleteReleasesClaim<G extends GraphDef>(
  * only for a row that still attaches its part.
  */
 export async function executeEdgeHardDeleteBatch<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  expectedKind: string,
+  ids: readonly string[],
+  entry: OperationEntry,
+): Promise<void> {
+  // The batch takes a savepoint unit inside a caller's transaction, so it
+  // holds that unit from before its first statement.
+  await runOperationUnit(entry, () =>
+    hardDeleteEdgeBatch(ctx, expectedKind, ids, entry),
+  );
+}
+
+/** {@link executeEdgeHardDeleteBatch} once its unit is held. */
+async function hardDeleteEdgeBatch<G extends GraphDef>(
   ctx: EdgeOperationContext<G>,
   expectedKind: string,
   ids: readonly string[],

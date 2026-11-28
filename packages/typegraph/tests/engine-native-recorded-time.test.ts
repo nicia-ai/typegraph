@@ -80,7 +80,10 @@ import { resolveLineage } from "../src/store/recorded-capture";
 import { storeCaptureEnabled } from "../src/store/runtime-port";
 import { requireDefined } from "../src/utils/presence";
 import { attachEngineNativeRecordedTime } from "./engine-native-recorded-time-fixture";
-import { savepointUnitEntry } from "./helpers/savepoint-unit";
+import {
+  savepointUnitChild,
+  savepointUnitEntry,
+} from "./helpers/savepoint-unit";
 import { toSqlString } from "./sql-test-utils";
 import { createTestBackend, matchingObject } from "./test-utils";
 
@@ -440,12 +443,14 @@ describe("engine-native recorded time: transaction receipts", () => {
             { label: "survivor" },
             { id: "survivor" },
           );
+        const [operation, unitBackend] = savepointUnitEntry(tx);
         await runRecordedTransactionSavepoint(
-          ...savepointUnitEntry(tx),
+          operation,
+          unitBackend,
           statements,
           "test_native_rollback",
           async () => {
-            await tx.nodes.Widget.create(
+            await savepointUnitChild(tx, operation).nodes.Widget.create(
               { label: "rolled back" },
               { id: "rolled-back" },
             );

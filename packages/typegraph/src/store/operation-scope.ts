@@ -80,6 +80,10 @@ import type {
   TransactionBackend,
 } from "../backend/types";
 import {
+  type TransactionCallRefusalReason,
+  TransactionCallRefusedError,
+} from "../errors";
+import {
   type NativeTransactionState,
   resolveNativeTransactionState,
 } from "./native-transaction-state";
@@ -201,6 +205,12 @@ type EngineEvidence<Engine extends TransactionBackend> =
 const SESSION_TRANSACTION: unique symbol = Symbol("typegraph.session");
 const OPERATION_SESSION: unique symbol = Symbol("typegraph.operation");
 const SESSION_CONTROL: unique symbol = Symbol("typegraph.sessionControl");
+const SESSION_CALLS: unique symbol = Symbol("typegraph.sessionCalls");
+const OPERATION_ROOT: unique symbol = Symbol("typegraph.operationRoot");
+const OPERATION_PARENT: unique symbol = Symbol("typegraph.operationParent");
+const OPERATION_IN_FLIGHT: unique symbol = Symbol(
+  "typegraph.operationInFlight",
+);
 
 /**
  * One native transaction as one Store binding opened or joined it: the value
@@ -249,6 +259,19 @@ export type TransactionSession<
      */
     [SESSION_CONTROL]: OperationScoped<Engine>;
     /**
+     * Which calls of the session are running and whether one of them holds
+     * a savepoint unit open: what the refusals of {@link enterOperation} and
+     * {@link openOperationUnit} read. Written only by this module.
+     */
+    [SESSION_CALLS]: {
+      /** Root calls {@link enterCall} counted that {@link exitCall} has not released. */
+      inFlight: number;
+      /** Savepoint units open on the session, nested ones included. */
+      unitDepth: number;
+      /** The root call whose units are open, while `unitDepth` is above 0. */
+      unitRoot: Operation | undefined;
+    };
+    /**
      * Graph write locks a still-running write frame on this session holds or
      * is still acquiring, by graph id: owned by `write-transaction.ts`.
      */
@@ -282,11 +305,30 @@ export type TransactionSession<
  * executes; work the call composes (a nested write frame, a mutation set's
  * legs, a query's selective attempt and its fallback) runs under the same
  * operation rather than entering another.
+ *
+ * A call that another call composes through a public surface of its own
+ * (merge apply's collection writes, say) is a CHILD: it is entered with its
+ * parent operation, passed explicitly, and belongs to the parent's root call.
+ * A savepoint unit is held by a root call, and a call of any other root is
+ * refused while it is open ({@link enterOperation}).
  */
 export type Operation<Engine extends TransactionBackend = TransactionBackend> =
   OperationScoped<
-    Readonly<{
+    {
+      /**
+       * On a root call: whether {@link enterCall} counted it as running on
+       * its session and {@link exitCall} has not yet released it.
+       */
+      [OPERATION_IN_FLIGHT]: boolean;
+    } & Readonly<{
       [OPERATION_SESSION]: TransactionSession<Engine>;
+      /**
+       * The root call this operation belongs to: itself when it was entered
+       * without a parent, its parent's root otherwise.
+       */
+      [OPERATION_ROOT]: Operation;
+      /** The operation this one was entered as a child of, if any. */
+      [OPERATION_PARENT]: Operation | undefined;
       backend: OperationScoped<Engine>;
       /**
        * The session's undecorated holding, as this operation holds it: the
@@ -331,6 +373,7 @@ export function openTransactionSession<
   return {
     [SESSION_TRANSACTION]: transaction,
     [SESSION_CONTROL]: transaction,
+    [SESSION_CALLS]: { inFlight: 0, unitDepth: 0, unitRoot: undefined },
     heldGraphWriteLocks: new Map<string, Promise<GraphWriteLock>>(),
     managedWrite: { writeSession: undefined, schemaFenceLeases: undefined },
     native: resolveNativeTransactionState(transaction),
@@ -482,20 +525,163 @@ export function openRootTransaction<T>(
 /**
  * The mint at a public Store member: the root backend as itself, or a new
  * {@link Operation} of the session.
+ *
+ * `parent` is the operation of the call that composes this one, passed
+ * explicitly by that call and never looked up: the new operation is its
+ * child and belongs to its root call. Without one, the operation is a root
+ * call of its own.
+ *
+ * A call that starts while a call of another root holds a savepoint unit open
+ * on the session ({@link openOperationUnit}) is refused here, before it can
+ * issue any statement, with a {@link TransactionCallRefusedError}
+ * (`"savepoint-open"`): its writes would run inside that savepoint and be
+ * lost if the unit rolled back.
+ *
+ * The operation is not counted as running: a call that brackets its extent
+ * hands it to {@link enterCall}, so a unit opening beside it is refused.
  */
 export function enterOperation<Engine extends TransactionBackend>(
   scope: TransactionSession<Engine>,
+  parent?: Operation,
 ): Operation<Engine>;
-export function enterOperation(scope: EntryScope): OperationEntry;
-export function enterOperation(scope: EntryScope): OperationEntry {
-  if (!(SESSION_TRANSACTION in scope)) return scope;
-  /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
-  return {
+export function enterOperation(
+  scope: EntryScope,
+  parent?: Operation,
+): OperationEntry;
+export function enterOperation(
+  scope: EntryScope,
+  parent?: Operation,
+): OperationEntry {
+  if (!(SESSION_TRANSACTION in scope)) {
+    if (parent !== undefined) {
+      throw new TypeError(
+        "A call on the root backend cannot be the child of an operation of a transaction session.",
+      );
+    }
+    return scope;
+  }
+  if (parent !== undefined && parent[OPERATION_SESSION] !== scope) {
+    throw new TypeError(
+      "A child operation must be entered on its parent's session.",
+    );
+  }
+  const refusal = callRefusal(scope[SESSION_CALLS], parent?.[OPERATION_ROOT]);
+  if (refusal !== undefined) throw new TransactionCallRefusedError(refusal);
+   
+  const operation = {
     [OPERATION_SESSION]: scope,
+    [OPERATION_ROOT]: undefined,
+    [OPERATION_PARENT]: parent,
+    [OPERATION_IN_FLIGHT]: false,
     backend: scope[SESSION_TRANSACTION],
     control: scope[SESSION_CONTROL],
-  } as Operation;
-  /* eslint-enable no-restricted-syntax */
+  } as unknown as MintedOperation;
+   
+  operation[OPERATION_ROOT] = parent?.[OPERATION_ROOT] ?? operation;
+  return operation;
+}
+
+/** An operation as its mint builds it, before its root is set. */
+type MintedOperation = { -readonly [Key in keyof Operation]: Operation[Key] };
+
+/**
+ * Counts `entry`, the operation a call just entered ({@link enterOperation}),
+ * as running on its session until {@link exitCall} releases it, so a
+ * savepoint unit another root call tries to open meanwhile is refused
+ * (`"siblings-in-flight"`), and returns it. For a call whose extent the
+ * caller brackets: call {@link exitCall} in a `finally` once the call's work
+ * has settled. A child (entered with a `parent`) is not counted: it runs
+ * within its root call's extent. The pooled root has no session to count on.
+ */
+export function enterCall<Entry extends OperationEntry>(entry: Entry): Entry {
+  if (!(OPERATION_SESSION in entry) || entry[OPERATION_PARENT] !== undefined) {
+    return entry;
+  }
+  const root = entry[OPERATION_ROOT];
+  if (!root[OPERATION_IN_FLIGHT]) {
+    root[OPERATION_IN_FLIGHT] = true;
+    entry[OPERATION_SESSION][SESSION_CALLS].inFlight += 1;
+  }
+  return entry;
+}
+
+/** Releases a call {@link enterCall} counted as running; idempotent. */
+export function exitCall(entry: OperationEntry): void {
+  if (!(OPERATION_SESSION in entry) || entry[OPERATION_PARENT] !== undefined) {
+    return;
+  }
+  const root = entry[OPERATION_ROOT];
+  if (!root[OPERATION_IN_FLIGHT]) return;
+  root[OPERATION_IN_FLIGHT] = false;
+  entry[OPERATION_SESSION][SESSION_CALLS].inFlight -= 1;
+}
+
+/**
+ * THE decision of whether an operation of root call `root` (`undefined` for
+ * a new root call) may run on a session with `calls`: refused while a unit of
+ * another root call is open.
+ */
+function callRefusal(
+  calls: TransactionSession[typeof SESSION_CALLS],
+  root: Operation | undefined,
+): TransactionCallRefusalReason | undefined {
+  return calls.unitDepth > 0 && root !== calls.unitRoot ?
+      "savepoint-open"
+    : undefined;
+}
+
+/**
+ * Opens a savepoint unit of `entry`'s root call on its session, before the
+ * unit's first statement. Refused with a {@link TransactionCallRefusedError}
+ * while a unit of another root call is open (`"savepoint-open"`), and while a
+ * root call other than `entry`'s own is running on the session
+ * (`"siblings-in-flight"`), whose statements would otherwise land inside the
+ * savepoint. A unit the same root call already holds open nests. Pair with
+ * {@link closeOperationUnit} in a `finally`. The pooled root has no session
+ * and opens nothing.
+ */
+export function openOperationUnit(entry: OperationEntry): void {
+  if (!(OPERATION_SESSION in entry)) return;
+  const calls = entry[OPERATION_SESSION][SESSION_CALLS];
+  const root = entry[OPERATION_ROOT];
+  const refusal =
+    callRefusal(calls, root) ??
+    ((
+      calls.unitDepth === 0 &&
+      calls.inFlight > (root[OPERATION_IN_FLIGHT] ? 1 : 0)
+    ) ?
+      "siblings-in-flight"
+    : undefined);
+  if (refusal !== undefined) throw new TransactionCallRefusedError(refusal);
+  calls.unitDepth += 1;
+  calls.unitRoot = root;
+}
+
+/**
+ * Runs `run`, the whole of a call that takes a savepoint unit on its session,
+ * holding that unit open from before the call's first statement: the call is
+ * refused before any statement beside running sibling calls, and a call
+ * started while it runs (its pre-savepoint reads included) is refused before
+ * any statement of its own. The savepoints the call takes inside nest in it.
+ */
+export async function runOperationUnit<T>(
+  entry: OperationEntry,
+  run: () => Promise<T>,
+): Promise<T> {
+  openOperationUnit(entry);
+  try {
+    return await run();
+  } finally {
+    closeOperationUnit(entry);
+  }
+}
+
+/** Closes the unit {@link openOperationUnit} opened for `entry`. */
+export function closeOperationUnit(entry: OperationEntry): void {
+  if (!(OPERATION_SESSION in entry)) return;
+  const calls = entry[OPERATION_SESSION][SESSION_CALLS];
+  calls.unitDepth -= 1;
+  if (calls.unitDepth === 0) calls.unitRoot = undefined;
 }
 
 /**
@@ -622,6 +808,9 @@ export function decorateOperation<Engine extends TransactionBackend>(
   /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
   return {
     [OPERATION_SESSION]: session,
+    [OPERATION_ROOT]: operation[OPERATION_ROOT],
+    [OPERATION_PARENT]: operation[OPERATION_PARENT],
+    [OPERATION_IN_FLIGHT]: false,
     backend: decorated,
     control,
   } as Operation;
@@ -682,13 +871,18 @@ function foreignOperationEntry(
 ): OperationEntry {
   const session = surfaceSession(entry.control);
   if (session === undefined) return enterTargetOperation(entry.backend);
-  /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
-  return {
+   
+  const operation = {
     [OPERATION_SESSION]: session,
+    [OPERATION_ROOT]: undefined,
+    [OPERATION_PARENT]: undefined,
+    [OPERATION_IN_FLIGHT]: false,
     backend: entry.backend,
     control: session[SESSION_CONTROL],
-  } as Operation;
-  /* eslint-enable no-restricted-syntax */
+  } as unknown as MintedOperation;
+   
+  operation[OPERATION_ROOT] = operation;
+  return operation;
 }
 
 // Module-private: only `sessionSurfaceMembers` puts a session on a statement

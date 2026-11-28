@@ -31,9 +31,12 @@ import { requireDefined } from "../../utils/presence";
 import { encodeTupleKey } from "../../utils/tuple-key";
 import { getEdgeRowsByIds, groupEndpointIdsByKind } from "../edge-fetch";
 import {
+  enterCall,
   enterOperation,
   enterTargetOperation,
   type EntryScope,
+  exitCall,
+  type Operation,
   type OperationEntry,
   operationEntryBackend,
   type StatementBackend,
@@ -112,6 +115,13 @@ export type EdgeCollectionConfig = Readonly<{
    * operation from it.
    */
   writes: EntryScope;
+  /**
+   * The operation of the call that composes this collection's writes, when
+   * the collection is a child surface of that call (merge apply's): each
+   * write enters as its child. Absent for a transaction's own collections,
+   * whose writes are root calls.
+   */
+  parent?: Operation;
   /** Threaded `batchPointRead` verdict — never re-resolved here. */
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   /** Threaded endpoint-set read verdict, resolved against the graph backend. */
@@ -446,6 +456,7 @@ export function createEdgeCollection<
     kind,
     backend,
     writes,
+    parent,
     batchPointRead,
     defaultTemporalMode,
     rowToEdge,
@@ -643,11 +654,16 @@ export function createEdgeCollection<
         validTo?: string;
       }>,
     ): Promise<Edge<E>> {
-      const result = await executeEdgeCreate(
-        buildCreateEdgeInput(kind, from, to, props ?? {}, options),
-        enterOperation(writes),
-      );
-      return narrowEdge<E>(result);
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const result = await executeEdgeCreate(
+          buildCreateEdgeInput(kind, from, to, props ?? {}, options),
+          call,
+        );
+        return narrowEdge<E>(result);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async getById(
@@ -689,11 +705,16 @@ export function createEdgeCollection<
       props: Partial<z.input<E["schema"]>>,
       options?: ValidityEndMutation,
     ): Promise<Edge<E>> {
-      const result = await executeEdgeUpdate(
-        buildUpdateEdgeInput(kind, id, props, options),
-        enterOperation(writes),
-      );
-      return narrowEdge<E>(result);
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const result = await executeEdgeUpdate(
+          buildUpdateEdgeInput(kind, id, props, options),
+          call,
+        );
+        return narrowEdge<E>(result);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async findFrom(from: NodeRef, options?: QueryOptions): Promise<Edge<E>[]> {
@@ -766,11 +787,21 @@ export function createEdgeCollection<
     },
 
     async delete(id: string): Promise<void> {
-      await executeEdgeDelete(kind, id, enterOperation(writes));
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        await executeEdgeDelete(kind, id, call);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async hardDelete(id: string): Promise<void> {
-      await executeEdgeHardDelete(kind, id, enterOperation(writes));
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        await executeEdgeHardDelete(kind, id, call);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async find(
@@ -854,12 +885,14 @@ export function createEdgeCollection<
       }>[],
     ): Promise<Edge<E>[]> {
       const batchInputs = mapBulkEdgeInputs(kind, items);
-      const results = await executeEdgeCreateBatch(
-        batchInputs,
-        enterOperation(writes),
-      );
-      await config.maybeRefreshStatisticsAfterBulk?.(results.length);
-      return narrowEdges<E>(results);
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const results = await executeEdgeCreateBatch(batchInputs, call);
+        await config.maybeRefreshStatisticsAfterBulk?.(results.length);
+        return narrowEdges<E>(results);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async bulkUpsertById(
@@ -1173,20 +1206,23 @@ export function createEdgeCollection<
       // backend without interactive transactions there is nothing to open, so
       // the decision is exactly as fenced as that backend's writes are — which
       // is to say not at all, matching the atomicity it already cannot offer.
-      const { results, mutations } = await runResolvedMutationSetConverging(
-        "edge",
-        backend,
-        () =>
-          runOwnedMutationSetTransaction(enterOperation(writes), (frame) =>
-            upsertAll(frame),
-          ),
-      );
-      // Match bulkCreate/bulkInsert: refresh planner statistics after a large
-      // autocommit bulk write. Coalesced items wrote nothing, so only real
-      // mutations count toward the threshold. A no-op inside a caller
-      // transaction (the hook is intentionally undefined there).
-      await config.maybeRefreshStatisticsAfterBulk?.(mutations);
-      return results;
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const { results, mutations } = await runResolvedMutationSetConverging(
+          "edge",
+          backend,
+          () =>
+            runOwnedMutationSetTransaction(call, (frame) => upsertAll(frame)),
+        );
+        // Match bulkCreate/bulkInsert: refresh planner statistics after a large
+        // autocommit bulk write. Coalesced items wrote nothing, so only real
+        // mutations count toward the threshold. A no-op inside a caller
+        // transaction (the hook is intentionally undefined there).
+        await config.maybeRefreshStatisticsAfterBulk?.(mutations);
+        return results;
+      } finally {
+        exitCall(call);
+      }
     },
 
     async bulkInsert(
@@ -1200,18 +1236,33 @@ export function createEdgeCollection<
       }>[],
     ): Promise<void> {
       const batchInputs = mapBulkEdgeInputs(kind, items);
-      await executeEdgeCreateNoReturnBatch(batchInputs, enterOperation(writes));
-      await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        await executeEdgeCreateNoReturnBatch(batchInputs, call);
+        await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async bulkDelete(ids: readonly string[]): Promise<void> {
       if (ids.length === 0) return;
-      await executeEdgeDeleteBatch(kind, ids, enterOperation(writes));
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        await executeEdgeDeleteBatch(kind, ids, call);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async bulkHardDelete(ids: readonly string[]): Promise<void> {
       if (ids.length === 0) return;
-      await executeEdgeHardDeleteBatch(kind, ids, enterOperation(writes));
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        await executeEdgeHardDeleteBatch(kind, ids, call);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async findByEndpoints(
@@ -1259,17 +1310,22 @@ export function createEdgeCollection<
         }),
       };
 
-      const result = await config.executeGetOrCreateByEndpoints(
-        kind,
-        from.kind,
-        from.id,
-        to.kind,
-        to.id,
-        props,
-        enterOperation(writes),
-        getOrCreateOptions,
-      );
-      return { edge: narrowEdge<E>(result.edge), action: result.action };
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const result = await config.executeGetOrCreateByEndpoints(
+          kind,
+          from.kind,
+          from.id,
+          to.kind,
+          to.id,
+          props,
+          call,
+          getOrCreateOptions,
+        );
+        return { edge: narrowEdge<E>(result.edge), action: result.action };
+      } finally {
+        exitCall(call);
+      }
     },
 
     async bulkGetOrCreateByEndpoints(
@@ -1338,7 +1394,12 @@ export function createEdgeCollection<
       // atomic convergence dispatch before a derived transaction target hides
       // the bundled backend proof; the portable implementation still enters
       // `runWritePlan` and receives the same all-or-nothing boundary.
-      return getOrCreateAll(enterOperation(writes));
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        return await getOrCreateAll(call);
+      } finally {
+        exitCall(call);
+      }
     },
   };
 }

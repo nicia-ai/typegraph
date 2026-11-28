@@ -60,8 +60,10 @@ import {
   runInsertNoReturn,
 } from "./insert-dispatch";
 import {
+  closeOperationUnit,
   enterOperation,
   openBoundTransactionSession,
+  openOperationUnit,
   openTransactionSession,
   type Operation,
   type OperationBackend,
@@ -804,19 +806,28 @@ export async function runRecordedTransactionSavepoint<T>(
     control,
     statementExecution,
   );
-  return withSavepointState(target, (restoreState) =>
-    runSessionSavepoint(
-      {
-        executeControl: (statement) =>
-          executeStatement(asCompiledStatementSql(portableSql.raw(statement))),
-        enterDriverScope: resolveDriverSavepointScope(control),
-        guardSavepoint: resolveSavepointGuard(control),
-      },
-      savepoint,
-      fn,
-      restoreState,
-    ),
-  );
+  // Refused before the savepoint statement: beside another root call still
+  // running on the session, or inside another root call's unit.
+  openOperationUnit(entry);
+  try {
+    return await withSavepointState(target, (restoreState) =>
+      runSessionSavepoint(
+        {
+          executeControl: (statement) =>
+            executeStatement(
+              asCompiledStatementSql(portableSql.raw(statement)),
+            ),
+          enterDriverScope: resolveDriverSavepointScope(control),
+          guardSavepoint: resolveSavepointGuard(control),
+        },
+        savepoint,
+        fn,
+        restoreState,
+      ),
+    );
+  } finally {
+    closeOperationUnit(entry);
+  }
 }
 
 /**

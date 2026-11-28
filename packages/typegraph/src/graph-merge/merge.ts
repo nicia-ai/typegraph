@@ -9,9 +9,12 @@ import { parseRecordedInstant } from "../core/temporal";
 import { IdentityEndpointValidityError } from "../errors";
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import {
+  enterCall,
   enterTransactionOperation,
+  exitCall,
   type Operation,
   type OperationBackend,
+  runOperationUnit,
   type StatementBackend,
 } from "../store/operation-scope";
 import { lockStoreWriteFence } from "../store/operations/write-fence-prelude";
@@ -318,6 +321,7 @@ import {
   storeCaptureEnabled,
   storeRuntime,
   transactionAssertWritable,
+  transactionChildSurface,
   transactionDeleteNodeWithPolicy,
   TypeGraphError,
   uncapturedGraphWriteLock,
@@ -6153,23 +6157,24 @@ async function applyValidatedMergePlanInTransaction<G extends GraphDef>(
       "beforeApply",
     );
   }
-  await preflightWireMergeWrites(
-    target,
-    tx.nodes as unknown as TxNodes,
-    tx.edges as unknown as TxEdges,
-    artifact,
-  );
+  // The apply's collection writes are children of its operation: an adopted
+  // apply holds its savepoint unit open around them, and a write entered
+  // through `tx` itself is refused while that unit is open.
+  const child = transactionChildSurface(tx, operation);
+  const nodes = child.nodes as unknown as TxNodes;
+  const edges = child.edges as unknown as TxEdges;
+  await preflightWireMergeWrites(target, nodes, edges, artifact);
   await assertPlannedIdentityIdsFresh(target, operation, {
     identityAssertions: artifact.writes.identityAssertions,
     identityRetractions: artifact.writes.identityRetractions,
   });
   const applied = await applyWireMergeWrites(
     target,
-    tx.nodes as unknown as TxNodes,
-    tx.edges as unknown as TxEdges,
+    nodes,
+    edges,
     operation,
     artifact,
-    (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
+    (work, policy) => child.deleteNodeWithPolicy(work, policy),
     decision,
   );
   if (afterApply !== undefined) {
@@ -6342,25 +6347,31 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
       );
     }
     // One operation of the caller's transaction's session for the whole
-    // apply: its fences, savepoint and direct statements.
-    const operation = enterTransactionOperation(tx);
-    await assertMergeTransactionPristine(effectiveTarget, operation);
-    const decision = mergeIdentityDecisionFromArtifact(artifact, options);
-    const merged = await withAdoptedMergeApplySavepoint(
-      effectiveTarget,
-      operation,
-      () =>
-        applyValidatedMergePlanInTransaction(
-          effectiveTarget,
-          tx,
-          operation,
-          artifact,
-          {},
-          true,
-          decision,
-        ),
-    );
-    return reportFromArtifact(artifact, merged, artifact.review.warnings);
+    // apply: its fences, savepoint and direct statements. It is a call of
+    // that session, counted as running until the apply settles, and the
+    // apply's collection writes are its children.
+    // It holds its savepoint unit from before its first statement.
+    const operation = enterCall(enterTransactionOperation(tx));
+    try {
+      const merged = await runOperationUnit(operation, async () => {
+        await assertMergeTransactionPristine(effectiveTarget, operation);
+        const decision = mergeIdentityDecisionFromArtifact(artifact, options);
+        return withAdoptedMergeApplySavepoint(effectiveTarget, operation, () =>
+          applyValidatedMergePlanInTransaction(
+            effectiveTarget,
+            tx,
+            operation,
+            artifact,
+            {},
+            true,
+            decision,
+          ),
+        );
+      });
+      return reportFromArtifact(artifact, merged, artifact.review.warnings);
+    } finally {
+      exitCall(operation);
+    }
   } catch (error) {
     const translated = translateMergeCommitError(error);
     throw translated instanceof MergeError ? translated : (

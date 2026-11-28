@@ -52,7 +52,10 @@ import {
 } from "../../../src/store/recorded-capture";
 import { type MeasurableTransactionContext } from "../../../src/store/types";
 import { requireDefined } from "../../../src/utils/presence";
-import { savepointUnitEntry } from "../../helpers/savepoint-unit";
+import {
+  savepointUnitChild,
+  savepointUnitEntry,
+} from "../../helpers/savepoint-unit";
 import { type IntegrationTestContext } from "./test-context";
 
 const SavepointStamp = defineNode("SavepointStamp", {
@@ -230,18 +233,22 @@ export function registerSavepointRecoveryIntegrationTests(
         const { receipt } = await store.transactionWithReceipt(async (tx) => {
           if (priorWrite)
             await tx.nodes.SavepointNote.create({ body: "survivor" });
+          // The unit's own writes are children of the operation it holds.
+          const [outer, outerBackend] = savepointUnitEntry(tx);
+          const child = savepointUnitChild(tx, outer);
           await runRecordedTransactionSavepoint(
-            ...savepointUnitEntry(tx),
+            outer,
+            outerBackend,
             statements,
             "test_outer_rollback",
             async () => {
-              await tx.nodes.SavepointNote.create({ body: "rolled back" });
+              await child.nodes.SavepointNote.create({ body: "rolled back" });
               await runRecordedTransactionSavepoint(
-                ...savepointUnitEntry(tx),
+                ...savepointUnitEntry(tx, outer),
                 statements,
                 "test_inner_release",
                 async () => {
-                  await tx.nodes.SavepointNote.bulkCreate([
+                  await child.nodes.SavepointNote.bulkCreate([
                     { props: { body: "also rolled back" } },
                   ]);
                   return { action: "release", value: undefined };
@@ -287,21 +294,24 @@ export function registerSavepointRecoveryIntegrationTests(
             { id: "before" },
           );
           expect(ended).toEqual(["before"]);
+          const [outer, outerBackend] = savepointUnitEntry(tx);
+          const child = savepointUnitChild(tx, outer);
           await runRecordedTransactionSavepoint(
-            ...savepointUnitEntry(tx),
+            outer,
+            outerBackend,
             statements,
             "test_hooks_outer",
             async () => {
-              await tx.nodes.SavepointNote.create(
+              await child.nodes.SavepointNote.create(
                 { body: "released" },
                 { id: "released" },
               );
               await runRecordedTransactionSavepoint(
-                ...savepointUnitEntry(tx),
+                ...savepointUnitEntry(tx, outer),
                 statements,
                 "test_hooks_inner",
                 async () => {
-                  await tx.nodes.SavepointNote.updateWhere({
+                  await child.nodes.SavepointNote.updateWhere({
                     all: true,
                     patch: { body: "rolled back" },
                   });
@@ -312,7 +322,7 @@ export function registerSavepointRecoveryIntegrationTests(
                   };
                 },
               );
-              await tx.nodes.SavepointNote.updateWhere({
+              await child.nodes.SavepointNote.updateWhere({
                 all: true,
                 patch: { body: "released bulk" },
               });
@@ -393,25 +403,28 @@ export function registerSavepointRecoveryIntegrationTests(
               { id: "before" },
             );
             const { receipt: nested } = await scoped.measure(async (inner) => {
+              const [outer, outerBackend] = savepointUnitEntry(tx);
+              const child = savepointUnitChild(inner, outer);
               const result = await runRecordedTransactionSavepoint(
-                ...savepointUnitEntry(tx),
+                outer,
+                outerBackend,
                 statements,
                 "test_effects_outer",
                 async () => {
-                  await inner.nodes.SavepointNote.create(
+                  await child.nodes.SavepointNote.create(
                     { body: "rolled back" },
                     { id: "rolled-back" },
                   );
-                  await inner.nodes.SavepointNote.updateWhere({
+                  await child.nodes.SavepointNote.updateWhere({
                     all: true,
                     patch: { body: "rolled back update" },
                   });
                   await runRecordedTransactionSavepoint(
-                    ...savepointUnitEntry(tx),
+                    ...savepointUnitEntry(tx, outer),
                     statements,
                     "test_effects_inner",
                     async () => {
-                      await inner.nodes.SavepointNote.create(
+                      await child.nodes.SavepointNote.create(
                         { body: "released inside outer" },
                         { id: "nested" },
                       );
@@ -472,16 +485,21 @@ export function registerSavepointRecoveryIntegrationTests(
         const statements = statementExecutionVerdict(backend);
         if (!statements.supported)
           throw new Error("Fixture requires statement execution");
-        const run = (tx: MeasurableTransactionContext<typeof stampGraph>) =>
-          runRecordedTransactionSavepoint(
-            ...savepointUnitEntry(tx),
+        const run = (tx: MeasurableTransactionContext<typeof stampGraph>) => {
+          const [unit, unitBackend] = savepointUnitEntry(tx);
+          return runRecordedTransactionSavepoint(
+            unit,
+            unitBackend,
             statements,
             "test_uncaught_failure",
             async () => {
-              await tx.nodes.SavepointNote.create({ body: "rolled back" });
+              await savepointUnitChild(tx, unit).nodes.SavepointNote.create({
+                body: "rolled back",
+              });
               throw cause;
             },
           );
+        };
         const attempt =
           adopted ?
             backend.transactionWithNative(async (_target, native) =>

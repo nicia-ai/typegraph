@@ -29,6 +29,7 @@ import {
 } from "./collections/node-collection";
 import type {
   EntryScope,
+  Operation,
   OperationEntry,
   StatementBackend,
 } from "./operation-scope";
@@ -345,6 +346,7 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
   writes: EntryScope,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   operations: NodeOperations,
+  parent?: Operation,
 ): GraphNodeCollections<G> {
   const collectionCache = new Map<string, unknown>();
 
@@ -367,6 +369,7 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
         kind,
         backend,
         writes,
+        ...(parent === undefined ? {} : { parent }),
         batchPointRead,
         ...operations,
       });
@@ -391,6 +394,7 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>,
   operations: EdgeOperations,
+  parent?: Operation,
 ): GraphEdgeCollections<G> {
   const collectionCache = new Map<string, unknown>();
 
@@ -413,6 +417,7 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
         kind,
         backend,
         writes,
+        ...(parent === undefined ? {} : { parent }),
         batchPointRead,
         endpointSetRead,
         ...operations,

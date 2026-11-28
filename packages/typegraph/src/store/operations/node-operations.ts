@@ -215,6 +215,7 @@ import {
   type OperationEntry,
   operationEntryBackend,
   type OperationScoped,
+  runOperationUnit,
   type StatementBackend,
 } from "../operation-scope";
 import { collectRecordedIdentityTransitionNotes } from "../recorded-capture";
@@ -7976,6 +7977,20 @@ type PlannedNodeHardDelete =
  * an all-absent batch opens no transaction.
  */
 export async function executeNodeHardDeleteBatch<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  ids: readonly string[],
+  entry: OperationEntry,
+): Promise<void> {
+  // The batch takes a savepoint unit inside a caller's transaction, so it
+  // holds that unit from before its first statement (its gate read).
+  await runOperationUnit(entry, () =>
+    hardDeleteNodeBatch(ctx, kind, ids, entry),
+  );
+}
+
+/** {@link executeNodeHardDeleteBatch} once its unit is held. */
+async function hardDeleteNodeBatch<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   kind: string,
   ids: readonly string[],

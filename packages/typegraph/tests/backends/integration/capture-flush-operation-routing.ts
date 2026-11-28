@@ -91,8 +91,9 @@ function routeOperations(): Routing {
   const enterOperation = operationScope.enterOperation;
   function recordingEnter(
     scope: operationScope.EntryScope,
+    parent?: operationScope.Operation,
   ): operationScope.OperationEntry {
-    const entry = enterOperation(scope);
+    const entry = enterOperation(scope, parent);
     const session = operationScope.operationEntrySession(entry);
     if (session === undefined) return entry;
     entered.push(session);

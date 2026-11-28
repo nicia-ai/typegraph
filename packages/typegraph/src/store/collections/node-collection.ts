@@ -38,8 +38,11 @@ import { nowIso } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import { getNodeRowsByIds } from "../node-fetch";
 import {
+  enterCall,
   enterOperation,
   type EntryScope,
+  exitCall,
+  type Operation,
   type OperationEntry,
   operationEntryBackend,
   type StatementBackend,
@@ -254,6 +257,13 @@ export type NodeCollectionConfig = Readonly<{
    * operation from it.
    */
   writes: EntryScope;
+  /**
+   * The operation of the call that composes this collection's writes, when
+   * the collection is a child surface of that call (merge apply's): each
+   * write enters as its child. Absent for a transaction's own collections,
+   * whose writes are root calls.
+   */
+  parent?: Operation;
   /** Threaded `batchPointRead` verdict — never re-resolved here. */
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   defaultTemporalMode: TemporalMode;
@@ -475,6 +485,7 @@ export function createNodeCollection<
     kind,
     backend,
     writes,
+    parent,
     batchPointRead,
     defaultTemporalMode,
     rowToNode,
@@ -515,11 +526,16 @@ export function createNodeCollection<
       data: Record<string, unknown>,
       options?: NodeCreateOptions,
     ): Promise<Node<N>> {
-      const result = await executeNodeCreate(
-        buildCreateInput(kind, data, options),
-        enterOperation(writes),
-      );
-      return narrowNode<N>(result);
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const result = await executeNodeCreate(
+          buildCreateInput(kind, data, options),
+          call,
+        );
+        return narrowNode<N>(result);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async getById(
@@ -560,11 +576,16 @@ export function createNodeCollection<
       props: Partial<z.input<N["schema"]>>,
       options?: ValidityEndMutation,
     ): Promise<Node<N>> {
-      const result = await executeNodeUpdate(
-        buildUpdateInput(kind, id, props, options),
-        enterOperation(writes),
-      );
-      return narrowNode<N>(result);
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const result = await executeNodeUpdate(
+          buildUpdateInput(kind, id, props, options),
+          call,
+        );
+        return narrowNode<N>(result);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async compareAndSet(id, params): Promise<boolean> {
@@ -584,15 +605,20 @@ export function createNodeCollection<
         .whereNode(rootAlias, (accessor) => accessor.id.eq(id))
         .select((ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id)
         .compile();
-      const result = await executeNodeSetUpdate(
-        kind,
-        params.patch,
-        candidateIds,
-        candidateIdColumn,
-        enterOperation(writes),
-        { operation: "compareAndSet", expected: params.expected },
-      );
-      return result.affectedCount === 1;
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const result = await executeNodeSetUpdate(
+          kind,
+          params.patch,
+          candidateIds,
+          candidateIdColumn,
+          call,
+          { operation: "compareAndSet", expected: params.expected },
+        );
+        return result.affectedCount === 1;
+      } finally {
+        exitCall(call);
+      }
     },
 
     async updateWhere(params): Promise<Readonly<{ affectedCount: number }>> {
@@ -751,16 +777,21 @@ export function createNodeCollection<
       }
       const compiledCandidates = asCompiledSelectSql(combinedCandidates);
 
-      const result = await executeNodeSetUpdate(
-        kind,
-        params.patch,
-        compiledCandidates,
-        candidateIdColumn,
-        enterOperation(writes),
-        { operation: "updateWhere" },
-      );
-      await config.maybeRefreshStatisticsAfterBulk?.(result.affectedCount);
-      return result;
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const result = await executeNodeSetUpdate(
+          kind,
+          params.patch,
+          compiledCandidates,
+          candidateIdColumn,
+          call,
+          { operation: "updateWhere" },
+        );
+        await config.maybeRefreshStatisticsAfterBulk?.(result.affectedCount);
+        return result;
+      } finally {
+        exitCall(call);
+      }
     },
 
     async reparent<
@@ -770,12 +801,17 @@ export function createNodeCollection<
       id: NodeId<N>,
       options: NodeReparentOptions<Via>,
     ): Promise<NodeReparentResult<Via>> {
-      return executeNodeReparent(
-        kind,
-        id,
-        options,
-        enterOperation(writes),
-      ) as Promise<NodeReparentResult<Via>>;
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        return (await executeNodeReparent(
+          kind,
+          id,
+          options,
+          call,
+        )) as NodeReparentResult<Via>;
+      } finally {
+        exitCall(call);
+      }
     },
 
     async bulkReparent<
@@ -787,16 +823,26 @@ export function createNodeCollection<
         options: NodeReparentOptions<Via>;
       }>[],
     ): Promise<readonly NodeReparentResult<Via>[]> {
-      return executeNodeReparentBatch(
-        kind,
-        items,
-        enterOperation(writes),
-      ) as Promise<readonly NodeReparentResult<Via>[]>;
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        return (await executeNodeReparentBatch(
+          kind,
+          items,
+          call,
+        )) as readonly NodeReparentResult<Via>[];
+      } finally {
+        exitCall(call);
+      }
     },
 
     async delete(id: NodeId<N>, options?: NodeDeleteOptions): Promise<void> {
       const expect = readNodeDeleteOptions(options, { kind, id });
-      await executeNodeDelete(kind, id, enterOperation(writes), expect);
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        await executeNodeDelete(kind, id, call, expect);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async hardDelete(
@@ -804,11 +850,21 @@ export function createNodeCollection<
       ...extraArguments: readonly unknown[]
     ): Promise<void> {
       refuseNodeDeleteArguments(extraArguments, { kind, id }, "hardDelete");
-      await executeNodeHardDelete(kind, id, enterOperation(writes));
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        await executeNodeHardDelete(kind, id, call);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async planDelete(id: NodeId<N>): Promise<NodeDeletePlan | undefined> {
-      return executeNodeDeletePlan(kind, id, enterOperation(writes));
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        return await executeNodeDeletePlan(kind, id, call);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async find(
@@ -956,42 +1012,46 @@ export function createNodeCollection<
         | Readonly<{ verdict: "skip"; row: NodeRow }>
         | Readonly<{ verdict: "write"; row: NodeRow | undefined }>;
 
-      const entry = enterOperation(writes);
-      const decision: UpsertVerdict =
-        existing !== undefined && coalesces(existing) ?
-          await runInWriteEntryTransaction(
-            entry,
-            async (frame): Promise<UpsertVerdict> => {
-              const confirmed = await operationEntryBackend(frame).getNode(
-                graphId,
-                kind,
-                id,
-              );
-              return confirmed !== undefined && coalesces(confirmed) ?
-                  { verdict: "skip", row: confirmed }
-                : { verdict: "write", row: confirmed };
-            },
-          )
-        : { verdict: "write", row: existing };
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const decision: UpsertVerdict =
+          existing !== undefined && coalesces(existing) ?
+            await runInWriteEntryTransaction(
+              call,
+              async (frame): Promise<UpsertVerdict> => {
+                const confirmed = await operationEntryBackend(frame).getNode(
+                  graphId,
+                  kind,
+                  id,
+                );
+                return confirmed !== undefined && coalesces(confirmed) ?
+                    { verdict: "skip", row: confirmed }
+                  : { verdict: "write", row: confirmed };
+              },
+            )
+          : { verdict: "write", row: existing };
 
-      if (decision.verdict === "skip") {
-        return narrowNode<N>(rowToNode(decision.row));
-      }
+        if (decision.verdict === "skip") {
+          return narrowNode<N>(rowToNode(decision.row));
+        }
 
-      if (decision.row !== undefined) {
-        const result = await executeNodeUpdate(
-          buildUpsertUpdateInput(kind, id, data, options),
-          entry,
-          { clearDeleted: decision.row.deleted_at !== undefined },
+        if (decision.row !== undefined) {
+          const result = await executeNodeUpdate(
+            buildUpsertUpdateInput(kind, id, data, options),
+            call,
+            { clearDeleted: decision.row.deleted_at !== undefined },
+          );
+          return narrowNode<N>(result);
+        }
+
+        const result = await executeNodeCreate(
+          buildCreateInput(kind, data, { ...options, id }),
+          call,
         );
         return narrowNode<N>(result);
+      } finally {
+        exitCall(call);
       }
-
-      const result = await executeNodeCreate(
-        buildCreateInput(kind, data, { ...options, id }),
-        entry,
-      );
-      return narrowNode<N>(result);
     },
 
     async bulkCreate(
@@ -999,12 +1059,14 @@ export function createNodeCollection<
         NodeCreateOptions)[],
     ): Promise<Node<N>[]> {
       const batchInputs = mapBulkNodeInputs(kind, items);
-      const results = await executeNodeCreateBatch(
-        batchInputs,
-        enterOperation(writes),
-      );
-      await config.maybeRefreshStatisticsAfterBulk?.(results.length);
-      return narrowNodes<N>(results);
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const results = await executeNodeCreateBatch(batchInputs, call);
+        await config.maybeRefreshStatisticsAfterBulk?.(results.length);
+        return narrowNodes<N>(results);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async bulkReplaceById(
@@ -1034,62 +1096,68 @@ export function createNodeCollection<
         id: item.id,
         props: prepareReplacement(kind, item.props),
       }));
-      const entry = enterOperation(writes);
-      const attempt = await executeNodeReplacementBatch(kind, prepared, entry);
-      if (attempt.outcome === "applied") {
-        await config.maybeRefreshStatisticsAfterBulk?.(attempt.value.length);
-        return narrowNodes<N>(attempt.value);
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const attempt = await executeNodeReplacementBatch(kind, prepared, call);
+        if (attempt.outcome === "applied") {
+          await config.maybeRefreshStatisticsAfterBulk?.(attempt.value.length);
+          return narrowNodes<N>(attempt.value);
+        }
+        const results = await runResolvedMutationSetConverging(
+          "node",
+          backend,
+          () =>
+            runOwnedMutationSetTransaction(call, async (frame) => {
+              const rows = await getNodeRowsByIds(
+                operationEntryBackend(frame),
+                batchPointRead,
+                graphId,
+                kind,
+                prepared.map((item) => item.id),
+              );
+              const results = new Map<string, Node<N>>();
+              const creates = prepared.filter((item) => !rows.has(item.id));
+              const updateEntries = prepared
+                .filter((item) => rows.has(item.id))
+                .map((item) => {
+                  const existing = requireDefined(rows.get(item.id));
+                  return {
+                    input: buildUpsertUpdateInput(kind, item.id, item.props),
+                    clearDeleted: existing.deleted_at !== undefined,
+                    existing,
+                    replacementProps: item.props,
+                  };
+                });
+              if (creates.length > 0) {
+                const created = await executeNodeCreateBatch(
+                  creates.map((item) =>
+                    buildCreateInput(kind, item.props, { id: item.id }),
+                  ),
+                  frame,
+                  { propsPreValidated: true, pairedUpdates: updateEntries },
+                );
+                for (const row of created)
+                  results.set(row.id, narrowNode<N>(row));
+              }
+              if (updateEntries.length > 0) {
+                const updated = await executeNodeUpsertUpdateBatch(
+                  updateEntries,
+                  frame,
+                );
+                for (const row of updated)
+                  results.set(row.id, narrowNode<N>(row));
+              }
+              return prepared.map((item) =>
+                requireDefined(results.get(item.id)),
+              );
+            }),
+          { isMovement: isNodeReplacementPartitionMovement },
+        );
+        await config.maybeRefreshStatisticsAfterBulk?.(results.length);
+        return results;
+      } finally {
+        exitCall(call);
       }
-      const results = await runResolvedMutationSetConverging(
-        "node",
-        backend,
-        () =>
-          runOwnedMutationSetTransaction(entry, async (frame) => {
-            const rows = await getNodeRowsByIds(
-              operationEntryBackend(frame),
-              batchPointRead,
-              graphId,
-              kind,
-              prepared.map((item) => item.id),
-            );
-            const results = new Map<string, Node<N>>();
-            const creates = prepared.filter((item) => !rows.has(item.id));
-            const updateEntries = prepared
-              .filter((item) => rows.has(item.id))
-              .map((item) => {
-                const existing = requireDefined(rows.get(item.id));
-                return {
-                  input: buildUpsertUpdateInput(kind, item.id, item.props),
-                  clearDeleted: existing.deleted_at !== undefined,
-                  existing,
-                  replacementProps: item.props,
-                };
-              });
-            if (creates.length > 0) {
-              const created = await executeNodeCreateBatch(
-                creates.map((item) =>
-                  buildCreateInput(kind, item.props, { id: item.id }),
-                ),
-                frame,
-                { propsPreValidated: true, pairedUpdates: updateEntries },
-              );
-              for (const row of created)
-                results.set(row.id, narrowNode<N>(row));
-            }
-            if (updateEntries.length > 0) {
-              const updated = await executeNodeUpsertUpdateBatch(
-                updateEntries,
-                frame,
-              );
-              for (const row of updated)
-                results.set(row.id, narrowNode<N>(row));
-            }
-            return prepared.map((item) => requireDefined(results.get(item.id)));
-          }),
-        { isMovement: isNodeReplacementPartitionMovement },
-      );
-      await config.maybeRefreshStatisticsAfterBulk?.(results.length);
-      return results;
     },
 
     async bulkUpsertById(
@@ -1373,20 +1441,23 @@ export function createNodeCollection<
         return { results, mutations: toCreate.length + toUpdate.length };
       };
 
-      const { results, mutations } = await runResolvedMutationSetConverging(
-        "node",
-        backend,
-        () =>
-          runOwnedMutationSetTransaction(enterOperation(writes), (frame) =>
-            upsertAll(frame),
-          ),
-      );
-      // Match bulkCreate/bulkInsert: refresh planner statistics after a large
-      // autocommit bulk write. Coalesced items wrote nothing, so only real
-      // mutations count toward the threshold. A no-op inside a caller
-      // transaction (the hook is intentionally undefined there).
-      await config.maybeRefreshStatisticsAfterBulk?.(mutations);
-      return results;
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const { results, mutations } = await runResolvedMutationSetConverging(
+          "node",
+          backend,
+          () =>
+            runOwnedMutationSetTransaction(call, (frame) => upsertAll(frame)),
+        );
+        // Match bulkCreate/bulkInsert: refresh planner statistics after a large
+        // autocommit bulk write. Coalesced items wrote nothing, so only real
+        // mutations count toward the threshold. A no-op inside a caller
+        // transaction (the hook is intentionally undefined there).
+        await config.maybeRefreshStatisticsAfterBulk?.(mutations);
+        return results;
+      } finally {
+        exitCall(call);
+      }
     },
 
     async bulkInsert(
@@ -1399,8 +1470,13 @@ export function createNodeCollection<
     ): Promise<void> {
       const batchInputs = mapBulkNodeInputs(kind, items);
 
-      await executeNodeCreateNoReturnBatch(batchInputs, enterOperation(writes));
-      await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        await executeNodeCreateNoReturnBatch(batchInputs, call);
+        await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async bulkDelete(
@@ -1409,7 +1485,12 @@ export function createNodeCollection<
     ): Promise<void> {
       refuseNodeDeleteArguments(extraArguments, { kind }, "bulkDelete");
       if (ids.length === 0) return;
-      await executeNodeDeleteBatch(kind, ids, enterOperation(writes));
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        await executeNodeDeleteBatch(kind, ids, call);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async bulkHardDelete(
@@ -1418,7 +1499,12 @@ export function createNodeCollection<
     ): Promise<void> {
       refuseNodeDeleteArguments(extraArguments, { kind }, "bulkHardDelete");
       if (ids.length === 0) return;
-      await executeNodeHardDeleteBatch(kind, ids, enterOperation(writes));
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        await executeNodeHardDeleteBatch(kind, ids, call);
+      } finally {
+        exitCall(call);
+      }
     },
 
     async findByConstraint(
@@ -1490,14 +1576,19 @@ export function createNodeCollection<
       // hooked transaction — nesting them here would fire their hooks before
       // this wrapper's COMMIT. Race convergence lives in
       // executeGetOrCreateByConstraint (re-probe on a create collision).
-      const result = await executeGetOrCreateByConstraint(
-        kind,
-        constraintName,
-        props,
-        enterOperation(writes),
-        options,
-      );
-      return result as NodeGetOrCreateByConstraintResult<N>;
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const result = await executeGetOrCreateByConstraint(
+          kind,
+          constraintName,
+          props,
+          call,
+          options,
+        );
+        return result as NodeGetOrCreateByConstraintResult<N>;
+      } finally {
+        exitCall(call);
+      }
     },
 
     async bulkGetOrCreateByConstraint(
@@ -1516,14 +1607,19 @@ export function createNodeCollection<
 
       // The operation owns its transaction boundary, which its convergence
       // retry reads: see `executeNodeBulkGetOrCreateByConstraint`.
-      const results = await executeBulkGetOrCreateByConstraint(
-        kind,
-        constraintName,
-        mappedItems,
-        enterOperation(writes),
-        options,
-      );
-      return results as NodeGetOrCreateByConstraintResult<N>[];
+      const call = enterCall(enterOperation(writes, parent));
+      try {
+        const results = await executeBulkGetOrCreateByConstraint(
+          kind,
+          constraintName,
+          mappedItems,
+          call,
+          options,
+        );
+        return results as NodeGetOrCreateByConstraintResult<N>[];
+      } finally {
+        exitCall(call);
+      }
     },
   };
 }

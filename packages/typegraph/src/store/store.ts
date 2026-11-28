@@ -369,9 +369,11 @@ import {
 import { readNodeByReference } from "./node-reference-read";
 import {
   decorateOperation,
+  enterCall,
   enterOperation,
   enterTargetOperation,
   type EntryScope,
+  exitCall,
   openBoundTransactionSession,
   openRootTransaction,
   openTransactionSession,
@@ -506,6 +508,7 @@ import {
   runInTransactionContext,
   STORE_RUNTIME,
   type StoreRuntime,
+  transactionChildSurfaceCarrier,
 } from "./runtime-port";
 import {
   publishSavepointEffect,
@@ -5519,6 +5522,25 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     };
   }
 
+  /**
+   * `tx.writeNodeUpsertBatch` as a call of `session`: one operation, counted
+   * as running on the session until the envelope settles.
+   */
+  async #writeNodeUpsertBatchCall<
+    const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
+  >(
+    session: TransactionSession,
+    entries: Entries,
+    receiptRecorder: TransactionReceiptRecorder | undefined,
+  ): Promise<HeterogeneousNodeUpsertResult<G, Entries>> {
+    const call = enterCall(enterOperation(session));
+    try {
+      return await this.#writeNodeUpsertBatch(call, entries, receiptRecorder);
+    } finally {
+      exitCall(call);
+    }
+  }
+
   /** One CTE-backed upsert envelope for plain history-store node kinds. */
   async #writeNodeUpsertBatch<
     const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
@@ -5749,8 +5771,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // (`#attachMeasure`). One builder is why a scoped write reaches the same
     // operations — and therefore the same composition cascade reporting — as
     // an unscoped one.
+    //
+    // `parent`, when given, is the operation of a call that composes writes
+    // through this surface inside its own savepoint unit (an adopted merge
+    // apply): every write the surface offers enters as that call's child.
     const buildSurface = (
       receiptRecorders: readonly TransactionReceiptRecorder[],
+      parent?: Operation,
     ): TransactionWriteSurface<G> => {
       const nodeOperationContext = this.#createNodeOperationContext(
         runHooks,
@@ -5792,21 +5819,33 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         runtime: {
           ...transactionRuntimeSession(session),
           backend: txBackend,
-          deleteNodeWithPolicy: (work, policy) =>
-            executeNodeDelete(
-              nodeOperationContext,
-              work.kind,
-              work.id,
-              enterOperation(session),
-              { policy },
-            ),
-          reviveNode: (work) =>
-            executeNodeRevive(
-              nodeOperationContext,
-              work.kind,
-              work.id,
-              enterOperation(session),
-            ),
+          deleteNodeWithPolicy: async (work, policy) => {
+            const call = enterCall(enterOperation(session, parent));
+            try {
+              await executeNodeDelete(
+                nodeOperationContext,
+                work.kind,
+                work.id,
+                call,
+                { policy },
+              );
+            } finally {
+              exitCall(call);
+            }
+          },
+          reviveNode: async (work) => {
+            const call = enterCall(enterOperation(session, parent));
+            try {
+              await executeNodeRevive(
+                nodeOperationContext,
+                work.kind,
+                work.id,
+                call,
+              );
+            } finally {
+              exitCall(call);
+            }
+          },
           acquireWriteFences: async (refusal) => {
             if (readOnly) {
               refuseReadOnlyTransactionWrite(
@@ -5815,10 +5854,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 refusal.suggestion,
               );
             }
-            await acquireManagedWriteFences(
-              nodeOperationContext,
-              enterOperation(session),
-            );
+            const call = enterCall(enterOperation(session, parent));
+            try {
+              await acquireManagedWriteFences(nodeOperationContext, call);
+            } finally {
+              exitCall(call);
+            }
           },
           acquireReadFences: async () => {
             if (readOnly) {
@@ -5829,16 +5870,27 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               );
               return;
             }
-            await acquireManagedWriteFences(
-              nodeOperationContext,
-              enterOperation(session),
-            );
+            const call = enterCall(enterOperation(session, parent));
+            try {
+              await acquireManagedWriteFences(nodeOperationContext, call);
+            } finally {
+              exitCall(call);
+            }
           },
           assertWritable: (operation) => {
             for (const recorder of receiptRecorders) {
               recorder.assertWritable(operation);
             }
           },
+          ...transactionChildSurfaceCarrier((child) => {
+            const surface = buildSurface(receiptRecorders, child);
+            const wrapped = wrapSurfaceForRecorders(surface, receiptRecorders);
+            return {
+              nodes: wrapped.nodes,
+              edges: wrapped.edges,
+              deleteNodeWithPolicy: surface.runtime.deleteNodeWithPolicy,
+            };
+          }),
         },
         nodes: createNodeCollectionsProxy(
           this.#graph,
@@ -5848,6 +5900,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           session,
           this.#batchPointRead,
           nodeOperations,
+          parent,
         ),
         edges: createEdgeCollectionsProxy(
           this.#graph,
@@ -5858,6 +5911,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#batchPointRead,
           this.#endpointSetRead,
           edgeOperations,
+          parent,
         ),
         ...(this.#graph.identity === undefined ?
           {}
@@ -5890,12 +5944,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
       >(
         entries: Entries,
-      ) =>
-        this.#writeNodeUpsertBatch(
-          enterOperation(session),
-          entries,
-          receiptRecorder,
-        ),
+      ) => this.#writeNodeUpsertBatchCall(session, entries, receiptRecorder),
       ...this.#createTransactionReadSurface(txBackend, session, attempt),
       assertUnchangedSince: (
         anchor: EngineRevision,
@@ -5989,7 +6038,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // to scope; the plain `transaction()` path stays free of a `measure` the
     // caller has no receiver for.
     return measurable && receiptRecorder !== undefined ?
-        this.#attachMeasure(withSql, buildSurface, [receiptRecorder])
+        this.#attachMeasure(withSql, (recorders) => buildSurface(recorders), [
+          receiptRecorder,
+        ])
       : withSql;
   }
 
