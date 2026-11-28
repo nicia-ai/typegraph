@@ -804,7 +804,12 @@ async function generateAllCandidates<G extends GraphDef>(
           introspectionKinds,
           kind,
         );
-        const blocks = blockNodes(nodes, resolveConfig, uniqueConstraints);
+        const blocks = blockNodes(
+          nodes,
+          resolveConfig,
+          uniqueConstraints,
+          target.graph.nodes[kind]?.type.schema,
+        );
         const keylessConfig = keylessConfigFor(resolveConfig);
         const scope: SourceScope = {
           kind,

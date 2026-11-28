@@ -151,6 +151,7 @@ export const SIDECAR_WRITE_MEMBERS = [
   "insertUnique",
   "insertUniqueBatch",
   "deleteUnique",
+  "releaseUniquesByOwner",
   "hardDeleteUniquesByNodeIds",
   "hardDeleteUniquesByConcreteKind",
   "claimEdgeCardinality",

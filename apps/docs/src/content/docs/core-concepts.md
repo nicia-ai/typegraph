@@ -857,6 +857,44 @@ TypeScript requires both `scope` and `collation`. An untyped caller that omits
 - `"binary"`: Case-sensitive comparison
 - `"caseInsensitive"`: Case-insensitive comparison
 
+### How a unique value is claimed and released
+
+A node reserves each unique value it holds as a claim row keyed by the value
+the row stores, by one function, on every path that claims or looks up a
+value: create, update, upsert, import, `updateWhere()`, graph merge,
+resurrection, `findByConstraint()` and `getOrCreateByConstraint()`. That
+function reads each unique field through the kind's schema and keys one
+canonical rendering of its value, so a write's validated props and the same
+row read back from storage key identically:
+
+- **A date** keys the same as a `Date` and as its stored ISO text: at a
+  top-level field as the JSON-quoted ISO text, nested inside an object or array
+  as the ISO text in that value's JSON. This holds through `.optional()`,
+  `.nullable()`, `.default()` and similar wrappers, `z.lazy()`, a pipe whose
+  output is a date (`z.string().pipe(z.coerce.date())`), and a union whose
+  other branches are `null` or `undefined`.
+- **An object** at a `z.object()` position keys with its declared keys in the
+  schema's order, then its undeclared keys, whatever order it was given in
+  (including a `.default()` literal and a PostgreSQL `jsonb` column's
+  order).
+
+Nothing is parsed through the schema again, so a transform never runs twice.
+A union branch that structurally cannot hold the value (a primitive of another
+type, or an object whose required `z.literal()` or `z.enum()` discriminator
+does not match) has no say in how the union reads it. A value under a
+`.transform()`, a `z.record()`, or a union whose remaining branches read it
+differently keys as given.
+
+A claim is released by the node that holds it. An update gives back every
+claim the node holds under the constraint other than the key it now claims,
+and a delete gives back all of them, without recomputing the key an earlier
+write took. A claim keyed in an older form is released the same way. An update
+compares each constraint's key under the row as stored with its key under the
+props it writes, and leaves a constraint whose key, and whether it applies,
+are the same alone, issuing no statement for it. The cases this does not
+repair are described in
+[Limitations](/limitations#uniqueness-claims-keyed-in-another-form).
+
 ## Type Inference
 
 TypeGraph infers TypeScript types from Zod schemas—you never duplicate type definitions.

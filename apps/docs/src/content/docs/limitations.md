@@ -817,6 +817,63 @@ For these use cases, export your data via `.query().traverse()` or
 [graphology](https://graphology.github.io/) in memory, or move to a
 dedicated graph database.
 
+## Uniqueness Claims Keyed in Another Form
+
+A unique value's claim is keyed from the value the row stores and released by
+its owner (see [Uniqueness Constraints](/core-concepts#how-a-unique-value-is-claimed-and-released)).
+Some claims can still hold the same value under a different key, so neither
+collides with the other:
+
+- **Claims written before keys came from validated props.** An import under
+  `onUnknownProperty: "allow"` or a provenance revival on an earlier release
+  could key a date claim from its unquoted ISO text, where a create keys the
+  JSON-quoted text of the `Date`. A create of the same date is admitted beside
+  such a claim. An update that leaves the key where it was leaves the claim as
+  it is, even when it restates the field. To re-key it, move the holder's
+  value off and back with two updates: the update back claims the value as a
+  create does, and refuses with `UniquenessError` when a duplicate was already
+  admitted; resolve the duplicate (for example by hard-deleting one of the two
+  nodes) and update the holder again. Until then,
+  `getOrCreateByConstraint()` does not resurrect a soft-deleted holder whose
+  released claim has the other form, and creates a new node instead.
+- **Object claims written in another key order before this release.** A
+  `.default()` or `.catch()` object whose literal states its keys in another
+  order than its schema was claimed in the literal's order and is now claimed
+  in the schema's. A create of the same value is admitted beside such a
+  claim until the holder's next write that moves the value or releases its
+  claims (an update to another value, a soft delete, a retraction). Where the
+  object can hold another value, move the holder's value off and back with two
+  updates to re-key it at once. Where the object holds only fixed literals, so
+  the default is the only value the field can take, no update moves the key:
+  restating the field leaves the old claim alone. Re-key it by soft-deleting
+  the holder and reviving it with `upsertById` under the same id in one
+  transaction; the revival claims the value as a create does, and refuses with
+  `UniquenessError`, rolling the delete back, while a duplicate admitted since
+  the upgrade holds it. The revival resets the row's validity window like any
+  resurrection. A holder with live edges cannot be repaired this way with its
+  edges as they are (`onDelete: "restrict"` refuses the delete, `"cascade"`
+  deletes the edges and `"disconnect"` soft-deletes them, and the revival
+  does not restore them); for a holder whose edges must stay, the one stale
+  claim stays until the row is deleted.
+- **Dates under a union whose branches disagree.** A date under
+  `z.union([z.date(), z.string()])` is read from a stored row as its ISO text,
+  while a create keys the `Date`. Such a value imported under
+  `onUnknownProperty: "allow"`, or revived by a provenance reopen, holds a
+  text-keyed claim a create of the same date does not collide with. Releases
+  are unaffected.
+- **Values imported verbatim.** An import under `onUnknownProperty: "allow"`
+  keys a node's claims and an edge's match identity from the document's text,
+  a node's in the canonical rendering a create keys. A value whose schema parse otherwise differs from that text, such as
+  an identity field the schema lower-cases, does not collide with a create of
+  the same value.
+- **Values whose validated key order follows their input.** A `z.record()`
+  value, or the extra keys of a `z.looseObject()`, keys in the order its keys
+  were stated, so two writers stating them in different orders hold two
+  claims. On PostgreSQL an export and import is such a pair, because `jsonb`
+  returns an object's keys in its own order. Declare unique constraints over
+  `z.object()` values, whose validated keys follow the schema, or over
+  scalars.
+
 ## Provenance Writes Are Not Checked Against Premise State
 
 Ordinary node and edge writes know nothing about the roles a
