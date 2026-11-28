@@ -2358,7 +2358,7 @@ class ExecutableProjectionQuery<Fields extends DatabaseProjection, Context, Resu
     }>;
 }
 
-// @public
+// @public (undocumented)
 class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = {}, RecursiveAliases extends RecursiveAliasMap = {}, R = unknown> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, selectFunction: (context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>) => R);
     // @internal
@@ -5456,7 +5456,7 @@ type Predicate = Readonly<{
 }>;
 
 // @public
-type PredicateExpression = ComparisonPredicate | TupleComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | DatabaseExpressionPredicate;
+type PredicateExpression = ComparisonPredicate | TupleComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | RelevanceComparisonPredicate | DatabaseExpressionPredicate;
 
 // @public (undocumented)
 type PreparedBindings<Parameters extends PreparedParameterDeclaration> = {
@@ -5503,6 +5503,7 @@ type ProjectedField = Readonly<{
     outputName: string;
     source: AggregateExpr | DatabaseExpression | FieldRef;
     cteAlias?: string;
+    batchExactNumber?: true;
 }>;
 
 // @public (undocumented)
@@ -5602,6 +5603,7 @@ type QueryAst = Readonly<{
     temporalMode: TemporalOptions;
     recordedAsOf?: string;
     orderBy?: readonly OrderSpec[];
+    reverseSelectionOrder?: true;
     limit?: number;
     offset?: number;
     groupBy?: GroupBySpec;
@@ -5740,6 +5742,7 @@ type QueryBuilderState = Readonly<{
     resultPredicate?: PredicateExpression;
     projection: readonly ProjectedField[];
     orderBy: readonly OrderSpec[];
+    reverseSelectionOrder?: true;
     aggregateOrderBy: readonly AggregateOrderSpec[];
     limit: number | undefined;
     offset: number | undefined;
@@ -6219,6 +6222,21 @@ type ReleaseIndexMaterializationClaimParams = Readonly<{
     token: string;
 }>;
 
+// @public
+type RelevanceComparisonPredicate = Readonly<{
+    __type: "relevance_comparison";
+    source: RelevanceSortSource;
+    op: "eq" | "gt" | "lt";
+    value: string | number;
+}> | Readonly<{
+    __type: "relevance_comparison";
+    source: RelevanceSortSource;
+    op: "isNull" | "isNotNull";
+}>;
+
+// @public
+type RelevanceSortSource = "fulltext_rank" | "vector_distance" | "hybrid_score" | "hybrid_node_id";
+
 // @public (undocumented)
 type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable" | "getPendingKindRemovals" | "getAllKindRemovals" | "recordKindRemoval" | "ensureReconciliationMarkersTable" | "getReconciliationMarker" | "setReconciliationMarker">;
 
@@ -6247,6 +6265,14 @@ export type RepairRelation = "nodes" | "edges" | "recordedNodes" | "recordedEdge
 
 // @public
 export type RepairRelationScope = "live" | "live-and-recorded";
+
+// @public
+type RepeatableApproximateSearch = Readonly<{
+    repeatable: true;
+}> | Readonly<{
+    repeatable: false;
+    reason: string;
+}>;
 
 // @public (undocumented)
 interface RequiredEdgeCollectionLookup<G extends GraphDef = GraphDef> {
@@ -8318,6 +8344,7 @@ type VectorCapabilities = Readonly<{
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
     searchFrontierTuning: VectorSearchFrontierTuning;
+    repeatableApproximateSearch?: RepeatableApproximateSearch;
 }>;
 
 // @public

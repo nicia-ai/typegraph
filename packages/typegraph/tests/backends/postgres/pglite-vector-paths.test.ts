@@ -42,6 +42,8 @@ import {
   asForeignTransaction,
   ForeignPgTransaction,
 } from "../../helpers/foreign-drizzle-handles";
+import { expectFilteredHnswPlansUseIndex } from "./hnsw-filtered-plan";
+import { expectIvfflatPlansResort } from "./ivfflat-resort-plan";
 import {
   setupSharedPgliteEngine,
   type SharedPgliteEngine,
@@ -267,6 +269,93 @@ describe("pgvectorStrategy under PGlite (executed against bundled pgvector)", ()
       pgvectorStrategy.buildSearch(s, searchParams([1, 0, 0], { limit: 1 })),
     );
     expect(rows.map((row) => row["node_id"])).toEqual(["d1"]);
+  });
+
+  it("keeps the HNSW index scan and cuts tied neighbors by node id", async () => {
+    const s = slot("hnsw");
+    await createStorage(s);
+    await execAll([requireDefined(pgvectorStrategy.buildCreateIndex?.(s))]);
+    // 30 neighbors tied at distance 0, inserted out of id order, among 120
+    // others.
+    for (let index = 29; index >= 0; index -= 1) {
+      await upsert(s, `t${String(index).padStart(2, "0")}`, [1, 0, 0]);
+    }
+    for (let index = 0; index < 120; index += 1) {
+      const angle = 0.2 + index / 100;
+      await upsert(s, `o${index}`, [Math.cos(angle), Math.sin(angle), 0.1]);
+    }
+    const search = pgvectorStrategy.buildSearch(
+      s,
+      searchParams([1, 0, 0], { limit: 5, indexType: "hnsw" }),
+      sql`SELECT node_id FROM ${sql.identifier(pgvectorStrategy.tableName(GRAPH, "Document", "embedding"))}`,
+    );
+    const table = pgvectorStrategy.tableName(GRAPH, "Document", "embedding");
+    // Statistics, as a loaded table has them: without them the planner reads
+    // the primary key instead of the vector index.
+    await engine.client.exec(`ANALYZE "${table}"`);
+    await engine.client.exec("SET enable_seqscan = off");
+    try {
+      const compiled = renderPostgres(search);
+      const plan = await engine.client.query<Record<string, string>>(
+        `EXPLAIN ${compiled.sql}`,
+        [...compiled.params],
+      );
+      const planText = plan.rows
+        .map((row) => row["QUERY PLAN"] ?? "")
+        .join("\n");
+      // The candidates are read from the ordered index scan, and the tie is
+      // broken over every tied row it returns.
+      expect(planText).toMatch(/Index Scan using \S+ on/);
+      const runs = new Set<string>();
+      for (let run_ = 0; run_ < 10; run_ += 1) {
+        const rows = await run(search);
+        runs.add(rows.map((row) => String(row["node_id"])).join(","));
+      }
+      expect([...runs]).toEqual(["t00,t01,t02,t03,t04"]);
+    } finally {
+      await engine.client.exec("RESET enable_seqscan");
+    }
+  });
+
+  it("reads a filtered HNSW search's candidates from the HNSW index, whatever a tiebreak would cost", async () => {
+    const s = slot("hnsw");
+    await createStorage(s);
+    await expectFilteredHnswPlansUseIndex(
+      {
+        query: (text, params) =>
+          engine.client.query(
+            text,
+            params === undefined ? undefined : [...params],
+          ),
+      },
+      s,
+      (overrides) => searchParams([1, 0, 0], overrides),
+    );
+  }, 120_000);
+
+  it("re-sorts an IVFFlat relaxed-order scan above the materialized scan, for every candidate form", async () => {
+    const s = slot("ivfflat");
+    await createStorage(s);
+    for (let index = 0; index < 300; index += 1) {
+      const angle = index / 100;
+      await upsert(s, `o${String(index).padStart(3, "0")}`, [
+        Math.cos(angle),
+        Math.sin(angle),
+        0.1 * (index % 7),
+      ]);
+    }
+    await execAll([requireDefined(pgvectorStrategy.buildCreateIndex?.(s))]);
+    await expectIvfflatPlansResort(
+      {
+        query: (text, params) =>
+          engine.client.query(
+            text,
+            params === undefined ? undefined : [...params],
+          ),
+      },
+      s,
+      (overrides) => searchParams([1, 0, 0], overrides),
+    );
   });
 
   it("builds an IVFFlat index that executes", async () => {

@@ -1374,6 +1374,8 @@ export type QueryBuilderState = Readonly<{
   resultPredicate?: PredicateExpression;
   projection: readonly ProjectedField[];
   orderBy: readonly OrderSpec[];
+  /** `QueryAst.reverseSelectionOrder`: set only by a backward cursor page of a search. */
+  reverseSelectionOrder?: true;
   /** ORDER BY entries added via `ExecutableAggregateQuery.orderBy()`. */
   aggregateOrderBy: readonly AggregateOrderSpec[];
   limit: number | undefined;

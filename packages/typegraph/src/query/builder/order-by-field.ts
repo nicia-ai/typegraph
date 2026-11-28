@@ -233,6 +233,18 @@ function metadataFieldOfReference(
 }
 
 /**
+ * Whether a field reference compares a timestamp: a timestamp metadata
+ * column (`$meta.createdAt`) or a date-typed property. Its operands are held
+ * to the canonical-date contract ({@link assertComparedOperand}).
+ */
+export function isTimestampFieldReference(reference: FieldRef): boolean {
+  return (
+    reference.valueType === "date" ||
+    metadataFieldOfReference(reference)?.timestamp === true
+  );
+}
+
+/**
  * Refuses one operand a metadata predicate compares against a metadata
  * column unless every backend compares it the same way. It is the single
  * check for a literal (the `$meta` accessor calls it before building the

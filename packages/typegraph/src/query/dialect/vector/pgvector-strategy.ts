@@ -31,11 +31,14 @@ import {
   type VectorSearchParams,
 } from "../../../backend/types";
 import { shortHash } from "../../../utils/hash";
+import { compileRelevanceCandidateOrder } from "../../order";
 import { sql, type SqlFragment } from "../../sql-fragment";
+import { postgresDialect } from "../postgres";
 import {
   assertFiniteEmbedding,
   quoteIdentifier,
   VECTOR_CONTRIBUTION_PREFIX,
+  vectorDefinedDistanceConditions,
   vectorMinScoreCondition,
   vectorPhysicalName,
   vectorScoreExpression,
@@ -118,7 +121,16 @@ const PGVECTOR_CAPABILITIES: VectorCapabilities = {
     indexType: "hnsw",
     requiresTransactionScope: true,
   },
+  // An HNSW or IVFFlat scan is a deterministic walk of the index, and every
+  // search form breaks distance ties by node id over the rows it returns.
+  repeatableApproximateSearch: { repeatable: true },
 };
+
+/**
+ * The materialized wrapper an index-driven search reads its candidates into
+ * before it breaks distance ties and pages them.
+ */
+export const INDEX_CANDIDATES_CTE = "tg_vec_index_candidates";
 
 /** Whether a slot's declared index type materializes a real pgvector ANN index. */
 function usesAnnIndex(slot: VectorSlot): boolean {
@@ -483,40 +495,76 @@ function createPgvectorStrategyWithPrefixes(
       // ordered candidates and OFFSET discards the leading page.
       const pageOffset = params.offset ?? 0;
       const pageClause = vectorPageClause(params.limit, params.offset);
-      // IVFFlat's iterative scan only offers `relaxed_order` (no
-      // strict_order mode), so under the backend-applied
-      // `ivfflat.iterative_scan` the index may emit the candidate set
-      // slightly out of distance order. Re-sort the bounded set inside a
-      // MATERIALIZED wrapper — the fence stops the planner from collapsing
-      // the sort back into the index scan's claimed ordering — and page in
-      // the wrapper: an OFFSET inside the relaxed scan could discard the
-      // wrong rows. Score is monotone in distance, so ordering by score per
-      // the metric's direction restores exact ranking.
-      if (slot.indexType === "ivfflat") {
-        const direction =
-          params.metric === "cosine" ? sql.raw("DESC") : sql.raw("ASC");
+      // An index-driven read (HNSW or IVFFlat) orders by the distance alone,
+      // the one expression the index's operator class serves. A second key
+      // in that ORDER BY is only satisfied by an incremental sort above the
+      // ordered index scan; where the planner costs that above a sequential
+      // scan and a full sort (a selective candidate filter, a small k), it
+      // drops the index and scores every row. The read keeps every row tied
+      // with the last one it needs (`FETCH FIRST … WITH TIES`), so the
+      // outer sort cuts a tie by node id over all the tied rows the index
+      // returns, as every other search form does.
+      //
+      // The outer sort and the page run in a MATERIALIZED wrapper. IVFFlat's
+      // iterative scan only offers `relaxed_order` (no strict_order mode), so
+      // under the backend-applied `ivfflat.iterative_scan` the index may emit
+      // the candidates slightly out of distance order: the wrapper re-sorts
+      // them, and pages there, since an OFFSET inside the relaxed scan could
+      // discard the wrong rows. The re-sort reads the distance itself, in the
+      // candidate order every cut uses (`compileRelevanceCandidateOrder`): a
+      // cosine score sorted descending would put a NaN distance first.
+      //
+      // The fence alone does not force the re-sort: PostgreSQL 17 and later
+      // carry a materialized CTE's sort order to the outer query, so an outer
+      // ORDER BY on the very keys the relaxed scan claims to be sorted by is
+      // planned without a Sort and the relaxed order leaks through (seen on
+      // PostgreSQL 18). The outer sort therefore reads `distance + 0`: the
+      // same order for every double, NaN, infinity and NULL, but an
+      // expression no CTE output column carries, so no pathkey can satisfy
+      // it and the plan keeps a full Sort above the CTE Scan.
+      //
+      // The read also leaves the undefined distances
+      // (`vectorDefinedDistanceConditions`) to the wrapper. PostgreSQL sorts
+      // a NaN distance after every defined one, so dropping it from the
+      // candidates drops exactly the rows the read would have skipped, and a
+      // range condition the read does not need keeps the planner's row
+      // estimate for the index scan, which decides whether the candidate
+      // filter is probed per row through the nodes' primary key or scanned
+      // whole.
+      if (usesAnnIndex(slot)) {
+        const definedDistance = vectorDefinedDistanceConditions(
+          sql`distance`,
+          params.metric,
+        );
         // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
-        const relaxedBody = sql`
-        SELECT ${table}."node_id" AS node_id, ${score} AS score
+        const indexBody = sql`
+        SELECT ${table}."node_id" AS node_id, ${score} AS score, ${distance} AS distance
         FROM ${table}
         WHERE ${sql.join(conditions, sql` AND `)}
         ORDER BY ${distance} ASC
-        LIMIT ${params.limit + pageOffset}
+        FETCH FIRST ${params.limit + pageOffset} ROWS WITH TIES
       `;
         // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
         return sql`
-        WITH tg_vec_relaxed AS MATERIALIZED (${relaxedBody})
-        SELECT node_id, score FROM tg_vec_relaxed
-        ORDER BY score ${direction}, node_id ASC
+        WITH ${sql.raw(INDEX_CANDIDATES_CTE)} AS MATERIALIZED (${indexBody})
+        SELECT node_id, score FROM ${sql.raw(INDEX_CANDIDATES_CTE)}
+        ${definedDistance.length === 0 ? sql`` : sql`WHERE ${sql.join(definedDistance, sql` AND `)}`}
+        ORDER BY ${compileRelevanceCandidateOrder(sql`(distance + 0)`, "asc", { nodeKind: undefined, nodeId: sql`node_id` }, postgresDialect)}
         ${pageClause}
       `;
       }
+      // Without an ANN index the read is an exact scan, which breaks a
+      // distance tie by node id in its own ORDER BY.
+      const exactConditions = [
+        ...conditions,
+        ...vectorDefinedDistanceConditions(distance, params.metric),
+      ];
       // eslint-disable-next-line unicorn/template-indent -- Keep the historical SQL snapshot stable.
       return sql`
       SELECT ${table}."node_id" AS node_id, ${score} AS score
       FROM ${table}
-      WHERE ${sql.join(conditions, sql` AND `)}
-      ORDER BY ${distance} ASC
+      WHERE ${sql.join(exactConditions, sql` AND `)}
+      ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${table}."node_id"` }, postgresDialect)}
       ${pageClause}
     `;
     },

@@ -314,6 +314,12 @@ the final result. The final order does not change which nodes entered the
 top-k candidate set, and the final limit counts match rows rather than distinct
 source nodes.
 
+Match rows come in relevance order, then the `.orderBy()` terms, then the
+row's identity, so rows tied on relevance have one order on every terminal.
+`paginate()`, `page()` and `stream()` read exactly the rows `execute()` returns
+in that order, with or without an `.orderBy()`; see
+[Paging a full-text, vector or hybrid query](/queries/execute#paging-a-full-text-vector-or-hybrid-query).
+
 A search predicate also composes with `groupBy()` and `aggregate()`. The top-k
 candidates are grouped like any other matches, and the groups are ordered by
 their best member under the backend's native scoring: the highest rank for

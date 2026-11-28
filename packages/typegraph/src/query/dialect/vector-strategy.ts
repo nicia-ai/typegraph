@@ -32,6 +32,7 @@
 import { type StrategyTableContribution } from "../../backend/table-contribution";
 import {
   type DeleteEmbeddingParams,
+  type RepeatableApproximateSearch,
   type UpsertEmbeddingBatchParams,
   type UpsertEmbeddingParams,
   type VectorCapabilities,
@@ -321,6 +322,55 @@ export function vectorScoreExpression(
       throw new Error(`Unsupported vector metric: ${String(_exhaustive)}`);
     }
   }
+}
+
+/**
+ * THE one reader of `capabilities.repeatableApproximateSearch`: the strategy's
+ * declaration, or `repeatable: false` naming the missing declaration when it
+ * states none.
+ */
+export function resolveRepeatableApproximateSearch(
+  capabilities: VectorCapabilities,
+): RepeatableApproximateSearch {
+  return (
+    capabilities.repeatableApproximateSearch ?? {
+      repeatable: false,
+      reason:
+        "the vector strategy does not declare capabilities.repeatableApproximateSearch",
+    }
+  );
+}
+
+/**
+ * A bound above every defined cosine distance (which lies in [0, 2], plus
+ * float rounding), below which an undefined one never falls.
+ */
+const COSINE_DISTANCE_BOUND = 3;
+
+/**
+ * The WHERE conditions that keep only candidates whose distance is defined:
+ * none for a metric whose distances always are.
+ *
+ * A zero-norm embedding, stored or queried, has no direction, so its cosine
+ * distance is undefined: NULL on the SQLite engines, NaN on pgvector. It is
+ * not similar to anything and never matches a cosine search, in every search
+ * form on every engine: without the condition SQLite sorted it as the
+ * nearest neighbor, PostgreSQL as the furthest, and sqlite-vec's KNN let it
+ * take a top-k slot from a real neighbor. `distance < 3` is false for both
+ * NULL and NaN and is the one constraint form a vec0 KNN accepts on its
+ * `distance` column. l2 and inner-product distances are always defined.
+ *
+ * The one owner of that rule: the compiler's exact scan and every
+ * strategy's `buildSearch` form apply it.
+ */
+export function vectorDefinedDistanceConditions(
+  distanceExpression: SqlFragment,
+  metric: VectorMetric,
+): readonly SqlFragment[] {
+  if (metric !== "cosine") return [];
+  return [
+    sql`${distanceExpression} < ${sql.raw(String(COSINE_DISTANCE_BOUND))}`,
+  ];
 }
 
 /**

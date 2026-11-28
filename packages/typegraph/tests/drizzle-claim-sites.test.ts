@@ -61,7 +61,7 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "apps/docs/src/content/docs/fulltext-search.md",
-    line: 819,
+    line: 825,
     text: "from the " + CLAIM_WORD + "-free backend-authoring entrypoint.",
   },
   {
@@ -103,7 +103,7 @@ const RECORDED_CLAIM_SITES: readonly RecordedClaimSite[] = [
   },
   {
     file: "packages/typegraph/src/query/dialect/vector-strategy.ts",
-    line: 144,
+    line: 145,
     text:
       "* The per-field storage this strategy owns for `slot`, as " +
       CLAIM_WORD +

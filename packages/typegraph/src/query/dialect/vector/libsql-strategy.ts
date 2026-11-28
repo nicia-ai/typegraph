@@ -27,11 +27,14 @@ import {
   type VectorMetric,
   type VectorSearchParams,
 } from "../../../backend/types";
+import { compileRelevanceCandidateOrder } from "../../order";
 import { sql, type SqlFragment } from "../../sql-fragment";
+import { sqliteDialect } from "../sqlite";
 import {
   assertFiniteEmbedding,
   quoteIdentifier,
   VECTOR_CONTRIBUTION_PREFIX,
+  vectorDefinedDistanceConditions,
   vectorMinScoreCondition,
   vectorPhysicalName,
   vectorScoreExpression,
@@ -73,6 +76,16 @@ const LIBSQL_CAPABILITIES: VectorCapabilities = {
     tunable: false,
     reason:
       "`vector_top_k` takes only (index, query, k); DiskANN's search_l is fixed at index-creation time",
+  },
+  // libSQL's DiskANN search starts from a randomly chosen node of the index
+  // graph, so one approximate search returns different neighbors from run to
+  // run on an unchanged database: 20 executions of a k = 5 search over 26
+  // tied embeddings returned four different sets. Cursor pagination of it
+  // is refused rather than skipping and repeating rows.
+  repeatableApproximateSearch: {
+    repeatable: false,
+    reason:
+      "libSQL's DiskANN `vector_top_k` starts each search from a randomly chosen node, so two executions of one approximate search can return different neighbors",
   },
 };
 
@@ -290,6 +303,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
       const query = vector32Literal(params.queryEmbedding, "queryEmbedding");
       const conditions: SqlFragment[] = [
         sql`${quoted}."graph_id" = ${params.graphId}`,
+        ...vectorDefinedDistanceConditions(distance, params.metric),
       ];
       if (params.minScore !== undefined) {
         conditions.push(
@@ -316,7 +330,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
         FROM vector_top_k(${indexName}, ${query}, ${annK})
         JOIN ${quoted} ON ${quoted}.rowid = id
         WHERE ${sql.join(conditions, sql` AND `)}
-        ORDER BY ${distance} ASC
+        ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${quoted}."node_id"` }, sqliteDialect)}
         ${pageClause}
       `;
     }
@@ -324,6 +338,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
     // Brute-force scan.
     const conditions: SqlFragment[] = [
       sql`${quoted}."graph_id" = ${params.graphId}`,
+      ...vectorDefinedDistanceConditions(distance, params.metric),
     ];
     if (candidates !== undefined) {
       conditions.push(sql`${quoted}."node_id" IN (${candidates})`);
@@ -338,7 +353,7 @@ export const libsqlVectorStrategy: VectorStrategy = {
       SELECT ${quoted}."node_id" AS node_id, ${score} AS score
       FROM ${quoted}
       WHERE ${sql.join(conditions, sql` AND `)}
-      ORDER BY ${distance} ASC
+      ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${quoted}."node_id"` }, sqliteDialect)}
       ${pageClause}
     `;
   },

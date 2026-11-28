@@ -2978,6 +2978,7 @@ TypeGraph choosing separate query semantics per backend:
 | Vector index type `ivfflat`                            | ✗                                                 | ✓                                          | Index declaration is **skipped** on SQLite (`indexTypes`: `hnsw`/`none` vs `hnsw`/`ivfflat`/`none`)                       |
 | Declared index over a date property (`capabilities.dateIndexExpressions`) | ✓                                    | ✗ every driver                             | Refused, never attempted: `store.materializeIndexes()` (and eager `store.evolve()`, before its schema commit), `prepareNamespaceForkTarget()` against its target, `createPostgresTables({ indexes })`, `generateIndexDDL(index, "postgres")` and the PostgreSQL Drizzle index builders throw `UnsupportedBackendCapabilityError` (`details.capability` `dateIndexExpressions`, with `kind`, `indexName`, `field` and `position`) before any DDL when a node or edge index reads a `z.date()` property in a key, covering column or partial-index `where`. The index expression casts the stored text to `timestamptz`, which PostgreSQL does not allow in an index because the cast depends on the session time zone. An array of dates under `method: "gin"` is unaffected (it indexes the JSON value). Declaring the index in `defineGraph` and opening the store still succeed, since neither knows or touches the engine's index DDL |
 | Filtered approximate search **guarantees** a full page | ✓ `sqlite-vec` / ✗ `libsql-native`                | ✗ (`pgvector` recovers, but is bounded)    | Only `sqlite-vec` guarantees it; the others can return **fewer than `limit`** rows under heavy filtering — see below      |
+| Repeatable approximate search (`vector.repeatableApproximateSearch`) | ✓ `sqlite-vec` / ✗ `libsql-native`           | ✓ (`pgvector`)                             | libSQL's DiskANN starts each search from a random node, so an approximate `execute()` can return different neighbors on an unchanged database. `paginate()`, `page()` and `stream()` refuse an approximate search there with `UnsupportedBackendCapabilityError` (`details.capability` `vector.repeatableApproximateSearch`); exact search pages on every backend |
 | Per-query fulltext `language` override                 | ✗                                                 | ✓                                          | Throws on SQLite — FTS5's tokenizer is fixed at table-create time; `tsvector` accepts a regconfig per query               |
 | HNSW `efSearch` query tuning                           | ✗                                                 | ✓ transactional HNSW drivers               | Refused, never ignored: `UnsupportedBackendCapabilityError` with `details.capability` `vector.searchFrontierTuning` on **any** SQLite backend (vector and hybrid alike — neither `sqlite-vec`'s `vec0` KNN nor `libsql-native`'s DiskANN has a per-search frontier), and on transaction-less Postgres or a non-HNSW slot |
 | Bounded planner-statistics sampling                    | ✓ standard connections / ✗ D1 and Durable Objects | Native `ANALYZE` sampling                  | Restricted SQLite skips `analysis_limit` but still attempts scoped `ANALYZE`. Performance only — same results             |
@@ -3043,6 +3044,22 @@ Vector and fulltext capabilities are populated from the configured strategy, so 
 bundled strategies (`sqlite-vec`/`libsql-native`/`pgvector`, `fts5`/`tsvector`). A custom strategy advertising
 different `metrics`/`indexTypes`/`filteredApproximateSearch`/`searchFrontierTuning` shifts these rows accordingly —
 always check `backend.capabilities` at runtime rather than hard-coding the dialect.
+
+A strategy should also declare `repeatableApproximateSearch`: `{ repeatable: true }` promises that an approximate
+search returns the same rows on every execution over an unchanged database, which cursor pagination of one needs, and
+`{ repeatable: false, reason }` makes paging an approximate search a typed refusal naming the reason. A strategy that
+declares nothing resolves to `repeatable: false` (`resolveRepeatableApproximateSearch`), so it is refused rather than
+assumed repeatable. A strategy whose `buildSearch` is exact (`searchIsExact: true`) serves the exact and the
+approximate search through it and never retrieves approximately, so paging its searches is not refused whatever it
+declares. A strategy's `buildSearch` must also break distance ties by node id, in byte order, wherever its engine
+takes an order (`compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId }, dialect)`, which
+compares the id through `dialect.binaryText`: it scans one kind's table, so the kind the query compiler's own cuts
+also order by is constant there) and keep zero-norm embeddings out of a cosine search
+(`vectorDefinedDistanceConditions`), as the bundled strategies do. A read an ANN index serves should order by the
+distance alone and keep every row tied with the last one it needs, breaking the tie in a sort over those candidates:
+a second key on the index scan's own ORDER BY, or a range condition on the distance, can cost the planner off the
+index. pgvector's bundled strategy reads `ORDER BY distance FETCH FIRST n ROWS WITH TIES` and applies the tiebreak
+and the defined-distance condition in a materialized wrapper.
 
 `searchFrontierTuning` is **required** on a vector strategy's capabilities, so a strategy must state whether it has a
 per-search ANN frontier knob rather than inheriting silence. It is a discriminated union: `{ tunable: true, parameter,

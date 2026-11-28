@@ -666,7 +666,7 @@ describe("Cursor Column Validation Properties", () => {
     };
 
     expect(() => {
-      validateCursorColumns(cursorData, orderBy);
+      validateCursorColumns(cursorData, orderBy, { textAdmitsNul: true });
     }).not.toThrow();
   });
 
@@ -680,7 +680,7 @@ describe("Cursor Column Validation Properties", () => {
     };
 
     expect(() => {
-      validateCursorColumns(cursorData, orderBy);
+      validateCursorColumns(cursorData, orderBy, { textAdmitsNul: true });
     }).toThrow(ValidationError);
   });
 
@@ -694,7 +694,7 @@ describe("Cursor Column Validation Properties", () => {
     };
 
     expect(() => {
-      validateCursorColumns(cursorData, orderBy);
+      validateCursorColumns(cursorData, orderBy, { textAdmitsNul: true });
     }).toThrow(ValidationError);
   });
 
@@ -711,7 +711,7 @@ describe("Cursor Column Validation Properties", () => {
     };
 
     expect(() => {
-      validateCursorColumns(cursorData, orderBy);
+      validateCursorColumns(cursorData, orderBy, { textAdmitsNul: true });
     }).toThrow(ValidationError);
   });
 });

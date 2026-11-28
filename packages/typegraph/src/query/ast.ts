@@ -110,6 +110,45 @@ export type TupleComparisonPredicate = Readonly<{
 }>;
 
 /**
+ * Which per-match value a relevance sort key reads:
+ * - `fulltext_rank`: the full-text engine's native rank (higher is better)
+ * - `vector_distance`: the vector distance (lower is better)
+ * - `hybrid_score`: the reciprocal-rank-fusion score of both legs
+ * - `hybrid_node_id`: the matched node's id, the hybrid tiebreak
+ */
+export type RelevanceSortSource =
+  "fulltext_rank" | "vector_distance" | "hybrid_score" | "hybrid_node_id";
+
+/** The relevance sort keys whose value is a number a cursor carries as text. */
+export type NumericRelevanceSortSource = Exclude<
+  RelevanceSortSource,
+  "hybrid_node_id"
+>;
+
+/**
+ * Compares a completed match row's value of one relevance sort key with the
+ * value a keyset cursor carries for it. Cursor pagination builds it, into the
+ * completed-match predicate of a full-text, vector or hybrid statement only:
+ * the value is computed by that statement's relevance relations and means
+ * nothing anywhere else. `value` is the key as the database returned it (see
+ * `DialectAdapter.relevanceCursorKey`) and is bound unchanged, so the
+ * comparison is exact.
+ */
+export type RelevanceComparisonPredicate =
+  | Readonly<{
+      __type: "relevance_comparison";
+      source: RelevanceSortSource;
+      op: "eq" | "gt" | "lt";
+      value: string | number;
+    }>
+  | Readonly<{
+      __type: "relevance_comparison";
+      source: RelevanceSortSource;
+      /** A key a cursor carries as NULL (a cosine distance to a zero embedding). */
+      op: "isNull" | "isNotNull";
+    }>;
+
+/**
  * A string predicate.
  */
 export type StringPredicate = Readonly<{
@@ -390,6 +429,7 @@ export type PredicateExpression =
   | InSubquery
   | VectorSimilarityPredicate
   | FulltextMatchPredicate
+  | RelevanceComparisonPredicate
   | DatabaseExpressionPredicate;
 
 // ============================================================
@@ -572,6 +612,13 @@ export type ProjectedField = Readonly<{
   source: AggregateExpr | DatabaseExpression | FieldRef;
   /** Override the CTE alias for this field (used for edge fields in node CTEs) */
   cteAlias?: string;
+  /**
+   * Set on a hidden numeric keyset column of a `store.batchOnce()` page of a
+   * full-text, vector or hybrid query: the column is projected as
+   * `DialectAdapter.batchExactNumber` renders it, so the batch envelope
+   * carries it exactly.
+   */
+  batchExactNumber?: true;
 }>;
 
 /**
@@ -696,6 +743,15 @@ export type QueryAst = Readonly<{
   /** Recorded/system-time timestamp for recorded-pinned reads. */
   recordedAsOf?: string;
   orderBy?: readonly OrderSpec[];
+  /**
+   * Select the rows of a full-text, vector or hybrid statement in exactly the
+   * reverse of its selection order (`describeSelectionOrder`): every relevance
+   * key, `orderBy` term and row-identity tiebreak flipped. A backward cursor
+   * page reads the rows before its cursor, nearest first, this way. Only a
+   * relevance-ordered statement can honor it; the compiler refuses it on any
+   * other.
+   */
+  reverseSelectionOrder?: true;
   limit?: number;
   offset?: number;
   /** GROUP BY specification for aggregate queries */

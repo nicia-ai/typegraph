@@ -15,6 +15,12 @@ import {
 } from "../json-pointer";
 import { sql, type SqlFragment } from "../sql-fragment";
 import { applyAggregateFilter } from "./aggregate-filter";
+import {
+  NEGATIVE_INFINITY_TEXT,
+  parseExactDoubleText,
+  POSITIVE_INFINITY_TEXT,
+  sqliteExactDoubleText,
+} from "./exact-double-text";
 import { fts5Strategy } from "./fulltext-strategy";
 import { likeEscapeClause, sqliteGlobFromLikePattern } from "./like-escape";
 import {
@@ -126,6 +132,15 @@ function mergeJsonObjects(parts: readonly SqlFragment[]): SqlFragment {
 /**
  * SQLite dialect adapter implementation.
  */
+/**
+ * The text `sqliteExactDoubleText` renders a REAL infinity as, and the
+ * literal SQLite reads as that infinity (a decimal past the largest double).
+ */
+const SQLITE_INFINITY_LITERALS: ReadonlyMap<string, string> = new Map([
+  [POSITIVE_INFINITY_TEXT, "9e999"],
+  [NEGATIVE_INFINITY_TEXT, "-9e999"],
+]);
+
 export const sqliteDialect: BuiltinDialectAdapter = {
   dateValue(value) {
     return value;
@@ -171,12 +186,36 @@ export const sqliteDialect: BuiltinDialectAdapter = {
     supportsFulltext: true,
     subgraphMembershipStrategy: "inline-cte",
     textIndexOrderIsBinary: true,
+    textAdmitsNul: true,
     transactionReadsShareOneSnapshot: true,
   },
 
   binaryText(expression) {
     return expression;
   },
+
+  relevanceCursorKey: {
+    value: (expression) => expression,
+    // The key's exact binary text (`sqliteExactDoubleText`), which reads
+    // back as the very double the statement computed: no decimal rendering
+    // SQLite offers is guaranteed to. An infinity (an L2 distance or a fused
+    // score past the largest double) renders as `Inf` / `-Inf`. No driver
+    // binds an infinite parameter, so that text stays the bound value and
+    // `operand` writes it as a literal SQLite reads as the infinity.
+    select: (expression) => sqliteExactDoubleText(expression),
+    bind: (text) =>
+      SQLITE_INFINITY_LITERALS.has(text) ? text : parseExactDoubleText(text),
+    operand: (bound) => {
+      const literal =
+        typeof bound === "string" ?
+          SQLITE_INFINITY_LITERALS.get(bound)
+        : undefined;
+      return literal === undefined ? sql`${bound}` : sql.raw(literal);
+    },
+  },
+
+  batchExactNumber: (expression) =>
+    sql`CASE WHEN typeof(${expression}) = 'real' THEN ${sqliteExactDoubleText(expression)} ELSE ${expression} END`,
 
   keyText(expression) {
     return sql`${expression} COLLATE BINARY`;

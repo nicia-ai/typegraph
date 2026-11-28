@@ -13,6 +13,25 @@ type TypedJsonExtractInput = Readonly<{
   valueType: string | undefined;
 }>;
 
+/**
+ * Whether a selective extraction of a value type (`compileTypedJsonExtract`)
+ * reads the same SQL value as `compileFieldValue` reads for a field of that
+ * type: a string, number, boolean or date, which both extract typed. A value
+ * of any other type is selected as its JSON value, which `compileFieldValue`
+ * reads as text (a value of unknown type) or refuses to order (an array or an
+ * object).
+ */
+export function selectiveExtractionIsFieldValue(
+  valueType: string | undefined,
+): boolean {
+  return (
+    valueType === "string" ||
+    valueType === "number" ||
+    valueType === "boolean" ||
+    valueType === "date"
+  );
+}
+
 export function compileTypedJsonExtract(
   input: TypedJsonExtractInput,
 ): SqlFragment {

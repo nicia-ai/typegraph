@@ -81,7 +81,13 @@ const CANONICAL_ISO_DATE_PATTERN =
 const ZONELESS_DATETIME_PATTERN =
   /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
 const OFFSET_DATETIME_PATTERN =
-  /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}(?::?\d{2})?)$/i;
+  /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(Z|[+-]\d{2}(?::?\d{2})?|[+-]\d{2}:\d{2}:\d{2})$/i;
+/**
+ * An offset with seconds, which PostgreSQL renders for a zone's local mean
+ * time (Europe/Paris before 1911 is `+00:09:21`) and `Date.parse` does not
+ * read: its hours and minutes, and its seconds.
+ */
+const OFFSET_WITH_SECONDS_PATTERN = /^([+-]\d{2}:\d{2}):([0-5]\d)$/;
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 function normalizedOffset(offset: string): string {
@@ -104,6 +110,15 @@ function databaseTimestampMilliseconds(value: string): number {
     const offset = offsetMatch[3];
     if (date === undefined || time === undefined || offset === undefined) {
       return Number.NaN;
+    }
+    const withSeconds = OFFSET_WITH_SECONDS_PATTERN.exec(offset);
+    if (withSeconds !== null) {
+      const [, hoursAndMinutes = "", seconds = ""] = withSeconds;
+      const sign = offset.startsWith("-") ? -1 : 1;
+      return (
+        Date.parse(`${date}T${time}${hoursAndMinutes}`) -
+        sign * Number(seconds) * 1000
+      );
     }
     return Date.parse(`${date}T${time}${normalizedOffset(offset)}`);
   }
@@ -231,6 +246,72 @@ export function canonicalDateOperandText(operand: unknown): string | undefined {
     : operand;
   if (typeof text !== "string" || !isCanonicalIsoDate(text)) return undefined;
   return text.startsWith(YEAR_ZERO_PREFIX) ? undefined : text;
+}
+
+/**
+ * A database driver's timestamp text, split where its year can be read: the
+ * year (four digits or more), the rest of the date and the time to the
+ * second (`T` or a space between them), an optional fraction, the offset
+ * text and an optional era. PostgreSQL renders a year before 1 as its
+ * positive `BC` year (`0001-12-31 21:00:00-08 BC` is year 0) and a local
+ * year past 9999 in five digits (`10000-01-01 10:00:00+14`), whatever
+ * instant in UTC either is.
+ */
+const DATABASE_TIMESTAMP_PATTERN =
+  /^(\d{4,})(-\d{2}-\d{2})([ T]\d{2}:\d{2}:\d{2})(?:\.(\d+))?([^ ]*)( BC)?$/;
+
+/**
+ * A year in the 400-year Gregorian cycle, which repeats every date and leap
+ * day, and is exactly {@link GREGORIAN_CYCLE_MILLISECONDS} long.
+ */
+const GREGORIAN_CYCLE_YEARS = 400;
+const GREGORIAN_CYCLE_MILLISECONDS = 146_097 * 24 * 60 * 60 * 1000;
+/** The four-digit years a driver's text is read in before it is shifted back. */
+const CYCLE_PROXY_BASE_YEAR = 2000;
+
+/**
+ * The canonical UTC text ({@link canonicalDateOperandText}) of the instant a
+ * database driver's timestamp text denotes, read as
+ * {@link canonicalizeDatabaseTimestamp} reads it (an offset such as
+ * PostgreSQL's `-08:00` or `+00`, `Z`, or none for UTC), or `undefined`
+ * when the text is not a full date and time with valid fields, is past
+ * millisecond precision (which canonical text cannot carry exactly), or
+ * names an instant outside the years 0001 to 9999 in UTC. A value the store
+ * wrote has millisecond precision, so every driver's rendering of it
+ * converts exactly.
+ *
+ * The year is decided on the UTC instant, not on the text: a session zone
+ * east of UTC renders the last hours of 9999 in year 10000, and one west of
+ * it renders the first hours of year 1 as `0001 BC`. The local text is read
+ * in a four-digit year at the same place in the Gregorian cycle, so its
+ * calendar (and its validity) is the same, and the instant is shifted back by
+ * whole cycles.
+ */
+export function canonicalDatabaseTimestampText(
+  text: string,
+): string | undefined {
+  const match = DATABASE_TIMESTAMP_PATTERN.exec(text);
+  if (match === null) return undefined;
+  const [, yearText = "", monthDay, time, fraction = "", offset, era] = match;
+  if (fraction.length > 3) return undefined;
+  // Astronomical numbering: 1 BC is year 0, 2 BC year -1.
+  const year = era === undefined ? Number(yearText) : 1 - Number(yearText);
+  const cycleYear =
+    ((year % GREGORIAN_CYCLE_YEARS) + GREGORIAN_CYCLE_YEARS) %
+    GREGORIAN_CYCLE_YEARS;
+  const proxyYear = String(CYCLE_PROXY_BASE_YEAR + cycleYear);
+  const proxyDate = `${proxyYear}${monthDay}`;
+  if (!isCanonicalIsoDate(`${proxyDate}T${time?.slice(1)}.000Z`))
+    return undefined;
+  const proxy = canonicalizeDatabaseTimestamp(
+    `${proxyDate}${time}${fraction === "" ? "" : `.${fraction}`}${offset}`,
+  );
+  if (proxy === undefined) return undefined;
+  const cycles =
+    (year - CYCLE_PROXY_BASE_YEAR - cycleYear) / GREGORIAN_CYCLE_YEARS;
+  return canonicalDateOperandText(
+    new Date(Date.parse(proxy) + cycles * GREGORIAN_CYCLE_MILLISECONDS),
+  );
 }
 
 /**

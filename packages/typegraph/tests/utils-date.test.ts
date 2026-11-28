@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { ValidationError } from "../src/errors";
 import {
+  canonicalDatabaseTimestampText,
   canonicalizeDatabaseTimestamp,
   decodeDate,
   encodeDate,
@@ -41,6 +42,28 @@ describe("date utilities", () => {
       );
     });
 
+    it("normalizes an offset with seconds, a zone's local mean time", () => {
+      // PostgreSQL in Europe/Paris renders 1900-01-01T00:00:00Z this way.
+      expect(
+        canonicalizeDatabaseTimestamp("1900-01-01 00:09:21+00:09:21"),
+      ).toBe("1900-01-01T00:00:00.000Z");
+      expect(
+        canonicalizeDatabaseTimestamp("1900-01-01T00:09:21.500+00:09:21"),
+      ).toBe("1900-01-01T00:00:00.500Z");
+      expect(
+        canonicalizeDatabaseTimestamp("1880-06-01 23:58:45-00:01:15"),
+      ).toBe("1880-06-02T00:00:00.000Z");
+      expect(
+        canonicalDatabaseTimestampText("1900-01-01T00:09:21+00:09:21"),
+      ).toBe("1900-01-01T00:00:00.000Z");
+      expect(
+        canonicalizeDatabaseTimestamp("1900-01-01 00:09:21+00:09:60"),
+      ).toBeUndefined();
+      expect(
+        canonicalizeDatabaseTimestamp("1900-01-01 00:09:21+0009:21"),
+      ).toBeUndefined();
+    });
+
     it("rejects unsupported and unrepresentable values", () => {
       expect(
         canonicalizeDatabaseTimestamp(new Date("not a date")),
@@ -50,6 +73,55 @@ describe("date utilities", () => {
         canonicalizeDatabaseTimestamp("June 25 2026 12:00:00"),
       ).toBeUndefined();
       expect(canonicalizeDatabaseTimestamp(42)).toBeUndefined();
+    });
+  });
+
+  describe("canonicalDatabaseTimestampText", () => {
+    it("decides the year on the UTC instant, not on the local text", () => {
+      // PostgreSQL in Pacific/Kiritimati (+14) renders the last hours of 9999
+      // in year 10000, and in a zone west of UTC the first hours of year 1 as
+      // year 1 BC (year 0).
+      expect(canonicalDatabaseTimestampText("10000-01-01T10:00:00+14:00")).toBe(
+        "9999-12-31T20:00:00.000Z",
+      );
+      expect(
+        canonicalDatabaseTimestampText("10000-01-01 13:59:59.999+14"),
+      ).toBe("9999-12-31T23:59:59.999Z");
+      expect(
+        canonicalDatabaseTimestampText("0001-12-31T21:00:00-08:00 BC"),
+      ).toBe("0001-01-01T05:00:00.000Z");
+      expect(canonicalDatabaseTimestampText("0001-12-31 16:00:00-08 BC")).toBe(
+        "0001-01-01T00:00:00.000Z",
+      );
+      // The same local texts an hour further out are outside 0001 to 9999.
+      expect(
+        canonicalDatabaseTimestampText("10000-01-01T14:00:00+14:00"),
+      ).toBeUndefined();
+      expect(
+        canonicalDatabaseTimestampText("0001-12-31T15:59:59.999-08:00 BC"),
+      ).toBeUndefined();
+      expect(
+        canonicalDatabaseTimestampText("0002-12-31T21:00:00-08:00 BC"),
+      ).toBeUndefined();
+    });
+
+    it("reads a local date by the calendar of its own year", () => {
+      // Leap days: 400 and 1 BC (year 0) have one, 100 and 2 BC do not.
+      expect(canonicalDatabaseTimestampText("0400-02-29T00:00:00Z")).toBe(
+        "0400-02-29T00:00:00.000Z",
+      );
+      expect(canonicalDatabaseTimestampText("0100-02-29T00:00:00Z")).toBe(
+        undefined,
+      );
+      expect(
+        canonicalDatabaseTimestampText("10000-02-29T00:00:00+14:00"),
+      ).toBeUndefined();
+      expect(
+        canonicalDatabaseTimestampText("0001-02-29T00:00:00-08:00 BC"),
+      ).toBeUndefined();
+      expect(
+        canonicalDatabaseTimestampText("10000-01-01T10:00:00.1234+14:00"),
+      ).toBeUndefined();
     });
   });
 
@@ -198,5 +270,55 @@ describe("date utilities", () => {
       const now = nowIso();
       expect(now.endsWith("Z")).toBe(true);
     });
+  });
+});
+
+describe("canonicalDatabaseTimestampText", () => {
+  it("reads a driver's rendering of a millisecond instant, with any offset or none, as its canonical UTC text", () => {
+    expect(
+      [
+        "2024-01-01T19:04:05.678-08:00",
+        "2024-01-02T03:04:05.678+00:00",
+        "2024-01-02 03:04:05.678+00",
+        "2024-01-02T08:34:05.678+05:30",
+        "2024-01-02T03:04:05.678+0000",
+        "2024-01-02T03:04:05.678Z",
+        "2024-01-02T03:04:05Z",
+        "2024-01-02 03:04:05.678",
+        "2024-01-01T19:04:05-08:00",
+        "2024-01-01T19:04:05.6-08:00",
+        "1999-12-31T15:59:59.999-08:00",
+      ].map((text) => canonicalDatabaseTimestampText(text)),
+    ).toEqual([
+      "2024-01-02T03:04:05.678Z",
+      "2024-01-02T03:04:05.678Z",
+      "2024-01-02T03:04:05.678Z",
+      "2024-01-02T03:04:05.678Z",
+      "2024-01-02T03:04:05.678Z",
+      "2024-01-02T03:04:05.678Z",
+      "2024-01-02T03:04:05.000Z",
+      "2024-01-02T03:04:05.678Z",
+      "2024-01-02T03:04:05.000Z",
+      "2024-01-02T03:04:05.600Z",
+      "1999-12-31T23:59:59.999Z",
+    ]);
+  });
+
+  it("refuses text without a full date and time, past millisecond precision, with an invalid field, or outside 0001 to 9999", () => {
+    expect(
+      [
+        "2024-01-02T03:04:05.678912+00:00",
+        "2024-01-02T03:04:05.6780+00:00",
+        "2024-13-02T03:04:05.678+00:00",
+        "2024-02-30T03:04:05.678+00:00",
+        "2024-01-02T24:04:05.678+00:00",
+        "2024-01-02T03:04:05.678+00:60",
+        "2024-01-02T03:04Z",
+        "2024-01-02",
+        "9999-12-31T20:00:00.000-08:00",
+        "0001-01-01T03:00:00.000+08:00",
+        "not a timestamp",
+      ].filter((text) => canonicalDatabaseTimestampText(text) !== undefined),
+    ).toEqual([]);
   });
 });

@@ -37,11 +37,14 @@ export {
   assertVectorSearchLimit,
   buildVectorCapabilities,
   quoteIdentifier,
+  resolveRepeatableApproximateSearch,
   VECTOR_CONTRIBUTION_PREFIX,
+  vectorDefinedDistanceConditions,
   vectorMinScoreCondition,
   vectorPhysicalName,
   vectorScoreExpression,
 } from "../query/dialect/vector-strategy";
+export { compileRelevanceCandidateOrder } from "../query/order";
 export type {
   RenderedSql,
   SqlChunk,
@@ -440,6 +443,7 @@ export type {
   RecursiveTraversalCapability,
   ReleaseIndexMaterializationClaimParams,
   RemovalMaterializationBackend,
+  RepeatableApproximateSearch,
   ResolvedNodeUpdateBatchEntry,
   ResolvedNodeUpdateBatchParams,
   RowProps,
@@ -563,7 +567,7 @@ export type {
 } from "../indexes/types";
 export type { MetaEdgeName } from "../ontology/constants";
 export { ALL_META_EDGE_NAMES } from "../ontology/constants";
-export type { ValueType } from "../query/ast";
+export type { RelevanceSortSource, ValueType } from "../query/ast";
 export type { JsonPointer } from "../query/json-pointer";
 export type {
   JsonSchema,

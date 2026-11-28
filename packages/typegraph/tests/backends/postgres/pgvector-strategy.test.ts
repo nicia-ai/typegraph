@@ -23,6 +23,8 @@ import {
 } from "../../../src/query/sql-fragment";
 import { requireDefined } from "../../../src/utils/presence";
 import { provisionPostgresTestDatabase } from "../../postgres-test-database";
+import { expectFilteredHnswPlansUseIndex } from "./hnsw-filtered-plan";
+import { expectIvfflatPlansResort } from "./ivfflat-resort-plan";
 
 const TEST_DATABASE_URL = await provisionPostgresTestDatabase(import.meta.url);
 
@@ -320,6 +322,57 @@ describe("pgvectorStrategy (executed against PostgreSQL + pgvector)", () => {
       pgvectorStrategy.buildSearch(s, searchParams([1, 0, 0], { limit: 1 })),
     );
     expect(rows.map((r) => r["node_id"] as string)).toEqual(["d1"]);
+  });
+
+  it("reads a filtered HNSW search's candidates from the HNSW index, whatever a tiebreak would cost", async (ctx) => {
+    const pool = requirePool(ctx);
+    const s = slot("hnsw");
+    await createStorage(pool, s);
+    // Planner settings are per session: hold one connection.
+    const client = await pool.connect();
+    try {
+      await expectFilteredHnswPlansUseIndex(
+        {
+          query: (text, params) =>
+            client.query(text, params === undefined ? undefined : [...params]),
+        },
+        s,
+        (overrides) => searchParams([1, 0, 0], overrides),
+      );
+    } finally {
+      client.release();
+    }
+  }, 120_000);
+
+  it("re-sorts an IVFFlat relaxed-order scan above the materialized scan, for every candidate form", async (ctx) => {
+    const pool = requirePool(ctx);
+    const s = slot("ivfflat");
+    await createStorage(pool, s);
+    for (let index = 0; index < 300; index += 1) {
+      const angle = index / 100;
+      await upsert(pool, s, `o${String(index).padStart(3, "0")}`, [
+        Math.cos(angle),
+        Math.sin(angle),
+        0.1 * (index % 7),
+      ]);
+    }
+    await execAll(pool, [
+      requireDefined(pgvectorStrategy.buildCreateIndex?.(s)),
+    ]);
+    // Planner settings are per session: hold one connection.
+    const client = await pool.connect();
+    try {
+      await expectIvfflatPlansResort(
+        {
+          query: (text, params) =>
+            client.query(text, params === undefined ? undefined : [...params]),
+        },
+        s,
+        (overrides) => searchParams([1, 0, 0], overrides),
+      );
+    } finally {
+      client.release();
+    }
   });
 
   it("buildDropStorage drops the per-field table", async (ctx) => {

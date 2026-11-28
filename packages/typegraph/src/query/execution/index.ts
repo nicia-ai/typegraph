@@ -17,6 +17,7 @@ export {
 export {
   adjustOrderByForDirection,
   applyCursorFilters,
+  applyRelevanceCursorFilter,
   buildCursorFromContext,
   buildCursorPredicate,
   buildPaginatedResult,

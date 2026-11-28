@@ -305,7 +305,10 @@ describe("column pruning pass", () => {
     const ast = makeMinimalAst({
       selectiveFields: [makeSelectiveField("p", "age", false, "number")],
       orderBy: [
-        { field: makeFieldRef("p", ["props", "age"]), direction: "asc" },
+        {
+          field: makeFieldRef("p", ["props", "age"], "number"),
+          direction: "asc",
+        },
       ],
     });
     const ctx = makePipelineContext();

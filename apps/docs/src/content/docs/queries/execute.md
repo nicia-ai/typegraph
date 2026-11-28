@@ -255,6 +255,117 @@ const employeesPage = await store
   .paginate({ first: 50 });
 ```
 
+### Paging a full-text, vector or hybrid query
+
+A query with `$fulltext.matches()`, `similarTo()` or both is ordered by relevance whether or not it
+has an `orderBy()`: the full-text rank (highest first), the vector distance (smallest first) or the
+fused hybrid score (highest first), then the `orderBy()` terms, then for a hybrid query the matched
+node's id in byte order, then the row's identity (the start node's `id`, its `kind` too when the
+alias spans several kinds, and each traversal's edge `id`). That order is total, so `execute()`
+returns rows tied on relevance in it, and `paginate()`, `page()` and `stream()` read exactly the
+rows `execute()` returns, each once, in that order, forward and backward. `orderBy()` is optional
+on these queries.
+
+```typescript
+const results = store
+  .query()
+  .from("Document", "d")
+  .whereNode("d", (d) => d.$fulltext.matches("climate", 100))
+  .select((ctx) => ({ id: ctx.d.id, title: ctx.d.title }));
+
+const first = await results.paginate({ first: 20 });
+const second = await results.paginate({ first: 20, after: first.nextCursor });
+```
+
+The cursor carries the boundary row's relevance values as the database rendered them, with its
+`orderBy()` values and its identity, and the next page compares against them exactly, so rows
+with equal or nearly equal scores are not skipped or repeated at a page boundary. On PostgreSQL a
+rank or distance is carried as the text of its `double precision` value, and a fused hybrid score
+as the text of the `numeric` it is computed in: a double cannot hold every score that valid
+`fuseWith()` options produce (weights near `Number.MAX_VALUE` exceed it), and the statement sorts
+and compares each key in that same type. On SQLite every key is a REAL carried as its exact
+binary text, an integer significand and a power of two computed with exact REAL arithmetic,
+because SQLite promises no decimal rendering of a REAL that reads back as the same double. An
+infinity (an L2 distance or fused score past the largest double) is carried as `Inf` or `-Inf`,
+which the next page compares as that infinity. A relevance value that is NULL sorts after
+every value, as the least relevant, and the cursor carries it as NULL. PostgreSQL's float text is exact at its default
+`extra_float_digits` of 1 or above; in a session that lowers it, issuing a search cursor is refused
+with a `ConfigurationError` whose `details.code` is `SEARCH_CURSOR_KEY_UNAVAILABLE`. A search whose
+rows are groups (`groupByNode()`) cannot be paged and is refused with
+`GROUPED_SEARCH_PAGINATION_UNSUPPORTED`.
+
+The cursor filters the completed match rows after the search has ranked its candidates and taken
+its top `k`, so every page ranks the same candidates `execute()` ranks and no page reaches past the
+top `k`. Every top-`k` cut breaks ties by node kind, then node id (an id is unique only within its
+kind, so a search whose alias spans several kinds can tie two nodes with one id), both in byte
+order whatever the database's collation, as `store.search` breaks them, inside the engine's own
+search where the engine takes an order (pgvector, every exact scan), so a cut inside a tie keeps
+the same rows on every execution, on every backend and through both APIs.
+
+A page whose rows do not advance past the cursor it was asked with (its last row forward, or its
+first row backward, is the row the cursor positions) is refused with a `CompilerInvariantError`
+instead of being returned, so following cursors can never repeat a page forever and `stream()`
+always ends. A correct keyset never produces such a page; the refusal reports the defect.
+
+An approximate `similarTo(..., { approximate: true })` pages the candidates its own `execute()`
+returns, including a short result where the backend's filtered approximate search can under-fill
+(`backend.capabilities.vector.filteredApproximateSearch.guaranteesFullPage` is `false`). That
+needs a search that returns the same candidates on every run, which
+`backend.capabilities.vector.repeatableApproximateSearch` declares. pgvector and sqlite-vec are
+repeatable (sqlite-vec's KNN takes tied neighbors in its storage order rather than by node id).
+libSQL's DiskANN is not: `vector_top_k` starts each search from a randomly chosen node, so two
+`execute()` calls of one approximate search can return different neighbors, and `paginate()`,
+`page()` and `stream()` refuse it with an `UnsupportedBackendCapabilityError` whose
+`details.capability` is `vector.repeatableApproximateSearch`. Drop `approximate` to page the exact
+search there. A vector strategy whose engine form is exact (`searchIsExact`) never retrieves
+approximately, so paging its search is never refused for repeatability.
+
+**Writes between pages.** Each page runs the search again. Without writes between pages the walk is
+exact. A write that changes which rows match, or how relevant they are, gives a weaker guarantee
+than keyset pagination of a query without a search. A vector distance and a PostgreSQL
+`ts_rank_cd` rank depend only on their own row, so a row that stays unchanged keeps its place as it
+would in ordinary keyset paging, except that a write can move rows into or out of the top `k`.
+SQLite's BM25 rank depends on statistics of the whole index, and a hybrid score on each row's rank
+among the candidates, so a write anywhere in the searched rows can move unchanged rows across a
+page boundary: such a row can be skipped or read twice. Restart from the first page when a walk
+must reflect one state of the data.
+
+**Refused cursors.** A search's cursor records the search it was issued for: each predicate's query
+text or embedding, `k`, minimum score, metric and approximate retrieval, and the hybrid fusion.
+`paginate()` and `page()` refuse a cursor issued for another search, for a query without a search,
+or by another backend dialect, a search query's cursor issued by a release before relevance keys
+were part of the cursor, and a cursor whose relevance value is not one the backend renders or is
+outside the range its key type holds, with a `ValidationError` whose issue `code` is
+`SEARCH_CURSOR_MISMATCH`. Start again without a cursor. The search is recorded as a 128-bit
+digest. A query without a search issues the same cursors as before.
+
+On every query, a cursor value that is not a value of its field (a string for a numeric field, an
+object for a string field), or that the field's predicate operand contract refuses (anything but a
+32-bit integer for `meta.version`, anything but a canonical UTC instant for a timestamp such as
+`meta.createdAt` or a date property), is refused with a `ValidationError` before the query reaches
+the database. Every form a terminal has issued is a value: a Boolean key accepts `true`/`false` and
+the `0`/`1` that SQLite's and libSQL's `store.batchOnce()` issue it as, and a timestamp key accepts
+the text with the session's UTC offset (`2024-01-01T19:04:05.678-08:00`, or an offset with
+seconds such as `+00:09:21`, which a zone's local mean time gives a date before the zone adopted
+standard time) that PostgreSQL's `store.batchOnce()` issues it as, or the rendering a PostgreSQL
+driver returns, compared as the instant it names. The year is the instant's in UTC, not the text's: a
+session zone east of UTC renders the last hours of 9999 in year 10000
+(`10000-01-01T10:00:00+14:00` in `Pacific/Kiritimati`), and one west of it renders the first hours of
+year 1 as `0001 BC`, and both are accepted. On PostgreSQL, whose text
+cannot hold a NUL character, a cursor whose text holds one (in an `orderBy()` value, an id or a
+hybrid search's node-id tiebreak) is refused the same way; SQLite's text can hold one, so it pages
+there. A cursor whose text holds a lone UTF-16 surrogate, which no database stores or returns, is
+refused on every dialect.
+
+**A property of unknown type.** A property whose type is neither a string, a number, a Boolean nor a
+date (a `z.union([z.string(), z.number()])`, say) is ordered by the value a comparison reads: its text
+on PostgreSQL, and its JSON value (numbers before text) on SQLite. Every page of a query ordered by
+one sorts its rows as `execute()` does, whichever fields the query selects. A search's cursor carries
+the key as the statement sorts it. A query without a search keeps the cursor it always issued, which
+holds the row's JSON value, so on PostgreSQL a number whose JSON form is not its text (`1e21`, whose
+text is `1000000000000000000000`) resumes from the JSON form and can skip a row whose text sorts
+between the two.
+
 ### Recursive traversals are not paginated
 
 `paginate()`, `page()` and `stream()` refuse a query with a recursive traversal (`recursive()`,
@@ -714,7 +825,9 @@ Useful for:
 
 ## Ordering Requirements
 
-Both `paginate()` and `stream()` require an `orderBy()` clause:
+Both `paginate()` and `stream()` require an `orderBy()` clause, except on a full-text, vector or
+hybrid query, which is ordered by relevance (see
+[Paging a full-text, vector or hybrid query](#paging-a-full-text-vector-or-hybrid-query)):
 
 ```typescript
 // Required for pagination

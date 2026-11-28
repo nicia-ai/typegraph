@@ -150,6 +150,39 @@ export type VectorSearchFrontierTuning =
     }>;
 
 /**
+ * Whether an approximate vector search served by the engine's ANN form
+ * returns the same rows on every execution over an unchanged database.
+ *
+ * Cursor pagination needs it: every page of a search re-runs the search and
+ * positions itself among the candidates that run returns, so a search whose
+ * candidates change between runs skips and repeats rows. An approximate
+ * search on an engine that declares `repeatable: false`, or declares
+ * nothing, is refused by
+ * `paginate()`, `page()` and `stream()` with an
+ * `UnsupportedBackendCapabilityError` on
+ * `vector.repeatableApproximateSearch`; its `execute()` still runs, and two
+ * executions may return different neighbors.
+ *
+ * - **pgvector**: `repeatable: true`. An HNSW or IVFFlat scan is a
+ *   deterministic walk of the index, and the cut breaks distance ties by node
+ *   id over the rows the index returns.
+ * - **sqlite-vec**: `repeatable: true`. vec0's KNN is a deterministic
+ *   brute-force scan; tied neighbors at the `k` cut follow its storage order.
+ * - **libSQL DiskANN**: `repeatable: false`. `vector_top_k` starts its graph
+ *   search from a randomly chosen node.
+ *
+ * A slot declared `indexType: "none"` is always served by an exact scan and
+ * is never refused.
+ */
+export type RepeatableApproximateSearch =
+  | Readonly<{ repeatable: true }>
+  | Readonly<{
+      repeatable: false;
+      /** Why the engine's approximate search is not repeatable. */
+      reason: string;
+    }>;
+
+/**
  * Vector search capabilities.
  */
 export type VectorCapabilities = Readonly<{
@@ -177,6 +210,17 @@ export type VectorCapabilities = Readonly<{
    * option instead of inheriting silence — the exact defect this closes.
    */
   searchFrontierTuning: VectorSearchFrontierTuning;
+  /**
+   * Whether an approximate search returns the same rows on every execution
+   * over an unchanged database, which cursor pagination of one requires. See
+   * {@link RepeatableApproximateSearch}.
+   *
+   * Optional so an existing strategy keeps compiling, but never assumed: a
+   * strategy that does not state it resolves to `repeatable: false`
+   * (`resolveRepeatableApproximateSearch`), so it does not inherit a promise
+   * its engine may not keep.
+   */
+  repeatableApproximateSearch?: RepeatableApproximateSearch;
 }>;
 
 // ============================================================

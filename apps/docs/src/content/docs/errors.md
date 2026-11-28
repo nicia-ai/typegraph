@@ -1895,7 +1895,16 @@ position itself, instead of returning pages that silently lose rows:
 
 | `details.code` | Meaning |
 | --- | --- |
+| `GROUPED_SEARCH_PAGINATION_UNSUPPORTED` | A `ConfigurationError`: the query is a full-text, vector or hybrid search whose rows are groups (`groupByNode()`). A cursor positions match rows, and a group's relevance is an aggregate of its members. Read the groups with `execute()` and an explicit `limit()`, or page the search without `groupByNode()`. |
+| `SEARCH_CURSOR_KEY_UNAVAILABLE` | A `ConfigurationError` raised while issuing a search cursor: the database returned no exact text for a row's relevance key. On PostgreSQL this means the session's `extra_float_digits` is below 1, where float output is rounded; keep it at its default of 1 or above for sessions that page searches. |
 | `RECURSIVE_PAGINATION_UNSUPPORTED` | The query contains a recursive traversal (`recursive()`, `parts()` or `wholes()`). A recursive row has no single edge to extend the start node's keyset cursor with, so the rows of one start node that straddle a page boundary would be dropped. `details.operation` names the refused surface. Read the walk with `execute()` and an explicit `limit()` or `recursive({ maxHops })`, or page the start nodes in a query without the recursive traversal and run the walk for each page. See [Recursive traversals are not paginated](/queries/execute#recursive-traversals-are-not-paginated). |
+
+A cursor that cannot position a full-text, vector or hybrid query is refused with a
+`ValidationError` whose `details.issues[0].code` is `SEARCH_CURSOR_MISMATCH`: a cursor issued for
+another search, for a query without a search, by another backend dialect, or for a search query by
+a release before relevance keys were part of the cursor. A search's cursor passed to a query
+without a search is refused the same way. Start the walk again without a cursor. See
+[Paging a full-text, vector or hybrid query](/queries/execute#paging-a-full-text-vector-or-hybrid-query).
 
 #### Query option codes
 
@@ -2866,7 +2875,7 @@ try {
 | `MIGRATION_ERROR` | `MigrationError` | system | Migration failed |
 | `BASE_SCHEMA_MIGRATION_REQUIRED` | `BaseSchemaMigrationError` | system | Deployment-wide base storage requires privileged adoption |
 | `UNSUPPORTED_PREDICATE` | `UnsupportedPredicateError` | system | Predicate not supported. Also raised, before any SQL is sent, when a `whereNode()` or `whereEdge()` predicate reads an alias other than its own (`details.targetAlias`, `details.readAlias`); compare aliases in `where()` and correlate subqueries with `$exists()` / `$scalar()`; and for a `$fulltext.matches()` or `.similarTo()` predicate on an alias a recursive traversal walks from or to (`details.reason` is `"recursive_traversal"`), for `.fuseWith()` on a recursive query (`details.option` is `"fuseWith"`), and for either predicate in `having()` or `whereEdge()` (`details.reason` is `"having"` or `"edge_predicate"`) |
-| `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation, or `clearGraphPreservingContributionMaterializations` for `store.clear({ preserveContributionMaterializations: true })` on a custom backend without that member (refused before anything is deleted) |
+| `UNSUPPORTED_BACKEND_CAPABILITY` | `UnsupportedBackendCapabilityError` | user | The backend does not advertise a capability the call needs. `details.capability` names it — for example `vector.searchFrontierTuning` for `efSearch` on any SQLite vector or hybrid search, where the engine has no per-search ANN frontier, with `details.reason` naming the limitation, `vector.repeatableApproximateSearch` for `paginate()`, `page()` or `stream()` on an approximate vector or hybrid search over an engine whose approximate search changes from run to run (libSQL's DiskANN), with `details.reason`, `nodeKind` and `fieldPath`, or `clearGraphPreservingContributionMaterializations` for `store.clear({ preserveContributionMaterializations: true })` on a custom backend without that member (refused before anything is deleted) |
 | `INTERCHANGE_EXPORT_STREAM_ABORTED` | `ExportStreamCancelledError` | user | An export stream's `signal` fired, after the export gave back everything it took. On a transactional backend that is the snapshot transaction and the connection's stream lease; on one without transactions the export held neither and simply abandoned its remaining reads. The message says which |
 | `INTERCHANGE_EXPORT_STREAM_IDLE_TIMEOUT` | `ExportStreamIdleTimeoutError` | user | An export stream's consumer left a delivered chunk unacknowledged past its configured `idleTimeoutMs`; the export settled its snapshot and lease before reporting the timeout |
 | `READ_SET_CHANGED` | `ReadSetChangedError` | system | A scope declared to `tx.assertUnchangedSince()` changed after the anchor. `details.changes` lists each changed scope and its keys |

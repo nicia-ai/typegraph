@@ -1508,6 +1508,12 @@ export type CompiledStatementSql = IntentSql<"statement">;
 export type CompiledTemporaryStatementSql = IntentSql<"temporary-statement">;
 
 // @public
+export function compileRelevanceCandidateOrder(value: SqlFragment, direction: "asc" | "desc", identity: Readonly<{
+    nodeKind: SqlFragment | undefined;
+    nodeId: SqlFragment;
+}>, dialect: Pick<DialectAdapter, "binaryText">): SqlFragment;
+
+// @public
 export type CompositionClaimScope = Readonly<{
     kind: "composition";
     holders: readonly Readonly<{
@@ -1918,6 +1924,7 @@ export const DEPLOYMENT_CONTRIBUTION_GRAPH_ID = "__typegraph_deployment__";
 export interface DialectAdapter {
     readonly analyzeTemporaryTable: (this: void, table: SqlFragment) => SqlFragment | undefined;
     readonly appendTextJsonArray: (this: void, array: SqlFragment, values: readonly SqlFragment[]) => SqlFragment;
+    readonly batchExactNumber: (this: void, expression: SqlFragment) => SqlFragment;
     readonly binaryText: (this: void, expression: SqlFragment) => SqlFragment;
     readonly bindValue: (this: void, value: unknown) => unknown;
     readonly booleanLiteral: (this: void, value: boolean) => SqlFragment;
@@ -1971,6 +1978,12 @@ export interface DialectAdapter {
     readonly packListValue: (this: void, values: readonly unknown[]) => unknown;
     readonly partitionedRowsJsonArrays?: (this: void, rowAlias: string, columns: readonly string[], orderColumn: string, partitionColumn: string) => SqlFragment;
     readonly quoteIdentifier: (this: void, name: string) => string;
+    readonly relevanceCursorKey: Readonly<{
+        value: (this: void, expression: SqlFragment, source: Exclude<RelevanceSortSource, "hybrid_node_id">) => SqlFragment;
+        select: (this: void, expression: SqlFragment, source: Exclude<RelevanceSortSource, "hybrid_node_id">) => SqlFragment;
+        bind: (this: void, text: string, source: Exclude<RelevanceSortSource, "hybrid_node_id">) => string | number | undefined;
+        operand: (this: void, bound: string | number) => SqlFragment;
+    }>;
     readonly rowValueComparison?: (this: void, operator: ">" | "<", left: readonly SqlFragment[], right: readonly SqlFragment[]) => SqlFragment;
     readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
     readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
@@ -1993,6 +2006,7 @@ export type DialectCapabilities = Readonly<{
     subgraphMembershipStrategy: DialectSubgraphMembershipStrategy;
     maxRecursiveBatchPlans?: number;
     textIndexOrderIsBinary: boolean;
+    textAdmitsNul: boolean;
     transactionReadsShareOneSnapshot: boolean;
 }>;
 
@@ -3792,6 +3806,9 @@ export type ReleaseIndexMaterializationClaimParams = Readonly<{
     token: string;
 }>;
 
+// @public
+export type RelevanceSortSource = "fulltext_rank" | "vector_distance" | "hybrid_score" | "hybrid_node_id";
+
 // @public (undocumented)
 export type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable" | "getPendingKindRemovals" | "getAllKindRemovals" | "recordKindRemoval" | "ensureReconciliationMarkersTable" | "getReconciliationMarker" | "setReconciliationMarker">;
 
@@ -3838,6 +3855,14 @@ export type RepairRelation = "nodes" | "edges" | "recordedNodes" | "recordedEdge
 
 // @public
 export type RepairRelationScope = "live" | "live-and-recorded";
+
+// @public
+export type RepeatableApproximateSearch = Readonly<{
+    repeatable: true;
+}> | Readonly<{
+    repeatable: false;
+    reason: string;
+}>;
 
 // @public
 export type RequiredExtrasOf<D extends CapabilityBundleDefinition, Op extends OperationNames<D>> = Extract<D["operations"][number], {
@@ -3907,6 +3932,9 @@ export type ResolvedSqlTableNames = Readonly<{
 
 // @public
 export function resolveRecursiveTraversal(capabilities: BackendCapabilities): RecursiveTraversalVerdict;
+
+// @public
+export function resolveRepeatableApproximateSearch(capabilities: VectorCapabilities): RepeatableApproximateSearch;
 
 // @public
 export function resolveStampedValidityLowerBound(statedValidFrom: string | null | undefined, validTo: string | undefined, writeInstant: string): string | undefined;
@@ -5201,7 +5229,11 @@ export type VectorCapabilities = Readonly<{
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
     searchFrontierTuning: VectorSearchFrontierTuning;
+    repeatableApproximateSearch?: RepeatableApproximateSearch;
 }>;
+
+// @public
+export function vectorDefinedDistanceConditions(distanceExpression: SqlFragment, metric: VectorMetric): readonly SqlFragment[];
 
 // @public
 export type VectorIndexDeclaration = Readonly<{

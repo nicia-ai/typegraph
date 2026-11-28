@@ -267,6 +267,11 @@ function extractFromExpression(
       break;
     }
 
+    case "relevance_comparison": {
+      // A cursor position over relevance values reads no property.
+      break;
+    }
+
     case "database_expression_predicate": {
       accesses.push(
         ...extractFromDatabaseExpression(expr.expression, "filter", ast),

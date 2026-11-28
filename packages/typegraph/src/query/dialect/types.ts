@@ -7,7 +7,7 @@
  */
 import { type VectorMetric } from "../../backend/types";
 import { type JsonScalar, type JsonValue } from "../../core/types";
-import { type ValueType } from "../ast";
+import { type RelevanceSortSource, type ValueType } from "../ast";
 import { type JsonPointer } from "../json-pointer";
 import { type SqlFragment } from "../sql-fragment";
 import { type FulltextStrategy } from "./fulltext-strategy";
@@ -129,6 +129,14 @@ export type DialectCapabilities = Readonly<{
   textIndexOrderIsBinary: boolean;
 
   /**
+   * Whether the engine's text (and the strings inside its JSON) can hold a
+   * NUL character. SQLite's can; PostgreSQL's `text` and `jsonb` cannot, and
+   * binding one is a database error, so a value carrying one (a forged
+   * cursor's) is refused before it is bound.
+   */
+  textAdmitsNul: boolean;
+
+  /**
    * Whether every read inside one interactive transaction sees one snapshot
    * whatever isolation level was requested, so a multi-statement read needs no
    * evidence beyond running inside the transaction. SQLite does: its readers
@@ -197,6 +205,90 @@ export interface DialectAdapter {
    * labels or query tie-breaks.
    */
   readonly binaryText: (this: void, expression: SqlFragment) => SqlFragment;
+
+  /**
+   * How a keyset cursor carries a numeric relevance sort key (a full-text
+   * rank, a vector distance, a fused hybrid score) so that comparing it back
+   * against the key is exact. `select` renders the key as text, the text the
+   * cursor stores: text survives every driver and the JSON a
+   * `store.batchOnce()` envelope carries rows in, where a number would be
+   * printed again. `bind` turns that text into the value the cursor's
+   * comparison binds, or `undefined` for text this dialect never renders or
+   * a value its key type cannot hold, which the cursor then refuses before
+   * the database sees it.
+   *
+   * Every member takes the key's source, because a key is compared in the
+   * type its source computes on that engine. PostgreSQL compares a rank and
+   * a distance as `double precision` (`value`), whose output is the
+   * shortest text that reads back as the same value at the default
+   * `extra_float_digits` of 1 or above (below it the key renders text the
+   * cursor refuses), and the fused hybrid score as the `numeric` it is
+   * computed in, whose text is exact and whose range holds every score valid
+   * fusion options produce (a double does not: weights near the largest
+   * double overflow it); in both, the text is bound as it is: an untyped
+   * parameter compared with the key takes the key's type. SQLite's keys are
+   * REAL: it renders them as their exact binary text
+   * (`sqliteExactDoubleText`: an integral significand and a power of two,
+   * computed with exact REAL arithmetic), an infinity as `Inf` / `-Inf`,
+   * and binds the double that text denotes (`parseExactDoubleText`),
+   * relying on none of the engine's decimal conversions: the SQLite libSQL
+   * ships (3.45.1) renders a REAL with 15 significant digits in
+   * `CAST(x AS TEXT)` and in JSON, and SQLite does not promise that any
+   * `printf` rendering reads back as the same double.
+   */
+  readonly relevanceCursorKey: Readonly<{
+    /**
+     * The value of a numeric relevance key that the statement sorts by and a
+     * cursor carries and compares, in one SQL type per dialect and source.
+     * PostgreSQL casts a rank or distance to `double precision` and a fused
+     * score to `numeric`; SQLite's keys are REAL already.
+     */
+    value: (
+      this: void,
+      expression: SqlFragment,
+      source: Exclude<RelevanceSortSource, "hybrid_node_id">,
+    ) => SqlFragment;
+    /**
+     * The text of a non-NULL {@link value}; a NULL key is carried as NULL by
+     * the shared compiler and never reaches this.
+     */
+    select: (
+      this: void,
+      expression: SqlFragment,
+      source: Exclude<RelevanceSortSource, "hybrid_node_id">,
+    ) => SqlFragment;
+    bind: (
+      this: void,
+      text: string,
+      source: Exclude<RelevanceSortSource, "hybrid_node_id">,
+    ) => string | number | undefined;
+    /**
+     * The SQL operand of a value {@link bind} returned for a numeric key,
+     * as the cursor's comparison reads it: a bound parameter, or a literal
+     * where no driver binds the value (SQLite's infinities). The hybrid
+     * node-id key is text and never reaches this: the shared compiler binds
+     * it as a text parameter.
+     */
+    operand: (this: void, bound: string | number) => SqlFragment;
+  }>;
+
+  /**
+   * The value a `store.batchOnce()` envelope carries a numeric keyset key of
+   * a full-text, vector or hybrid page as, so the page's cursor reads back
+   * exactly the double the statement computed, as a page read alone does.
+   * The SQLite libSQL ships (3.45.1) renders a REAL inside JSON with 15
+   * significant digits, which puts two nearly equal keys at one cursor
+   * position, and no decimal text SQLite renders is guaranteed to read back
+   * as the same double, so SQLite carries a REAL as its exact binary text
+   * (`sqliteExactDoubleText`) and any other value unchanged. PostgreSQL's
+   * JSON renders a number as its own shortest exact text output, so it
+   * carries the value unchanged. The cursor reads a text back with
+   * `parseExactDoubleText`.
+   */
+  readonly batchExactNumber: (
+    this: void,
+    expression: SqlFragment,
+  ) => SqlFragment;
 
   /**
    * Builds the dialect's planner-statistics refresh for a temporary table.

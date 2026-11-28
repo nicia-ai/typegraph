@@ -27,10 +27,10 @@ import {
 } from "./predicate-utils";
 import { type PredicateCompilerContext } from "./predicates";
 import { assertRecordedQueryDoesNotUseCurrentIndexes } from "./recorded-current-index-guard";
-import { describeRelevanceOrder } from "./relevance-order";
+import { describeRelevanceOrder, orderedFieldSpecs } from "./relevance-order";
 import {
   addRequiredColumn,
-  findSelectivePropsFieldForFieldRef,
+  findSelectiveFieldHoldingOrderValue,
   isIdFieldRef,
   mapSelectiveSystemFieldToColumn,
   markFieldRefAsRequired,
@@ -108,6 +108,9 @@ function visitPredicateFields(
     case "vector_similarity":
     case "fulltext_match": {
       visit(expression.field);
+      return;
+    }
+    case "relevance_comparison": {
       return;
     }
     case "and":
@@ -207,7 +210,7 @@ function visitOuterClauseFields(
     }
   }
 
-  for (const orderSpec of ast.orderBy ?? []) {
+  for (const orderSpec of orderedFieldSpecs(ast)) {
     if (orderSpec.field.__type === "database_expression") {
       visitExpressionFields(orderSpec.field, (field) => {
         visit(field, "order-by-expression");
@@ -270,7 +273,7 @@ export function collectRequiredColumnsByAlias(
     // from that extracted column, so it needs nothing else carried.
     if (
       use === "order-by-field" &&
-      findSelectivePropsFieldForFieldRef(ast.selectiveFields, field) !==
+      findSelectiveFieldHoldingOrderValue(ast.selectiveFields, field) !==
         undefined
     )
       return;
@@ -320,7 +323,8 @@ function hasIdEqualityPredicate(
     case "exists":
     case "in_subquery":
     case "vector_similarity":
-    case "fulltext_match": {
+    case "fulltext_match":
+    case "relevance_comparison": {
       return false;
     }
     case "database_expression_predicate": {

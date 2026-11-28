@@ -183,6 +183,8 @@ export type {
   QueryAst,
   QueryStart,
   RecursiveCyclePolicy,
+  RelevanceComparisonPredicate,
+  RelevanceSortSource,
   SelectiveField,
   SetOperation,
   SetOperationType,

@@ -130,6 +130,9 @@ function visitAliasPredicateFields(
       visit(expression.field);
       return;
     }
+    case "relevance_comparison": {
+      return;
+    }
     case "aggregate_comparison": {
       visit(expression.aggregate.field);
       return;

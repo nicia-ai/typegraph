@@ -61,11 +61,14 @@ import {
   type VectorMetric,
   type VectorSearchParams,
 } from "../../../backend/types";
+import { compileRelevanceCandidateOrder } from "../../order";
 import { sql, type SqlFragment } from "../../sql-fragment";
+import { sqliteDialect } from "../sqlite";
 import {
   assertFiniteEmbedding,
   quoteIdentifier,
   VECTOR_CONTRIBUTION_PREFIX,
+  vectorDefinedDistanceConditions,
   vectorMinScoreCondition,
   vectorPhysicalName,
   vectorScoreExpression,
@@ -111,6 +114,9 @@ const SQLITE_VEC_CAPABILITIES: VectorCapabilities = {
     reason:
       "a vec0 KNN takes only `k` (the page size); sqlite-vec exposes no ANN frontier parameter",
   },
+  // vec0's KNN is a deterministic brute-force scan in C: an unchanged table
+  // returns the same neighbors, ties included, on every execution.
+  repeatableApproximateSearch: { repeatable: true },
 };
 
 /** Whether a slot's declared index type maps to vec0's `MATCH … k =` KNN. */
@@ -344,6 +350,9 @@ export const sqliteVecStrategy: VectorStrategy = {
         sql`${table}."embedding" MATCH ${query}`,
         sql`k = ${knnK}`,
         sql`${table}."graph_id" = ${params.graphId}`,
+        // On vec0's own `distance` column, so the KNN never spends a `k` slot
+        // on an undefined distance.
+        ...vectorDefinedDistanceConditions(sql`distance`, params.metric),
       ];
       if (params.minScore !== undefined) {
         conditions.push(
@@ -356,6 +365,12 @@ export const sqliteVecStrategy: VectorStrategy = {
       if (candidates !== undefined) {
         conditions.push(sql`${table}."node_id" IN (${candidates})`);
       }
+      // The `k` cut is vec0's own: a MATCH query takes no tiebreak, so which
+      // tied neighbors make it follows the engine's storage order, not the
+      // node id (`compileRelevanceCandidateOrder`) every other cut uses. The
+      // KNN is a deterministic scan in C, so the cut is the same on every
+      // execution over an unchanged database: declared as
+      // `repeatableApproximateSearch`.
       const knnBody = sql`
         SELECT ${table}."node_id" AS node_id, ${score} AS score
         FROM ${table}
@@ -378,6 +393,7 @@ export const sqliteVecStrategy: VectorStrategy = {
     // Brute-force scan: no MATCH, so LIMIT is allowed (and required).
     const conditions: SqlFragment[] = [
       sql`${table}."graph_id" = ${params.graphId}`,
+      ...vectorDefinedDistanceConditions(distance, params.metric),
     ];
     if (candidates !== undefined) {
       conditions.push(sql`${table}."node_id" IN (${candidates})`);
@@ -392,7 +408,7 @@ export const sqliteVecStrategy: VectorStrategy = {
       SELECT ${table}."node_id" AS node_id, ${score} AS score
       FROM ${table}
       WHERE ${sql.join(conditions, sql` AND `)}
-      ORDER BY ${distance} ASC
+      ORDER BY ${compileRelevanceCandidateOrder(distance, "asc", { nodeKind: undefined, nodeId: sql`${table}."node_id"` }, sqliteDialect)}
       ${pageClause}
     `;
   },

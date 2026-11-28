@@ -9,6 +9,7 @@ import {
 import { DEFAULT_PAGINATION_LIMIT } from "../../constants";
 import { type GraphDef } from "../../core/define-graph";
 import {
+  CompilerInvariantError,
   ConfigurationError,
   UnsupportedPredicateError,
   ValidationError,
@@ -23,7 +24,6 @@ import { compareStrings } from "../../utils/compare";
 import { requireDefined } from "../../utils/presence";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import {
-  type FieldRef,
   mergeEdgeKinds,
   type NodePredicate,
   type OrderSpec,
@@ -32,23 +32,42 @@ import {
   type SelectiveField,
   type SortDirection,
 } from "../ast";
+import { isAggregatedStatement } from "../compiler/aggregated-statement";
 import {
   compileNameCheckedQuery,
   type CompileQueryOptions,
+  selectionOrderColumn,
 } from "../compiler/index";
 import {
-  buildCursorFromRow,
+  carriesFieldCursorKey,
+  describeSelectionOrder,
+  fieldCursorKeyColumn,
+  relevanceCursorKeyColumn,
+} from "../compiler/relevance-order";
+import {
+  type FieldOrderSpec,
+  missingRowIdentityOrder,
+} from "../compiler/row-identity-order";
+import {
   buildCursorFromValues,
+  buildKeysetCursor,
   type CursorData,
   decodeCursor,
+  extractCursorValue,
+  type KeysetKey,
+  keysetPositionValues,
   requireCursorField,
-  validateCursorColumns,
+  type SearchCursorBinding,
+  searchCursorFingerprint,
+  validateKeysetCursor,
 } from "../cursor";
+import { getDialect } from "../dialect";
+import { parseExactDoubleText } from "../dialect/exact-double-text";
 import { type SqlDialect } from "../dialect/types";
 import {
   adjustOrderByForDirection,
   applyCursorFilters,
-  buildPaginatedResult,
+  applyRelevanceCursorFilter,
   buildPaginatedResultFromRows,
   buildSelectContext,
   buildSelectiveFields,
@@ -148,6 +167,58 @@ export function setUnionableQueryClass(cls: UnionableQueryConstructor): void {
 /**
  * A query that can be executed.
  */
+/** A query's `store.batchOnce()` item (`compileOneStatementBatchItem`). */
+type QueryBatchItem<R> = Readonly<{
+  query: CompiledSelectSql;
+  provenance: Readonly<{ graphId: string; executionTarget: object }>;
+  outputNames: readonly string[];
+  orderBy: readonly Readonly<{
+    column: string;
+    direction: "asc" | "desc";
+    nulls: "first" | "last";
+  }>[];
+  mapRows: (rows: readonly Record<string, unknown>[]) => readonly R[];
+}>;
+
+/**
+ * Whether a hidden keyset column of a `store.batchOnce()` item carries its
+ * key as `DialectAdapter.batchExactNumber` renders it: a numeric field key
+ * of a full-text, vector or hybrid page (the `cursor-keyed` shape). The one
+ * decision the projection and the cursor that reads it back both make.
+ */
+function carriesBatchExactNumber(
+  order: OrderSpec,
+  shape: "selection-ordered" | "cursor-keyed",
+): boolean {
+  return (
+    shape === "cursor-keyed" &&
+    order.field.__type === "field_ref" &&
+    order.field.valueType === "number"
+  );
+}
+
+/**
+ * A hidden keyset column's value as the page's cursor carries it: the
+ * double the exact binary text `batchExactNumber` rendered denotes
+ * (`parseExactDoubleText`), where the column carries one, and the value
+ * itself otherwise.
+ */
+function readBatchKeyValue(
+  value: unknown,
+  order: OrderSpec,
+  shape: "selection-ordered" | "cursor-keyed",
+): unknown {
+  if (!carriesBatchExactNumber(order, shape) || typeof value !== "string")
+    return value;
+  const parsed = parseExactDoubleText(value);
+  if (parsed === undefined)
+    throw new CompilerInvariantError(
+      `A batched page's numeric keyset key came back as text that is not a double's exact binary text: ${value}`,
+      { phase: "relevance-cursor-key" },
+    );
+  return parsed;
+}
+
 export class ExecutableQuery<
   G extends GraphDef,
   Aliases extends AliasMap,
@@ -171,6 +242,10 @@ export class ExecutableQuery<
   // reuse across execute()/paginate()/stream() instead of rebuilding per call.
   #cachedAst: QueryAst | undefined;
   #cachedHasParameterReferences: boolean | undefined;
+  // What this query's cursor is bound to (`#searchCursorBinding`): invariant
+  // with the AST, and hashing an embedding is not free.
+  #cachedSearchCursorBinding:
+    Readonly<{ binding: SearchCursorBinding | undefined }> | undefined;
   // Per-instance compiled placeholder templates for the full and
   // selective-field ASTs (NOT_COMPUTED = not yet built; undefined = no fast
   // path). Reused across execute()/executeOn() calls so a repeated query
@@ -1000,6 +1075,18 @@ export class ExecutableQuery<
     }>[];
     mapRows: (rows: readonly Record<string, unknown>[]) => readonly R[];
   }> {
+    return this.#compileOneStatementBatchItem("selection-ordered");
+  }
+
+  /**
+   * The `store.batchOnce()` item of this query, compiled in `shape`. A page of
+   * a search compiles in the `cursor-keyed` shape, whose hidden order columns
+   * hold every field key of its keyset and whose relevance cursor-key columns
+   * hold the rest, so the batch can build the page's cursors.
+   */
+  #compileOneStatementBatchItem(
+    shape: "selection-ordered" | "cursor-keyed",
+  ): QueryBatchItem<R> {
     if (
       getQueryBuilderInternalContext(this.#config).expectedSchemaVersion !==
       undefined
@@ -1015,7 +1102,14 @@ export class ExecutableQuery<
       );
     }
     const ast = this.toAst();
-    const batchOrderBy = (ast.orderBy ?? []).map((order, index) => ({
+    // The hidden order columns carry a page's cursor values: in the
+    // `cursor-keyed` shape every field key of the keyset, including the row
+    // identity the compiler appends to a search's selection order.
+    const hiddenOrderSpecs: readonly OrderSpec[] =
+      shape === "cursor-keyed" ?
+        this.#paginationOrderBy()
+      : (ast.orderBy ?? []);
+    const batchOrderBy = hiddenOrderSpecs.map((order, index) => ({
       column: oneStatementBatchOrderColumn(index),
       direction: order.direction,
       nulls: resolveNullOrdering(order),
@@ -1028,7 +1122,7 @@ export class ExecutableQuery<
           projection: {
             fields: [
               ...ast.projection.fields,
-              ...(ast.orderBy ?? []).map((order, index) => {
+              ...hiddenOrderSpecs.map((order, index) => {
                 // An edge alias's columns live in its traversal's node CTE,
                 // as they do for an edge field a select() projects.
                 const edgeTraversal =
@@ -1045,6 +1139,9 @@ export class ExecutableQuery<
                   ...(edgeTraversal === undefined ?
                     {}
                   : { cteAlias: `cte_${edgeTraversal.nodeAlias}` }),
+                  ...(carriesBatchExactNumber(order, shape) ?
+                    { batchExactNumber: true as const }
+                  : {}),
                 };
               }),
             ],
@@ -1065,7 +1162,7 @@ export class ExecutableQuery<
         this.#config.graphId,
         this.#compileOptions(),
         "wrapped",
-        "selection-ordered",
+        shape,
       ),
       provenance: {
         graphId: this.#config.graphId,
@@ -1411,7 +1508,7 @@ export class ExecutableQuery<
       row,
       selectiveFields,
     );
-    return buildCursorFromRow(contextRow, this.#paginationOrderBy(), direction);
+    return this.#cursorFromRow(contextRow, row, direction);
   }
 
   #buildCursorContextFromSelectiveRow(
@@ -1579,92 +1676,217 @@ export class ExecutableQuery<
 
   /**
    * The ORDER BY used for keyset pagination: the caller's ORDER BY plus a final
-   * tiebreaker that identifies the RESULT ROW. Without a unique final key, a
-   * non-unique sort (e.g. `orderBy("p", "age")` with many equal ages) makes the
-   * keyset predicate `age > lastAge` skip every not-yet-returned equal-age row,
-   * silently losing data across pages.
+   * tiebreaker that identifies the RESULT ROW (`missingRowIdentityOrder`).
+   * Without a unique final key, a non-unique sort (e.g. `orderBy("p", "age")`
+   * with many equal ages) makes the keyset predicate `age > lastAge` skip every
+   * not-yet-returned equal-age row, silently losing data across pages.
    *
-   * A row is one start node together with one match per traversal, so its
-   * identity is the start node's plus, per traversal, the matched edge's id —
-   * an edge id is unique in the graph and determines the node it leads to, and
-   * two parallel edges between one pair of nodes are two rows. The start
-   * node's identity is `(kind, id)` when the start alias spans more than one
-   * kind and `id` alone otherwise. Each component the caller's order does not
-   * already name is appended after it, in traversal order. A query with no
-   * traversal keeps the start node's identity alone.
-   *
-   * The emitted sort, cursor predicate, cursor encoding, and cursor validation
-   * all use this order, including the selective-field-optimized path.
+   * These are the field keys of the keyset ({@link #keyset}), in its order,
+   * for every query: a full-text, vector or hybrid query's selection order
+   * (`describeSelectionOrder`) appends the same row identity after the same
+   * caller terms. The emitted sort, cursor predicate, cursor encoding, and
+   * cursor validation all use this order, including the
+   * selective-field-optimized path.
    */
-  #paginationOrderBy(): readonly (Omit<OrderSpec, "field"> & {
-    field: FieldRef;
-  })[] {
+  #paginationOrderBy(): readonly FieldOrderSpec[] {
     const orderBy = this.#state.orderBy.map((order) => ({
       ...order,
       field: requireCursorField(order.field),
     }));
-    function missingIdentityKey(
-      alias: string,
-      fieldName: "kind" | "id",
-      nullable: boolean,
-    ): readonly (OrderSpec & { field: FieldRef })[] {
-      const named = orderBy.some(
-        (spec) =>
-          spec.field.alias === alias &&
-          spec.field.path.length === 1 &&
-          spec.field.path[0] === fieldName &&
-          spec.field.jsonPointer === undefined,
-      );
-      if (named) return [];
-      return [
-        {
-          field: {
-            __type: "field_ref",
-            alias,
-            nullable,
-            path: [fieldName],
-            valueType: "string",
-          },
-          direction: "asc",
-        },
-      ];
-    }
-    function missingNodeIdentity(
-      alias: string,
-      kinds: readonly string[],
-      nullable: boolean,
-    ): readonly (OrderSpec & { field: FieldRef })[] {
-      return [
-        ...(kinds.length > 1 ?
-          missingIdentityKey(alias, "kind", nullable)
-        : []),
-        ...missingIdentityKey(alias, "id", nullable),
-      ];
-    }
-    const tiebreaker = [
-      ...missingNodeIdentity(
-        this.#state.startAlias,
-        this.#state.startKinds,
-        false,
-      ),
-      ...(this.#keysetIdentifiesMatchRows() ?
-        this.#state.traversals.flatMap((traversal) =>
-          missingIdentityKey(traversal.edgeAlias, "id", traversal.optional),
-        )
-      : []),
-    ];
+    const tiebreaker = missingRowIdentityOrder(orderBy, {
+      startAlias: this.#state.startAlias,
+      startKinds: this.#state.startKinds,
+      traversals:
+        this.#keysetIdentifiesMatchRows() ? this.#state.traversals : [],
+    });
     return tiebreaker.length === 0 ? orderBy : [...orderBy, ...tiebreaker];
+  }
+
+  /**
+   * What this query's cursor is bound to when the query is a full-text,
+   * vector or hybrid search (`selectionOrderColumn`): the search it positions
+   * and how its dialect carries a relevance key. `undefined` for any other
+   * query, whose keyset is its field keys alone.
+   */
+  #searchCursorBinding(): SearchCursorBinding | undefined {
+    if (this.#cachedSearchCursorBinding === undefined) {
+      const ast = this.toAst();
+      this.#cachedSearchCursorBinding =
+        selectionOrderColumn(ast) === undefined ?
+          { binding: undefined }
+        : {
+            binding: {
+              fingerprint: searchCursorFingerprint(ast, this.#dialect()),
+              textAdmitsNul: getDialect(this.#dialect()).capabilities
+                .textAdmitsNul,
+              bindRelevanceKey: getDialect(this.#dialect()).relevanceCursorKey
+                .bind,
+            },
+          };
+    }
+    return this.#cachedSearchCursorBinding.binding;
+  }
+
+  /**
+   * The keys cursor pagination positions a row by, in order. For a query
+   * without a relevance order, {@link #paginationOrderBy}. For a full-text,
+   * vector or hybrid query, the order its statement selects in
+   * (`describeSelectionOrder`): the relevance keys where its ORDER BY reads
+   * them, around the same field keys {@link #paginationOrderBy} lists, so a
+   * page boundary falls exactly where `execute()` orders the rows.
+   */
+  #keyset(): readonly KeysetKey[] {
+    const fieldKeys = this.#paginationOrderBy();
+    if (this.#searchCursorBinding() === undefined)
+      return fieldKeys.map((spec) => ({ kind: "field", spec }));
+    return describeSelectionOrder(this.toAst()).map((key) => {
+      switch (key.kind) {
+        case "relevance": {
+          return { kind: "relevance", key: key.key };
+        }
+        case "field": {
+          return {
+            kind: "field",
+            spec: { ...key.spec, field: requireCursorField(key.spec.field) },
+          };
+        }
+        case "output": {
+          throw new CompilerInvariantError(
+            "A paginated query's selection order names an aggregate output",
+            { phase: "relevance-cursor-key" },
+          );
+        }
+      }
+    });
+  }
+
+  /**
+   * The cursor of one row of a page. `context` holds the row's selected
+   * values as {@link extractCursorValue} reads them; `relevanceRow` holds the
+   * cursor-key columns a search statement returns (`relevanceCursorKeyColumn`).
+   * A query without a search encodes exactly the cursor it always has.
+   */
+  #cursorFromRow(
+    context: Record<string, unknown>,
+    relevanceRow: Record<string, unknown>,
+    direction: "f" | "b",
+  ): string {
+    const search = this.#searchCursorBinding() !== undefined;
+    // A search statement projects the value a field key's ORDER BY term
+    // sorts by where the row does not return it (`carriesFieldCursorKey`).
+    // Its field keys are these, in this order (`describeSelectionOrder`).
+    const fieldValues = this.#paginationOrderBy().map((spec, index) =>
+      search && carriesFieldCursorKey(spec) ?
+        relevanceRow[fieldCursorKeyColumn(index)]
+      : extractCursorValue(context, spec),
+    );
+    return this.#cursorFromValues(fieldValues, relevanceRow, direction);
+  }
+
+  /** {@link #cursorFromRow} from the field keys' values, in keyset order. */
+  #cursorFromValues(
+    fieldValues: readonly unknown[],
+    relevanceRow: Record<string, unknown>,
+    direction: "f" | "b",
+  ): string {
+    const search = this.#searchCursorBinding();
+    if (search === undefined)
+      return buildCursorFromValues(
+        fieldValues,
+        this.#paginationOrderBy(),
+        direction,
+      );
+    const keys = this.#keyset();
+    return buildKeysetCursor({
+      keys,
+      fieldValues,
+      relevanceValues: keys
+        .filter((key) => key.kind === "relevance")
+        .map((_key, index) => relevanceRow[relevanceCursorKeyColumn(index)]),
+      direction,
+      search,
+    });
+  }
+
+  /**
+   * The refusals of a terminal that pages this query: a search whose rows
+   * are groups (a cursor positions match rows, and a group's relevance is an
+   * aggregate no row filter can compare), and a query without an order.
+   */
+  #requirePaginationOrder(surface: "page" | "paginate" | "stream"): void {
+    if (
+      this.#searchCursorBinding() !== undefined &&
+      isAggregatedStatement(this.toAst())
+    )
+      throw new ConfigurationError(
+        `${surface}() cannot page a full-text, vector or hybrid query whose rows are groups (groupByNode()): ` +
+          "a cursor positions match rows, and a group's relevance is an aggregate of its members.",
+        { code: "GROUPED_SEARCH_PAGINATION_UNSUPPORTED", operation: surface },
+        {
+          suggestion:
+            "Read the groups with execute() and an explicit limit(), or page the search without groupByNode().",
+        },
+      );
+    // A search is ordered by relevance whether or not it has an orderBy().
+    if (
+      this.#state.orderBy.length > 0 ||
+      this.#searchCursorBinding() !== undefined
+    )
+      return;
+    if (surface === "stream")
+      throw new ValidationError(
+        "Streaming requires ORDER BY. Add .orderBy() before .stream()",
+        {
+          issues: [
+            { path: "orderBy", message: "ORDER BY is required for streaming" },
+          ],
+        },
+        {
+          suggestion: `Add .orderBy(alias, field) before .stream() to specify sort order.`,
+        },
+      );
+    throw new ValidationError(
+      `Cursor pagination requires ORDER BY. Add .orderBy() before .${surface}()`,
+      {
+        issues: [
+          {
+            path: "orderBy",
+            message: "ORDER BY is required for cursor pagination",
+          },
+        ],
+      },
+      {
+        suggestion: `Add .orderBy(alias, field) before .${surface}() to specify sort order.`,
+      },
+    );
+  }
+
+  /**
+   * Decodes `cursor` and refuses it unless it positions this keyset; its field
+   * values come back in the form their position compares.
+   */
+  #decodeCursorFor(cursor: string | undefined): CursorData | undefined {
+    if (cursor === undefined) return undefined;
+    return validateKeysetCursor(
+      decodeCursor(cursor),
+      this.#keyset(),
+      this.#searchCursorBinding(),
+      getDialect(this.#dialect()).capabilities,
+    );
   }
 
   /**
    * Executes a paginated query using cursor-based keyset pagination.
    *
    * Cursor pagination is efficient for large datasets as it avoids OFFSET.
-   * Requires ORDER BY to be specified for deterministic results.
+   * Requires ORDER BY to be specified for deterministic results, except on a
+   * full-text, vector or hybrid query, which is ordered by relevance.
    *
    * @param options - Pagination options (first/after for forward, last/before for backward)
    * @throws ValidationError if ORDER BY is not specified
    * @throws ValidationError if cursor columns don't match query ORDER BY columns
+   * @throws ValidationError (`SEARCH_CURSOR_MISMATCH`) if the cursor does not
+   *   position this search
    */
   async paginate(options: PaginateOptions): Promise<PaginatedResult<R>> {
     this.#refuseCheckedReadSurface("paginate");
@@ -1681,23 +1903,7 @@ export class ExecutableQuery<
       );
     }
 
-    // Validate ORDER BY is present
-    if (this.#state.orderBy.length === 0) {
-      throw new ValidationError(
-        "Cursor pagination requires ORDER BY. Add .orderBy() before .paginate()",
-        {
-          issues: [
-            {
-              path: "orderBy",
-              message: "ORDER BY is required for cursor pagination",
-            },
-          ],
-        },
-        {
-          suggestion: `Add .orderBy(alias, field) before .paginate() to specify sort order.`,
-        },
-      );
-    }
+    this.#requirePaginationOrder("paginate");
 
     // Determine pagination direction and parameters
     const isBackward =
@@ -1706,11 +1912,7 @@ export class ExecutableQuery<
     const cursor = options.after ?? options.before;
 
     // Decode and validate cursor if provided
-    let cursorData: CursorData | undefined;
-    if (cursor) {
-      cursorData = decodeCursor(cursor);
-      validateCursorColumns(cursorData, this.#paginationOrderBy());
-    }
+    const cursorData = this.#decodeCursorFor(cursor);
 
     // Fetch limit + 1 to detect if there are more pages
     const fetchLimit = limit + 1;
@@ -1754,19 +1956,21 @@ export class ExecutableQuery<
     );
 
     // Build paginated result with cursors
-    return buildPaginatedResult(
+    return buildPaginatedResultFromRows(
       data,
       orderedRows,
-      this.#paginationOrderBy(),
-      limit,
       hasMore,
       isBackward,
       cursor,
-      (row) =>
-        buildSelectContext<Aliases, EdgeAliases, RecursiveAliases>(
+      (row, cursorDirection) =>
+        this.#cursorFromRow(
+          buildSelectContext<Aliases, EdgeAliases, RecursiveAliases>(
+            row,
+            this.#state.startAlias,
+            this.#state.traversals,
+          ),
           row,
-          this.#state.startAlias,
-          this.#state.traversals,
+          cursorDirection,
         ),
     );
   }
@@ -1793,22 +1997,7 @@ export class ExecutableQuery<
           "Use store.query() or pass a backend to createQueryBuilder().",
       );
     }
-    if (this.#state.orderBy.length === 0) {
-      throw new ValidationError(
-        "Cursor pagination requires ORDER BY. Add .orderBy() before .page()",
-        {
-          issues: [
-            {
-              path: "orderBy",
-              message: "ORDER BY is required for cursor pagination",
-            },
-          ],
-        },
-        {
-          suggestion: `Add .orderBy(alias, field) before .page() to specify sort order.`,
-        },
-      );
-    }
+    this.#requirePaginationOrder("page");
 
     const isBackward =
       pageOptions.last !== undefined || pageOptions.before !== undefined;
@@ -1816,17 +2005,15 @@ export class ExecutableQuery<
       pageOptions.first ?? pageOptions.last ?? DEFAULT_PAGINATION_LIMIT;
     const cursor = pageOptions.after ?? pageOptions.before;
     const paginationOrderBy = this.#paginationOrderBy();
-    const cursorData = cursor === undefined ? undefined : decodeCursor(cursor);
-    if (cursorData !== undefined)
-      validateCursorColumns(cursorData, paginationOrderBy);
+    const cursorData = this.#decodeCursorFor(cursor);
     const direction = isBackward ? "backward" : "forward";
-    const orderBy = adjustOrderByForDirection(paginationOrderBy, direction);
+    const search = this.#searchCursorBinding() !== undefined;
     const pagedQuery = new ExecutableQuery(
       this.#config,
       {
         ...this.#state,
-        ...this.#cursorFilters(cursorData, paginationOrderBy, direction),
-        orderBy,
+        ...this.#cursorFilters(cursorData, direction),
+        ...this.#pageOrder(direction),
         limit: pageLimit + 1,
         offset: undefined,
       },
@@ -1836,25 +2023,42 @@ export class ExecutableQuery<
     return {
       execute: () => this.paginate(pageOptions),
       compileOneStatementBatchItem: () => {
-        const item = requireDefined(
-          pagedQuery.compileOneStatementBatchItem?.(),
-        );
-        const cursorOutputNames = orderBy.map((_spec, index) =>
+        const batchShape = search ? "cursor-keyed" : "selection-ordered";
+        const item = pagedQuery.#compileOneStatementBatchItem(batchShape);
+        const cursorOutputNames = paginationOrderBy.map((_spec, index) =>
           oneStatementBatchOrderColumn(index),
         );
-        function cursorFromRow(
+        const relevanceOutputNames =
+          search ?
+            [
+              ...this.#keyset()
+                .filter((key) => key.kind === "relevance")
+                .map((_key, index) => relevanceCursorKeyColumn(index)),
+              ...paginationOrderBy.flatMap((spec, index) =>
+                carriesFieldCursorKey(spec) ?
+                  [fieldCursorKeyColumn(index)]
+                : [],
+              ),
+            ]
+          : [];
+        const cursorFromRow = (
           row: Record<string, unknown>,
           cursorDirection: "f" | "b",
-        ): string {
-          return buildCursorFromValues(
-            cursorOutputNames.map((outputName) => row[outputName]),
-            paginationOrderBy,
+        ): string =>
+          this.#cursorFromValues(
+            paginationOrderBy.map((spec, index) =>
+              readBatchKeyValue(
+                row[oneStatementBatchOrderColumn(index)],
+                spec,
+                batchShape,
+              ),
+            ),
+            row,
             cursorDirection,
           );
-        }
         return {
           ...item,
-          hiddenOutputNames: cursorOutputNames,
+          hiddenOutputNames: [...cursorOutputNames, ...relevanceOutputNames],
           mapRows: (rows: readonly Record<string, unknown>[]) => {
             const hasMore = rows.length > pageLimit;
             const fetchedRows = hasMore ? rows.slice(0, pageLimit) : rows;
@@ -1879,7 +2083,8 @@ export class ExecutableQuery<
    * Returns an async iterator that streams results in batches.
    *
    * Uses cursor pagination internally for efficient memory usage.
-   * Requires ORDER BY to be specified for deterministic results.
+   * Requires ORDER BY to be specified for deterministic results, except on a
+   * full-text, vector or hybrid query, which is ordered by relevance.
    *
    * @param options - Stream options (batchSize defaults to 1000)
    * @throws ValidationError if ORDER BY is not specified
@@ -1887,20 +2092,7 @@ export class ExecutableQuery<
   stream(options?: StreamOptions): AsyncIterable<R> {
     this.#refuseCheckedReadSurface("stream");
     refuseRecursivePagination(this.#state, "stream");
-    // Validate ORDER BY is present
-    if (this.#state.orderBy.length === 0) {
-      throw new ValidationError(
-        "Streaming requires ORDER BY. Add .orderBy() before .stream()",
-        {
-          issues: [
-            { path: "orderBy", message: "ORDER BY is required for streaming" },
-          ],
-        },
-        {
-          suggestion: `Add .orderBy(alias, field) before .stream() to specify sort order.`,
-        },
-      );
-    }
+    this.#requirePaginationOrder("stream");
 
     const batchSize = getStreamBatchSize(options);
     return createStreamIterable(batchSize, (paginateOptions) =>
@@ -1922,23 +2114,49 @@ export class ExecutableQuery<
   }
 
   /**
+   * The order one page reads its rows in. Forward: the query's own. Backward:
+   * the exact reverse, so the rows before the cursor come nearest first. A
+   * query without a search reverses its keyset terms; a search keeps its
+   * `orderBy()` and reverses its whole selection order, relevance keys
+   * included (`reverseSelectionOrder`).
+   */
+  #pageOrder(
+    direction: "forward" | "backward",
+  ): Pick<QueryBuilderState, "orderBy" | "reverseSelectionOrder"> {
+    if (this.#searchCursorBinding() === undefined)
+      return {
+        orderBy: adjustOrderByForDirection(
+          this.#paginationOrderBy(),
+          direction,
+        ),
+      };
+    return {
+      orderBy: this.#state.orderBy,
+      ...(direction === "backward" && { reverseSelectionOrder: true as const }),
+    };
+  }
+
+  /**
    * This query's filters for one page: unchanged for the first page, with the
-   * cursor applied (`applyCursorFilters`) for every later one. Spread over
-   * the state by `page()` and over the AST by `#executeWithCursor`, so the
-   * two page builders place the cursor identically.
+   * cursor applied for every later one. Spread over the state by `page()` and
+   * over the AST by `#executeWithCursor`, so the two page builders place the
+   * cursor identically. A search's cursor is a completed-match predicate over
+   * its whole keyset (`applyRelevanceCursorFilter`), so every page ranks the
+   * candidates `execute()` ranks; any other query's goes through
+   * `applyCursorFilters`.
    */
   #cursorFilters(
     cursorData: CursorData | undefined,
-    paginationOrderBy: readonly OrderSpec[],
     direction: "forward" | "backward",
   ): Readonly<{
     predicates: readonly NodePredicate[];
     resultPredicate?: PredicateExpression;
   }> {
+    const search = this.#searchCursorBinding();
     const { predicates, resultPredicate } =
-      cursorData === undefined ?
-        this.#state
-      : applyCursorFilters(
+      cursorData === undefined ? this.#state
+      : search === undefined ?
+        applyCursorFilters(
           {
             startAlias: this.#state.startAlias,
             positionsCompletedMatch: this.#keysetIdentifiesMatchRows(),
@@ -1946,9 +2164,18 @@ export class ExecutableQuery<
             resultPredicate: this.#state.resultPredicate,
           },
           cursorData,
-          paginationOrderBy,
+          this.#paginationOrderBy(),
           direction,
-        );
+        )
+      : {
+          predicates: this.#state.predicates,
+          resultPredicate: applyRelevanceCursorFilter(
+            this.#state.resultPredicate,
+            keysetPositionValues(cursorData, this.#keyset(), search),
+            this.#keyset(),
+            direction,
+          ),
+        };
     return {
       predicates,
       ...(resultPredicate === undefined ? {} : { resultPredicate }),
@@ -1966,18 +2193,15 @@ export class ExecutableQuery<
     options?: Readonly<{ selectiveFields?: readonly SelectiveField[] }>,
   ): Promise<readonly Record<string, unknown>[]> {
     const ast = this.toAst();
+    const { orderBy, reverseSelectionOrder } = this.#pageOrder(direction);
 
-    const orderBy = adjustOrderByForDirection(
-      this.#paginationOrderBy(),
-      direction,
-    );
-
-    // Apply modified ORDER BY, cursor filters, and limit to AST (discard offset)
-    const { offset: _discarded, ...astWithoutOffset } = ast;
-    const modifiedAst = {
+    // Apply page ORDER BY, cursor filters, and limit to AST (discard offset)
+    const { offset: _discarded, orderBy: _replaced, ...astWithoutOffset } = ast;
+    const modifiedAst: QueryAst = {
       ...astWithoutOffset,
-      ...this.#cursorFilters(cursorData, this.#paginationOrderBy(), direction),
-      orderBy,
+      ...this.#cursorFilters(cursorData, direction),
+      ...(orderBy.length > 0 && { orderBy }),
+      ...(reverseSelectionOrder === true && { reverseSelectionOrder }),
       limit,
       ...(options?.selectiveFields !== undefined && {
         selectiveFields: options.selectiveFields,
@@ -1990,6 +2214,7 @@ export class ExecutableQuery<
       this.#config.graphId,
       this.#compileOptions(),
       "decoded",
+      this.#searchCursorBinding() === undefined ? "rows" : "cursor-keyed",
     );
     const rawRows = await backend.execute<Record<string, unknown>>(compiled);
     const dialect = this.#config.dialect ?? "sqlite";

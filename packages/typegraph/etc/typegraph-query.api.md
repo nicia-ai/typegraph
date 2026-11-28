@@ -1531,7 +1531,7 @@ export class ExecutableProjectionQuery<Fields extends DatabaseProjection, Contex
     }>;
 }
 
-// @public
+// @public (undocumented)
 export class ExecutableQuery<G extends GraphDef, Aliases extends AliasMap, EdgeAliases extends EdgeAliasMap = {}, RecursiveAliases extends RecursiveAliasMap = {}, R = unknown> {
     constructor(config: QueryBuilderConfig, state: QueryBuilderState, selectFunction: (context: SelectContext<Aliases, EdgeAliases, RecursiveAliases>) => R);
     // @internal
@@ -3573,7 +3573,7 @@ type Predicate = Readonly<{
 }>;
 
 // @public
-export type PredicateExpression = ComparisonPredicate | TupleComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | DatabaseExpressionPredicate;
+export type PredicateExpression = ComparisonPredicate | TupleComparisonPredicate | StringPredicate | NullPredicate | BetweenPredicate | ArrayPredicate | ObjectPredicate | AndPredicate | OrPredicate | NotPredicate | AggregateComparisonPredicate | ExistsSubquery | InSubquery | VectorSimilarityPredicate | FulltextMatchPredicate | RelevanceComparisonPredicate | DatabaseExpressionPredicate;
 
 // @public (undocumented)
 export type PreparedBindings<Parameters extends PreparedParameterDeclaration> = {
@@ -3615,6 +3615,7 @@ export type ProjectedField = Readonly<{
     outputName: string;
     source: AggregateExpr | DatabaseExpression | FieldRef;
     cteAlias?: string;
+    batchExactNumber?: true;
 }>;
 
 // @public
@@ -3683,6 +3684,7 @@ export type QueryAst = Readonly<{
     temporalMode: TemporalOptions;
     recordedAsOf?: string;
     orderBy?: readonly OrderSpec[];
+    reverseSelectionOrder?: true;
     limit?: number;
     offset?: number;
     groupBy?: GroupBySpec;
@@ -3821,6 +3823,7 @@ export type QueryBuilderState = Readonly<{
     resultPredicate?: PredicateExpression;
     projection: readonly ProjectedField[];
     orderBy: readonly OrderSpec[];
+    reverseSelectionOrder?: true;
     aggregateOrderBy: readonly AggregateOrderSpec[];
     limit: number | undefined;
     offset: number | undefined;
@@ -4122,8 +4125,31 @@ type ReleaseIndexMaterializationClaimParams = Readonly<{
     token: string;
 }>;
 
+// @public
+export type RelevanceComparisonPredicate = Readonly<{
+    __type: "relevance_comparison";
+    source: RelevanceSortSource;
+    op: "eq" | "gt" | "lt";
+    value: string | number;
+}> | Readonly<{
+    __type: "relevance_comparison";
+    source: RelevanceSortSource;
+    op: "isNull" | "isNotNull";
+}>;
+
+// @public
+export type RelevanceSortSource = "fulltext_rank" | "vector_distance" | "hybrid_score" | "hybrid_node_id";
+
 // @public (undocumented)
 type RemovalMaterializationBackend = Pick<GraphBackend, "ensureKindRemovalsTable" | "getPendingKindRemovals" | "getAllKindRemovals" | "recordKindRemoval" | "ensureReconciliationMarkersTable" | "getReconciliationMarker" | "setReconciliationMarker">;
+
+// @public
+type RepeatableApproximateSearch = Readonly<{
+    repeatable: true;
+}> | Readonly<{
+    repeatable: false;
+    reason: string;
+}>;
 
 // @public
 export type RequiredRecursiveAliasValue<RA> = RA extends RecursiveAlias<"depth", "ids" | "qualified", boolean> ? number : RA extends RecursiveAlias<"path", "qualified", boolean> ? QualifiedRecursivePath : RA extends RecursiveAlias<"path", "ids", boolean> ? readonly string[] : never;
@@ -5123,6 +5149,7 @@ type VectorCapabilities = Readonly<{
     maxDimensions: number;
     filteredApproximateSearch: FilteredApproximateSearch;
     searchFrontierTuning: VectorSearchFrontierTuning;
+    repeatableApproximateSearch?: RepeatableApproximateSearch;
 }>;
 
 // @public

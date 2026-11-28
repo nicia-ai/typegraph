@@ -9,17 +9,21 @@
  * - Column identifiers for validation
  */
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
-import { ValidationError } from "../src";
+import { defineGraph, defineNode, searchable, ValidationError } from "../src";
 import { type OrderSpec } from "../src/query/ast";
+import { createQueryBuilder } from "../src/query/builder";
 import {
   buildColumnId,
   buildCursorFromRow,
   decodeCursor,
   encodeCursor,
   extractCursorValue,
+  searchCursorFingerprint,
   validateCursorColumns,
 } from "../src/query/cursor";
+import { buildKindRegistry } from "../src/registry";
 
 describe("Cursor Encoding", () => {
   it("encodes cursor data to URL-safe base64", () => {
@@ -134,6 +138,17 @@ describe("Cursor Decoding", () => {
     );
     expect(() => decodeCursor(mismatchedCounts)).toThrow(ValidationError);
     expect(() => decodeCursor(mismatchedCounts)).toThrow(/mismatch/i);
+  });
+
+  it("throws ValidationError for a column that is not a string", () => {
+    // An object whose conversion to text throws reached a refusal's message
+    // as a TypeError.
+    for (const column of [{ toString: false }, 1, true]) {
+      const forged = btoa(
+        JSON.stringify({ v: 1, d: "f", vals: [1], cols: [column] }),
+      );
+      expect(() => decodeCursor(forged)).toThrow(ValidationError);
+    }
   });
 });
 
@@ -326,7 +341,7 @@ describe("validateCursorColumns", () => {
 
     // Should not throw
     expect(() => {
-      validateCursorColumns(cursorData, orderSpecs);
+      validateCursorColumns(cursorData, orderSpecs, { textAdmitsNul: true });
     }).not.toThrow();
   });
 
@@ -350,7 +365,7 @@ describe("validateCursorColumns", () => {
     ];
 
     expect(() => {
-      validateCursorColumns(cursorData, orderSpecs);
+      validateCursorColumns(cursorData, orderSpecs, { textAdmitsNul: true });
     }).toThrow(ValidationError);
   });
 
@@ -374,7 +389,82 @@ describe("validateCursorColumns", () => {
     ];
 
     expect(() => {
-      validateCursorColumns(cursorData, orderSpecs);
+      validateCursorColumns(cursorData, orderSpecs, { textAdmitsNul: true });
     }).toThrow(ValidationError);
+  });
+});
+
+describe("searchCursorFingerprint", () => {
+  const Document = defineNode("Doc", {
+    schema: z.object({ title: searchable({ language: "english" }) }),
+  });
+  const Post = defineNode("Post", {
+    schema: z.object({ title: searchable({ language: "english" }) }),
+  });
+  const graph = defineGraph({
+    id: "fingerprint",
+    nodes: { Doc: { type: Document }, Post: { type: Post } },
+    edges: {},
+  });
+  const search = (kind: "Doc" | "Post", text: string) =>
+    createQueryBuilder<typeof graph>(graph.id, buildKindRegistry(graph))
+      .from(kind, "a")
+      .whereNode("a", (a) => a.$fulltext.matches(text, 10))
+      .select((ctx) => ({ id: ctx.a.id }))
+      .toAst();
+
+  it("tells apart searches over different kinds, texts and dialects", () => {
+    const document = searchCursorFingerprint(
+      search("Doc", "climate"),
+      "sqlite",
+    );
+    expect(searchCursorFingerprint(search("Doc", "climate"), "sqlite")).toBe(
+      document,
+    );
+    expect(
+      new Set([
+        document,
+        searchCursorFingerprint(search("Post", "climate"), "sqlite"),
+        searchCursorFingerprint(search("Doc", "report"), "sqlite"),
+        searchCursorFingerprint(search("Doc", "climate"), "postgres"),
+      ]).size,
+    ).toBe(4);
+  });
+
+  const searchDocuments = (text: string) =>
+    createQueryBuilder<typeof graph>(graph.id, buildKindRegistry(graph))
+      .from("Doc", "d")
+      .whereNode("d", (d) => d.$fulltext.matches(text, 10))
+      .select((ctx) => ({ id: ctx.d.id }))
+      .toAst();
+
+  it("does not collide where a 32-bit hash did", () => {
+    // Both texts hashed to 97757315 under the 32-bit fingerprint, so each
+    // search accepted the other's cursor.
+    for (const dialect of ["sqlite", "postgres"] as const) {
+      expect(
+        searchCursorFingerprint(searchDocuments("climate 2957"), dialect),
+      ).not.toBe(
+        searchCursorFingerprint(searchDocuments("climate 52473"), dialect),
+      );
+    }
+  });
+
+  it("is a 128-bit digest", () => {
+    expect(searchCursorFingerprint(search("Doc", "climate"), "sqlite")).toMatch(
+      /^[\da-f]{32}$/,
+    );
+  });
+});
+
+describe("encodeCursor", () => {
+  it("encodes values outside Latin-1 and decodes them unchanged", () => {
+    const data = {
+      v: 1,
+      d: "f",
+      vals: ["東京", "😀", "é"],
+      cols: ["a", "b", "c"],
+    } as const;
+    expect(decodeCursor(encodeCursor(data))).toEqual(data);
   });
 });

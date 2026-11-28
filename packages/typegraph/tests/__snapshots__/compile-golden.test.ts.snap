@@ -6310,9 +6310,11 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
     "2026-01-01T00:00:00.000Z",
     "Document",
     "[0.1,0.2,0.3]",
+    "[0.1,0.2,0.3]",
     "compile_golden",
     "Document",
     "[0.1,0.2,0.3]",
+    5,
     5,
     5,
   ],
@@ -6329,23 +6331,36 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC) AS ord
       FROM (
-        
+        SELECT
+          node_id,
+          node_kind,
+          distance,
+          score
+        FROM (
+          
         SELECT node_id, $5 AS node_kind, (1.0 - score) AS distance, score
         FROM (
-      SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $6::vector))) AS score
-      FROM "tg_vec_compile_golden_document_embedding_8872495b"
-      WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = $7 AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = $8)
-      ORDER BY ("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $9::vector) ASC
-      LIMIT $10
-    ) AS tg_ann_src
+        WITH tg_vec_index_candidates AS MATERIALIZED (
+        SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $6::vector))) AS score, ("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $7::vector) AS distance
+        FROM "tg_vec_compile_golden_document_embedding_8872495b"
+        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = $8 AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = $9)
+        ORDER BY ("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $10::vector) ASC
+        FETCH FIRST $11 ROWS WITH TIES
+      )
+        SELECT node_id, score FROM tg_vec_index_candidates
+        WHERE distance < 3
+        ORDER BY (distance + 0) ASC NULLS LAST, node_id COLLATE "C" ASC
+        LIMIT $12
+      ) AS tg_ann_src
       
-        ORDER BY distance ASC
-        LIMIT $11
+        ) AS vec_candidates
+        ORDER BY distance ASC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC
+        LIMIT $13
       ) AS vec_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY CAST(cte_embeddings.distance AS DOUBLE PRECISION) ASC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6362,6 +6377,7 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
     "[0.1,0.2,0.3]",
     20,
     "compile_golden",
+    "[0.1,0.2,0.3]",
     "Document",
     "[0.1,0.2,0.3]",
     5,
@@ -6380,24 +6396,31 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
-        
+        SELECT
+          node_id,
+          node_kind,
+          distance,
+          score
+        FROM (
+          
         SELECT node_id, ? AS node_kind, (1.0 - score) AS distance, score
         FROM (
         SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (vector_distance_cos("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vector32(?)))) AS score
         FROM vector_top_k(?, vector32(?), ?)
         JOIN "tg_vec_compile_golden_document_embedding_8872495b" ON "tg_vec_compile_golden_document_embedding_8872495b".rowid = id
-        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = ?)
-        ORDER BY vector_distance_cos("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vector32(?)) ASC
+        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND vector_distance_cos("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vector32(?)) < 3 AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = ?)
+        ORDER BY vector_distance_cos("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vector32(?)) ASC NULLS LAST, "tg_vec_compile_golden_document_embedding_8872495b"."node_id" ASC
         LIMIT ?
       ) AS tg_ann_src
       
-        ORDER BY distance ASC
+        ) AS vec_candidates
+        ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC
         LIMIT ?
       ) AS vec_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6429,22 +6452,29 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
-        
+        SELECT
+          node_id,
+          node_kind,
+          distance,
+          score
+        FROM (
+          
         SELECT node_id, ? AS node_kind, (1.0 - score) AS distance, score
         FROM (
         SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (vec_distance_cosine("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vec_f32(?)))) AS score
         FROM "tg_vec_compile_golden_document_embedding_8872495b"
-        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."embedding" MATCH vec_f32(?) AND k = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = ?)
+        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."embedding" MATCH vec_f32(?) AND k = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND distance < 3 AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = ?)
         ORDER BY distance ASC
       ) AS tg_ann_src
       
-        ORDER BY distance ASC
+        ) AS vec_candidates
+        ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC
         LIMIT ?
       ) AS vec_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6460,6 +6490,7 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
     "[0.1,0.2,0.3]",
     "Document",
     "compile_golden",
+    "[0.1,0.2,0.3]",
     5,
   ],
   "sql": "WITH 
@@ -6475,9 +6506,15 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC) AS ord
       FROM (
-        
+        SELECT
+          node_id,
+          node_kind,
+          distance,
+          score
+        FROM (
+          
       SELECT
         "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id,
         $5 AS node_kind,
@@ -6495,13 +6532,14 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         ON scoped_relevance_nodes.node_id =
            "tg_vec_compile_golden_document_embedding_8872495b"."node_id"
        AND scoped_relevance_nodes.node_kind = $8
-      WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = $9
+      WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = $9 AND ("tg_vec_compile_golden_document_embedding_8872495b"."embedding" <=> $10::vector) < 3
     
-        ORDER BY distance ASC
-        LIMIT $10
+        ) AS vec_candidates
+        ORDER BY distance ASC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC
+        LIMIT $11
       ) AS vec_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY CAST(cte_embeddings.distance AS DOUBLE PRECISION) ASC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6517,6 +6555,7 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
     "[0.1,0.2,0.3]",
     "Document",
     "compile_golden",
+    "[0.1,0.2,0.3]",
     5,
   ],
   "sql": "WITH 
@@ -6532,9 +6571,15 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
-        
+        SELECT
+          node_id,
+          node_kind,
+          distance,
+          score
+        FROM (
+          
       SELECT
         "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id,
         ? AS node_kind,
@@ -6552,13 +6597,14 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         ON scoped_relevance_nodes.node_id =
            "tg_vec_compile_golden_document_embedding_8872495b"."node_id"
        AND scoped_relevance_nodes.node_kind = ?
-      WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ?
+      WHERE "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND vector_distance_cos("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vector32(?)) < 3
     
-        ORDER BY distance ASC
+        ) AS vec_candidates
+        ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC
         LIMIT ?
       ) AS vec_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6590,22 +6636,29 @@ exports[`compile-golden: query compiler ASTs > approximate vector similarity > c
         node_kind,
         distance,
         score,
-        ROW_NUMBER() OVER (ORDER BY distance ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
-        
+        SELECT
+          node_id,
+          node_kind,
+          distance,
+          score
+        FROM (
+          
         SELECT node_id, ? AS node_kind, (1.0 - score) AS distance, score
         FROM (
         SELECT "tg_vec_compile_golden_document_embedding_8872495b"."node_id" AS node_id, (1 - (vec_distance_cosine("tg_vec_compile_golden_document_embedding_8872495b"."embedding", vec_f32(?)))) AS score
         FROM "tg_vec_compile_golden_document_embedding_8872495b"
-        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."embedding" MATCH vec_f32(?) AND k = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = ?)
+        WHERE "tg_vec_compile_golden_document_embedding_8872495b"."embedding" MATCH vec_f32(?) AND k = ? AND "tg_vec_compile_golden_document_embedding_8872495b"."graph_id" = ? AND distance < 3 AND "tg_vec_compile_golden_document_embedding_8872495b"."node_id" IN (SELECT cte_d.d_id FROM cte_d WHERE cte_d.d_kind = ?)
         ORDER BY distance ASC
       ) AS tg_ann_src
       
-        ORDER BY distance ASC
+        ) AS vec_candidates
+        ORDER BY distance ASC NULLS LAST, node_kind ASC, node_id ASC
         LIMIT ?
       ) AS vec_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_embeddings ON cte_embeddings.node_id = cte_d.d_id AND cte_embeddings.node_kind = cte_d.d_kind ORDER BY cte_embeddings.distance ASC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6634,7 +6687,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         node_id,
         node_kind,
         rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC) AS ord
       FROM (
         SELECT
           "typegraph_node_fulltext"."node_id" AS node_id,
@@ -6654,11 +6707,11 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
          AND scoped_relevance_nodes.node_kind =
              "typegraph_node_fulltext"."node_kind"
         WHERE "typegraph_node_fulltext"."graph_id" = $6 AND "typegraph_node_fulltext"."node_kind" = $7 AND "typegraph_node_fulltext"."tsv" @@ websearch_to_tsquery("language", $8)
-        ORDER BY rank DESC, "typegraph_node_fulltext"."node_id" ASC
+        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" COLLATE "C" ASC, "typegraph_node_fulltext"."node_id" COLLATE "C" ASC
         LIMIT $9
       ) AS fts_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY cte_fulltext.rank DESC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY CAST(cte_fulltext.rank AS DOUBLE PRECISION) DESC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6686,7 +6739,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         node_id,
         node_kind,
         rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
         SELECT
           "typegraph_node_fulltext"."node_id" AS node_id,
@@ -6706,11 +6759,11 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
          AND scoped_relevance_nodes.node_kind =
              "typegraph_node_fulltext"."node_kind"
         WHERE "typegraph_node_fulltext"."graph_id" = ? AND "typegraph_node_fulltext"."node_kind" = ? AND "typegraph_node_fulltext" MATCH ?
-        ORDER BY rank DESC, "typegraph_node_fulltext"."node_id" ASC
+        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" ASC, "typegraph_node_fulltext"."node_id" ASC
         LIMIT ?
       ) AS fts_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY cte_fulltext.rank DESC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY cte_fulltext.rank DESC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6739,7 +6792,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         node_id,
         node_kind,
         rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC) AS ord
       FROM (
         SELECT
           "typegraph_node_fulltext"."node_id" AS node_id,
@@ -6759,11 +6812,11 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
          AND scoped_relevance_nodes.node_kind =
              "typegraph_node_fulltext"."node_kind"
         WHERE "typegraph_node_fulltext"."graph_id" = $6 AND "typegraph_node_fulltext"."node_kind" = $7 AND "typegraph_node_fulltext"."tsv" @@ websearch_to_tsquery("language", $8)
-        ORDER BY rank DESC, "typegraph_node_fulltext"."node_id" ASC
+        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" COLLATE "C" ASC, "typegraph_node_fulltext"."node_id" COLLATE "C" ASC
         LIMIT $9
       ) AS fts_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY cte_fulltext.rank DESC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY CAST(cte_fulltext.rank AS DOUBLE PRECISION) DESC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6791,7 +6844,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         node_id,
         node_kind,
         rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
         SELECT
           "typegraph_node_fulltext"."node_id" AS node_id,
@@ -6811,11 +6864,11 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
          AND scoped_relevance_nodes.node_kind =
              "typegraph_node_fulltext"."node_kind"
         WHERE "typegraph_node_fulltext"."graph_id" = ? AND "typegraph_node_fulltext"."node_kind" = ? AND "typegraph_node_fulltext" MATCH ?
-        ORDER BY rank DESC, "typegraph_node_fulltext"."node_id" ASC
+        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" ASC, "typegraph_node_fulltext"."node_id" ASC
         LIMIT ?
       ) AS fts_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY cte_fulltext.rank DESC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY cte_fulltext.rank DESC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6842,7 +6895,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         node_id,
         node_kind,
         rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC) AS ord
       FROM (
         SELECT
           "typegraph_node_fulltext"."node_id" AS node_id,
@@ -6862,11 +6915,11 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
          AND scoped_relevance_nodes.node_kind =
              "typegraph_node_fulltext"."node_kind"
         WHERE "typegraph_node_fulltext"."graph_id" = $4 AND "typegraph_node_fulltext"."node_kind" = $5 AND "typegraph_node_fulltext"."tsv" @@ websearch_to_tsquery("language", $6)
-        ORDER BY rank DESC, "typegraph_node_fulltext"."node_id" ASC
+        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" COLLATE "C" ASC, "typegraph_node_fulltext"."node_id" COLLATE "C" ASC
         LIMIT $7
       ) AS fts_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY cte_fulltext.rank DESC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY CAST(cte_fulltext.rank AS DOUBLE PRECISION) DESC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6892,7 +6945,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         node_id,
         node_kind,
         rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
         SELECT
           "typegraph_node_fulltext"."node_id" AS node_id,
@@ -6912,11 +6965,11 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
          AND scoped_relevance_nodes.node_kind =
              "typegraph_node_fulltext"."node_kind"
         WHERE "typegraph_node_fulltext"."graph_id" = ? AND "typegraph_node_fulltext"."node_kind" = ? AND "typegraph_node_fulltext" MATCH ?
-        ORDER BY rank DESC, "typegraph_node_fulltext"."node_id" ASC
+        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" ASC, "typegraph_node_fulltext"."node_id" ASC
         LIMIT ?
       ) AS fts_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY cte_fulltext.rank DESC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY cte_fulltext.rank DESC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6943,7 +6996,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         node_id,
         node_kind,
         rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind COLLATE "C" ASC, node_id COLLATE "C" ASC) AS ord
       FROM (
         SELECT
           "typegraph_node_fulltext"."node_id" AS node_id,
@@ -6963,11 +7016,11 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
          AND scoped_relevance_nodes.node_kind =
              "typegraph_node_fulltext"."node_kind"
         WHERE "typegraph_node_fulltext"."graph_id" = $4 AND "typegraph_node_fulltext"."node_kind" = $5 AND "typegraph_node_fulltext"."tsv" @@ websearch_to_tsquery("language", $6)
-        ORDER BY rank DESC, "typegraph_node_fulltext"."node_id" ASC
+        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" COLLATE "C" ASC, "typegraph_node_fulltext"."node_id" COLLATE "C" ASC
         LIMIT $7
       ) AS fts_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY cte_fulltext.rank DESC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY CAST(cte_fulltext.rank AS DOUBLE PRECISION) DESC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 
@@ -6993,7 +7046,7 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
         node_id,
         node_kind,
         rank,
-        ROW_NUMBER() OVER (ORDER BY rank DESC, node_id ASC) AS ord
+        ROW_NUMBER() OVER (ORDER BY rank DESC NULLS LAST, node_kind ASC, node_id ASC) AS ord
       FROM (
         SELECT
           "typegraph_node_fulltext"."node_id" AS node_id,
@@ -7013,11 +7066,11 @@ exports[`compile-golden: query compiler ASTs > fulltext match > websearch match,
          AND scoped_relevance_nodes.node_kind =
              "typegraph_node_fulltext"."node_kind"
         WHERE "typegraph_node_fulltext"."graph_id" = ? AND "typegraph_node_fulltext"."node_kind" = ? AND "typegraph_node_fulltext" MATCH ?
-        ORDER BY rank DESC, "typegraph_node_fulltext"."node_id" ASC
+        ORDER BY rank DESC NULLS LAST, "typegraph_node_fulltext"."node_kind" ASC, "typegraph_node_fulltext"."node_id" ASC
         LIMIT ?
       ) AS fts_inner
     )
-   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY cte_fulltext.rank DESC",
+   SELECT cte_d.d_id AS "d_id", cte_d.d_kind AS "d_kind", cte_d.d_props AS "d_props", cte_d.d_version AS "d_version", cte_d.d_valid_from AS "d_valid_from", cte_d.d_valid_to AS "d_valid_to", cte_d.d_created_at AS "d_created_at", cte_d.d_updated_at AS "d_updated_at", cte_d.d_deleted_at AS "d_deleted_at" FROM cte_d INNER JOIN cte_fulltext ON cte_fulltext.node_id = cte_d.d_id AND cte_fulltext.node_kind = cte_d.d_kind ORDER BY cte_fulltext.rank DESC NULLS LAST, cte_d.d_id ASC NULLS LAST",
 }
 `;
 

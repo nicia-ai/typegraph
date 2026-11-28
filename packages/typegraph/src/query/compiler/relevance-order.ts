@@ -1,18 +1,18 @@
-import type { QueryAst, SortDirection } from "../ast";
+import type {
+  AggregateOrderSpec,
+  OrderSpec,
+  QueryAst,
+  RelevanceSortSource,
+  SortDirection,
+} from "../ast";
+import { RELEVANCE_NULL_ORDERING } from "../order";
+import { isAggregatedStatement } from "./aggregated-statement";
 import {
   extractFulltextMatchPredicates,
   extractVectorSimilarityPredicates,
 } from "./predicates";
-
-/**
- * Which per-match value a relevance sort key reads:
- * - `fulltext_rank`: the full-text engine's native rank (higher is better)
- * - `vector_distance`: the vector distance (lower is better)
- * - `hybrid_score`: the reciprocal-rank-fusion score of both legs
- * - `hybrid_node_id`: the matched node's id, the hybrid tiebreak
- */
-export type RelevanceSortSource =
-  "fulltext_rank" | "vector_distance" | "hybrid_score" | "hybrid_node_id";
+import { missingRowIdentityOrder } from "./row-identity-order";
+import { selectiveExtractionIsFieldValue } from "./typed-json-extract";
 
 /**
  * One term of the relevance ORDER BY a full-text, vector or hybrid statement
@@ -22,20 +22,23 @@ export type RelevanceSortSource =
 export type RelevanceSortKey = Readonly<{
   source: RelevanceSortSource;
   direction: SortDirection;
+  /** Where a NULL value sorts: `RELEVANCE_NULL_ORDERING`, least relevant. */
+  nulls: "first" | "last";
   placement: "leading" | "trailing";
 }>;
 
 function relevanceSortKey(source: RelevanceSortSource): RelevanceSortKey {
+  const nulls = RELEVANCE_NULL_ORDERING;
   switch (source) {
     case "fulltext_rank":
     case "hybrid_score": {
-      return { source, direction: "desc", placement: "leading" };
+      return { source, direction: "desc", nulls, placement: "leading" };
     }
     case "vector_distance": {
-      return { source, direction: "asc", placement: "leading" };
+      return { source, direction: "asc", nulls, placement: "leading" };
     }
     case "hybrid_node_id": {
-      return { source, direction: "asc", placement: "trailing" };
+      return { source, direction: "asc", nulls, placement: "trailing" };
     }
   }
 }
@@ -66,9 +69,110 @@ function relevanceSortSources(
   return [];
 }
 
+/** One term of the order a full-text, vector or hybrid statement selects in. */
+export type SelectionOrderKey =
+  | Readonly<{ kind: "relevance"; key: RelevanceSortKey }>
+  | Readonly<{ kind: "field"; spec: OrderSpec }>
+  | Readonly<{ kind: "output"; spec: AggregateOrderSpec }>;
+
+/**
+ * The order a full-text, vector or hybrid statement selects its rows in, term
+ * by term, forward (before `reverseSelectionOrder`); empty for a statement
+ * without a relevance order. The leading relevance keys (rank DESC, distance
+ * ASC, or the fused RRF score DESC), then the caller's `orderBy()` terms as
+ * tiebreakers, then the trailing relevance keys (the hybrid node-id tiebreak),
+ * then, when the rows are matches rather than groups, the row-identity terms
+ * the caller's order does not name (`missingRowIdentityOrder`), which make the
+ * order total.
+ *
+ * The one owner of that order: the statement's ORDER BY, its selection-order
+ * column and cursor pagination's keyset all read it, so a cursor positions a
+ * row exactly where `execute()` returns it.
+ */
+export function describeSelectionOrder(
+  ast: QueryAst,
+): readonly SelectionOrderKey[] {
+  const keys = describeRelevanceOrder(ast);
+  if (keys.length === 0) return [];
+  const orderBy = ast.orderBy ?? [];
+  const relevance = (placement: RelevanceSortKey["placement"]) =>
+    keys
+      .filter((key) => key.placement === placement)
+      .map((key) => ({ kind: "relevance", key }) as const);
+  const rowIdentity =
+    isAggregatedStatement(ast) ?
+      []
+    : missingRowIdentityOrder(orderBy, {
+        startAlias: ast.start.alias,
+        startKinds: ast.start.kinds,
+        traversals: ast.traversals,
+      });
+  return [
+    ...relevance("leading"),
+    ...orderBy.map((spec) => ({ kind: "field", spec }) as const),
+    ...(ast.aggregateOrderBy ?? []).map(
+      (spec) => ({ kind: "output", spec }) as const,
+    ),
+    ...relevance("trailing"),
+    ...rowIdentity.map((spec) => ({ kind: "field", spec }) as const),
+  ];
+}
+
 /**
  * The column a relevance-ordered statement compiled for a wrapping statement
  * carries the rank of its own ORDER BY in (`buildStandardSelectionOrderColumn`).
  * It is in the reserved `__tg` namespace, which no caller's output key may use.
  */
 export const SELECTION_ORDER_COLUMN = "__tg_selection_order";
+
+/**
+ * The column a relevance-ordered statement compiled in the `cursor-keyed`
+ * shape carries the value of its `index`-th relevance sort key in, rendered by
+ * `DialectAdapter.relevanceCursorKey`, for a keyset cursor to carry.
+ */
+export function relevanceCursorKeyColumn(index: number): string {
+  return `__tg_relevance_key_${index}`;
+}
+
+/**
+ * The column a relevance-ordered statement compiled in the `cursor-keyed`
+ * shape carries the value of its `index`-th field sort key in (counted
+ * among the field keys of {@link describeSelectionOrder}), when that key
+ * {@link carriesFieldCursorKey}.
+ */
+export function fieldCursorKeyColumn(index: number): string {
+  return `__tg_field_key_${index}`;
+}
+
+/**
+ * Whether a keyset cursor over a full-text, vector or hybrid statement reads
+ * a field sort key from the statement's {@link fieldCursorKeyColumn}, the
+ * value its ORDER BY term sorts by, rather than from the row it returns: a
+ * property of unknown type (a union of a string and a number, say), which a
+ * row returns as its JSON value while PostgreSQL orders and compares it as
+ * its text. The one decision the projection and the cursor that reads it
+ * both make.
+ */
+export function carriesFieldCursorKey(spec: OrderSpec): boolean {
+  const { field } = spec;
+  return (
+    field.__type === "field_ref" &&
+    field.path[0] === "props" &&
+    !selectiveExtractionIsFieldValue(field.valueType)
+  );
+}
+
+/**
+ * The field ordering terms the ORDER BY of the statement `ast` compiles to
+ * reads: a relevance-ordered statement's selection-order field terms
+ * ({@link describeSelectionOrder}, row identity included), any other
+ * statement's `orderBy`. The column-pruning pass reads it, so every column an
+ * ordering term reads is carried out of its CTE.
+ */
+export function orderedFieldSpecs(ast: QueryAst): readonly OrderSpec[] {
+  const selectionOrder = describeSelectionOrder(ast);
+  if (selectionOrder.length === 0) return ast.orderBy ?? [];
+  return selectionOrder.flatMap((key) =>
+    key.kind === "field" ? [key.spec] : [],
+  );
+}

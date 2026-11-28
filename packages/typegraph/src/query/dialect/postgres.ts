@@ -14,7 +14,11 @@ import { sql, type SqlFragment } from "../sql-fragment";
 import { applyAggregateFilter } from "./aggregate-filter";
 import { tsvectorStrategy } from "./fulltext-strategy";
 import { likeEscapeClause } from "./like-escape";
-import { DOUBLE_OVERFLOW_BOUNDARY } from "./numeric-conversion";
+import {
+  DOUBLE_OVERFLOW_BOUNDARY,
+  isRepresentableNumericText,
+  parseRepresentableDouble,
+} from "./numeric-conversion";
 import {
   getSqlDialectProfile,
   inlineSqlStringLiteral,
@@ -154,6 +158,20 @@ function postgresElementCast(elementType: ValueType | undefined): SqlFragment {
 /**
  * PostgreSQL dialect adapter implementation.
  */
+/**
+ * The text the cursor key of a relevance value renders as when the session's
+ * float output is not exact (`extra_float_digits` below 1): text no double
+ * renders as, so the cursor refuses it.
+ */
+const INEXACT_FLOAT_OUTPUT = "inexact float output";
+
+/** The non-finite `double precision` values, as PostgreSQL renders them. */
+const POSTGRES_SPECIAL_DOUBLES: ReadonlySet<string> = new Set([
+  "NaN",
+  "Infinity",
+  "-Infinity",
+]);
+
 export const postgresDialect: BuiltinDialectAdapter = {
   dateValue(value) {
     return sql`CAST(${value} AS ${sql.raw(SCALAR_SQL_TYPES.date)})`;
@@ -183,12 +201,49 @@ export const postgresDialect: BuiltinDialectAdapter = {
     maxRecursiveBatchPlans: 25,
     subgraphMembershipStrategy: "materialized-ids",
     textIndexOrderIsBinary: false,
+    textAdmitsNul: false,
     transactionReadsShareOneSnapshot: false,
   },
 
   binaryText(expression) {
     return sql`${expression} COLLATE "C"`;
   },
+
+  relevanceCursorKey: {
+    // A `real` ts_rank_cd and a `double precision` distance are compared as
+    // `double precision` (widening a `real` is exact), so their bound text
+    // has one type whose range `bind` can check before the database sees
+    // it. The fused score stays the `numeric` it is computed in: a double
+    // cannot hold every score valid fusion options produce, and would round
+    // apart scores `execute()` orders apart.
+    value: (expression, source) =>
+      source === "hybrid_score" ?
+        sql`CAST(${expression} AS NUMERIC)`
+      : sql`CAST(${expression} AS DOUBLE PRECISION)`,
+    // `numeric` text is exact. Float text is exact only at
+    // `extra_float_digits` >= 1 (the default): below it the key renders text
+    // the cursor refuses, rather than a rounded value that would skip or
+    // repeat nearly tied rows.
+    select: (expression, source) =>
+      source === "hybrid_score" ?
+        sql`CAST(${expression} AS TEXT)`
+      : sql`CASE WHEN current_setting('extra_float_digits')::integer >= 1 THEN CAST(${expression} AS TEXT) ELSE ${INEXACT_FLOAT_OUTPUT} END`,
+    // The text of a value of the key's type: any other text, or a value out
+    // of its range, would be a database error, not a refused cursor.
+    bind: (text, source) => {
+      if (source === "hybrid_score")
+        return isRepresentableNumericText(text) ? text : undefined;
+      return (
+          POSTGRES_SPECIAL_DOUBLES.has(text) ||
+            parseRepresentableDouble(text) !== undefined
+        ) ?
+          text
+        : undefined;
+    },
+    operand: (bound) => sql`${bound}`,
+  },
+
+  batchExactNumber: (expression) => expression,
 
   keyText(expression) {
     return sql`${expression} COLLATE "default"`;

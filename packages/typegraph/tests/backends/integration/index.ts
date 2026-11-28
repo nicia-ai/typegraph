@@ -102,6 +102,10 @@ export { registerOrderingIntegrationTests } from "./ordering";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-property";
 export { registerPaginationSystemColumnIntegrationTests } from "./pagination-system-columns";
+export {
+  registerCursorFieldContractIntegrationTests,
+  registerPlainCursorCompatibilityIntegrationTests,
+} from "./plain-cursor-compatibility";
 export { registerPredicateIntegrationTests } from "./predicates";
 export { registerProvenanceIntegrationTests } from "./provenance";
 export { registerProvenanceInterchangeOperationRoutingIntegrationTests } from "./provenance-interchange-operation-routing";
@@ -133,6 +137,7 @@ export { registerReservedAliasPrefixIntegrationTests } from "./reserved-alias-pr
 export { registerSavepointRecoveryIntegrationTests } from "./savepoint-recovery";
 export { registerSchemaCheckedReadIntegrationTests } from "./schema-checked-read";
 export { registerSchemaOperationRoutingIntegrationTests } from "./schema-operation-routing";
+export { registerSearchPaginationIntegrationTests } from "./search-pagination";
 export { registerSelectiveRetryIntegrationTests } from "./selective-retry";
 export { registerSetNodeMutationIntegrationTests } from "./set-node-mutation";
 export { registerSetOperationIntegrationTests } from "./set-operations";
