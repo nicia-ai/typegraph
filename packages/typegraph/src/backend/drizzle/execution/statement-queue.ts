@@ -109,10 +109,15 @@ function queueForTransaction(owner: object): StatementQueue {
  *
  * The queue is a leaf: nothing it runs re-enters it, so a queued statement
  * can never wait on a statement queued behind it.
+ *
+ * `refusal`, when given, is asked as each statement is submitted, before it
+ * is queued: a statement it returns an error for is rejected with that error
+ * and never reaches the queue.
  */
 export function createSerialExecutionAdapter(
   adapter: SqlExecutionAdapter,
   transactionOwner?: object,
+  refusal?: () => Error | undefined,
 ): SerialExecutionAdapter {
   const queue =
     transactionOwner === undefined ?
@@ -123,6 +128,8 @@ export function createSerialExecutionAdapter(
 
   function enqueue<T>(task: () => Promise<T>): Promise<T> {
     if (closed) return Promise.reject(new TransactionClosedError());
+    const refused = refusal?.();
+    if (refused !== undefined) return Promise.reject(refused);
     return queue.enqueue(task);
   }
 

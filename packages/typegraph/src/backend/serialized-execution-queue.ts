@@ -251,3 +251,24 @@ export function runWithSerializedQueue<T>(
   if (queue === undefined) return task();
   return queue.runExclusive(task);
 }
+
+/**
+ * `queue`, with `refusal` asked as each task is submitted: a submission it
+ * returns an error for is rejected with that error, never queued. Disposing it disposes
+ * `queue`.
+ */
+export function refusingSerializedExecutionQueue(
+  queue: SerializedExecutionQueue,
+  refusal: () => Error | undefined,
+): SerializedExecutionQueue {
+  return {
+    dispose: () => {
+      queue.dispose();
+    },
+    runExclusive<T>(task: () => Promise<T>): Promise<T> {
+      const refused = refusal();
+      if (refused !== undefined) return Promise.reject(refused);
+      return queue.runExclusive(task);
+    },
+  };
+}

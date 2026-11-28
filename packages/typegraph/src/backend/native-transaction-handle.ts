@@ -189,6 +189,18 @@ function identifyNativeTransaction(handle: NativeHandle): object | undefined {
 }
 
 /**
+ * The native transaction `handle` runs in, by the proof its kind offers (see
+ * {@link identifyNativeTransaction}); `undefined` without proof. For an
+ * engine built over a caller's transaction handle, which binds no transaction
+ * backend of its own whose record could be resolved.
+ */
+export function resolveNativeTransactionOfHandle(
+  handle: NativeHandle,
+): object | undefined {
+  return identifyNativeTransaction(handle);
+}
+
+/**
  * Records, once per bind, the native transaction `backend` runs on (see
  * {@link identifyNativeTransaction}). Records nothing without proof.
  */

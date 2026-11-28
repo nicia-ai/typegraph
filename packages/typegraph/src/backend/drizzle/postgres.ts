@@ -96,6 +96,10 @@ import {
   asCompiledRowsSql,
   type CompiledRowsSql,
 } from "../../query/sql-intent";
+import {
+  rootStatementRefusal,
+  runRootSavepointUnit,
+} from "../../store/root-savepoint-units";
 import { resolveStampedValidityLowerBound } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import {
@@ -1442,7 +1446,15 @@ function buildPostgresEngineProfileInternal(
   const executionAdapter =
     queueOwner === undefined ?
       unqueuedExecutionAdapter
-    : createSerialExecutionAdapter(unqueuedExecutionAdapter, queueOwner);
+    : createSerialExecutionAdapter(
+        unqueuedExecutionAdapter,
+        queueOwner,
+        // Over a caller's transaction, a statement this backend issues on it
+        // directly is refused while another call's savepoint is open there.
+        transactionScoped ?
+          () => rootStatementRefusal(postgresNativeHandle(db))
+        : undefined,
+      );
   const atomicSqlProgramExecutor =
     createAtomicSqlProgramExecutor(executionAdapter);
   // `declaredCapabilities` above is this profile's contribution; the
@@ -2291,15 +2303,22 @@ function buildPostgresEngineProfileInternal(
         }
         return body(tx);
       };
-      if (capabilities.execution.commitOutcome !== "commit-reply") {
-        return db.transaction((tx) => run(tx), config);
-      }
-      return runMarkedPostgresTransaction(
-        db,
-        (markedBody) => db.transaction(markedBody, config),
-        (error) => isSerializationFailure(error, ctx.self()),
-        (tx) => run(tx),
-      );
+      const open = (): Promise<T> => {
+        if (capabilities.execution.commitOutcome !== "commit-reply") {
+          return db.transaction((tx) => run(tx), config);
+        }
+        return runMarkedPostgresTransaction(
+          db,
+          (markedBody) => db.transaction(markedBody, config),
+          (error) => isSerializationFailure(error, ctx.self()),
+          (tx) => run(tx),
+        );
+      };
+      // A savepoint on the caller's transaction is a unit of it: refused,
+      // before its SAVEPOINT, while another call's unit is open on `db`.
+      return isPostgresTransactionHandle(db) ?
+          runRootSavepointUnit(postgresNativeHandle(db), open)
+        : open();
     }
 
     /**
