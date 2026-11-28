@@ -1478,9 +1478,25 @@ export function registerDatePropertyReadIntegrationTests(
       const selectedRows = (await requireDefined(
         selective,
       ).execute()) as readonly Record<string, unknown>[];
+      // A selected scalar date is the column as the driver returns it, as
+      // before reads decoded dates: the stored text, or the engine's
+      // `timestamptz` text on a driver that does not parse it (postgres-js).
+      // Never a decoded `Date`.
       expect(
-        selectedRows.map((selected) => [selected["plain"], selected["nested"]]),
-      ).toEqual(stored);
+        selectedRows.map((selected) => [
+          typeof selected["plain"],
+          selected["nested"],
+        ]),
+      ).toEqual(stored.map(([, nested]) => ["string", nested]));
+      expect(
+        selectedRows.map((selected) =>
+          context.driver === "postgres-js" ? "engine text" : selected["plain"],
+        ),
+      ).toEqual(
+        stored.map(([plain]) =>
+          context.driver === "postgres-js" ? "engine text" : plain,
+        ),
+      );
       const wholeRows = (await requireDefined(
         whole,
       ).execute()) as readonly Record<string, unknown>[];
