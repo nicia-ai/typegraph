@@ -221,8 +221,13 @@ export function isBackendNativeTransactionReadOnly(backend: object): boolean {
  * The fact is a scope, not a property set for the transaction's life: a
  * read-only `store.transaction` on a backend built over a caller's
  * transaction runs as a savepoint of that transaction, which is read-write
- * again once the savepoint is released. Scopes nest; the transaction reads
- * as read-only until the last one is released.
+ * again once the savepoint is released. That savepoint is read-write at the
+ * engine (the caller's transaction keeps its own access mode), so the scope
+ * is what refuses TypeGraph's writes there, and it is opened only by the
+ * `store.transaction` a caller asked to be read-only: TypeGraph's own
+ * read-only units (an export's snapshot, a confirm read, an algorithm's
+ * working table) open none. Scopes nest; the transaction reads as read-only
+ * until the last one is released.
  */
 export function openReadOnlyScope(
   state: NativeTransactionState,

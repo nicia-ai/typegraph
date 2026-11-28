@@ -1125,60 +1125,6 @@ const toSchemaVersionRow = createSchemaVersionRowMapper(
 // ============================================================
 
 /**
- * The savepoint a read-only transaction of a backend over a caller's
- * transaction runs inside (`openCommittingTransaction`). PostgreSQL releases
- * the most recent savepoint of a name, so nested read-only scopes may share it.
- */
-const READ_ONLY_SAVEPOINT = "typegraph_read_only_scope";
-
-/**
- * Makes the current savepoint read-only and reads the mode back in the same
- * statement: `set_config('transaction_read_only', 'on', true)` is
- * `SET TRANSACTION READ ONLY`, and the outer `current_setting` reads the
- * session's mode once the subquery has set it (PostgreSQL never flattens a
- * subquery whose target list calls a volatile function into its parent).
- * Both functions are schema-qualified, so no `search_path` can shadow them.
- */
-const READ_ONLY_SAVEPOINT_MODE_SQL =
-  "SELECT requested.mode AS requested_mode, " +
-  "pg_catalog.current_setting('transaction_read_only') AS transaction_read_only " +
-  "FROM (SELECT pg_catalog.set_config('transaction_read_only', 'on', true) AS mode) AS requested";
-
-/**
- * Makes the savepoint `tx` read-only, as its first statement, and refuses
- * when the session did not take the mode: what the session reads back for
- * `transaction_read_only`, not what was requested, is what leaves the
- * caller's raw `tx.sql` writes to the engine inside the read-only scope.
- */
-async function enterReadOnlySavepoint(tx: AnyPgTransaction): Promise<void> {
-  const result: unknown = await tx.execute(
-    sql.raw(READ_ONLY_SAVEPOINT_MODE_SQL),
-  );
-  const rows =
-    Array.isArray(result) ? result : (
-      ((result as Readonly<{ rows?: readonly unknown[] }>).rows ?? [])
-    );
-  const [row] = rows as readonly (
-    Readonly<{ transaction_read_only?: unknown }> | undefined
-  )[];
-  const mode = row?.transaction_read_only;
-  if (mode === "on") return;
-  throw new ConfigurationError(
-    "The PostgreSQL session did not take the read-only mode TypeGraph set " +
-      "for a read-only transaction's savepoint: transaction_read_only reads " +
-      `${mode === undefined ? "nothing" : JSON.stringify(mode)} after it was set.`,
-    {
-      code: "POSTGRES_READ_ONLY_MODE_NOT_TAKEN",
-      transactionReadOnly: typeof mode === "string" ? mode : String(mode),
-    },
-    {
-      suggestion:
-        "Connect through a driver or proxy that runs every statement of a transaction on one server session, so the session enforces the read-only mode.",
-    },
-  );
-}
-
-/**
  * Whether `handle` is a Drizzle PostgreSQL transaction object: THE
  * classifier every site in this module that asks "is this a transaction"
  * calls — factory routing (`createPostgresBackend`,
@@ -2357,38 +2303,22 @@ function buildPostgresEngineProfileInternal(
       body: (tx: AnyPgTransaction) => Promise<T>,
     ): Promise<T> {
       // On a transaction-scoped backend `tx` is a savepoint on `db`: it runs
-      // in `db`'s native transaction, not one of its own.
-      const run = async (tx: AnyPgTransaction): Promise<T> => {
+      // in `db`'s native transaction, not one of its own. That transaction is
+      // the caller's, and so is its access mode: Drizzle opens the savepoint
+      // without `config`, so a read-only unit's savepoint stays read-write at
+      // the engine, as for every other unit. An internal read-only unit, a
+      // read-only `store.transaction` and any call overlapping either on the
+      // caller's transaction therefore issue only their own statements; the
+      // read-only scope `store.transaction` opens is enforced before any
+      // statement, by the Store and the backend's write gate
+      // (`read-only-write-gate.ts`), never by a savepoint whose release could
+      // end a sibling call's.
+      const run = (tx: AnyPgTransaction): Promise<T> => {
         if (isPostgresTransactionHandle(db)) {
           recordEngineSavepoint(tx, postgresNativeHandle(db));
-          // Drizzle opens a savepoint without the transaction's config, so
-          // a read-only one is made read-only here, as its first statement:
-          // PostgreSQL scopes the access mode to the subtransaction and every
-          // one nested in it, and restores the enclosing mode when it ends
-          // (see `READ_ONLY_SAVEPOINT` for how it is made to end).
-          // The session then refuses every write in it, the caller's own
-          // savepoints and raw `tx.sql` statements included.
-          if (config?.accessMode === "read only") {
-            await enterReadOnlySavepoint(tx);
-          }
         }
         return body(tx);
       };
-      // postgres-js never releases a savepoint whose callback succeeded, so
-      // Drizzle's savepoint, and the read-only mode set in it, would last for
-      // the rest of the caller's transaction. A read-only one therefore runs
-      // inside a savepoint of TypeGraph's own, whose RELEASE (or rollback)
-      // ends the driver's with it, on every driver alike.
-      if (isPostgresTransactionHandle(db) && config?.accessMode === "read only") {
-        return runSessionSavepoint(
-          { executeControl: (statement) => db.execute(sql.raw(statement)) },
-          READ_ONLY_SAVEPOINT,
-          async () => ({
-            action: "release",
-            value: await db.transaction((tx) => run(tx)),
-          }),
-        );
-      }
       if (capabilities.execution.commitOutcome !== "commit-reply") {
         return db.transaction((tx) => run(tx), config);
       }

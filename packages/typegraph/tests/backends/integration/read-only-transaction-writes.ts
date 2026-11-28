@@ -62,6 +62,7 @@ import type {
 } from "../../../src/store/collection-surface";
 import { requireDefined } from "../../../src/utils/presence";
 import { unwrap } from "../../../src/utils/result";
+import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
 
 const RotPerson = defineNode("RotPerson", {
@@ -1385,18 +1386,23 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
         // the caller's savepoint, and node-postgres its pooled client, which
         // holds the read-only scope while it runs, so the Store refuses the
         // write. postgres-js gives the savepoint a client of its own that
-        // nothing ties to the scope; the read-only savepoint is read-only at
-        // the engine, which rejects the write and rolls the caller's
-        // savepoint back.
-        expect({
-          write: writeOutcome(write),
-          team: team === undefined ? undefined : String(team.id),
-        }).toEqual({
-          write:
-            context.driver === "postgres-js" ?
-              "rejected: 25006"
-            : "refused as read-only",
-          team: undefined,
+        // nothing ties to the scope, and the caller's transaction is
+        // read-write at the engine (TypeGraph leaves a caller's access mode
+        // alone): the write commits with it, as on main.
+        expectObservation({
+          lane: { driver: context.driver },
+          observed: {
+            write: writeOutcome(write),
+            team: team === undefined ? undefined : String(team.id),
+          },
+          correct: { write: "refused as read-only", team: undefined },
+          defects: [
+            {
+              label: "rework-957-fix6-defect-caller-savepoint-postgres-js",
+              on: { driver: ["postgres-js"] },
+              today: { write: "fulfilled", team: "t3" },
+            },
+          ],
         });
       });
 
@@ -1467,7 +1473,7 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
         expect(committed?.id).toBe("p1");
       });
 
-      it("leaves a raw tx.sql write in a read-only savepoint to the engine: PostgreSQL refuses it, SQLite has no read-only savepoint", async () => {
+      it("leaves a raw tx.sql write in a read-only unit on a caller's read-write transaction to the caller: TypeGraph sets no access mode there", async () => {
         const graph = buildGraph(nextGraphId());
         const [store] = await createAdapterStoreWithSchema(
           graph,
@@ -1504,11 +1510,14 @@ export function registerReadOnlyTransactionWritesIntegrationTests(
           );
           rows = rowsOf(read).map((row) => Number(row["x"]));
         });
-        expect({ write: writeOutcome(write), rows }).toEqual(
-          context.driver === "libsql" ?
-            { write: "fulfilled", rows: [1, 2] }
-          : { write: "rejected: 25006", rows: [2] },
-        );
+        // SQL the caller wrote is the engine's to refuse, and the caller's
+        // transaction is read-write at the engine on every dialect: the
+        // read-only unit opens a savepoint of it and changes nothing else,
+        // so the write runs, as on main.
+        expect({ write: writeOutcome(write), rows }).toEqual({
+          write: "fulfilled",
+          rows: [1, 2],
+        });
       });
 
       it("refuses every Store member that writes, on a Store over the transaction, by the member's own name before it reads its arguments", async () => {
