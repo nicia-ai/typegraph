@@ -199,7 +199,8 @@ function backendRecreatingBeforeSetWrite(
           kind: params.kind,
           id,
           props: replacement.props,
-          validFrom: replacement.validFrom ?? requireDefined(original.valid_from),
+          validFrom:
+            replacement.validFrom ?? requireDefined(original.valid_from),
         });
         const nodesTable = createSqlSchema(target.tableNames).nodesTable;
         await requireDefined(target.executeStatement)(

@@ -102,7 +102,9 @@ export type CreateVectorMembersDeps =
 
 export type VectorMembers = Readonly<{
   upsertEmbedding?: (params: UpsertEmbeddingParams) => Promise<void>;
-  upsertEmbeddingBatch?: (params: UpsertEmbeddingBatchParams) => Promise<void>;
+  upsertEmbeddingBatch?: (
+    params: UpsertEmbeddingBatchParams,
+  ) => Promise<void>;
   deleteEmbedding?: (params: DeleteEmbeddingParams) => Promise<void>;
   deleteEmbeddingBatch?: (
     params: Omit<DeleteEmbeddingParams, "nodeId"> &
@@ -129,14 +131,19 @@ export function createVectorMembers(
       {}
     : {
         async upsertEmbedding(params: UpsertEmbeddingParams): Promise<void> {
-          const { vectorStrategy, execution, contributionMaterializer } = deps;
+          const { vectorStrategy, execution, contributionMaterializer } =
+            deps;
           const slot = vectorSlotFromParams(params);
           // Assert the slot's durable marker (SELECT, cached) — never DDL.
           // The per-field table is provisioned by the privileged migrator
           // (`createStoreWithSchema` → `materializeVectorContributions`), so
           // a least-privilege runtime role writes embeddings without CREATE.
           await contributionMaterializer.assertVectorSlot(slot);
-          const statements = vectorStrategy.buildUpsert(slot, params, nowIso());
+          const statements = vectorStrategy.buildUpsert(
+            slot,
+            params,
+            nowIso(),
+          );
           try {
             for (const statement of statements) {
               await execution.execRun(statement);
@@ -150,12 +157,8 @@ export function createVectorMembers(
           params: UpsertEmbeddingBatchParams,
         ): Promise<void> {
           if (params.rows.length === 0) return;
-          const {
-            vectorStrategy,
-            execution,
-            batchConfig,
-            contributionMaterializer,
-          } = deps;
+          const { vectorStrategy, execution, batchConfig, contributionMaterializer } =
+            deps;
           const slot = vectorSlotFromParams(params);
           // Same SELECT-only marker assert as the single-row path — never DDL.
           await contributionMaterializer.assertVectorSlot(slot);
@@ -204,7 +207,8 @@ export function createVectorMembers(
         },
 
         async deleteEmbedding(params: DeleteEmbeddingParams): Promise<void> {
-          const { vectorStrategy, execution, contributionMaterializer } = deps;
+          const { vectorStrategy, execution, contributionMaterializer } =
+            deps;
           // Assert the slot's durable marker before deleting. A delete can
           // run before any embedding was ever written for the field (e.g. a
           // node hard-deleted having never carried one); the per-field table
@@ -227,12 +231,8 @@ export function createVectorMembers(
             Readonly<{ nodeIds: readonly string[] }>,
         ): Promise<void> {
           if (params.nodeIds.length === 0) return;
-          const {
-            vectorStrategy,
-            execution,
-            batchConfig,
-            contributionMaterializer,
-          } = deps;
+          const { vectorStrategy, execution, batchConfig, contributionMaterializer } =
+            deps;
           const slot = vectorSlotFromParams(params);
           await contributionMaterializer.assertVectorSlot(slot);
           for (const nodeIds of chunkArray(
@@ -294,12 +294,8 @@ export function createVectorMembers(
 
     async deleteSchemaVectorSlotContribution(slot: VectorSlot): Promise<void> {
       if (deps.vectorStrategy === undefined) return;
-      const {
-        vectorStrategy,
-        execution,
-        operationStrategy,
-        contributionMaterializer,
-      } = deps;
+      const { vectorStrategy, execution, operationStrategy, contributionMaterializer } =
+        deps;
       for (const contribution of vectorStrategy.ownedTables(slot)) {
         await execution.execRun(
           operationStrategy.buildDeleteContributionMaterialization({
@@ -317,7 +313,8 @@ export function createVectorMembers(
 
     async createVectorIndex(params: CreateVectorIndexParams): Promise<void> {
       if (deps.vectorStrategy === undefined) return;
-      const { vectorStrategy, contributionMaterializer, runIndexBuild } = deps;
+      const { vectorStrategy, contributionMaterializer, runIndexBuild } =
+        deps;
       const slot = vectorSlotFromCreateIndexParams(params);
       // Ensure the per-field table + its durable marker first (privileged,
       // idempotent), then create its ANN index. A strategy's `ownedTables`

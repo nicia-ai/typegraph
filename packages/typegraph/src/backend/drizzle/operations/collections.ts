@@ -171,7 +171,11 @@ export function buildCountNodesByKind(
     ...buildTemporalConditions(nodes, params),
   ];
 
-  return buildCountQuery(nodes, sql.join(conditions, sql` AND `), params.limit);
+  return buildCountQuery(
+    nodes,
+    sql.join(conditions, sql` AND `),
+    params.limit,
+  );
 }
 
 /** Builds an `IN (...)` membership predicate over a non-empty id list. */
@@ -331,7 +335,7 @@ export function buildFindEdgesByMatchIdentity(
        AND (${sql.join(predicates, sql` OR `)})
        ORDER BY ${edges.id} ASC
   `;
-}
+  }
 
 /** One keyset page across declared edge kinds. */
 export function buildFindEdgesAcrossKinds(
@@ -527,5 +531,9 @@ export function buildCountEdgesByKind(
     conditions.push(sql`${edges.toId} = ${params.toId}`);
   }
 
-  return buildCountQuery(edges, sql.join(conditions, sql` AND `), params.limit);
+  return buildCountQuery(
+    edges,
+    sql.join(conditions, sql` AND `),
+    params.limit,
+  );
 }

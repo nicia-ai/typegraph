@@ -203,9 +203,7 @@ export function mapHybridSearchRow(
       { vectorRank: Number(row["vector_rank"]) }
     : {}),
     ...(present(row["vector_score"]) ?
-      {
-        vectorScore: coerceNumericScore(row["vector_score"] as number | string),
-      }
+      { vectorScore: coerceNumericScore(row["vector_score"] as number | string) }
     : {}),
     ...(present(row["fulltext_rank"]) ?
       { fulltextRank: Number(row["fulltext_rank"]) }

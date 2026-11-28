@@ -114,10 +114,9 @@ function routeThroughCurrentScope(
             execute<TRow>(
               params: readonly unknown[],
             ): Promise<readonly TRow[]> {
-              return requireScopeMember(
-                current().prepare,
-                "prepare",
-              )(sqlText).execute<TRow>(params);
+              return requireScopeMember(current().prepare, "prepare")(
+                sqlText,
+              ).execute<TRow>(params);
             },
           };
         },
