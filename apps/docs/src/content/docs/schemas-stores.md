@@ -2467,6 +2467,17 @@ too. On
 `@libsql/client` before 0.18, sql.js and Durable Object storage nothing ties it to the transaction,
 so it runs as a root backend does.
 
+Which connection a handle runs on is decided the same way the serialized-resource audit decides
+it: the client the driver is detected on, else the resource a
+`serializedResource: { mode: "shared", resource }` declaration names. On a driver TypeGraph cannot
+detect (`sqlite-proxy`), two backends declaring the same resource are therefore one connection here
+too. A declaration names the connection but proves no transaction, so an adoption of the second
+backend's own handle (`store.withTransaction(db)` on a Store over it) is never joined to a read-only
+transaction opened through the first; while that transaction is open, the adoption's writes are
+refused before any statement, and once it ends the same adoption writes. The second backend's root
+runs as it does without a read-only transaction. Without a declaration nothing ties the two
+handles to one connection, and the adoption writes.
+
 A savepoint you open yourself and hand to `withTransaction()` is refused the same way on
 better-sqlite3, libSQL and PGlite, whose drivers show which transaction it runs in. On postgres-js
 it gets a client of its own that TypeGraph cannot tie to the read-only transaction, so the engine
