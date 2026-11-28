@@ -982,7 +982,7 @@ export function registerTransactionSessionHazardTests(
                 unwrap(artifact),
               ).then(
                 () => "fulfilled",
-                (rejection: unknown) => rejection,
+                (error_: unknown) => error_,
               );
               throw new Error("injected failure after the delete");
             },
