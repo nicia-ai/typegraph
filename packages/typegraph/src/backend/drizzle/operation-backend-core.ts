@@ -813,7 +813,7 @@ export type OperationBackendBatchConfig = Readonly<{
 }>;
 
 /** The bound-value budget a backend that declares none gets: 64 MiB. */
-export const DEFAULT_MAX_BOUND_VALUE_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_BOUND_VALUE_BYTES = 64 * 1024 * 1024;
 
 export type OperationBackendRowMappers = Readonly<{
   toEdgeRow: (row: Record<string, unknown>) => EdgeRow;
