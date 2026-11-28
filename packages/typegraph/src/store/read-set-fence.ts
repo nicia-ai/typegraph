@@ -20,7 +20,12 @@ import {
   ReadSetUnverifiableError,
   UnsupportedBackendCapabilityError,
 } from "../errors";
-import type { Operation } from "./operation-scope";
+import {
+  enterCall,
+  enterOperation,
+  exitCall,
+  type TransactionSession,
+} from "./operation-scope";
 import { lockStoreWriteFence } from "./operations/write-fence-prelude";
 import {
   refuseReadOnlyTransactionWrite,
@@ -114,7 +119,7 @@ export type ReadSetFenceContext<G extends GraphDef> = Readonly<{
  */
 export async function assertReadSetUnchangedSince<G extends GraphDef>(
   ctx: ReadSetFenceContext<G>,
-  operation: Operation,
+  session: TransactionSession,
   anchor: EngineRevision,
   scopes: readonly ReadSetScope<G>[],
 ): Promise<void> {
@@ -131,23 +136,30 @@ export async function assertReadSetUnchangedSince<G extends GraphDef>(
   }
   assertReadSetFenceSupported(ctx, graphId);
 
-  const txBackend = operation.backend;
-  await lockStoreWriteFence(operation, {
-    graphId,
-    schemaVersion: ctx.schemaVersion,
-    graphLock: "required",
-    requireFreshSnapshot: true,
-    freshSnapshotError: (isolation) =>
-      freshSnapshotUnprovableError(graphId, isolation),
-    staleSchemaError: (cause) => cause,
-  });
-
-  const delta = await changesInReadSet(
-    ctx.lineageStore,
-    txBackend,
-    anchor,
-    regions,
-  );
+  // A call of its own on the transaction's session, entered once its
+  // statement-free refusals have run: refused while another call's savepoint
+  // unit is open, and in flight until its last statement has settled.
+  const operation = enterCall(enterOperation(session));
+  let delta: Awaited<ReturnType<typeof changesInReadSet>>;
+  try {
+    await lockStoreWriteFence(operation, {
+      graphId,
+      schemaVersion: ctx.schemaVersion,
+      graphLock: "required",
+      requireFreshSnapshot: true,
+      freshSnapshotError: (isolation) =>
+        freshSnapshotUnprovableError(graphId, isolation),
+      staleSchemaError: (cause) => cause,
+    });
+    delta = await changesInReadSet(
+      ctx.lineageStore,
+      operation.backend,
+      anchor,
+      regions,
+    );
+  } finally {
+    exitCall(operation);
+  }
   if (delta.kind === "unbounded") {
     throw new ReadSetUnverifiableError({ graphId, anchor });
   }

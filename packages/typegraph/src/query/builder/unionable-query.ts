@@ -33,7 +33,7 @@ import { buildCompileOptions } from "./compile-options";
 import { getQueryBuilderInternalContext } from "./internal-context";
 import { assertCompatibleSetOperationProvenance } from "./one-statement-provenance";
 import { composableQueryHasParameterReferences } from "./prepared-query";
-import { enterQueryExecution } from "./query-operation";
+import { enterQueryExecution, exitQueryExecution } from "./query-operation";
 import {
   buildReadInstantTemplate,
   type CompiledTemplate,
@@ -395,13 +395,14 @@ export class UnionableQuery<G extends GraphDef, R> {
       );
     }
 
-    return this.#mapRows(
-      await this.#fetchRows(
-        enterQueryExecution(this.#config) ?? backend,
-        ast,
-        "recorded-query",
-      ),
-    );
+    const target = enterQueryExecution(this.#config) ?? backend;
+    try {
+      return this.#mapRows(
+        await this.#fetchRows(target, ast, "recorded-query"),
+      );
+    } finally {
+      exitQueryExecution(this.#config);
+    }
   }
 
   /**

@@ -6,7 +6,10 @@ import {
 } from "../core/allocation-owner";
 import { recordedInstantOwner } from "../core/temporal";
 import { parseRecordedInstant } from "../core/temporal";
-import { IdentityEndpointValidityError } from "../errors";
+import {
+  IdentityEndpointValidityError,
+  TransactionCallRefusedError,
+} from "../errors";
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import {
   enterCall,
@@ -6334,45 +6337,56 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
     // collections, so it passes their write gate itself, before any read:
     // a read-only transaction is refused rather than written to.
     transactionAssertWritable(tx, "applyMergePlanInTransaction()");
-    const artifact = await validateMergePlanForTarget(effectiveTarget, input);
-    assertPublicPlanCapability(effectiveTarget);
-    if (artifact.provenance.persist) {
-      throw new MergePlanCapabilityError(
-        "A caller-owned merge transaction cannot persist merge provenance atomically.",
-        {
-          details: { capability: "adoptedMergeProvenance" },
-          suggestion:
-            "Create the merge plan without persisted provenance, or apply it through applyMergePlan so TypeGraph can manage provenance persistence.",
-        },
-      );
-    }
     // One operation of the caller's transaction's session for the whole
     // apply: its fences, savepoint and direct statements. It is a call of
     // that session, counted as running until the apply settles, and the
-    // apply's collection writes are its children.
-    // It holds its savepoint unit from before its first statement.
+    // apply's collection writes and reads are its children. It is admitted,
+    // and holds its savepoint unit, before its first asynchronous step (the
+    // artifact's validation): a unit another call holds open, or a call
+    // still running beside it, refuses the apply before it awaits anything.
     const operation = enterCall(enterTransactionOperation(tx));
     try {
-      const merged = await runOperationUnit(operation, async () => {
+      return await runOperationUnit(operation, async () => {
+        const artifact = await validateMergePlanForTarget(
+          effectiveTarget,
+          input,
+        );
+        assertPublicPlanCapability(effectiveTarget);
+        if (artifact.provenance.persist) {
+          throw new MergePlanCapabilityError(
+            "A caller-owned merge transaction cannot persist merge provenance atomically.",
+            {
+              details: { capability: "adoptedMergeProvenance" },
+              suggestion:
+                "Create the merge plan without persisted provenance, or apply it through applyMergePlan so TypeGraph can manage provenance persistence.",
+            },
+          );
+        }
         await assertMergeTransactionPristine(effectiveTarget, operation);
         const decision = mergeIdentityDecisionFromArtifact(artifact, options);
-        return withAdoptedMergeApplySavepoint(effectiveTarget, operation, () =>
-          applyValidatedMergePlanInTransaction(
-            effectiveTarget,
-            tx,
-            operation,
-            artifact,
-            {},
-            true,
-            decision,
-          ),
+        const applied = await withAdoptedMergeApplySavepoint(
+          effectiveTarget,
+          operation,
+          () =>
+            applyValidatedMergePlanInTransaction(
+              effectiveTarget,
+              tx,
+              operation,
+              artifact,
+              {},
+              true,
+              decision,
+            ),
         );
+        return reportFromArtifact(artifact, applied, artifact.review.warnings);
       });
-      return reportFromArtifact(artifact, merged, artifact.review.warnings);
     } finally {
       exitCall(operation);
     }
   } catch (error) {
+    // The session's refusal of the apply as a call crosses this boundary as
+    // itself, so a caller can branch on its type and `details.reason`.
+    if (error instanceof TransactionCallRefusedError) throw error;
     const translated = translateMergeCommitError(error);
     throw translated instanceof MergeError ? translated : (
         new MergeError(

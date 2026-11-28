@@ -22,6 +22,7 @@ import {
   type IdentityTransitionNoteFunction,
   withRecordedIdentityMutationTarget,
 } from "../store/recorded-capture";
+import type { IdentityWriteCounterName } from "../store/transaction-receipt";
 import { chunk } from "../utils/array";
 import { compareCodePoints } from "../utils/compare";
 import { nowIso } from "../utils/date";
@@ -825,17 +826,28 @@ type IdentityCall<G extends GraphDef> = Readonly<{
 }>;
 
 /**
- * THE entry of one identity facade call: one operation of the facade's
- * session (the root itself for a root facade), and the context whose
- * statements go through it. Called once per public call, after the call's
- * statement-free refusals, so a refused call enters nothing; everything the
- * call composes runs under the one operation it entered.
+ * THE entry of one identity facade read call: one operation of the facade's
+ * session (the root itself for a root facade), counted as running on the
+ * session until `run` settles, and the context whose statements go through
+ * it. Called once per public call, after the call's statement-free refusals,
+ * so a refused call enters nothing; everything the call composes runs under
+ * the one operation it entered. A read is a call: refused while another
+ * call's savepoint unit is open, and in flight, so a unit another call tries
+ * to open meanwhile is refused.
  */
-function enterIdentityCall<G extends GraphDef>(
+async function runIdentityRead<G extends GraphDef, T>(
   source: IdentityFacadeSource<G>,
-): IdentityCall<G> {
-  const entry = enterOperation(source.scope);
-  return { entry, ctx: source.callContext(operationEntryBackend(entry)) };
+  run: (call: IdentityCall<G>) => Promise<T>,
+): Promise<T> {
+  const entry = enterCall(enterOperation(source.scope));
+  try {
+    return await run({
+      entry,
+      ctx: source.callContext(operationEntryBackend(entry)),
+    });
+  } finally {
+    exitCall(entry);
+  }
 }
 
 export function createIdentityReadFacade<G extends GraphDef>(
@@ -883,404 +895,317 @@ export function createIdentityReadFacade<G extends GraphDef>(
                 "Use a backend profile that supports SQL window functions, or avoid this query shape.",
             },
           );
-        return loadCurrentIdentityClassPage(
-          enterIdentityCall(source).ctx,
-          allKinds,
-          kinds,
-          options.limit,
-          after,
-        );
-      }
-      const call = enterIdentityCall(source).ctx;
-      const coordinate = identitySqlCoordinate(ctx.coordinate, nowIso());
-      const kindValues = sql.join(
-        allKinds.map((kind) => sql`${kind}`),
-        sql`, `,
-      );
-      const nodeSource = identityNodeSnapshotSource(
-        ctx.schema,
-        ctx.graphId,
-        coordinate,
-      );
-      const rows = await call.backend.execute<PlainNodeRef>(
-        asCompiledRowsSql(sql`
-          WITH node_snapshot AS (${nodeSource})
-          SELECT n.kind, n.id
-          FROM node_snapshot n
-          WHERE n.kind IN (${kindValues})
-            AND ${identityNodeVisibilitySql(coordinate, "n")}
-          ORDER BY n.kind, n.id
-        `),
-      );
-      const seeds = rows.map((row) => ({ kind: row.kind, id: row.id }));
-      const grouped = new Map<string, Map<string, PlainNodeRef>>();
-      const historical = await loadHistoricalClasses(
-        call.backend,
-        ctx.schema,
-        ctx.graphId,
-        seeds,
-        ctx.coordinate,
-        ctx.sameIdAcrossKinds,
-        activeKinds,
-      );
-      for (const value of historical.values()) {
-        const members = value.visible;
-        if (members.length === 0) continue;
-        if (!members.some((member) => kinds.includes(member.kind))) continue;
-        const representative = members[0];
-        if (representative === undefined) continue;
-        const key = refKey(representative);
-        if (grouped.has(key)) continue;
-        grouped.set(
-          key,
-          new Map(members.map((member) => [refKey(member), member])),
-        );
-      }
-      const sorted = [...grouped.values()]
-        .map((members) =>
-          [...members.values()].toSorted((left, right) =>
-            compareReferences(left, right),
+        return runIdentityRead(source, (identityCall) =>
+          loadCurrentIdentityClassPage(
+            identityCall.ctx,
+            allKinds,
+            kinds,
+            options.limit,
+            after,
           ),
-        )
-        .toSorted((left, right) =>
-          compareReferences(requireDefined(left[0]), requireDefined(right[0])),
         );
-      const remaining = sorted.filter((members) => {
-        const first = requireDefined(members[0]);
-        return after === undefined || compareReferences(first, after) > 0;
-      });
-      const selected = remaining.slice(0, options.limit);
-      const classes = selected.map((members) => ({
-        representative: publicNodeRef<G>(requireDefined(members[0])),
-        members: members.map((member) => publicNodeRef<G>(member)),
-      }));
-      const last = selected.at(-1)?.[0];
-      return {
-        classes,
-        ...(remaining.length > selected.length && last !== undefined ?
-          {
-            nextCursor: encodeIdentityClassCursor(
-              {
-                graphId: ctx.graphId,
-                coordinate: ctx.coordinate,
-                kinds,
-              },
-              last,
+      }
+      // Narrowed above to a historical coordinate; a closure does not keep a
+      // property's narrowing.
+      const historicalCoordinate = ctx.coordinate;
+      return runIdentityRead(source, async (identityCall) => {
+        const call = identityCall.ctx;
+        const coordinate = identitySqlCoordinate(
+          historicalCoordinate,
+          nowIso(),
+        );
+        const kindValues = sql.join(
+          allKinds.map((kind) => sql`${kind}`),
+          sql`, `,
+        );
+        const nodeSource = identityNodeSnapshotSource(
+          ctx.schema,
+          ctx.graphId,
+          coordinate,
+        );
+        const rows = await call.backend.execute<PlainNodeRef>(
+          asCompiledRowsSql(sql`
+            WITH node_snapshot AS (${nodeSource})
+            SELECT n.kind, n.id
+            FROM node_snapshot n
+            WHERE n.kind IN (${kindValues})
+              AND ${identityNodeVisibilitySql(coordinate, "n")}
+            ORDER BY n.kind, n.id
+          `),
+        );
+        const seeds = rows.map((row) => ({ kind: row.kind, id: row.id }));
+        const grouped = new Map<string, Map<string, PlainNodeRef>>();
+        const historical = await loadHistoricalClasses(
+          call.backend,
+          ctx.schema,
+          ctx.graphId,
+          seeds,
+          historicalCoordinate,
+          ctx.sameIdAcrossKinds,
+          activeKinds,
+        );
+        for (const value of historical.values()) {
+          const members = value.visible;
+          if (members.length === 0) continue;
+          if (!members.some((member) => kinds.includes(member.kind))) continue;
+          const representative = members[0];
+          if (representative === undefined) continue;
+          const key = refKey(representative);
+          if (grouped.has(key)) continue;
+          grouped.set(
+            key,
+            new Map(members.map((member) => [refKey(member), member])),
+          );
+        }
+        const sorted = [...grouped.values()]
+          .map((members) =>
+            [...members.values()].toSorted((left, right) =>
+              compareReferences(left, right),
             ),
-          }
-        : {}),
-      };
+          )
+          .toSorted((left, right) =>
+            compareReferences(
+              requireDefined(left[0]),
+              requireDefined(right[0]),
+            ),
+          );
+        const remaining = sorted.filter((members) => {
+          const first = requireDefined(members[0]);
+          return after === undefined || compareReferences(first, after) > 0;
+        });
+        const selected = remaining.slice(0, options.limit);
+        const classes = selected.map((members) => ({
+          representative: publicNodeRef<G>(requireDefined(members[0])),
+          members: members.map((member) => publicNodeRef<G>(member)),
+        }));
+        const last = selected.at(-1)?.[0];
+        return {
+          classes,
+          ...(remaining.length > selected.length && last !== undefined ?
+            {
+              nextCursor: encodeIdentityClassCursor(
+                {
+                  graphId: ctx.graphId,
+                  coordinate: ctx.coordinate,
+                  kinds,
+                },
+                last,
+              ),
+            }
+          : {}),
+        };
+      });
     },
     async representativeOf(input) {
       const ref = registeredPlainRef(ctx, input);
-      const members = await visibleMembersAtCoordinate(
-        enterIdentityCall(source).ctx,
-        ref,
-        activeKinds,
-      );
-      return members[0] === undefined ? undefined : publicNodeRef(members[0]);
+      return runIdentityRead(source, async (identityCall) => {
+        const members = await visibleMembersAtCoordinate(
+          identityCall.ctx,
+          ref,
+          activeKinds,
+        );
+        return members[0] === undefined ? undefined : publicNodeRef(members[0]);
+      });
     },
 
     async membersOf(input) {
       const ref = registeredPlainRef(ctx, input);
-      const members = await visibleMembersAtCoordinate(
-        enterIdentityCall(source).ctx,
-        ref,
-        activeKinds,
-      );
-      return members.map((member) => publicNodeRef<G>(member));
+      return runIdentityRead(source, async (identityCall) => {
+        const members = await visibleMembersAtCoordinate(
+          identityCall.ctx,
+          ref,
+          activeKinds,
+        );
+        return members.map((member) => publicNodeRef<G>(member));
+      });
     },
 
     async nodesOf(input) {
       const ref = registeredPlainRef(ctx, input);
-      const call = enterIdentityCall(source).ctx;
-      const members = await visibleMembersAtCoordinate(call, ref, activeKinds);
-      const nodes = await call.loadNodes(members, call.coordinate);
-      return nodes.filter((node) => node !== undefined);
+      return runIdentityRead(source, async (identityCall) => {
+        const call = identityCall.ctx;
+        const members = await visibleMembersAtCoordinate(
+          call,
+          ref,
+          activeKinds,
+        );
+        const nodes = await call.loadNodes(members, call.coordinate);
+        return nodes.filter((node) => node !== undefined);
+      });
     },
 
     async areSame(firstInput, secondInput) {
       const first = registeredPlainRef(ctx, firstInput);
       const second = registeredPlainRef(ctx, secondInput);
-      const members = await visibleMembersAtCoordinate(
-        enterIdentityCall(source).ctx,
-        first,
-        activeKinds,
-      );
-      return containsRef(members, second);
+      return runIdentityRead(source, async (identityCall) => {
+        const members = await visibleMembersAtCoordinate(
+          identityCall.ctx,
+          first,
+          activeKinds,
+        );
+        return containsRef(members, second);
+      });
     },
 
     async areDifferent(firstInput, secondInput) {
       const first = registeredPlainRef(ctx, firstInput);
       const second = registeredPlainRef(ctx, secondInput);
-      const call = enterIdentityCall(source).ctx;
-      const { coordinate } = ctx;
-      if (coordinate === undefined || isCurrentClosureCoordinate(coordinate)) {
-        const [firstVisible, secondVisible] = await Promise.all([
-          loadCurrentVisibleMembers(
+      return runIdentityRead(source, async (identityCall) => {
+        const call = identityCall.ctx;
+        const { coordinate } = ctx;
+        if (
+          coordinate === undefined ||
+          isCurrentClosureCoordinate(coordinate)
+        ) {
+          const [firstVisible, secondVisible] = await Promise.all([
+            loadCurrentVisibleMembers(
+              call.backend,
+              ctx.schema,
+              ctx.graphId,
+              first,
+            ),
+            loadCurrentVisibleMembers(
+              call.backend,
+              ctx.schema,
+              ctx.graphId,
+              second,
+            ),
+          ]);
+          if (firstVisible.length === 0 || secondVisible.length === 0)
+            return false;
+          const classes = await loadCurrentStructuralClasses(
             call.backend,
             ctx.schema,
             ctx.graphId,
-            first,
-          ),
-          loadCurrentVisibleMembers(
+            [first, second],
+          );
+          const firstClass = requireDefined(classes.get(refKey(first)));
+          const secondClass = requireDefined(classes.get(refKey(second)));
+          // A boolean is the whole answer here, and the separation relation holds
+          // exactly that boolean for a pair of current classes — no assertion has
+          // to be named, so the ledger is not read at all.
+          const separated = await isSeparated(
             call.backend,
             ctx.schema,
             ctx.graphId,
-            second,
-          ),
-        ]);
-        if (firstVisible.length === 0 || secondVisible.length === 0)
-          return false;
-        const classes = await loadCurrentStructuralClasses(
+            currentClassKey(firstClass),
+            currentClassKey(secondClass),
+            ctx.registry,
+          );
+          return (
+            separated ||
+            classHasDisjointKinds(ctx.registry, firstClass, secondClass) !==
+              undefined
+          );
+        }
+        const classes = await loadHistoricalClasses(
           call.backend,
           ctx.schema,
           ctx.graphId,
           [first, second],
+          coordinate,
+          ctx.sameIdAcrossKinds,
+          activeKinds,
         );
         const firstClass = requireDefined(classes.get(refKey(first)));
         const secondClass = requireDefined(classes.get(refKey(second)));
-        // A boolean is the whole answer here, and the separation relation holds
-        // exactly that boolean for a pair of current classes — no assertion has
-        // to be named, so the ledger is not read at all.
-        const separated = await isSeparated(
+        if (firstClass.visible.length === 0 || secondClass.visible.length === 0)
+          return false;
+        const different = await loadSpanningDifferentAssertion(
           call.backend,
           ctx.schema,
           ctx.graphId,
-          currentClassKey(firstClass),
-          currentClassKey(secondClass),
-          ctx.registry,
-        );
-        return (
-          separated ||
-          classHasDisjointKinds(ctx.registry, firstClass, secondClass) !==
-            undefined
-        );
-      }
-      const classes = await loadHistoricalClasses(
-        call.backend,
-        ctx.schema,
-        ctx.graphId,
-        [first, second],
-        coordinate,
-        ctx.sameIdAcrossKinds,
-        activeKinds,
-      );
-      const firstClass = requireDefined(classes.get(refKey(first)));
-      const secondClass = requireDefined(classes.get(refKey(second)));
-      if (firstClass.visible.length === 0 || secondClass.visible.length === 0)
-        return false;
-      const different = await loadSpanningDifferentAssertion(
-        call.backend,
-        ctx.schema,
-        ctx.graphId,
-        firstClass.structural,
-        secondClass.structural,
-        ctx.coordinate,
-      );
-      return (
-        different !== undefined ||
-        classHasDisjointKinds(
-          ctx.registry,
           firstClass.structural,
           secondClass.structural,
-        ) !== undefined
-      );
+          ctx.coordinate,
+        );
+        return (
+          different !== undefined ||
+          classHasDisjointKinds(
+            ctx.registry,
+            firstClass.structural,
+            secondClass.structural,
+          ) !== undefined
+        );
+      });
     },
 
     async assertionsOf(input) {
       const ref = registeredPlainRef(ctx, input);
-      const call = enterIdentityCall(source).ctx;
-      const members = await visibleMembersAtCoordinate(call, ref, activeKinds);
-      if (members.length === 0) return [];
-      const assertions = await loadAssertionsTouching(
-        call.backend,
-        ctx.schema,
-        ctx.graphId,
-        [ref],
-        ctx.coordinate,
-      );
-      return assertions
-        .filter(
-          (assertion) =>
-            (assertion.a_kind === ref.kind && assertion.a_id === ref.id) ||
-            (assertion.b_kind === ref.kind && assertion.b_id === ref.id),
-        )
-        .toSorted((left, right) => compareCodePoints(left.id, right.id))
-        .map((assertion) => publicAssertion<G>(assertion));
+      return runIdentityRead(source, async (identityCall) => {
+        const call = identityCall.ctx;
+        const members = await visibleMembersAtCoordinate(
+          call,
+          ref,
+          activeKinds,
+        );
+        if (members.length === 0) return [];
+        const assertions = await loadAssertionsTouching(
+          call.backend,
+          ctx.schema,
+          ctx.graphId,
+          [ref],
+          ctx.coordinate,
+        );
+        return assertions
+          .filter(
+            (assertion) =>
+              (assertion.a_kind === ref.kind && assertion.a_id === ref.id) ||
+              (assertion.b_kind === ref.kind && assertion.b_id === ref.id),
+          )
+          .toSorted((left, right) => compareCodePoints(left.id, right.id))
+          .map((assertion) => publicAssertion<G>(assertion));
+      });
     },
 
     async explainSame(firstInput, secondInput) {
       const first = registeredPlainRef(ctx, firstInput);
       const second = registeredPlainRef(ctx, secondInput);
-      const call = enterIdentityCall(source).ctx;
-      let structuralMembers: readonly PlainNodeRef[];
-      let foldEligibleMembers: readonly PlainNodeRef[];
-      if (
-        ctx.coordinate === undefined ||
-        isCurrentClosureCoordinate(ctx.coordinate)
-      ) {
-        const visibleMembers = await visibleMembersAtCoordinate(
-          call,
-          first,
-          activeKinds,
-        );
-        if (!containsRef(visibleMembers, second)) return;
-        if (refKey(first) === refKey(second)) return [];
-        const classes = await loadCurrentStructuralClassComponents(
-          call.backend,
-          ctx.schema,
-          ctx.graphId,
-          [first],
-        );
-        structuralMembers = [...classes.values()].find((members) =>
-          containsRef(members, first),
-        ) ?? [first];
-        foldEligibleMembers = structuralMembers;
-      } else {
-        const classes = await loadHistoricalClasses(
-          call.backend,
-          ctx.schema,
-          ctx.graphId,
-          [first],
-          ctx.coordinate,
-          ctx.sameIdAcrossKinds,
-          activeKinds,
-        );
-        const historicalClass = requireDefined(classes.get(refKey(first)));
-        if (!containsRef(historicalClass.visible, second)) return;
-        if (refKey(first) === refKey(second)) return [];
-        structuralMembers = historicalClass.structural;
-        foldEligibleMembers = historicalClass.foldEligible;
-      }
-      if (!containsRef(structuralMembers, second))
-        throw closureMismatchError(
-          ctx.graphId,
-          { first, second, invariant: "class member missing from structure" },
-          (
-            ctx.coordinate === undefined ||
-              isCurrentClosureCoordinate(ctx.coordinate)
-          ) ?
-            "current"
-          : "historical",
-        );
-      const classKeys = new Set(
-        structuralMembers.map((member) => refKey(member)),
-      );
-      const classAssertions = await loadAssertionsTouching(
-        call.backend,
-        ctx.schema,
-        ctx.graphId,
-        structuralMembers,
-        ctx.coordinate,
-        "same",
-      );
-
-      type Previous = Readonly<{
-        ref: PlainNodeRef;
-        step: IdentitySamePathStep<G>;
-      }>;
-      const structuralById = new Map<string, PlainNodeRef[]>();
-      for (const ref of foldEligibleMembers) {
-        const group = structuralById.get(ref.id) ?? [];
-        group.push(ref);
-        structuralById.set(ref.id, group);
-      }
-      const assertionEdges = classAssertions
-        .filter(
-          (assertion) =>
-            assertion.rel === "same" &&
-            classKeys.has(
-              refKey({ kind: assertion.a_kind, id: assertion.a_id }),
-            ) &&
-            classKeys.has(
-              refKey({ kind: assertion.b_kind, id: assertion.b_id }),
-            ),
-        )
-        .map((assertion) => ({
-          a: { kind: assertion.a_kind, id: assertion.a_id },
-          b: { kind: assertion.b_kind, id: assertion.b_id },
-          assertion,
-        }));
-      const assertionAdjacency = new Map<
-        string,
-        { ref: PlainNodeRef; via: Previous["step"]["via"] }[]
-      >();
-      for (const edge of assertionEdges) {
-        const edgeValue = publicAssertion<G>(edge.assertion);
-        const neighborsA = assertionAdjacency.get(refKey(edge.a)) ?? [];
-        neighborsA.push({
-          ref: edge.b,
-          via: { type: "assertion", assertion: edgeValue },
-        });
-        assertionAdjacency.set(refKey(edge.a), neighborsA);
-        const neighborsB = assertionAdjacency.get(refKey(edge.b)) ?? [];
-        neighborsB.push({
-          ref: edge.a,
-          via: { type: "assertion", assertion: edgeValue },
-        });
-        assertionAdjacency.set(refKey(edge.b), neighborsB);
-      }
-      for (const members of structuralById.values()) {
-        members.sort((left, right) => compareReferences(left, right));
-      }
-      const visited = new Set([refKey(first)]);
-      const previous = new Map<string, Previous>();
-      const queue = [first];
-      for (
-        let index = 0;
-        index < queue.length && !visited.has(refKey(second));
-        index += 1
-      ) {
-        const current = queue[index];
-        if (current === undefined) continue;
-        const neighbors: readonly Readonly<{
-          ref: PlainNodeRef;
-          via: Previous["step"]["via"];
-        }>[] = [
-          ...(assertionAdjacency.get(refKey(current)) ?? []),
-          ...(ctx.sameIdAcrossKinds === "fold" ?
-            (structuralById.get(current.id) ?? [])
-              .filter((member) => member.kind !== current.kind)
-              .map((member) => ({
-                ref: member,
-                via: { type: "same-id-fold" as const },
-              }))
-          : []),
-        ];
-        const orderedNeighbors = [...neighbors].toSorted((left, right) => {
-          const refOrder = compareReferences(left.ref, right.ref);
-          if (refOrder !== 0) return refOrder;
-          if (left.via.type === "same-id-fold") return -1;
-          if (right.via.type === "same-id-fold") return 1;
-          return compareCodePoints(
-            left.via.assertion.id,
-            right.via.assertion.id,
+      return runIdentityRead(source, async (identityCall) => {
+        const call = identityCall.ctx;
+        let structuralMembers: readonly PlainNodeRef[];
+        let foldEligibleMembers: readonly PlainNodeRef[];
+        if (
+          ctx.coordinate === undefined ||
+          isCurrentClosureCoordinate(ctx.coordinate)
+        ) {
+          const visibleMembers = await visibleMembersAtCoordinate(
+            call,
+            first,
+            activeKinds,
           );
-        });
-        for (const neighbor of orderedNeighbors) {
-          const key = refKey(neighbor.ref);
-          if (visited.has(key)) continue;
-          visited.add(key);
-          previous.set(key, {
-            ref: current,
-            step: {
-              from: publicNodeRef<G>(current),
-              to: publicNodeRef<G>(neighbor.ref),
-              via: neighbor.via,
-            },
-          });
-          queue.push(neighbor.ref);
+          if (!containsRef(visibleMembers, second)) return;
+          if (refKey(first) === refKey(second)) return [];
+          const classes = await loadCurrentStructuralClassComponents(
+            call.backend,
+            ctx.schema,
+            ctx.graphId,
+            [first],
+          );
+          structuralMembers = [...classes.values()].find((members) =>
+            containsRef(members, first),
+          ) ?? [first];
+          foldEligibleMembers = structuralMembers;
+        } else {
+          const classes = await loadHistoricalClasses(
+            call.backend,
+            ctx.schema,
+            ctx.graphId,
+            [first],
+            ctx.coordinate,
+            ctx.sameIdAcrossKinds,
+            activeKinds,
+          );
+          const historicalClass = requireDefined(classes.get(refKey(first)));
+          if (!containsRef(historicalClass.visible, second)) return;
+          if (refKey(first) === refKey(second)) return [];
+          structuralMembers = historicalClass.structural;
+          foldEligibleMembers = historicalClass.foldEligible;
         }
-      }
-      const path: IdentitySamePathStep<G>[] = [];
-      let cursor = refKey(second);
-      while (cursor !== refKey(first)) {
-        const entry = previous.get(cursor);
-        if (entry === undefined)
+        if (!containsRef(structuralMembers, second))
           throw closureMismatchError(
             ctx.graphId,
-            { first, second, invariant: "same-class pair has no proof" },
+            { first, second, invariant: "class member missing from structure" },
             (
               ctx.coordinate === undefined ||
                 isCurrentClosureCoordinate(ctx.coordinate)
@@ -1288,10 +1213,135 @@ export function createIdentityReadFacade<G extends GraphDef>(
               "current"
             : "historical",
           );
-        path.push(entry.step);
-        cursor = refKey(entry.ref);
-      }
-      return path.toReversed();
+        const classKeys = new Set(
+          structuralMembers.map((member) => refKey(member)),
+        );
+        const classAssertions = await loadAssertionsTouching(
+          call.backend,
+          ctx.schema,
+          ctx.graphId,
+          structuralMembers,
+          ctx.coordinate,
+          "same",
+        );
+
+        type Previous = Readonly<{
+          ref: PlainNodeRef;
+          step: IdentitySamePathStep<G>;
+        }>;
+        const structuralById = new Map<string, PlainNodeRef[]>();
+        for (const ref of foldEligibleMembers) {
+          const group = structuralById.get(ref.id) ?? [];
+          group.push(ref);
+          structuralById.set(ref.id, group);
+        }
+        const assertionEdges = classAssertions
+          .filter(
+            (assertion) =>
+              assertion.rel === "same" &&
+              classKeys.has(
+                refKey({ kind: assertion.a_kind, id: assertion.a_id }),
+              ) &&
+              classKeys.has(
+                refKey({ kind: assertion.b_kind, id: assertion.b_id }),
+              ),
+          )
+          .map((assertion) => ({
+            a: { kind: assertion.a_kind, id: assertion.a_id },
+            b: { kind: assertion.b_kind, id: assertion.b_id },
+            assertion,
+          }));
+        const assertionAdjacency = new Map<
+          string,
+          { ref: PlainNodeRef; via: Previous["step"]["via"] }[]
+        >();
+        for (const edge of assertionEdges) {
+          const edgeValue = publicAssertion<G>(edge.assertion);
+          const neighborsA = assertionAdjacency.get(refKey(edge.a)) ?? [];
+          neighborsA.push({
+            ref: edge.b,
+            via: { type: "assertion", assertion: edgeValue },
+          });
+          assertionAdjacency.set(refKey(edge.a), neighborsA);
+          const neighborsB = assertionAdjacency.get(refKey(edge.b)) ?? [];
+          neighborsB.push({
+            ref: edge.a,
+            via: { type: "assertion", assertion: edgeValue },
+          });
+          assertionAdjacency.set(refKey(edge.b), neighborsB);
+        }
+        for (const members of structuralById.values()) {
+          members.sort((left, right) => compareReferences(left, right));
+        }
+        const visited = new Set([refKey(first)]);
+        const previous = new Map<string, Previous>();
+        const queue = [first];
+        for (
+          let index = 0;
+          index < queue.length && !visited.has(refKey(second));
+          index += 1
+        ) {
+          const current = queue[index];
+          if (current === undefined) continue;
+          const neighbors: readonly Readonly<{
+            ref: PlainNodeRef;
+            via: Previous["step"]["via"];
+          }>[] = [
+            ...(assertionAdjacency.get(refKey(current)) ?? []),
+            ...(ctx.sameIdAcrossKinds === "fold" ?
+              (structuralById.get(current.id) ?? [])
+                .filter((member) => member.kind !== current.kind)
+                .map((member) => ({
+                  ref: member,
+                  via: { type: "same-id-fold" as const },
+                }))
+            : []),
+          ];
+          const orderedNeighbors = [...neighbors].toSorted((left, right) => {
+            const refOrder = compareReferences(left.ref, right.ref);
+            if (refOrder !== 0) return refOrder;
+            if (left.via.type === "same-id-fold") return -1;
+            if (right.via.type === "same-id-fold") return 1;
+            return compareCodePoints(
+              left.via.assertion.id,
+              right.via.assertion.id,
+            );
+          });
+          for (const neighbor of orderedNeighbors) {
+            const key = refKey(neighbor.ref);
+            if (visited.has(key)) continue;
+            visited.add(key);
+            previous.set(key, {
+              ref: current,
+              step: {
+                from: publicNodeRef<G>(current),
+                to: publicNodeRef<G>(neighbor.ref),
+                via: neighbor.via,
+              },
+            });
+            queue.push(neighbor.ref);
+          }
+        }
+        const path: IdentitySamePathStep<G>[] = [];
+        let cursor = refKey(second);
+        while (cursor !== refKey(first)) {
+          const entry = previous.get(cursor);
+          if (entry === undefined)
+            throw closureMismatchError(
+              ctx.graphId,
+              { first, second, invariant: "same-class pair has no proof" },
+              (
+                ctx.coordinate === undefined ||
+                  isCurrentClosureCoordinate(ctx.coordinate)
+              ) ?
+                "current"
+              : "historical",
+            );
+          path.push(entry.step);
+          cursor = refKey(entry.ref);
+        }
+        return path.toReversed();
+      });
     },
   };
 }
@@ -1374,27 +1424,55 @@ export async function applyRetractionAftermath<G extends GraphDef>(
 }
 
 /**
+ * Records `count` identity writes under `counter` into the receipt chain of
+ * the transaction surface a facade belongs to.
+ */
+export type IdentityWriteRecorder = (
+  counter: IdentityWriteCounterName,
+  count: number,
+) => void;
+
+function countOne(): number {
+  return 1;
+}
+
+function countResults(result: readonly unknown[]): number {
+  return result.length;
+}
+
+/**
  * The identity facade over `source`. Each call, a read or a mutation, enters
- * one operation of `source.scope` (see {@link enterIdentityCall}); a facade a
+ * one operation of `source.scope` (see {@link runIdentityRead}); a facade a
  * transaction context offers therefore shares the write executor's
  * per-session state with the node and edge writes of that transaction.
  */
 export function createIdentityFacade<G extends GraphDef>(
   source: IdentityFacadeSource<G>,
+  recordWrite?: IdentityWriteRecorder,
 ): IdentityFacade<G> {
   const ctx = source.context;
   /**
    * One mutation call: its operation, entered and counted as running on its
-   * session until it settles, runs `fn` in the write executor.
+   * session until it settles, runs `fn` in the write executor, and records
+   * the call's `count(result)` writes under `counter` through
+   * `recordWrite` once it has succeeded, inside the call: a savepoint unit
+   * another call opens can never checkpoint a receipt between the write and
+   * its count.
    */
-  async function mutate<T>(fn: IdentityMutationBody<T>): Promise<T> {
+  async function mutate<T>(
+    counter: IdentityWriteCounterName,
+    count: (result: T) => number,
+    fn: IdentityMutationBody<T>,
+  ): Promise<T> {
     const entry = enterCall(enterOperation(source.scope));
     try {
-      return await runIdentityMutation(
+      const result = await runIdentityMutation(
         source.callContext(operationEntryBackend(entry)),
         fn,
         entry,
       );
+      recordWrite?.(counter, count(result));
+      return result;
     } finally {
       exitCall(entry);
     }
@@ -1404,97 +1482,119 @@ export function createIdentityFacade<G extends GraphDef>(
 
     async assertSame(a, b, window) {
       const request = identityAssertionRequest(ctx, "same", a, b, window);
-      return mutate((target, touch, _markWritten, noteTransition) => {
-        const operationInstant = nowIso();
-        return assertPair(
-          ctx,
-          target,
-          "same",
-          request,
-          touch,
-          noteTransition,
-          operationInstant,
-        );
-      });
+      return mutate(
+        "sameAssertions",
+        countOne,
+        (target, touch, _markWritten, noteTransition) => {
+          const operationInstant = nowIso();
+          return assertPair(
+            ctx,
+            target,
+            "same",
+            request,
+            touch,
+            noteTransition,
+            operationInstant,
+          );
+        },
+      );
     },
 
     async assertDifferent(a, b, window) {
       const request = identityAssertionRequest(ctx, "different", a, b, window);
-      return mutate((target, touch, _markWritten, noteTransition) => {
-        const operationInstant = nowIso();
-        return assertPair(
-          ctx,
-          target,
-          "different",
-          request,
-          touch,
-          noteTransition,
-          operationInstant,
-        );
-      });
+      return mutate(
+        "differentAssertions",
+        countOne,
+        (target, touch, _markWritten, noteTransition) => {
+          const operationInstant = nowIso();
+          return assertPair(
+            ctx,
+            target,
+            "different",
+            request,
+            touch,
+            noteTransition,
+            operationInstant,
+          );
+        },
+      );
     },
 
     async bulkAssertSame(pairs) {
       const requests = identityAssertionRequests(ctx, "same", pairs);
-      return mutate((target, touch, _markWritten, noteTransition) => {
-        if (requests.every((request) => request.window === undefined)) {
-          return bulkAssertPairs(
+      // Counts the pairs the facade snapshotted (one result per pair), never
+      // a second read of the caller's array, which may be mutated meanwhile.
+      return mutate(
+        "sameAssertions",
+        countResults,
+        (target, touch, _markWritten, noteTransition) => {
+          if (requests.every((request) => request.window === undefined)) {
+            return bulkAssertPairs(
+              ctx,
+              target,
+              "same",
+              requests,
+              touch,
+              noteTransition,
+            );
+          }
+          return bulkAssertWindowedPairs(
             ctx,
             target,
             "same",
             requests,
             touch,
             noteTransition,
+            nowIso(),
           );
-        }
-        return bulkAssertWindowedPairs(
-          ctx,
-          target,
-          "same",
-          requests,
-          touch,
-          noteTransition,
-          nowIso(),
-        );
-      });
+        },
+      );
     },
 
     async bulkAssertDifferent(pairs) {
       const requests = identityAssertionRequests(ctx, "different", pairs);
-      return mutate((target, touch, _markWritten, noteTransition) => {
-        if (requests.every((request) => request.window === undefined)) {
-          return bulkAssertPairs(
+      return mutate(
+        "differentAssertions",
+        countResults,
+        (target, touch, _markWritten, noteTransition) => {
+          if (requests.every((request) => request.window === undefined)) {
+            return bulkAssertPairs(
+              ctx,
+              target,
+              "different",
+              requests,
+              touch,
+              noteTransition,
+            );
+          }
+          return bulkAssertWindowedPairs(
             ctx,
             target,
             "different",
             requests,
             touch,
             noteTransition,
+            nowIso(),
           );
-        }
-        return bulkAssertWindowedPairs(
-          ctx,
-          target,
-          "different",
-          requests,
-          touch,
-          noteTransition,
-          nowIso(),
-        );
-      });
+        },
+      );
     },
 
     retractAssertion(id) {
-      return mutate(async (target, touch, _markWritten, noteTransition) => {
-        const operationInstant = nowIso();
-        const ended = await retractById(ctx, target, id, touch);
-        if (ended === undefined) return;
-        await applyRetractionAftermath(ctx, target, [ended], noteTransition, {
-          cause: "retract",
-          validAt: operationInstant,
-        });
-        return publicAssertion<G>(ended);
-      });
+      return mutate(
+        "retractions",
+        countOne,
+        async (target, touch, _markWritten, noteTransition) => {
+          const operationInstant = nowIso();
+          const ended = await retractById(ctx, target, id, touch);
+          if (ended === undefined) return;
+          await applyRetractionAftermath(ctx, target, [ended], noteTransition, {
+            cause: "retract",
+            validAt: operationInstant,
+          });
+          return publicAssertion<G>(ended);
+        },
+      );
     },
 
     async retractSameAssertion(firstInput, secondInput) {
@@ -1503,30 +1603,34 @@ export function createIdentityFacade<G extends GraphDef>(
         registeredPlainRef(ctx, firstInput),
         registeredPlainRef(ctx, secondInput),
       );
-      return mutate(async (target, touch, _markWritten, noteTransition) => {
-        const operationInstant = nowIso();
-        const existing = await currentAssertionForPair(
-          target,
-          ctx.schema,
-          ctx.graphId,
-          "same",
-          a,
-          b,
-        );
-        if (existing === undefined) return;
-        const ended = await retractById(ctx, target, existing.id, touch);
-        // The row the lookup found, never `ended`: the closure must be
-        // repaired even for an id another writer ended first, and both carry
-        // the same endpoints.
-        await applyRetractionAftermath(
-          ctx,
-          target,
-          [existing],
-          noteTransition,
-          { cause: "retract", validAt: operationInstant },
-        );
-        return ended === undefined ? undefined : publicAssertion<G>(ended);
-      });
+      return mutate(
+        "retractions",
+        countOne,
+        async (target, touch, _markWritten, noteTransition) => {
+          const operationInstant = nowIso();
+          const existing = await currentAssertionForPair(
+            target,
+            ctx.schema,
+            ctx.graphId,
+            "same",
+            a,
+            b,
+          );
+          if (existing === undefined) return;
+          const ended = await retractById(ctx, target, existing.id, touch);
+          // The row the lookup found, never `ended`: the closure must be
+          // repaired even for an id another writer ended first, and both carry
+          // the same endpoints.
+          await applyRetractionAftermath(
+            ctx,
+            target,
+            [existing],
+            noteTransition,
+            { cause: "retract", validAt: operationInstant },
+          );
+          return ended === undefined ? undefined : publicAssertion<G>(ended);
+        },
+      );
     },
 
     async retractDifferentAssertion(firstInput, secondInput) {
@@ -1535,39 +1639,55 @@ export function createIdentityFacade<G extends GraphDef>(
         registeredPlainRef(ctx, firstInput),
         registeredPlainRef(ctx, secondInput),
       );
-      return mutate(async (target, touch, _markWritten, noteTransition) => {
-        const operationInstant = nowIso();
-        const existing = await currentAssertionForPair(
-          target,
-          ctx.schema,
-          ctx.graphId,
-          "different",
-          a,
-          b,
-        );
-        if (existing === undefined) return;
-        const ended = await retractById(ctx, target, existing.id, touch);
-        await applyRetractionAftermath(
-          ctx,
-          target,
-          [existing],
-          noteTransition,
-          { cause: "retract", validAt: operationInstant },
-        );
-        return ended === undefined ? undefined : publicAssertion<G>(ended);
-      });
+      return mutate(
+        "retractions",
+        countOne,
+        async (target, touch, _markWritten, noteTransition) => {
+          const operationInstant = nowIso();
+          const existing = await currentAssertionForPair(
+            target,
+            ctx.schema,
+            ctx.graphId,
+            "different",
+            a,
+            b,
+          );
+          if (existing === undefined) return;
+          const ended = await retractById(ctx, target, existing.id, touch);
+          await applyRetractionAftermath(
+            ctx,
+            target,
+            [existing],
+            noteTransition,
+            { cause: "retract", validAt: operationInstant },
+          );
+          return ended === undefined ? undefined : publicAssertion<G>(ended);
+        },
+      );
     },
 
     bulkRetractAssertions(ids) {
-      return mutate(async (target, touch, _markWritten, noteTransition) => {
-        const operationInstant = nowIso();
-        const retracted = await retractByIds(ctx, target, ids, touch);
-        await applyRetractionAftermath(ctx, target, retracted, noteTransition, {
-          cause: "retract",
-          validAt: operationInstant,
-        });
-        return retracted.map((assertion) => publicAssertion<G>(assertion));
-      });
+      // Pinned at call time: the caller may mutate `ids` while it runs.
+      const count = ids.length;
+      return mutate(
+        "retractions",
+        () => count,
+        async (target, touch, _markWritten, noteTransition) => {
+          const operationInstant = nowIso();
+          const retracted = await retractByIds(ctx, target, ids, touch);
+          await applyRetractionAftermath(
+            ctx,
+            target,
+            retracted,
+            noteTransition,
+            {
+              cause: "retract",
+              validAt: operationInstant,
+            },
+          );
+          return retracted.map((assertion) => publicAssertion<G>(assertion));
+        },
+      );
     },
 
     async transitionsOf(ref, options) {
@@ -1577,8 +1697,9 @@ export function createIdentityFacade<G extends GraphDef>(
         options,
         "transitionsOf",
       );
-      const call = enterIdentityCall(source);
-      return identityTransitionsOf(call.ctx, call.entry, request, options);
+      return runIdentityRead(source, (call) =>
+        identityTransitionsOf(call.ctx, call.entry, request, options),
+      );
     },
 
     async replay(ref, options) {
@@ -1588,8 +1709,9 @@ export function createIdentityFacade<G extends GraphDef>(
         options,
         "replay",
       );
-      const call = enterIdentityCall(source);
-      return identityReplay(call.ctx, call.entry, request, options);
+      return runIdentityRead(source, (call) =>
+        identityReplay(call.ctx, call.entry, request, options),
+      );
     },
   };
 }

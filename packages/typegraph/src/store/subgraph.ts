@@ -31,7 +31,10 @@ import {
   type OneStatementCombinedItem,
   registerOneStatementSharing,
 } from "../query/builder/one-statement-sharing";
-import { enterQueryExecution } from "../query/builder/query-operation";
+import {
+  enterQueryExecution,
+  exitQueryExecution,
+} from "../query/builder/query-operation";
 import type { ExecutableOneStatementRead } from "../query/builder/types";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
 import { MAX_EXPLICIT_RECURSIVE_DEPTH } from "../query/compiler/recursive";
@@ -972,6 +975,30 @@ export async function executeSubgraph<
   params: SubgraphExecutionParams<G, EK, NK, P, C>,
 ): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
   const plan = buildSubgraphPlan(params, "subgraph");
+  // Entered once the plan's refusals have run: every statement below (the
+  // closure fetch, the composition walk, the node and edge fetches) goes
+  // through this one execution's target.
+  const backend = enterQueryExecution(params);
+  try {
+    return await executeSubgraphPlan(params, plan, backend);
+  } finally {
+    // In flight from its admission until its last statement has settled.
+    exitQueryExecution(params);
+  }
+}
+
+/** {@link executeSubgraph}'s statements, through the call's entered target. */
+async function executeSubgraphPlan<
+  G extends GraphDef,
+  EK extends EdgeKinds<G>,
+  NK extends NodeKinds<G>,
+  P extends SubgraphProjectFor<G, NK, EK, C> | undefined = undefined,
+  C extends SubgraphCompositionSelection | undefined = undefined,
+>(
+  params: SubgraphExecutionParams<G, EK, NK, P, C>,
+  plan: SubgraphPlan,
+  backend: GraphBackend,
+): Promise<SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>> {
   const {
     reachableCte,
     includedIdsCte,
@@ -979,10 +1006,6 @@ export async function executeSubgraph<
     edgeProjectionPlan,
     baseSchema,
   } = plan;
-  // Entered once the plan's refusals have run: every statement below (the
-  // closure fetch, the composition walk, the node and edge fetches) goes
-  // through this one execution's target.
-  const backend = enterQueryExecution(params);
   const ctx = subgraphContextOn(plan.ctx, backend);
   const readContext =
     plan.readContext === plan.ctx ?
@@ -1227,12 +1250,18 @@ export function createSubgraphRead<
     >(ctx.root, rows as readonly OneStatementSubgraphRow[], nodePlan, edgePlan);
   }
   return {
-    execute: async () =>
-      mapRows(
-        await enterQueryExecution(params).execute<OneStatementSubgraphRow>(
-          asCompiledRowsSql(query),
-        ),
-      ),
+    execute: async () => {
+      const target = enterQueryExecution(params);
+      try {
+        return mapRows(
+          await target.execute<OneStatementSubgraphRow>(
+            asCompiledRowsSql(query),
+          ),
+        );
+      } finally {
+        exitQueryExecution(params);
+      }
+    },
     compileOneStatementBatchItem: () => {
       const item: OneStatementBatchItem<
         SubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>

@@ -14,7 +14,10 @@ import {
   TypeGraphError,
   ValidationError,
 } from "../errors";
-import { enterQueryExecution } from "../query/builder/query-operation";
+import {
+  enterQueryExecution,
+  exitQueryExecution,
+} from "../query/builder/query-operation";
 import type { SqlSchema } from "../query/compiler/schema";
 import { compileTemporalFilter } from "../query/compiler/temporal";
 import { decodeCursor, encodeCursor } from "../query/cursor";
@@ -159,9 +162,10 @@ type AnalysisContext<G extends GraphDef> = Readonly<{
 }>;
 
 /**
- * `analysis` with its statement target for one call: a new operation of the
- * session a transaction's analysis read was built in, or its backend. Call it
- * once per public call, after the call's refusals.
+ * `analysis` with its statement target for one call: the session a
+ * transaction's analysis read was built in, admitted as a read call, or its
+ * backend. Call it once per public call, after the call's refusals, and
+ * release it with `exitQueryExecution(analysis)` once the call has settled.
  */
 function enteredAnalysisContext<G extends GraphDef>(
   analysis: AnalysisContext<G>,
@@ -544,8 +548,20 @@ async function readValidationRows<G extends GraphDef>(
 export async function describeStore<G extends GraphDef>(
   analysis: AnalysisContext<G>,
 ): Promise<StoreDescription> {
-  // Nothing to refuse: the call enters its execution before its first read.
+  // Nothing to refuse: the call enters its execution before its first read,
+  // and is in flight until its last one has settled.
   const ctx = enteredAnalysisContext(analysis);
+  try {
+    return await describeEntered(ctx);
+  } finally {
+    exitQueryExecution(analysis);
+  }
+}
+
+/** {@link describeStore}'s reads, through the call's entered context. */
+async function describeEntered<G extends GraphDef>(
+  ctx: AnalysisContext<G>,
+): Promise<StoreDescription> {
   const before = await schemaCoordinateFor(ctx);
   const currentTimestamp = nowIso();
   const nodePaths = declaredPathsForEntity(ctx.graph, "node");
@@ -611,8 +627,24 @@ export async function validateStore<G extends GraphDef>(
   }
 
   // Every refusal above needs no statement: the call enters its execution
-  // here, and each read below goes through it.
+  // here, each read below goes through it, and it is in flight until the last
+  // one has settled.
   const ctx = enteredAnalysisContext(analysis);
+  try {
+    return await validateEntered(ctx, options, cursor, registration, pageSize);
+  } finally {
+    exitQueryExecution(analysis);
+  }
+}
+
+/** {@link validateStore}'s reads, through the call's entered context. */
+async function validateEntered<G extends GraphDef>(
+  ctx: AnalysisContext<G>,
+  options: ValidateStoreOptions,
+  cursor: ValidationCursor | undefined,
+  registration: Readonly<{ type: Readonly<{ schema: z.ZodType }> }>,
+  pageSize: number,
+): Promise<StoreValidationPage> {
   const before = await schemaCoordinateFor(ctx);
   if (cursor !== undefined && cursor.schemaFence !== before.schemaFence) {
     throw new StoreAnalysisCursorStaleError({

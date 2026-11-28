@@ -12,7 +12,7 @@ import {
 } from "../sql-fragment";
 import { asCompiledRowsSql, recursivePlanCount } from "../sql-intent";
 import { groupOneStatementBatchItems } from "./one-statement-sharing";
-import { enterQueryExecution } from "./query-operation";
+import { enterQueryExecution, exitQueryExecution } from "./query-operation";
 import type {
   EmbeddableOneStatementRead,
   OneStatementBatchableQuery,
@@ -254,8 +254,15 @@ export async function executeOneStatementBatch<
       },
     );
   }
-  const envelopes =
-    await enterQueryExecution(execution).execute<BatchEnvelopeRow>(statement);
+  const target = enterQueryExecution(execution);
+  let envelopes: readonly BatchEnvelopeRow[];
+  try {
+    envelopes = await target.execute<BatchEnvelopeRow>(statement);
+  } finally {
+    // Everything after the statement is synchronous decoding: the read has
+    // settled once its one statement has.
+    exitQueryExecution(execution);
+  }
   const payloads = new Map<number, Record<string, unknown>[]>();
   for (const envelope of envelopes) {
     const index = Number(envelope.batch_index);

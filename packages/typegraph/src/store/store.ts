@@ -369,11 +369,13 @@ import {
 import { readNodeByReference } from "./node-reference-read";
 import {
   decorateOperation,
+  countReadCall,
   enterCall,
   enterOperation,
   enterTargetOperation,
   type EntryScope,
   exitCall,
+  exitReadCall,
   openBoundTransactionSession,
   openRootTransaction,
   openTransactionSession,
@@ -542,6 +544,7 @@ import {
 } from "./subgraph";
 import {
   createTransactionReceiptRecorder,
+  identityWriteRecorder,
   type TransactionReceiptRecorder,
   type TransactionWriteAccess,
   wrapTransactionCollections,
@@ -5748,13 +5751,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     readOnly = false,
     measurable = receiptRecorder !== undefined,
   ): AdapterTransactionContext<G, TNativeTransaction> {
-    // The context's own operation of the session: what the parts of this
-    // context that do not yet enter an operation per call (the transaction
-    // runtime port, the identity facade's context, the read-set fence, the
-    // read fences, the immediate hook runners) hold for the life of the
-    // transaction.
-    const contextOperation = enterOperation(session);
-    const txBackend = contextOperation.backend;
+    // The session's statement handle, as an operation of the session holds
+    // it: what the context's surfaces compile against and what an admitted
+    // call's statements go through. It admits nothing: every public member
+    // the context offers enters its own call of `session` (an operation, or a
+    // read call) when it runs.
+    const txBackend = enterOperation(session).backend;
     const runHooks = bufferedHooks ?? this.#immediateHookRunner(txBackend);
     const runBulkHooks =
       bufferedBulkHooks ?? this.#immediateBulkHookRunner(txBackend);
@@ -5863,11 +5865,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           },
           acquireReadFences: async () => {
             if (readOnly) {
-              await lockRecordedGraphWrite(
-                txBackend,
-                this.graphId,
-                recordedGraphLockMemoOf(contextOperation),
-              );
+              // A call of its own: admitted on the session, as the writable
+              // branch below is.
+              const call = enterCall(enterOperation(session, parent));
+              try {
+                await lockRecordedGraphWrite(
+                  operationEntryBackend(call),
+                  this.graphId,
+                  recordedGraphLockMemoOf(call),
+                );
+              } finally {
+                exitCall(call);
+              }
               return;
             }
             const call = enterCall(enterOperation(session, parent));
@@ -5901,6 +5910,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#batchPointRead,
           nodeOperations,
           parent,
+          receiptRecorders,
         ),
         edges: createEdgeCollectionsProxy(
           this.#graph,
@@ -5912,12 +5922,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#endpointSetRead,
           edgeOperations,
           parent,
+          receiptRecorders,
         ),
         ...(this.#graph.identity === undefined ?
           {}
         : {
             identity: createIdentityFacade(
               this.#identityFacadeSource(session, txBackend),
+              identityWriteRecorder(receiptRecorders),
             ),
           }),
       };
@@ -5952,16 +5964,23 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ) =>
         assertReadSetUnchangedSince(
           this.#readSetFenceContext(readOnly),
-          contextOperation,
+          session,
           anchor,
           scopes,
         ),
       ...(receiptIdentity === undefined ? {} : { identity: receiptIdentity }),
-      // Each read member is a call of its own: one operation of the session.
-      backend: createTransactionReadBackend(
-        txBackend,
-        () => enterOperation(session).backend,
-      ),
+      // Each read member is a read call of its own: one operation of the
+      // session, counted as running until the member's promise settles.
+      backend: createTransactionReadBackend(txBackend, {
+        enter: () => {
+          const operation = enterOperation(session);
+          countReadCall(operation);
+          return operation.backend;
+        },
+        exit: () => {
+          exitReadCall(session);
+        },
+      }),
       [TRANSACTION_RUNTIME]: outerSurface.runtime,
       ...this.#nodeCollectionAccess(nodes),
       ...this.#edgeCollectionAccess(edges),
@@ -8726,9 +8745,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   }
 
   /**
-   * The operation source a read built inside a transaction carries: each call
-   * enters one operation of `session` and returns what that operation's
-   * statements go through, `decorate`d as the read decorates `backend`.
+   * The operation source a read built inside a transaction carries: each
+   * execution enters one operation of `session`, counted as a running read
+   * call ({@link countReadCall}) until it settles, and is handed what that
+   * operation's statements go through, `decorate`d as the read decorates
+   * `backend`.
    *
    * The operation's handle is the transaction it was entered from (the brand
    * is a phantom), so `decorated` (the decoration already built for
@@ -8742,9 +8763,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     decorated: Backend,
     decorate: (handle: StatementBackend) => Backend,
   ): QueryOperationSource<Backend> {
-    return () => {
-      const handle = operationEntryBackend(enterOperation(session));
-      return handle === backend ? decorated : decorate(handle);
+    return {
+      enter: () => {
+        const operation = enterOperation(session);
+        countReadCall(operation);
+        const handle = operationEntryBackend(operation);
+        return handle === backend ? decorated : decorate(handle);
+      },
+      exit: () => {
+        exitReadCall(session);
+      },
     };
   }
 

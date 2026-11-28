@@ -11,7 +11,7 @@ import { buildQueryAst } from "./ast-builder";
 import { buildCompileOptions } from "./compile-options";
 import { getQueryBuilderInternalContext } from "./internal-context";
 import { hasParameterReferences } from "./prepared-query";
-import { enterQueryExecution } from "./query-operation";
+import { enterQueryExecution, exitQueryExecution } from "./query-operation";
 import type { QueryBuilderConfig, QueryBuilderState } from "./types";
 
 /** COUNT operates on groups when grouping is present, otherwise on match rows. */
@@ -76,22 +76,26 @@ export async function executeQueryTerminal(
   // Entered once the terminal can no longer refuse: its one statement runs on
   // it. `backend` is what the configuration names, defined here.
   const target = enterQueryExecution(config) ?? backend;
-  const rowsPromise =
-    checked === undefined ?
-      target.execute<Record<string, unknown>>(statement)
-    : executeSchemaCheckedRead({
-        backend: target,
-        ast: unorderedAst,
-        graphId: config.graphId,
-        expectedVersion: checked.value,
-        rowIdentityColumn: column,
-        compile: () => statement,
-      });
-  const rows = await (state.recordedAsOf === undefined ?
-    rowsPromise
-  : withRecordedRelationsPrecondition(rowsPromise, {
-      dialect: target.dialect,
-      surface: `recorded-query-${operation}`,
-    }));
-  return Number(rows[0]?.[column] ?? 0);
+  try {
+    const rowsPromise =
+      checked === undefined ?
+        target.execute<Record<string, unknown>>(statement)
+      : executeSchemaCheckedRead({
+          backend: target,
+          ast: unorderedAst,
+          graphId: config.graphId,
+          expectedVersion: checked.value,
+          rowIdentityColumn: column,
+          compile: () => statement,
+        });
+    const rows = await (state.recordedAsOf === undefined ?
+      rowsPromise
+    : withRecordedRelationsPrecondition(rowsPromise, {
+        dialect: target.dialect,
+        surface: `recorded-query-${operation}`,
+      }));
+    return Number(rows[0]?.[column] ?? 0);
+  } finally {
+    exitQueryExecution(config);
+  }
 }

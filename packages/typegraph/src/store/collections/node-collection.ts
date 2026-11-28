@@ -40,8 +40,10 @@ import { getNodeRowsByIds } from "../node-fetch";
 import {
   enterCall,
   enterOperation,
+  enterReadCall,
   type EntryScope,
   exitCall,
+  exitReadCall,
   type Operation,
   type OperationEntry,
   operationEntryBackend,
@@ -60,6 +62,11 @@ import {
   runResolvedMutationSetConverging,
 } from "../resolved-mutation-set";
 import { type NodeRow } from "../row-mappers";
+import {
+  type NodeWriteMethodName,
+  pinNodeWriteIntent,
+  type TransactionReceiptRecorder,
+} from "../transaction-receipt";
 import {
   type CreateNodeInput,
   type GetOrCreateAction,
@@ -252,18 +259,26 @@ export type NodeCollectionConfig = Readonly<{
   /** What the collection's reads go through. */
   backend: StatementBackend;
   /**
-   * Where its writes enter: the root backend, or the session of the
+   * Where its calls enter: the root backend, or the session of the
    * transaction `backend` belongs to. Each write member enters its own
-   * operation from it.
+   * operation from it, and each read member is admitted on it as a read
+   * call (`enterReadCall`) before its statements go through `backend`.
    */
   writes: EntryScope;
   /**
-   * The operation of the call that composes this collection's writes, when
+   * The operation of the call that composes this collection's calls, when
    * the collection is a child surface of that call (merge apply's): each
-   * write enters as its child. Absent for a transaction's own collections,
-   * whose writes are root calls.
+   * write and read enters as its child. Absent for a transaction's own
+   * collections, whose calls are root calls.
    */
   parent?: Operation;
+  /**
+   * The receipt chain the collection's writes count into: every recorder of
+   * the transaction surface it was built for. Each write records its intent
+   * into every one of them once it has written, inside its own call, before
+   * the call is released. Empty outside a receipt-tracked transaction.
+   */
+  receiptRecorders?: readonly TransactionReceiptRecorder[];
   /** Threaded `batchPointRead` verdict — never re-resolved here. */
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>;
   defaultTemporalMode: TemporalMode;
@@ -486,6 +501,7 @@ export function createNodeCollection<
     backend,
     writes,
     parent,
+    receiptRecorders = [],
     batchPointRead,
     defaultTemporalMode,
     rowToNode,
@@ -514,6 +530,30 @@ export function createNodeCollection<
     executeBulkFindByIndex,
   } = config;
 
+  /**
+   * One write member's call, `method` called with `args`: entered (and
+   * counted as running on its session) before its first statement, with its
+   * receipt intent pinned at call time, and recorded into the surface's
+   * receipt chain once `run` has written, before the call is released. A
+   * savepoint unit another call opens can therefore never checkpoint the
+   * receipt between this write and its count.
+   */
+  async function runWrite<T>(
+    method: NodeWriteMethodName,
+    args: readonly unknown[],
+    run: (call: OperationEntry) => Promise<T>,
+  ): Promise<T> {
+    const record = pinNodeWriteIntent(receiptRecorders, kind, method, args);
+    const call = enterCall(enterOperation(writes, parent));
+    try {
+      const result = await run(call);
+      record();
+      return result;
+    } finally {
+      exitCall(call);
+    }
+  }
+
   return {
     async create(
       props: z.input<N["schema"]>,
@@ -526,26 +566,30 @@ export function createNodeCollection<
       data: Record<string, unknown>,
       options?: NodeCreateOptions,
     ): Promise<Node<N>> {
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("createFromRecord", [], async (call) => {
         const result = await executeNodeCreate(
           buildCreateInput(kind, data, options),
           call,
         );
         return narrowNode<N>(result);
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async getById(
       id: NodeId<N>,
       options?: QueryOptions,
     ): Promise<Node<N> | undefined> {
-      const row = await backend.getNode(graphId, kind, id);
-      if (!row) return undefined;
-      if (!temporalRowMatcher(options)(row)) return undefined;
-      return narrowNode<N>(rowToNode(row));
+      // A read is a call: admitted before its statement, in flight until it
+      // settles.
+      enterReadCall(writes, parent);
+      try {
+        const row = await backend.getNode(graphId, kind, id);
+        if (!row) return undefined;
+        if (!temporalRowMatcher(options)(row)) return undefined;
+        return narrowNode<N>(rowToNode(row));
+      } finally {
+        exitReadCall(writes, parent);
+      }
     },
 
     async getByIds(
@@ -554,21 +598,26 @@ export function createNodeCollection<
     ): Promise<readonly (Node<N> | undefined)[]> {
       if (ids.length === 0) return [];
 
-      const rowsById = await getNodeRowsByIds(
-        backend,
-        batchPointRead,
-        graphId,
-        kind,
-        ids,
-      );
-      // Resolve the coordinate once so the whole batch observes one instant.
-      const matches = temporalRowMatcher(options);
-      return ids.map((id) => {
-        const row = rowsById.get(id);
-        if (!row) return;
-        if (!matches(row)) return;
-        return narrowNode<N>(rowToNode(row));
-      });
+      enterReadCall(writes, parent);
+      try {
+        const rowsById = await getNodeRowsByIds(
+          backend,
+          batchPointRead,
+          graphId,
+          kind,
+          ids,
+        );
+        // Resolve the coordinate once so the whole batch observes one instant.
+        const matches = temporalRowMatcher(options);
+        return ids.map((id) => {
+          const row = rowsById.get(id);
+          if (!row) return;
+          if (!matches(row)) return;
+          return narrowNode<N>(rowToNode(row));
+        });
+      } finally {
+        exitReadCall(writes, parent);
+      }
     },
 
     async update(
@@ -576,16 +625,13 @@ export function createNodeCollection<
       props: Partial<z.input<N["schema"]>>,
       options?: ValidityEndMutation,
     ): Promise<Node<N>> {
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("update", [], async (call) => {
         const result = await executeNodeUpdate(
           buildUpdateInput(kind, id, props, options),
           call,
         );
         return narrowNode<N>(result);
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async compareAndSet(id, params): Promise<boolean> {
@@ -605,8 +651,7 @@ export function createNodeCollection<
         .whereNode(rootAlias, (accessor) => accessor.id.eq(id))
         .select((ctx: Record<string, { id: unknown }>) => ctx[rootAlias]?.id)
         .compile();
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("compareAndSet", [], async (call) => {
         const result = await executeNodeSetUpdate(
           kind,
           params.patch,
@@ -616,9 +661,7 @@ export function createNodeCollection<
           { operation: "compareAndSet", expected: params.expected },
         );
         return result.affectedCount === 1;
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async updateWhere(params): Promise<Readonly<{ affectedCount: number }>> {
@@ -777,8 +820,7 @@ export function createNodeCollection<
       }
       const compiledCandidates = asCompiledSelectSql(combinedCandidates);
 
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("updateWhere", [], async (call) => {
         const result = await executeNodeSetUpdate(
           kind,
           params.patch,
@@ -789,9 +831,7 @@ export function createNodeCollection<
         );
         await config.maybeRefreshStatisticsAfterBulk?.(result.affectedCount);
         return result;
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async reparent<
@@ -801,17 +841,14 @@ export function createNodeCollection<
       id: NodeId<N>,
       options: NodeReparentOptions<Via>,
     ): Promise<NodeReparentResult<Via>> {
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("reparent", [], async (call) => {
         return (await executeNodeReparent(
           kind,
           id,
           options,
           call,
         )) as NodeReparentResult<Via>;
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async bulkReparent<
@@ -823,26 +860,20 @@ export function createNodeCollection<
         options: NodeReparentOptions<Via>;
       }>[],
     ): Promise<readonly NodeReparentResult<Via>[]> {
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("bulkReparent", [items], async (call) => {
         return (await executeNodeReparentBatch(
           kind,
           items,
           call,
         )) as readonly NodeReparentResult<Via>[];
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async delete(id: NodeId<N>, options?: NodeDeleteOptions): Promise<void> {
       const expect = readNodeDeleteOptions(options, { kind, id });
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("delete", [], async (call) => {
         await executeNodeDelete(kind, id, call, expect);
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async hardDelete(
@@ -850,12 +881,9 @@ export function createNodeCollection<
       ...extraArguments: readonly unknown[]
     ): Promise<void> {
       refuseNodeDeleteArguments(extraArguments, { kind, id }, "hardDelete");
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("hardDelete", [], async (call) => {
         await executeNodeHardDelete(kind, id, call);
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async planDelete(id: NodeId<N>): Promise<NodeDeletePlan | undefined> {
@@ -905,6 +933,7 @@ export function createNodeCollection<
           .select((ctx: Record<string, unknown>) => ctx["_n"]);
         if (filter.limit !== undefined) query = query.limit(filter.limit);
         if (filter.offset !== undefined) query = query.offset(filter.offset);
+        // The query's execution is the read call: admitted there.
         const results = await query.execute();
         return results as Node<N>[];
       }
@@ -922,8 +951,13 @@ export function createNodeCollection<
       if (filter?.limit !== undefined) params.limit = filter.limit;
       if (filter?.offset !== undefined) params.offset = filter.offset;
 
-      const rows = await backend.findNodesByKind(params);
-      return rows.map((row) => narrowNode<N>(rowToNode(row)));
+      enterReadCall(writes, parent);
+      try {
+        const rows = await backend.findNodesByKind(params);
+        return rows.map((row) => narrowNode<N>(rowToNode(row)));
+      } finally {
+        exitReadCall(writes, parent);
+      }
     },
 
     async count(temporal?: QueryOptions): Promise<number> {
@@ -935,7 +969,12 @@ export function createNodeCollection<
         kind,
         ...resolveTemporalReadParams(temporal, defaultTemporalMode),
       };
-      return backend.countNodesByKind(params);
+      enterReadCall(writes, parent);
+      try {
+        return await backend.countNodesByKind(params);
+      } finally {
+        exitReadCall(writes, parent);
+      }
     },
 
     async upsertById(
@@ -962,8 +1001,7 @@ export function createNodeCollection<
       // Admitted before its first statement, the pre-read included: a call
       // that starts inside another call's savepoint unit is refused before it
       // reads, and a unit cannot open while this read is in flight.
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("upsertByIdFromRecord", [], async (call) => {
         const existing = await operationEntryBackend(call).getNode(
           graphId,
           kind,
@@ -1056,9 +1094,7 @@ export function createNodeCollection<
           call,
         );
         return narrowNode<N>(result);
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async bulkCreate(
@@ -1066,14 +1102,11 @@ export function createNodeCollection<
         NodeCreateOptions)[],
     ): Promise<Node<N>[]> {
       const batchInputs = mapBulkNodeInputs(kind, items);
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("bulkCreate", [items], async (call) => {
         const results = await executeNodeCreateBatch(batchInputs, call);
         await config.maybeRefreshStatisticsAfterBulk?.(results.length);
         return narrowNodes<N>(results);
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async bulkReplaceById(
@@ -1103,8 +1136,7 @@ export function createNodeCollection<
         id: item.id,
         props: prepareReplacement(kind, item.props),
       }));
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("bulkReplaceById", [items], async (call) => {
         const attempt = await executeNodeReplacementBatch(kind, prepared, call);
         if (attempt.outcome === "applied") {
           await config.maybeRefreshStatisticsAfterBulk?.(attempt.value.length);
@@ -1162,9 +1194,7 @@ export function createNodeCollection<
         );
         await config.maybeRefreshStatisticsAfterBulk?.(results.length);
         return results;
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async bulkUpsertById(
@@ -1448,8 +1478,7 @@ export function createNodeCollection<
         return { results, mutations: toCreate.length + toUpdate.length };
       };
 
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("bulkUpsertById", [items], async (call) => {
         const { results, mutations } = await runResolvedMutationSetConverging(
           "node",
           backend,
@@ -1462,9 +1491,7 @@ export function createNodeCollection<
         // transaction (the hook is intentionally undefined there).
         await config.maybeRefreshStatisticsAfterBulk?.(mutations);
         return results;
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async bulkInsert(
@@ -1477,13 +1504,10 @@ export function createNodeCollection<
     ): Promise<void> {
       const batchInputs = mapBulkNodeInputs(kind, items);
 
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("bulkInsert", [items], async (call) => {
         await executeNodeCreateNoReturnBatch(batchInputs, call);
         await config.maybeRefreshStatisticsAfterBulk?.(batchInputs.length);
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async bulkDelete(
@@ -1492,12 +1516,9 @@ export function createNodeCollection<
     ): Promise<void> {
       refuseNodeDeleteArguments(extraArguments, { kind }, "bulkDelete");
       if (ids.length === 0) return;
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("bulkDelete", [ids], async (call) => {
         await executeNodeDeleteBatch(kind, ids, call);
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async bulkHardDelete(
@@ -1506,25 +1527,27 @@ export function createNodeCollection<
     ): Promise<void> {
       refuseNodeDeleteArguments(extraArguments, { kind }, "bulkHardDelete");
       if (ids.length === 0) return;
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("bulkHardDelete", [ids], async (call) => {
         await executeNodeHardDeleteBatch(kind, ids, call);
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async findByConstraint(
       constraintName: string,
       props: z.input<N["schema"]>,
     ): Promise<Node<N> | undefined> {
-      const result = await executeFindByConstraint(
-        kind,
-        constraintName,
-        props,
-        backend,
-      );
-      return result === undefined ? undefined : narrowNode<N>(result);
+      enterReadCall(writes, parent);
+      try {
+        const result = await executeFindByConstraint(
+          kind,
+          constraintName,
+          props,
+          backend,
+        );
+        return result === undefined ? undefined : narrowNode<N>(result);
+      } finally {
+        exitReadCall(writes, parent);
+      }
     },
 
     async bulkFindByConstraint(
@@ -1539,15 +1562,20 @@ export function createNodeCollection<
         props: item.props,
       }));
 
-      const results = await executeBulkFindByConstraint(
-        kind,
-        constraintName,
-        mappedItems,
-        backend,
-      );
-      return results.map((result) =>
-        result === undefined ? undefined : narrowNode<N>(result),
-      );
+      enterReadCall(writes, parent);
+      try {
+        const results = await executeBulkFindByConstraint(
+          kind,
+          constraintName,
+          mappedItems,
+          backend,
+        );
+        return results.map((result) =>
+          result === undefined ? undefined : narrowNode<N>(result),
+        );
+      } finally {
+        exitReadCall(writes, parent);
+      }
     },
 
     async bulkFindByIndex(
@@ -1563,14 +1591,19 @@ export function createNodeCollection<
         props: item.props,
       }));
 
-      const results = await executeBulkFindByIndex(
-        kind,
-        indexName,
-        mappedItems,
-        backend,
-        options,
-      );
-      return results.map((bucket) => narrowNodes<N>(bucket));
+      enterReadCall(writes, parent);
+      try {
+        const results = await executeBulkFindByIndex(
+          kind,
+          indexName,
+          mappedItems,
+          backend,
+          options,
+        );
+        return results.map((bucket) => narrowNodes<N>(bucket));
+      } finally {
+        exitReadCall(writes, parent);
+      }
     },
 
     async getOrCreateByConstraint(
@@ -1583,8 +1616,7 @@ export function createNodeCollection<
       // hooked transaction — nesting them here would fire their hooks before
       // this wrapper's COMMIT. Race convergence lives in
       // executeGetOrCreateByConstraint (re-probe on a create collision).
-      const call = enterCall(enterOperation(writes, parent));
-      try {
+      return runWrite("getOrCreateByConstraint", [], async (call) => {
         const result = await executeGetOrCreateByConstraint(
           kind,
           constraintName,
@@ -1593,9 +1625,7 @@ export function createNodeCollection<
           options,
         );
         return result as NodeGetOrCreateByConstraintResult<N>;
-      } finally {
-        exitCall(call);
-      }
+      });
     },
 
     async bulkGetOrCreateByConstraint(
@@ -1614,19 +1644,20 @@ export function createNodeCollection<
 
       // The operation owns its transaction boundary, which its convergence
       // retry reads: see `executeNodeBulkGetOrCreateByConstraint`.
-      const call = enterCall(enterOperation(writes, parent));
-      try {
-        const results = await executeBulkGetOrCreateByConstraint(
-          kind,
-          constraintName,
-          mappedItems,
-          call,
-          options,
-        );
-        return results as NodeGetOrCreateByConstraintResult<N>[];
-      } finally {
-        exitCall(call);
-      }
+      return runWrite(
+        "bulkGetOrCreateByConstraint",
+        [constraintName, items],
+        async (call) => {
+          const results = await executeBulkGetOrCreateByConstraint(
+            kind,
+            constraintName,
+            mappedItems,
+            call,
+            options,
+          );
+          return results as NodeGetOrCreateByConstraintResult<N>[];
+        },
+      );
     },
   };
 }

@@ -23,8 +23,8 @@ import type {
   TransactionReceipt,
 } from "./types";
 
-type NodeWriteMethodName = (typeof NODE_WRITE_NAMES)[number];
-type EdgeWriteMethodName = (typeof EDGE_WRITE_NAMES)[number];
+export type NodeWriteMethodName = (typeof NODE_WRITE_NAMES)[number];
+export type EdgeWriteMethodName = (typeof EDGE_WRITE_NAMES)[number];
 
 // If these fail, the receipt wrapper drifted away from the collection write
 // surface that defines NodeWrites / EdgeWrites.
@@ -66,7 +66,7 @@ type _identityReadSplitIsHonest = Assert<
  * not bump `identity.total` or the receipt's overall `total` the way a real
  * write kind does.
  */
-type IdentityWriteCounterName = Exclude<
+export type IdentityWriteCounterName = Exclude<
   keyof IdentityWriteSummary,
   "total" | "transitions"
 >;
@@ -339,6 +339,8 @@ export function wrapTransactionIdentity<G extends GraphDef>(
   identity: IdentityFacade<G>,
   recorder: TransactionReceiptRecorder,
 ): IdentityFacade<G> {
+  // The write gate only: each write counts itself into the surface's receipt
+  // chain inside its own call (`createIdentityFacade`'s `recordWrite`).
   return {
     classes: (options) => identity.classes(options),
     representativeOf: (ref) => identity.representativeOf(ref),
@@ -352,57 +354,50 @@ export function wrapTransactionIdentity<G extends GraphDef>(
     replay: (ref, options) => identity.replay(ref, options),
     async assertSame(a, b, window) {
       recorder.assertWritable("tx.identity.assertSame()");
-      const result = await identity.assertSame(a, b, window);
-      recorder.recordIdentity("sameAssertions", 1);
-      return result;
+      return identity.assertSame(a, b, window);
     },
     async assertDifferent(a, b, window) {
       recorder.assertWritable("tx.identity.assertDifferent()");
-      const result = await identity.assertDifferent(a, b, window);
-      recorder.recordIdentity("differentAssertions", 1);
-      return result;
+      return identity.assertDifferent(a, b, window);
     },
     async bulkAssertSame(pairs) {
       recorder.assertWritable("tx.identity.bulkAssertSame()");
-      // Count the pairs the facade snapshotted (one result per pair), never a
-      // separate read of the caller's array: a second read can disagree with
-      // the snapshot, and the caller may mutate the array while the write is
-      // in flight.
-      const result = await identity.bulkAssertSame(pairs);
-      recorder.recordIdentity("sameAssertions", result.length);
-      return result;
+      return identity.bulkAssertSame(pairs);
     },
     async bulkAssertDifferent(pairs) {
       recorder.assertWritable("tx.identity.bulkAssertDifferent()");
-      const result = await identity.bulkAssertDifferent(pairs);
-      recorder.recordIdentity("differentAssertions", result.length);
-      return result;
+      return identity.bulkAssertDifferent(pairs);
     },
     async retractAssertion(id) {
       recorder.assertWritable("tx.identity.retractAssertion()");
-      const result = await identity.retractAssertion(id);
-      recorder.recordIdentity("retractions", 1);
-      return result;
+      return identity.retractAssertion(id);
     },
     async retractSameAssertion(a, b) {
       recorder.assertWritable("tx.identity.retractSameAssertion()");
-      const result = await identity.retractSameAssertion(a, b);
-      recorder.recordIdentity("retractions", 1);
-      return result;
+      return identity.retractSameAssertion(a, b);
     },
     async retractDifferentAssertion(a, b) {
       recorder.assertWritable("tx.identity.retractDifferentAssertion()");
-      const result = await identity.retractDifferentAssertion(a, b);
-      recorder.recordIdentity("retractions", 1);
-      return result;
+      return identity.retractDifferentAssertion(a, b);
     },
     async bulkRetractAssertions(ids) {
       recorder.assertWritable("tx.identity.bulkRetractAssertions()");
-      const count = ids.length;
-      const result = await identity.bulkRetractAssertions(ids);
-      recorder.recordIdentity("retractions", count);
-      return result;
+      return identity.bulkRetractAssertions(ids);
     },
+  };
+}
+
+/**
+ * What a transaction surface's identity facade records its writes through
+ * (`createIdentityFacade`'s `recordWrite`): every recorder of the surface's
+ * receipt chain, or nothing outside a receipt-tracked transaction.
+ */
+export function identityWriteRecorder(
+  recorders: readonly TransactionReceiptRecorder[],
+): ((counter: IdentityWriteCounterName, count: number) => void) | undefined {
+  if (recorders.length === 0) return undefined;
+  return (counter, count) => {
+    for (const recorder of recorders) recorder.recordIdentity(counter, count);
   };
 }
 
@@ -415,30 +410,25 @@ function isObject(value: unknown): value is object {
 }
 
 /**
- * Which methods on a node/edge collection count as writes, and how each
- * counts its intent. Bundled into one value per entity kind (below) rather
- * than passed as separate `methodNames`/`counters` parameters, so a call
- * site can only pick "the node surface" or "the edge surface" as a unit —
- * it cannot independently mismatch a method-name set against the wrong
- * counter table.
+ * Which methods on a node/edge collection are writes the recorder's gate
+ * stands in front of, bundled with the context key refusals name, one value
+ * per entity kind (below). How each write counts its intent is
+ * {@link pinNodeWriteIntent} / {@link pinEdgeWriteIntent}'s table.
  */
 type WriteIntentSurface<M extends string> = Readonly<{
   /** The transaction context's key for these collections, as refusals name it. */
   entity: "nodes" | "edges";
-  methodNames: ReadonlySet<string>;
-  counters: Record<M, WriteIntentCounter>;
+  methodNames: ReadonlySet<M | string>;
 }>;
 
 const NODE_WRITE_SURFACE: WriteIntentSurface<NodeWriteMethodName> = {
   entity: "nodes",
   methodNames: new Set(NODE_WRITE_NAMES),
-  counters: NODE_WRITE_INTENT_COUNTERS,
 };
 
 const EDGE_WRITE_SURFACE: WriteIntentSurface<EdgeWriteMethodName> = {
   entity: "edges",
   methodNames: new Set(EDGE_WRITE_NAMES),
-  counters: EDGE_WRITE_INTENT_COUNTERS,
 };
 
 /**
@@ -476,14 +466,14 @@ function memoizedProxyGet<T extends object>(
 
 /**
  * Wraps one node/edge collection so every write method on it (per
- * `surface.methodNames`) passes the recorder's write gate first, then counts
- * its intent through `record` on resolution.
+ * `surface.methodNames`) passes the recorder's write gate first. The write
+ * counts its own intent, inside its call ({@link pinNodeWriteIntent},
+ * {@link pinEdgeWriteIntent}).
  */
 function wrapWriteCollection<T extends object, M extends string>(
   collection: T,
   kind: string,
   surface: WriteIntentSurface<M>,
-  record: (kind: string, count: number) => void,
   assertWritable: (operation: string) => void,
 ): T {
   return memoizedProxyGet(
@@ -492,23 +482,61 @@ function wrapWriteCollection<T extends object, M extends string>(
     (value, property) => {
       if (!isWrappedMethod(value)) return value;
 
-      const method = property as M;
       const wrapped: WrappedMethod = async (...args) => {
         // Reject before the live write: a context retained past its callback
         // must not persist a row the already-snapshotted receipt cannot count.
         assertWritable(`tx.${surface.entity}.${kind}.${property}()`);
-        // Pin the intent count at call time: a caller may mutate a bulk input
-        // array while the write is in flight, and the backend has already
-        // snapshotted the items. Recording still waits for resolution so a
-        // rejected write counts 0.
-        const count = surface.counters[method](args);
-        const result = await Reflect.apply(value, collection, args);
-        record(kind, count);
-        return result;
+        return Reflect.apply(value, collection, args);
       };
       return wrapped;
     },
   );
+}
+
+/** What records a pinned write intent once its write has succeeded. */
+export type RecordWriteIntent = () => void;
+
+function recordNothing(): void {
+  // A write outside a receipt-tracked transaction counts into no receipt.
+}
+
+/**
+ * Pins the intent of one node write, `method` called with `args`, at call
+ * time, and returns what records it into every recorder of `recorders` (a
+ * surface's receipt chain) once the write has succeeded: a caller may mutate
+ * a bulk input array while the write is in flight, and the backend has
+ * already snapshotted the items, while a rejected write counts 0.
+ *
+ * The collection records inside the write's own call, before the call is
+ * released: a savepoint unit another call opens on the session can then
+ * never checkpoint the receipt between a write and its count, and its
+ * rollback can never erase the count of a row that survives it.
+ */
+export function pinNodeWriteIntent(
+  recorders: readonly TransactionReceiptRecorder[],
+  kind: string,
+  method: NodeWriteMethodName,
+  args: readonly unknown[],
+): RecordWriteIntent {
+  if (recorders.length === 0) return recordNothing;
+  const count = NODE_WRITE_INTENT_COUNTERS[method](args);
+  return () => {
+    for (const recorder of recorders) recorder.recordNode(kind, count);
+  };
+}
+
+/** {@link pinNodeWriteIntent} for an edge write. */
+export function pinEdgeWriteIntent(
+  recorders: readonly TransactionReceiptRecorder[],
+  kind: string,
+  method: EdgeWriteMethodName,
+  args: readonly unknown[],
+): RecordWriteIntent {
+  if (recorders.length === 0) return recordNothing;
+  const count = EDGE_WRITE_INTENT_COUNTERS[method](args);
+  return () => {
+    for (const recorder of recorders) recorder.recordEdge(kind, count);
+  };
 }
 
 /**
@@ -542,7 +570,6 @@ export function wrapTransactionCollections<G extends GraphDef>(
         collection,
         kind,
         NODE_WRITE_SURFACE,
-        recorder.recordNode,
         recorder.assertWritable,
       ),
     ),
@@ -551,7 +578,6 @@ export function wrapTransactionCollections<G extends GraphDef>(
         collection,
         kind,
         EDGE_WRITE_SURFACE,
-        recorder.recordEdge,
         recorder.assertWritable,
       ),
     ),

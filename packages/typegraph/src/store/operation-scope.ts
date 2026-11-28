@@ -264,7 +264,12 @@ export type TransactionSession<
      * {@link openOperationUnit} read. Written only by this module.
      */
     [SESSION_CALLS]: {
-      /** Root calls {@link enterCall} counted that {@link exitCall} has not released. */
+      /**
+       * Root calls running on the session: those {@link enterCall} counted
+       * that {@link exitCall} has not released, and root reads
+       * {@link enterReadCall} or {@link countReadCall} counted that
+       * {@link exitReadCall} has not released.
+       */
       inFlight: number;
       /** Savepoint units open on the session, nested ones included. */
       unitDepth: number;
@@ -615,6 +620,82 @@ export function exitCall(entry: OperationEntry): void {
   if (!root[OPERATION_IN_FLIGHT]) return;
   root[OPERATION_IN_FLIGHT] = false;
   entry[OPERATION_SESSION][SESSION_CALLS].inFlight -= 1;
+}
+
+/**
+ * Admits a read call on `scope` and returns what its statements go through:
+ * the root backend as itself, or the session's transaction handle. A read is
+ * a call like any other: it is refused here, before any statement, while a
+ * savepoint unit of another root call is open (`"savepoint-open"`, the
+ * decision {@link enterOperation} makes), and a root read is counted as
+ * running on the session until {@link exitReadCall} releases it, so a unit
+ * another call tries to open meanwhile is refused (`"siblings-in-flight"`).
+ *
+ * No operation is minted: for a read whose statements go through the
+ * session's transaction handle as it already holds it (a collection's point
+ * and list reads), admission costs a counter update. A read that routes its
+ * statements through an operation's handle enters one and is counted with
+ * {@link countReadCall} instead, by the same decision. A read with a `parent` (merge apply's own
+ * collection reads) is that call's child: checked against the parent's root,
+ * and not counted, as it runs within its root call's extent. Call
+ * {@link exitReadCall} with the same arguments in a `finally` once the read
+ * has settled; a stream admits each page on its own.
+ */
+export function enterReadCall<Engine extends TransactionBackend>(
+  scope: TransactionSession<Engine>,
+  parent?: Operation,
+): OperationScoped<Engine>;
+export function enterReadCall(
+  scope: EntryScope,
+  parent?: Operation,
+): StatementBackend;
+export function enterReadCall(
+  scope: EntryScope,
+  parent?: Operation,
+): StatementBackend {
+  if (!(SESSION_TRANSACTION in scope)) {
+    if (parent !== undefined) {
+      throw new TypeError(
+        "A call on the root backend cannot be the child of an operation of a transaction session.",
+      );
+    }
+    return scope;
+  }
+  if (parent !== undefined && parent[OPERATION_SESSION] !== scope) {
+    throw new TypeError(
+      "A child operation must be entered on its parent's session.",
+    );
+  }
+  const calls = scope[SESSION_CALLS];
+  const refusal = callRefusal(calls, parent?.[OPERATION_ROOT]);
+  if (refusal !== undefined) throw new TransactionCallRefusedError(refusal);
+  if (parent === undefined) calls.inFlight += 1;
+  return scope[SESSION_TRANSACTION];
+}
+
+/**
+ * Counts a read call that entered `entry` ({@link enterOperation}, whose
+ * refusal it has passed) as running on its session until
+ * {@link exitReadCall} releases it with `entry`'s session: for a read whose
+ * statements go through an operation's handle (a query terminal, a
+ * `tx.backend` member), admitted by the same decision as
+ * {@link enterReadCall}. A child, or the pooled root, is not counted.
+ */
+export function countReadCall(entry: OperationEntry): void {
+  if (!(OPERATION_SESSION in entry) || entry[OPERATION_PARENT] !== undefined) {
+    return;
+  }
+  entry[OPERATION_SESSION][SESSION_CALLS].inFlight += 1;
+}
+
+/**
+ * Releases a read {@link enterReadCall} admitted with the same arguments, or
+ * one {@link countReadCall} counted on `scope` (its entry's session, no
+ * parent).
+ */
+export function exitReadCall(scope: EntryScope, parent?: Operation): void {
+  if (!(SESSION_TRANSACTION in scope) || parent !== undefined) return;
+  scope[SESSION_CALLS].inFlight -= 1;
 }
 
 /**

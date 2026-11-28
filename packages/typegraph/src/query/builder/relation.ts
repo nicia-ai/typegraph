@@ -57,7 +57,7 @@ import {
   substituteDatabaseExpression,
   validateQueryBindings,
 } from "./prepared-query";
-import { enterQueryExecution } from "./query-operation";
+import { enterQueryExecution, exitQueryExecution } from "./query-operation";
 import {
   buildReadInstantTemplate,
   type CompiledTemplate,
@@ -996,6 +996,7 @@ export class ExecutableRelationQuery<
         const rows = await this.#fetchRows(
           this.#requireBackend(),
           () => this.#enterExecution(),
+          true,
           definition.ast,
           bindings,
         );
@@ -1017,6 +1018,7 @@ export class ExecutableRelationQuery<
     const rows = await this.#fetchRows(
       backend,
       () => this.#enterExecution(),
+      true,
       this.#materialize(),
     );
     return rows.map((row) => this.#definition.decodeRow(row));
@@ -1049,6 +1051,7 @@ export class ExecutableRelationQuery<
     const rows = await this.#fetchRows(
       target,
       () => operationEntryBackend(enterTargetOperation(target)),
+      false,
       this.#materialize(),
     );
     return rows.map((row) => this.#definition.decodeRow(row));
@@ -1183,6 +1186,19 @@ export class ExecutableRelationQuery<
     this.#assertWindowFunctionsSupported(this.#requireBackend(), relation);
     this.#assertRelationBound(relation);
     const backend = this.#enterExecution();
+    try {
+      return await this.#scalarOn(backend, relation, operation);
+    } finally {
+      exitQueryExecution(this.#definition.config);
+    }
+  }
+
+  /** {@link #scalar} on the execution's admitted target. */
+  async #scalarOn(
+    backend: GraphBackend,
+    relation: RelationAst,
+    operation: "count" | "exists",
+  ): Promise<number> {
     const executeRaw = backend.executeRaw;
     const template =
       executeRaw === undefined ? undefined : (
@@ -1326,6 +1342,7 @@ export class ExecutableRelationQuery<
   async #fetchRows(
     target: Pick<GraphBackend, "capabilities">,
     enter: () => StatementBackend,
+    admitted: boolean,
     relation: RelationAst,
     bindings?: Readonly<Record<string, unknown>>,
   ): Promise<readonly Record<string, unknown>[]> {
@@ -1336,7 +1353,22 @@ export class ExecutableRelationQuery<
     );
     if (bindings === undefined) this.#assertRelationBound(relation, metadata);
     const backend = enter();
+    try {
+      return await this.#fetchRowsOn(backend, relation, metadata, bindings);
+    } finally {
+      // With `admitted`, `enter` admitted the read on its session
+      // (`enterQueryExecution`): released once the read has settled.
+      if (admitted) exitQueryExecution(this.#definition.config);
+    }
+  }
 
+  /** {@link #fetchRows} on the execution's target. */
+  #fetchRowsOn(
+    backend: StatementBackend,
+    relation: RelationAst,
+    metadata: ReturnType<typeof collectParameterMetadata>,
+    bindings: Readonly<Record<string, unknown>> | undefined,
+  ): Promise<readonly Record<string, unknown>[]> {
     const executeRaw = backend.executeRaw;
     const template =
       executeRaw === undefined ? undefined : this.#resolveTemplate(relation);

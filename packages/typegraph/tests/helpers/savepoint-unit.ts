@@ -1,6 +1,9 @@
+import { TransactionCallRefusedError } from "../../src/errors";
 import {
+  closeOperationUnit,
   enterOperation,
   enterTransactionOperation,
+  openOperationUnit,
   type Operation,
   type OperationBackend,
   operationSession,
@@ -28,6 +31,23 @@ export function savepointUnitEntry(
       enterTransactionOperation(context)
     : enterOperation(operationSession(parent), parent);
   return [operation, operation.backend];
+}
+
+/**
+ * Whether a savepoint unit of `operation`'s root call may open on its session
+ * right now, decided by the session's own admission (`openOperationUnit`)
+ * and answered synchronously: true when no call of another root is running
+ * and no other root's unit is open. Opens nothing it keeps.
+ */
+export function unitMayOpen(operation: Operation): boolean {
+  try {
+    openOperationUnit(operation);
+  } catch (error) {
+    if (error instanceof TransactionCallRefusedError) return false;
+    throw error;
+  }
+  closeOperationUnit(operation);
+  return true;
 }
 
 /**
