@@ -98,7 +98,7 @@ const RAW_STATEMENT_TARGET_BASELINE = {
   "operations/composition": 15,
   "operations/write": 3,
   "recorded-capture": 26,
-  claims: 17,
+  claims: 16,
   "search-sync": 0,
   collections: 0,
   store: 36,

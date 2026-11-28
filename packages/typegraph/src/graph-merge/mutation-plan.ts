@@ -739,6 +739,12 @@ function observationsAsCandidates(
   };
 }
 
+/**
+ * The claim keys the mutated rows would hold, grouped for the probe. Each
+ * row's keys are derived from the value it stores by the key owner, which
+ * renders a stored value as a create of the same value does, so a probed key
+ * is the key a holder's claim was written under.
+ */
 function uniquenessProbes<G extends GraphDef>(
   target: Store<G>,
   nodes: readonly NodeRow[],
