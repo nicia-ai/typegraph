@@ -651,6 +651,53 @@ function parseRowProps(row: NodeRow): Record<string, unknown> {
 }
 
 /**
+ * Runs one node row UPDATE bound to the version of the row it was planned
+ * from, and proves the backend honored the binding.
+ *
+ * Every store node update is a read-then-write pair: its props are merged
+ * over, and its claim transition planned from, `existing`. Under PostgreSQL
+ * READ COMMITTED another session can commit a write to the same row between
+ * the read and the UPDATE, and an UPDATE predicated on identity alone then
+ * writes props and claims decided from a superseded row — the lost update that
+ * left a row holding one unique value while its claim named another. So the
+ * UPDATE carries `existing.version` in its own `WHERE`
+ * ({@link UpdateNodeParams.expectedVersion}): a row that moved matches
+ * nothing, the claim transition compensates itself, and the caller's recovery
+ * re-reads and decides again from the row that is really there. This is the
+ * one place the version is taken from: the write is handed it, so no caller
+ * can bind a write to a row other than the one its plan was read off.
+ *
+ * Every store update increments the version by one, so a returned row whose
+ * version is not exactly one past `existing.version` was written over a
+ * newer row by a backend that ignored the predicate. That is refused rather
+ * than accepted: the stale write is already in the transaction, and the
+ * refusal aborts it.
+ */
+async function rowVersionWrite(
+  existing: NodeRow,
+  write: (expectedVersion: number) => Promise<NodeRow>,
+): Promise<NodeRow> {
+  const row = await write(existing.version);
+  if (row.version !== existing.version + 1) {
+    throw new ConfigurationError(
+      `The backend's updateNode wrote ${existing.kind} "${existing.id}" at version ${String(row.version)}, but the store planned the write from version ${String(existing.version)}: it did not apply UpdateNodeParams.expectedVersion, so the write may have replaced a newer row.`,
+      {
+        operation: "updateNode",
+        kind: existing.kind,
+        id: existing.id,
+        expectedVersion: existing.version,
+        returnedVersion: row.version,
+      },
+      {
+        suggestion:
+          "A custom backend's updateNode must add `version = expectedVersion` to its UPDATE's WHERE clause whenever UpdateNodeParams.expectedVersion is present.",
+      },
+    );
+  }
+  return row;
+}
+
+/**
  * The row a node update targets. A plain update runs live-row side effects
  * (uniqueness diff, embedding/fulltext sync), so it must be handed a
  * {@link LiveNodeRow}; only an explicit `clearDeleted: true` resurrecting
@@ -791,12 +838,17 @@ export async function applyNodeUpdate(
     id,
     plan,
     () =>
-      backend.updateNode({
-        ...updateParams,
-        ...(args.clearValidTo === true ? { clearValidTo: true as const }
-        : args.validTo === undefined ? {}
-        : { validTo: args.validTo }),
-      }),
+      // The row the claim plan above was read off is the row this write lands
+      // on, or it lands on nothing.
+      rowVersionWrite(args.existing, (expectedVersion) =>
+        backend.updateNode({
+          ...updateParams,
+          expectedVersion,
+          ...(args.clearValidTo === true ? { clearValidTo: true as const }
+          : args.validTo === undefined ? {}
+          : { validTo: args.validTo }),
+        }),
+      ),
   );
 
   const syncContext = nodeSyncContext(ctx, kind, id, backend);
@@ -1022,14 +1074,17 @@ export async function applyNodeResurrect(
     id,
     plan,
     () =>
-      backend.updateNode({
-        graphId: ctx.graphId,
-        kind,
-        id,
-        props,
-        incrementVersion: true,
-        clearDeleted: true,
-      }),
+      rowVersionWrite(args.existing, (expectedVersion) =>
+        backend.updateNode({
+          graphId: ctx.graphId,
+          kind,
+          id,
+          props,
+          expectedVersion,
+          incrementVersion: true,
+          clearDeleted: true,
+        }),
+      ),
   );
   const syncContext = nodeSyncContext(ctx, kind, id, backend);
   await syncEmbeddings(syncContext, args.schema, props);

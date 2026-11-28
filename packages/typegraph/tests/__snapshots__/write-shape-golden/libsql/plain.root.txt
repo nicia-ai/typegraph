@@ -36,8 +36,8 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "
     ["<graph1>","Item","item-dead"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
     ["<graph1>","Item","item-dead"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
-    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead",1]
 libsql commit
 hook end create node:Item item-dead written
 => ok
@@ -178,8 +178,8 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_to" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_to" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a",1]
 libsql commit
 hook end update node:Item item-a written
 => ok
@@ -238,8 +238,8 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
     ["<graph1>","Item","item-dead"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
-    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead",1]
 libsql commit
 hook end update node:Item item-dead written
 => ok
@@ -284,12 +284,12 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"first\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"first\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"second\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"second\"}","<timestamp>","<graph1>","Item","item-a",2]
 libsql commit
 => ok
 

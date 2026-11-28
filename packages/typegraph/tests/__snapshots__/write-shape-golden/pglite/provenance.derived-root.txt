@@ -58,8 +58,8 @@ sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_sche
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Source","source-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"source-a\",\"retracted\":true}","<timestamp>","<graph1>","Source","source-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"source-a\",\"retracted\":true}","<timestamp>","<graph1>","Source","source-a",1]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Fact","fact-a"]
 hook start delete node:Fact fact-a

@@ -53,8 +53,8 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "
 hook start update node:Source source-a
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
     ["<graph1>","Source","source-a"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"source-a\",\"retracted\":true}","<timestamp>","<graph1>","Source","source-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"source-a\",\"retracted\":true}","<timestamp>","<graph1>","Source","source-a",1]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
     ["<graph1>","Fact","fact-a"]
 hook start delete node:Fact fact-a
