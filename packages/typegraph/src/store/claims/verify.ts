@@ -65,6 +65,7 @@ import {
 } from "../operations/composition-create";
 import {
   type ClaimOwner,
+  claimOwnerKey,
   type ClaimTarget,
   compareClaimTargets,
   DISJOINT_CONSTRAINT_NAME,
@@ -83,6 +84,12 @@ import {
   type EdgeCardinalityDirection,
   edgeCardinalitySpec,
 } from "./edge-claims";
+import {
+  planUniquenessClaimRepair,
+  type UniquenessClaimFinding,
+  uniquenessClaimFindings,
+  type UniquenessClaimPlan,
+} from "./uniqueness-claim-audit";
 
 /**
  * One claim axis more than one live claimant holds, OR one edge kind whose
@@ -192,6 +199,7 @@ export type ConstraintFenceViolation =
       /** Live edges sitting outside all of them. */
       edges: readonly MisassignedEdgeEndpointRow[];
     }>
+  | UniquenessClaimFinding
   | EdgeAcyclicityViolation;
 
 /** What the audit needs to know: the graph, its registry, and where to read. */
@@ -547,6 +555,26 @@ type ClaimTargetedViolation = Extract<
   { target: ClaimTarget }
 >;
 
+/**
+ * The order claim-backed violations naming ONE target are reported in: the
+ * contention first, then the claim findings about that row. Two violations of
+ * different families can share a target only through the uniqueness claim
+ * audit, whose missing claim and value duplicate name the same owed row.
+ */
+const CLAIM_FAMILY_ORDER: readonly ClaimTargetedViolation["family"][] = [
+  "nodeUniqueness",
+  "nodeDisjointness",
+  "edgeCardinality",
+  "composition",
+  "nodeUniquenessClaimStale",
+  "nodeUniquenessClaimMissing",
+];
+
+/** The owner a claim finding names, so two findings on one row sort stably. */
+function claimViolationOwnerKey(violation: ClaimTargetedViolation): string {
+  return "owner" in violation ? claimOwnerKey(violation.owner) : "";
+}
+
 type UntargetedViolation = Exclude<
   ConstraintFenceViolation,
   ClaimTargetedViolation
@@ -586,13 +614,19 @@ function untargetedOrderKey(violation: UntargetedViolation): string {
  * `compositionExistence` by part kind, `compositionWindowOverlap` by part,
  * `edgeAcyclicity` by relation).
  */
-function compareConstraintFenceViolations(
+export function compareConstraintFenceViolations(
   left: ConstraintFenceViolation,
   right: ConstraintFenceViolation,
 ): number {
   if (hasClaimTarget(left)) {
     return hasClaimTarget(right) ?
-        compareClaimTargets(left.target, right.target)
+        compareClaimTargets(left.target, right.target) ||
+          CLAIM_FAMILY_ORDER.indexOf(left.family) -
+            CLAIM_FAMILY_ORDER.indexOf(right.family) ||
+          compareStrings(
+            claimViolationOwnerKey(left),
+            claimViolationOwnerKey(right),
+          )
       : -1;
   }
   if (hasClaimTarget(right)) return 1;
@@ -738,8 +772,11 @@ export async function auditConstraintFences(
  * already carries more than one live claimant, every edge kind whose live
  * rows sit outside every declared endpoint pair, every acyclic relation
  * already carrying a cycle, every live required part with no live whole,
- * every composition row whose window starts or ends later than now, and every
- * part whose composition edges' valid-time windows overlap.
+ * every composition row whose window starts or ends later than now, every
+ * part whose composition edges' valid-time windows overlap, and every
+ * uniqueness claim that no longer fences its holder's value
+ * ({@link planUniquenessClaimRepair}, whose value duplicates join the
+ * `nodeUniqueness` family).
  *
  * The `edgeAcyclicity` family does NOT go through
  * `readConstraintFenceViolations` (the backend port every other family
@@ -753,7 +790,7 @@ export async function auditConstraintFences(
 export async function verifyConstraintFences(
   context: VerifyConstraintFencesContext,
 ): Promise<readonly ConstraintFenceViolation[]> {
-  const claimBacked = await auditConstraintFences(context.backend, {
+  const audited = await auditConstraintFences(context.backend, {
     declarations: fenceDeclarations(
       context.graph,
       context.registry,
@@ -762,6 +799,11 @@ export async function verifyConstraintFences(
     uniquenessGroups: uniquenessAxisGroups(context.graph, context.registry),
     registry: context.registry,
   });
+  const claimBacked = withUniquenessClaimAudit(
+    audited,
+    await planUniquenessClaimRepair(context),
+    context.graphId,
+  );
 
   const acyclicRelations = acyclicEdgeRelations(
     context.graph,
@@ -813,6 +855,49 @@ export async function verifyConstraintFences(
     ...compositionFutureWindow,
     ...compositionWindowOverlap,
   ].toSorted(compareConstraintFenceViolations);
+}
+
+/**
+ * Folds the uniqueness claim audit into the claim-relation audit's report:
+ * each value two live holders store becomes a `nodeUniqueness` violation (or
+ * joins the one the claim relation already shows for that row, owners
+ * merged), and every stale and missing claim is reported as its own finding.
+ */
+function withUniquenessClaimAudit(
+  audited: readonly ConstraintFenceViolation[],
+  plan: UniquenessClaimPlan,
+  graphId: string,
+): readonly ConstraintFenceViolation[] {
+  const duplicateByTarget = new Map(
+    plan.duplicates.map((duplicate) => [
+      targetIdentity(duplicate.target),
+      duplicate,
+    ]),
+  );
+  const merged = audited.map((violation) => {
+    if (violation.family !== "nodeUniqueness") return violation;
+    const identity = targetIdentity(violation.target);
+    const duplicate = duplicateByTarget.get(identity);
+    if (duplicate === undefined) return violation;
+    duplicateByTarget.delete(identity);
+    const owners = [...violation.owners];
+    for (const owner of duplicate.owners) {
+      if (!owners.some((held) => isSameClaimOwner(held, owner)))
+        owners.push(owner);
+    }
+    return { ...violation, owners: sortedOwners(owners) };
+  });
+  return [
+    ...merged,
+    ...[...duplicateByTarget.values()].map(
+      (duplicate): ConstraintFenceViolation => ({
+        family: "nodeUniqueness",
+        target: duplicate.target,
+        owners: duplicate.owners,
+      }),
+    ),
+    ...plan.work.flatMap((item) => uniquenessClaimFindings(graphId, item)),
+  ];
 }
 
 /**

@@ -238,6 +238,36 @@ describe("constrained writes on a backend that cannot fence them", () => {
       .all();
   }
 
+  it("refuses an applying uniqueness claim repair before it writes, and still plans one", async () => {
+    const store = createStore(graph, backend);
+    const account = await store.nodes.Account.create({
+      email: "a@example.com",
+    });
+    // A claim in another form than the one a create derives.
+    sqlite
+      .prepare(
+        "UPDATE typegraph_node_uniques SET key = ? WHERE node_id = ? AND constraint_name = 'own_email'",
+      )
+      .run("legacy-form", account.id);
+    const claims = () =>
+      sqlite
+        .prepare(
+          "SELECT key, node_id, deleted_at FROM typegraph_node_uniques WHERE constraint_name = 'own_email'",
+        )
+        .all();
+    const before = claims();
+
+    const plan = await store.repairUniquenessClaims();
+    expect(plan.repaired.map((finding) => finding.family)).toEqual([
+      "nodeUniquenessClaimMissing",
+      "nodeUniquenessClaimStale",
+    ]);
+    await expect(
+      store.repairUniquenessClaims({ dryRun: false }),
+    ).rejects.toThrow(expectFenceRefusal("nodeUniquenessClaim"));
+    expect(claims()).toEqual(before);
+  });
+
   it("refuses an edge create whose cardinality it cannot enforce", async () => {
     const store = createStore(graph, backend);
     const alice = await store.nodes.Person.create({ name: "Alice" });

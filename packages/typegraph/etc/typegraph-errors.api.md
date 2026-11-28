@@ -361,7 +361,7 @@ type ConstraintFenceViolation = Readonly<{
     edgeKind: string;
     allowedPairs: readonly (readonly [string, string])[];
     edges: readonly MisassignedEdgeEndpointRow[];
-}> | EdgeAcyclicityViolation;
+}> | UniquenessClaimFinding | EdgeAcyclicityViolation;
 
 // @public
 export type ContributionRebuildRefusal = "vector-source-unavailable" | "no-drop-ddl" | "no-schema-fence" | "shared-storage-in-use" | "fulltext-unavailable";
@@ -1565,6 +1565,9 @@ export type TypeGraphErrorOptions = Readonly<{
 }>;
 
 // @public
+type UniquenessClaimFinding = UniquenessClaimStaleFinding | UniquenessClaimMissingFinding;
+
+// @public
 type UniquenessClaimGate = Readonly<{
     cause: "constraint-added" | "constraint-reshaped";
     kind: string;
@@ -1576,6 +1579,22 @@ type UniquenessClaimGate = Readonly<{
     constraintName: string;
     axis: string;
     lostKinds: readonly string[];
+}>;
+
+// @public
+type UniquenessClaimMissingFinding = Readonly<{
+    family: "nodeUniquenessClaimMissing";
+    target: ClaimTarget;
+    owner: ClaimOwner;
+    released: boolean;
+}>;
+
+// @public
+type UniquenessClaimStaleFinding = Readonly<{
+    family: "nodeUniquenessClaimStale";
+    target: ClaimTarget;
+    owner: ClaimOwner;
+    expectedKey: string | undefined;
 }>;
 
 // @public

@@ -161,6 +161,7 @@ export { registerTraversalLimitPushdownIntegrationTests } from "./traversal-limi
 export { registerTraversalIntegrationTests } from "./traversals";
 export { registerTrustedImportIntegrationTests } from "./trusted-import";
 export { registerUniquenessClaimGateIntegrationTests } from "./uniqueness-claim-gate";
+export { registerUniquenessClaimRepairIntegrationTests } from "./uniqueness-claim-repair";
 export { registerValidityEndClearingIntegrationTests } from "./validity-end-clearing";
 export { registerValidityLowerBoundIntegrationTests } from "./validity-lower-bound";
 export { registerVectorSearchFreshSessionIntegrationTests } from "./vector-search-fresh-session";
