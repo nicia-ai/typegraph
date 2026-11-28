@@ -2469,6 +2469,47 @@ the orphaned promise yourself. To avoid orphaning writes at all, use
 transaction ends — so this error cannot arise there. It remains the caller's
 job to await every graph write before committing.
 
+### `TransactionCallRefusedError`
+
+Thrown when a call inside a transaction would overlap another call's TypeGraph savepoint unit on the same
+transaction context. Node and edge `bulkHardDelete` and `applyMergePlanInTransaction` hold such a unit;
+its rollback undoes every statement issued on the transaction since it opened, so an overlapping call
+could otherwise report success for a write that was then removed.
+
+`details.reason` says which side was refused:
+
+| `reason` | Refused call | When |
+| --- | --- | --- |
+| `"savepoint-open"` | any call, a stream page read included | another call's unit is open on the context. Refused before the call issues any statement. |
+| `"siblings-in-flight"` | `bulkHardDelete`, adopted merge apply | other calls are still running on the context. Refused before the call's first statement. |
+
+```typescript
+await store.transaction(async (tx) => {
+  try {
+    await Promise.all([
+      tx.nodes.Doc.bulkHardDelete(staleIds),
+      tx.nodes.Doc.create(props),
+    ]);
+  } catch (error) {
+    if (error instanceof TransactionCallRefusedError) {
+      console.log(error.details.reason); // "savepoint-open" or "siblings-in-flight"
+    }
+    throw error;
+  }
+});
+```
+
+Await the calls one after another. The refusal is not a retryable conflict: re-running the same overlap
+is refused again. See
+[Overlapping calls in one transaction](/schemas-stores#overlapping-calls-in-one-transaction).
+
+### `TransactionDoomedError`
+
+The error for a call that ran inside a transaction that is rolling back: its statements were issued and
+none of them will commit. Its `cause` is the failure that rolled the transaction back, and it never
+replaces that failure for the transaction's owner or its retry owner. It is exported from
+`@nicia-ai/typegraph/errors`; no code path raises it in this release.
+
 ### `TransactionConflictError`
 
 Thrown when a transaction was aborted by a serialization failure or deadlock

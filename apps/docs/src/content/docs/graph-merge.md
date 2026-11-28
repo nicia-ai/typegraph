@@ -234,9 +234,11 @@ revision clock, so `receipt.recorded` and `revisionNow()` reflect only the
 transaction's other writes. Let the
 exception reject the outer callback anyway, so the application writes that
 depended on the merge roll back with it. Await the apply before starting
-other calls on the same transaction: the savepoint's rollback undoes every
-statement issued on the transaction since the apply began, including those of
-an overlapping call (see
+other calls on the same transaction: the savepoint's rollback would undo every
+statement issued on the transaction since the apply began, so an apply started
+beside running calls, and a call started on the same transaction context while
+the apply runs (a hook's write through a captured `tx` included), is refused
+with `TransactionCallRefusedError` (see
 [Overlapping calls in one transaction](/schemas-stores#overlapping-calls-in-one-transaction)).
 A target whose transactions expose no statement execution cannot take the savepoint and is refused with
 `MergePlanCapabilityError` (`details.capability: "mergeTransactionSavepoint"`)

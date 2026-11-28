@@ -783,19 +783,18 @@ handling it. See
 
 ## Overlapping Calls Inside One Transaction
 
-Node and edge `bulkHardDelete`, `importGraph` writing into a transaction other calls also use, and
-`applyMergePlanInTransaction` run their writes behind a TypeGraph savepoint. A savepoint's rollback undoes
-every statement issued on its transaction since the savepoint was taken, not only the statements of the
-call that took it. Inside `store.transaction()`, a call started without awaiting one of these calls (for
-example under `Promise.all`) can have its completed, successfully reported writes undone when the
-savepoint-guarded call fails, the callback catches the failure, and the transaction commits. The same
-rollback can drop that call's recorded-history row and its count in the transaction receipt while its
-write commits.
+Node and edge `bulkHardDelete` and `applyMergePlanInTransaction` run their writes behind a TypeGraph
+savepoint. A savepoint's rollback undoes every statement issued on its transaction since the savepoint was
+taken, not only the statements of the call that took it. On one transaction context TypeGraph refuses a
+call that would overlap such a unit with `TransactionCallRefusedError` (see
+[Overlapping calls in one transaction](/schemas-stores#overlapping-calls-in-one-transaction)).
 
-Await those calls before starting other work on the same transaction. TypeGraph does not detect or refuse
-the overlap. See
-[Overlapping calls in one transaction](/schemas-stores#overlapping-calls-in-one-transaction) and
-issue #909 in the TypeGraph repository.
+The refusal does not yet reach across transaction contexts. When two contexts share one native
+transaction (two Stores adopting the same `sql` transaction, or a history Store's
+`withRecordedTransaction` beside a plain Store's `withTransaction`), a call on one context that overlaps
+a unit on the other runs, and the unit's rollback can undo its completed, successfully reported writes.
+Await every call on one context before starting a call on another. See issue #909 in the TypeGraph
+repository.
 
 ## Graph Analytics Limits
 

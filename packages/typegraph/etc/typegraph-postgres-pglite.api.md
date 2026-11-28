@@ -5241,11 +5241,24 @@ type OntologyRelation = Readonly<{
 }> & CompositionRealization;
 
 // @public
-type Operation<Engine extends TransactionBackend = TransactionBackend> = OperationScoped<Readonly<{
+type Operation<Engine extends TransactionBackend = TransactionBackend> = OperationScoped<{
+    [OPERATION_IN_FLIGHT]: boolean;
+} & Readonly<{
     [OPERATION_SESSION]: TransactionSession<Engine>;
+    [OPERATION_ROOT]: Operation;
+    [OPERATION_PARENT]: Operation | undefined;
     backend: OperationScoped<Engine>;
     control: OperationScoped<Engine>;
 }>>;
+
+// @public (undocumented)
+const OPERATION_IN_FLIGHT: unique symbol;
+
+// @public (undocumented)
+const OPERATION_PARENT: unique symbol;
+
+// @public (undocumented)
+const OPERATION_ROOT: unique symbol;
 
 // @public (undocumented)
 const OPERATION_SCOPED: unique symbol;
@@ -6649,6 +6662,9 @@ type SerializedUniqueConstraint = Readonly<{
 }>;
 
 // @public (undocumented)
+const SESSION_CALLS: unique symbol;
+
+// @public (undocumented)
 const SESSION_CONTROL: unique symbol;
 
 // @public (undocumented)
@@ -7785,6 +7801,11 @@ type TransactionSession<Engine extends TransactionBackend = TransactionBackend> 
     [SESSION_TRANSACTION]: OperationScoped<Engine>;
 } & Readonly<{
     [SESSION_CONTROL]: OperationScoped<Engine>;
+    [SESSION_CALLS]: {
+        inFlight: number;
+        unitDepth: number;
+        unitRoot: Operation | undefined;
+    };
     heldGraphWriteLocks: Map<string, Promise<GraphWriteLock>>;
     managedWrite: ManagedWriteState;
     native: NativeTransactionState;

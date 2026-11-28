@@ -1483,6 +1483,23 @@ type SystemColumnName = "graph_id" | "kind" | "id" | "from_kind" | "from_id" | "
 type TargetCardinality = Exclude<Cardinality, "unique">;
 
 // @public
+export type TransactionCallRefusalReason = "savepoint-open" | "siblings-in-flight";
+
+// @public
+export class TransactionCallRefusedError extends TypeGraphError {
+    constructor(reason: TransactionCallRefusalReason, options?: {
+        cause?: unknown;
+    });
+    // (undocumented)
+    readonly details: TransactionCallRefusedErrorDetails;
+}
+
+// @public
+export type TransactionCallRefusedErrorDetails = Readonly<{
+    reason: TransactionCallRefusalReason;
+}>;
+
+// @public
 export class TransactionClosedError extends TypeGraphError {
     constructor(options?: {
         cause?: unknown;
@@ -1503,6 +1520,13 @@ export type TransactionConflictErrorDetails = Readonly<{
     operation: string;
     attempts: number;
 }>;
+
+// @public
+export class TransactionDoomedError extends TypeGraphError {
+    constructor(options?: {
+        cause?: unknown;
+    });
+}
 
 // @public
 export class TransactionOutcomeUnknownError extends TypeGraphError {
