@@ -420,14 +420,27 @@ export type ConnectionIdentity = Readonly<{
  * construction so the audit and every later native-transaction bind read
  * the same value even if the caller's options object is mutated afterwards.
  *
+ * Captured by READING `mode` and, for `"shared"`, `resource`, never by
+ * spreading: a spread copies only own enumerable properties, so a declaration
+ * whose fields are accessors on its prototype (a class instance) would lose
+ * both and silently audit as no declaration at all.
+ *
  * @internal
  */
 export function captureSerializedResourceDeclaration(
   declaration: SerializedResourceDeclaration | undefined,
 ): SerializedResourceDeclaration | undefined {
-  return declaration === undefined ? undefined : (
-      Object.freeze({ ...declaration })
-    );
+  if (declaration === undefined) return undefined;
+  const mode = declaration.mode;
+  switch (mode) {
+    case "shared": {
+      return Object.freeze({ mode, resource: declaration.resource });
+    }
+    case "detect":
+    case "independent": {
+      return Object.freeze({ mode });
+    }
+  }
 }
 
 /**
