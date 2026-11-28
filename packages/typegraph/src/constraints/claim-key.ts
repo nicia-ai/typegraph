@@ -44,20 +44,32 @@
  *  - a pipe whose output is a transform (`.transform()`): the output's
  *    structure is the function's, which no schema states;
  *  - an `.overwrite()` check, for the same reason;
- *  - a union whose branches disagree: each branch that can hold a value the
- *    walk changes is walked (a `z.null()`, `z.undefined()`, `z.void()` or
- *    `z.never()` branch holds only values the walk returns as given, so it
- *    has no say), and the value is canonicalised only when every such branch
- *    renders it to the same key text. `z.union([z.date(), z.null()])` is
- *    therefore read as a date. `z.union([z.date(), z.string()])` disagrees on
- *    ISO text (one branch reads a date, the other a string), so that text
- *    keys as given, as does an object under a union of shapes whose key
- *    orders differ;
+ *  - a union whose branches disagree: each branch that can hold the value is
+ *    walked, and the value is canonicalised only when every such branch
+ *    renders it to the same key text. A `z.null()`, `z.undefined()`,
+ *    `z.void()` or `z.never()` branch holds only values the walk returns as
+ *    given, so it has no say. Neither has a branch that structurally cannot
+ *    hold the value ({@link branchExcludes}): a primitive of another type
+ *    (`z.number()` for a string), a non-array for `z.array()`, a non-object
+ *    for `z.object()`, or an object whose required `z.literal()` /
+ *    `z.enum()` property is missing or holds another value (a discriminator).
+ *    When every branch is excluded, every branch with a say is walked, as if
+ *    none were. `z.union([z.date(), z.null()])` and
+ *    `z.union([z.date(), z.number()])` are therefore read as a date.
+ *    `z.union([z.date(), z.string()])` disagrees on ISO text (one branch
+ *    reads a date, the other a string), so that text keys as given, as does an
+ *    object under a union of shapes whose key orders differ and that no
+ *    discriminator tells apart;
  *  - a record, tuple, intersection, map or set, and every undeclared property.
  *
  * Nothing is parsed: no transform, refinement or coercion runs, because a
  * schema whose parse does not reproduce its own output (a transform that
  * appends to its input) would key a value the row does not hold.
+ *
+ * The walk is linear in the value. One derivation walks each value at each
+ * schema at most once ({@link WalkMemo}): a union whose branches share a
+ * recursive property schema walks that property's value once, not once per
+ * branch per level, which would be exponential in the depth.
  */
 import { type z } from "zod";
 
@@ -71,10 +83,23 @@ import { isPlainObject } from "../utils/object";
 
 type WalkedSchemaDef = Readonly<{
   element?: z.ZodType;
+  entries?: Readonly<Record<string, unknown>>;
   getter?: () => z.ZodType;
   out?: z.ZodType;
   options?: readonly z.ZodType[];
+  values?: readonly unknown[];
 }>;
+
+/**
+ * One key derivation's walked values: per schema (with its transparent
+ * wrappers peeled off, which the walk does not distinguish), per value, the
+ * value's canonical rendering. A value is walked at a schema at most once, so
+ * a value two union branches both descend into, through the same property
+ * schema, is walked once. Recorded only for a walk entered with no lazy schema
+ * already resolved at its position, the one state in which the rendering
+ * depends on nothing but the schema and the value.
+ */
+type WalkMemo = Map<z.ZodType, Map<unknown, unknown>>;
 
 /**
  * The text one field value contributes to a unique key, before collation:
@@ -107,9 +132,85 @@ const VALUELESS_TYPES: ReadonlySet<string> = new Set([
   "never",
 ]);
 
+/**
+ * Whether a value at a position whose schema is `schema` structurally cannot
+ * be one `schema` holds: the schema's type, or a required literal property
+ * of an object schema, rules it out. `false` whenever that is not certain —
+ * `null` and `undefined` (which a wrapper admits), a schema the walk does
+ * not interpret, a transform's output — so excluding a branch never drops one
+ * that holds the value. Bounded by the schema, not the value: an object's
+ * properties are read one level deep and only at a literal or enum.
+ */
+function branchExcludes(
+  schema: z.ZodType,
+  value: unknown,
+  lazySeen: ReadonlySet<z.ZodType>,
+): boolean {
+  if (value === null || value === undefined) return false;
+  const unwrapped = unwrapTransparentWrappers(schema);
+  if (hasOverwriteCheck(unwrapped)) return false;
+  const def = unwrapped.def as WalkedSchemaDef;
+  const schemaType: string = unwrapped.type;
+  switch (schemaType) {
+    case "string":
+    case "number":
+    case "boolean": {
+      return typeof value !== schemaType;
+    }
+    case "date": {
+      return !(value instanceof Date) && typeof value !== "string";
+    }
+    case "literal":
+    case "enum": {
+      const allowed =
+        schemaType === "literal" ?
+          def.values
+        : Object.values(def.entries ?? {});
+      return allowed !== undefined && !allowed.includes(value);
+    }
+    case "array": {
+      return !Array.isArray(value);
+    }
+    case "lazy": {
+      if (def.getter === undefined || lazySeen.has(unwrapped)) return false;
+      return branchExcludes(
+        def.getter(),
+        value,
+        new Set([...lazySeen, unwrapped]),
+      );
+    }
+    case "pipe": {
+      const out = def.out;
+      return out !== undefined && out.type !== "transform" ?
+          branchExcludes(out, value, lazySeen)
+        : false;
+    }
+    case "union": {
+      const options = def.options ?? [];
+      return (
+        options.length > 0 &&
+        options.every((option) => branchExcludes(option, value, lazySeen))
+      );
+    }
+    default: {
+      const shape = objectSchemaShape(unwrapped);
+      if (shape === undefined) return false;
+      if (!isPlainObject(value)) return true;
+      return Object.entries(shape).some(
+        ([key, propertySchema]) =>
+          (propertySchema.type === "literal" ||
+            propertySchema.type === "enum") &&
+          (!Object.hasOwn(value, key) ||
+            branchExcludes(propertySchema, value[key], new Set())),
+      );
+    }
+  }
+}
+
 function walkObject(
   shape: Readonly<Record<string, z.ZodType>>,
   value: Record<string, unknown>,
+  memo: WalkMemo,
 ): Record<string, unknown> {
   const declared = Object.keys(shape).filter((key) =>
     Object.hasOwn(value, key),
@@ -123,7 +224,7 @@ function walkObject(
     return [
       key,
       propertySchema === undefined ? element : (
-        walkValue(propertySchema, element, new Set())
+        walkValue(propertySchema, element, new Set(), memo)
       ),
     ] as const;
   });
@@ -141,12 +242,17 @@ function walkUnion(
   options: readonly z.ZodType[],
   value: unknown,
   lazySeen: ReadonlySet<z.ZodType>,
+  memo: WalkMemo,
 ): unknown {
-  const [first, ...rest] = options
-    .filter(
-      (option) => !VALUELESS_TYPES.has(unwrapTransparentWrappers(option).type),
-    )
-    .map((option) => walkValue(option, value, lazySeen));
+  const withSay = options.filter(
+    (option) => !VALUELESS_TYPES.has(unwrapTransparentWrappers(option).type),
+  );
+  const holding = withSay.filter(
+    (option) => !branchExcludes(option, value, lazySeen),
+  );
+  const [first, ...rest] = (holding.length === 0 ? withSay : holding).map(
+    (option) => walkValue(option, value, lazySeen, memo),
+  );
   if (first === undefined) return value;
   const text = uniqueKeyValueText(first);
   return rest.every((candidate) => uniqueKeyValueText(candidate) === text) ?
@@ -165,8 +271,28 @@ function walkValue(
   schema: z.ZodType,
   value: unknown,
   lazySeen: ReadonlySet<z.ZodType>,
+  memo: WalkMemo,
 ): unknown {
   const unwrapped = unwrapTransparentWrappers(schema);
+  if (lazySeen.size > 0) return walkUnwrapped(unwrapped, value, lazySeen, memo);
+  const walked = memo.get(unwrapped);
+  if (walked?.has(value) === true) return walked.get(value);
+  const result = walkUnwrapped(unwrapped, value, lazySeen, memo);
+  // Read again: the walk of a recursive schema records deeper values under
+  // this same schema, so the map it filled is the one to extend.
+  const recorded = memo.get(unwrapped);
+  if (recorded === undefined) memo.set(unwrapped, new Map([[value, result]]));
+  else recorded.set(value, result);
+  return result;
+}
+
+/** {@link walkValue} at a schema whose transparent wrappers are peeled off. */
+function walkUnwrapped(
+  unwrapped: z.ZodType,
+  value: unknown,
+  lazySeen: ReadonlySet<z.ZodType>,
+  memo: WalkMemo,
+): unknown {
   if (hasOverwriteCheck(unwrapped)) return value;
   const def = unwrapped.def as WalkedSchemaDef;
   // Widened to `string`: the walk handles a handful of schema types and
@@ -180,24 +306,31 @@ function walkValue(
     }
     case "lazy": {
       if (def.getter === undefined || lazySeen.has(unwrapped)) return value;
-      return walkValue(def.getter(), value, new Set([...lazySeen, unwrapped]));
+      return walkValue(
+        def.getter(),
+        value,
+        new Set([...lazySeen, unwrapped]),
+        memo,
+      );
     }
     case "pipe": {
       const out = def.out;
       return out === undefined || out.type === "transform" ?
           value
-        : walkValue(out, value, lazySeen);
+        : walkValue(out, value, lazySeen, memo);
     }
     case "union": {
       return def.options === undefined ?
           value
-        : walkUnion(def.options, value, lazySeen);
+        : walkUnion(def.options, value, lazySeen, memo);
     }
     case "array": {
       const element = def.element;
       if (element === undefined || !Array.isArray(value)) return value;
       const items = value as readonly unknown[];
-      const walked = items.map((item) => walkValue(element, item, new Set()));
+      const walked = items.map((item) =>
+        walkValue(element, item, new Set(), memo),
+      );
       return walked.some((item, index) => item !== items[index]) ? walked : (
           value
         );
@@ -205,7 +338,7 @@ function walkValue(
     default: {
       const shape = objectSchemaShape(unwrapped);
       return shape !== undefined && isPlainObject(value) ?
-          walkObject(shape, value)
+          walkObject(shape, value, memo)
         : value;
     }
   }
@@ -217,5 +350,5 @@ function walkValue(
  * Returns `value` itself when it is already canonical.
  */
 export function claimKeyValue(schema: z.ZodType, value: unknown): unknown {
-  return walkValue(schema, value, new Set());
+  return walkValue(schema, value, new Set(), new Map());
 }

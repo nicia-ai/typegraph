@@ -879,8 +879,11 @@ row read back from storage key identically:
   order).
 
 Nothing is parsed through the schema again, so a transform never runs twice.
-A value under a `.transform()`, a `z.record()`, or a union whose branches
-read it differently keys as given.
+A union branch that structurally cannot hold the value (a primitive of another
+type, or an object whose required `z.literal()` or `z.enum()` discriminator
+does not match) has no say in how the union reads it. A value under a
+`.transform()`, a `z.record()`, or a union whose remaining branches read it
+differently keys as given.
 
 A claim is released by the node that holds it. An update gives back every
 claim the node holds under the constraint other than the key it now claims,
