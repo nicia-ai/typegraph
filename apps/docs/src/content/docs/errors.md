@@ -2455,7 +2455,12 @@ issued through that transaction with this error. This holds on every bundled
 driver, and covers a prepared query or a `stream()` iterator kept past the
 callback, a `backend.trustedImport()` session kept past its import, and the
 contribution-marker reads a transaction backend's vector and fulltext
-operations make, as well as an orphaned write.
+operations make, as well as an orphaned write. The refusal is per statement,
+not per call: a call that issues several statements and is still running when
+the callback returns has the statements it already issued settle and every
+later one refused, so its work can be cut part way (a vector slot's marker
+deletion can remove one of its markers and not the other). Await every call
+before the callback returns.
 
 The rule covers transactions TypeGraph opens and ends, and every backend
 bound to one: a backend adopted with `adoptTransaction(native)` over the
@@ -2468,7 +2473,12 @@ node-postgres, postgres-js). A backend built over a database handle is a root
 backend and is not refused; on better-sqlite3 the native handle is the
 connection itself. Every member of a constructor-built backend is refused,
 including the ones that write marker, materialization, kind-removal and
-graph-template rows, run lazy DDL or refresh statistics. A backend adopted
+graph-template rows, run lazy DDL or refresh statistics, and its
+`transaction()` is refused before it opens a savepoint. A backend bound to
+the native handle only after the transaction ended is refused only on
+node-postgres and postgres-js for now: on libSQL and PGlite it cannot
+identify the ended transaction, and its statements reach the driver, which
+refuses them with its own error. A backend adopted
 over a savepoint's native handle closes with the enclosing transaction, not
 with the savepoint, for now. A savepoint a constructor-built backend opens with
 `transaction()` closes with the savepoint, not with the enclosing transaction,
