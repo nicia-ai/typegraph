@@ -532,8 +532,12 @@ a caller's transaction (`createPostgresBackend(tx)`), the operation runs in a
 savepoint, which would keep the override, so the caller's own `work_mem` is
 read in the statement that applies the override and restored before the
 operation returns; an operation that fails rolls back to its savepoint, which
-discards the override too. When omitted (the default), operations inherit the
-server's configured `work_mem`.
+discards the override too. Await each such operation before starting other work
+on the caller's transaction: the transaction's statements are serialized one at
+a time, not operation by operation, so two overlapping operations can
+interleave their apply and restore statements and leave one override in place.
+When omitted (the default), operations inherit the server's configured
+`work_mem`.
 
 Note that `work_mem` is a threshold each sort/hash operator (and each parallel
 worker) may allocate up to, **not** a per-operation budget: a single round can

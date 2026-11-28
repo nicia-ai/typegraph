@@ -1028,7 +1028,10 @@ working-copy manager's `lock_timeout` and allocation `search_path`, a vector
 search's index parameters) reads the caller's value in the statement that sets
 it and restores it before returning. A unit that fails rolls back to its
 savepoint, or leaves the transaction aborted for the application to roll back,
-and either rollback discards the setting.
+and either rollback discards the setting. The queue orders statements, not
+units, so await each such call before starting other work on the same
+transaction: two overlapping calls can interleave their set and restore
+statements, and the transaction can then keep one call's value.
 `createPostgresBackend(tx)` also routes a PostgreSQL transaction handle to the
 transaction-scoped backend automatically. Use `createPostgresTransactionBackend`
 when you want the transaction-scoped intent to be explicit; a regular database
