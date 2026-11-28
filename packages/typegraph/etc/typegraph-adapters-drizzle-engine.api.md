@@ -429,13 +429,15 @@ type CommonOperationStrategy = Readonly<{
     buildGetNode: (graphId: string, kind: string, id: string) => SQL;
     buildGetNodes: (graphId: string, kind: string, ids: readonly string[]) => SQL;
     nodeRowLockClauses: NodeRowLockClauses;
+    nodeSetUpdateRowLock: RowLockClause;
     buildLockNodes: (graphId: string, kind: string, ids: readonly string[], rowLock: RowLockClause) => SQL;
     buildUpdateNode: (params: UpdateNodeParams, timestamp: string) => SQL;
     buildAtomicNodeResolvedUpdateBatch: (entries: readonly AtomicNodeResolvedUpdateEntry[], timestamp: string, schemaFence: SchemaWriteFenceParams, schemaLockClause: SQL) => SQL;
     buildAssertAtomicNodeMutationPostimages: (creates: readonly AtomicNodePostimageEntry[], updates: readonly AtomicNodeResolvedUpdateEntry[], timestamp: string, schemaFence: SchemaWriteFenceParams) => SQL;
     buildAssertAtomicNodeProjectionEvidence: (timestamp: string, evidence: readonly AtomicContributionEvidence[]) => SQL;
     buildReadAtomicNodeMutationPostimages: (graphId: string, kind: string, ids: readonly string[], schemaFence: SchemaWriteFenceParams) => SQL;
-    buildUpdateNodeSet: (params: CompareAndSetNodeParams | UpdateNodeSetParams, timestamp: string) => SQL;
+    buildPreviewNodeSetUpdate: (params: PreviewNodeSetUpdateParams, rowLock: RowLockClause) => SQL;
+    buildUpdateNodeSet: (params: UpdateNodeSetParams, timestamp: string, rowLock: RowLockClause) => SQL;
     buildResolvedNodeUpdateBatch: (params: ResolvedNodeUpdateBatchParams, timestamp: string) => SQL;
     buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
     buildAtomicNodeDeleteBatchWithSchemaFence: (input: AtomicNodeDeleteBatchInput, timestamp: string, schemaLockClause: SQL) => SQL;
@@ -540,7 +542,7 @@ type CommonOperationStrategy = Readonly<{
     }>) => readonly ClearGraphStatement[];
 }>;
 
-// @public (undocumented)
+// @public
 type CompareAndSetNodeParams = Readonly<{
     operation: "compareAndSet";
     graphId: string;
@@ -9240,9 +9242,9 @@ type GraphBackend = Readonly<{
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
     upsertHeterogeneousNodes?: (this: void, params: HeterogeneousNodeUpsertParams) => Promise<readonly NodeRow[]>;
+    previewNodeSetUpdate?: (this: void, params: PreviewNodeSetUpdateParams) => Promise<NodeSetUpdatePreview>;
     updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
     updateResolvedNodesBatch?: (this: void, params: ResolvedNodeUpdateBatchParams) => Promise<readonly NodeRow[]>;
-    compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
     hardDeleteNodesBatch?: (this: void, params: HardDeleteNodesBatchParams) => Promise<HardDeleteNodesBatchResult>;
@@ -9968,7 +9970,7 @@ type NodeCreateCommandResult = Readonly<{
 type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "findNodesAcrossKinds" | "countNodesByKind">;
 
 // @public (undocumented)
-type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode" | "hardDeleteNodesBatch" | "lockNodes">;
+type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "previewNodeSetUpdate" | "updateNodeSet" | "deleteNode" | "hardDeleteNode" | "hardDeleteNodesBatch" | "lockNodes">;
 
 // @public (undocumented)
 type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -10053,6 +10055,25 @@ type NodeRowLock = "edgeEndpoint" | "delete";
 type NodeRowLockClauses = Readonly<Record<NodeRowLock, RowLockClause>>;
 
 // @public
+type NodeSetUpdatePreview = Readonly<{
+    rows: readonly NodeSetUpdatePreviewRow[];
+}>;
+
+// @public
+type NodeSetUpdatePreviewRow = Readonly<{
+    id: string;
+    version: number;
+    props: RowProps;
+    rowToken: string;
+}>;
+
+// @public
+type NodeSetUpdateRowKey = Readonly<{
+    id: string;
+    rowToken: string;
+}>;
+
+// @public
 type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "other";
 
 // @public
@@ -10121,6 +10142,9 @@ type PostgresTables = ReturnType<typeof createPostgresTables>;
 type PreparedSqlStatement = Readonly<{
     execute: <TRow>(params: readonly unknown[]) => Promise<readonly TRow[]>;
 }>;
+
+// @public
+type PreviewNodeSetUpdateParams = UpdateWhereNodeSetParams | CompareAndSetNodeParams;
 
 // @public
 type PrimaryKeyRelation = Readonly<{
@@ -10775,6 +10799,21 @@ type UpdateNodeParams = Readonly<{
 
 // @public
 type UpdateNodeSetParams = Readonly<{
+    graphId: string;
+    kind: string;
+    patch: Readonly<Record<string, JsonValue>>;
+    unsetProperties?: readonly string[];
+    rows: readonly NodeSetUpdateRowKey[];
+}>;
+
+// @public
+type UpdateNodeSetResult = Readonly<{
+    affectedCount: number;
+    rows: readonly NodeRow[];
+}>;
+
+// @public
+type UpdateWhereNodeSetParams = Readonly<{
     operation: "updateWhere";
     graphId: string;
     kind: string;
@@ -10782,12 +10821,6 @@ type UpdateNodeSetParams = Readonly<{
     unsetProperties?: readonly string[];
     candidateIds: CompiledSelectSql;
     candidateIdColumn: string;
-}>;
-
-// @public
-type UpdateNodeSetResult = Readonly<{
-    affectedCount: number;
-    rows: readonly NodeRow[];
 }>;
 
 // @public

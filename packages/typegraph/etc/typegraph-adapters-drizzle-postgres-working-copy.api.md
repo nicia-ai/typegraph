@@ -764,7 +764,7 @@ type CompareAndSetExpected<Props> = Readonly<{
     [Property in keyof Props]?: Extract<Exclude<Props[Property], undefined>, JsonScalar> | CompareAndSetAbsent;
 }>;
 
-// @public (undocumented)
+// @public
 type CompareAndSetNodeParams = Readonly<{
     operation: "compareAndSet";
     graphId: string;
@@ -3311,9 +3311,9 @@ type GraphBackend = Readonly<{
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
     upsertHeterogeneousNodes?: (this: void, params: HeterogeneousNodeUpsertParams) => Promise<readonly NodeRow[]>;
+    previewNodeSetUpdate?: (this: void, params: PreviewNodeSetUpdateParams) => Promise<NodeSetUpdatePreview>;
     updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
     updateResolvedNodesBatch?: (this: void, params: ResolvedNodeUpdateBatchParams) => Promise<readonly NodeRow[]>;
-    compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
     hardDeleteNodesBatch?: (this: void, params: HardDeleteNodesBatchParams) => Promise<HardDeleteNodesBatchResult>;
@@ -4948,7 +4948,7 @@ type NodeDeletePolicy = Readonly<{
 type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "findNodesAcrossKinds" | "countNodesByKind">;
 
 // @public (undocumented)
-type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode" | "hardDeleteNodesBatch" | "lockNodes">;
+type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "previewNodeSetUpdate" | "updateNodeSet" | "deleteNode" | "hardDeleteNode" | "hardDeleteNodesBatch" | "lockNodes">;
 
 // @public
 type NodeGetOrCreateByConstraintOptions<Via extends CompositionViaRef | undefined = CompositionViaRef | undefined, Whole extends CompositionWholeInput = CompositionWholeInput> = Readonly<{
@@ -5132,6 +5132,25 @@ type NodeRow = Readonly<{
 
 // @public
 type NodeRowLock = "edgeEndpoint" | "delete";
+
+// @public
+type NodeSetUpdatePreview = Readonly<{
+    rows: readonly NodeSetUpdatePreviewRow[];
+}>;
+
+// @public
+type NodeSetUpdatePreviewRow = Readonly<{
+    id: string;
+    version: number;
+    props: RowProps;
+    rowToken: string;
+}>;
+
+// @public
+type NodeSetUpdateRowKey = Readonly<{
+    id: string;
+    rowToken: string;
+}>;
 
 // @public
 type NodeType<K extends string = string, S extends z.ZodObject<z.ZodRawShape> = z.ZodObject<z.ZodRawShape>> = Readonly<{
@@ -5601,6 +5620,9 @@ type PreparedQueryConfig<R> = Readonly<{
     selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
     schemaIntrospector: SchemaIntrospector;
 }>;
+
+// @public
+type PreviewNodeSetUpdateParams = UpdateWhereNodeSetParams | CompareAndSetNodeParams;
 
 // @public (undocumented)
 type ProjectedEdgeResult<E extends AnyEdgeType, Selection extends readonly string[] | undefined> = Readonly<Pick<Edge<E>, "id" | "kind" | "fromKind" | "fromId" | "toKind" | "toId">> & Readonly<SelectedEdgeProps<E, Selection>> & (HasMeta<Selection> extends true ? Readonly<{
@@ -8289,6 +8311,21 @@ type UpdateNodeParams = Readonly<{
 
 // @public
 type UpdateNodeSetParams = Readonly<{
+    graphId: string;
+    kind: string;
+    patch: Readonly<Record<string, JsonValue>>;
+    unsetProperties?: readonly string[];
+    rows: readonly NodeSetUpdateRowKey[];
+}>;
+
+// @public
+type UpdateNodeSetResult = Readonly<{
+    affectedCount: number;
+    rows: readonly NodeRow[];
+}>;
+
+// @public
+type UpdateWhereNodeSetParams = Readonly<{
     operation: "updateWhere";
     graphId: string;
     kind: string;
@@ -8296,12 +8333,6 @@ type UpdateNodeSetParams = Readonly<{
     unsetProperties?: readonly string[];
     candidateIds: CompiledSelectSql;
     candidateIdColumn: string;
-}>;
-
-// @public
-type UpdateNodeSetResult = Readonly<{
-    affectedCount: number;
-    rows: readonly NodeRow[];
 }>;
 
 // @public

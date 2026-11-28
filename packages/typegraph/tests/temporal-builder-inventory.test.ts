@@ -111,6 +111,9 @@ const LEAK_ALLOWLIST: Readonly<Record<string, readonly string[]>> = {
     "const currentValidFrom = qualifiedColumn(targetAlias, nodes.validFrom);",
     "${quotedColumn(nodes.validFrom)} = CASE",
     "ELSE ${excluded(nodes.validFrom)}",
+    // The set update's row token READS the stored bound to name the row its
+    // dry-run read; the set update never writes a bound.
+    "column(nodes.validFrom.name),",
   ],
   "drizzle/operations/edges.ts": [
     // The gate that makes the site below a pass-through: it runs only when the

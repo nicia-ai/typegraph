@@ -1477,7 +1477,7 @@ export type CommitSchemaVersionParams = Readonly<{
     schemaDoc: SerializedSchema;
 }>;
 
-// @public (undocumented)
+// @public
 export type CompareAndSetNodeParams = Readonly<{
     operation: "compareAndSet";
     graphId: string;
@@ -2725,9 +2725,9 @@ export type GraphBackend = Readonly<{
     insertNodesBatchReturning?: (this: void, params: readonly InsertNodeParams[]) => Promise<readonly NodeRow[]>;
     updateNode: (this: void, params: UpdateNodeParams) => Promise<NodeRow>;
     upsertHeterogeneousNodes?: (this: void, params: HeterogeneousNodeUpsertParams) => Promise<readonly NodeRow[]>;
+    previewNodeSetUpdate?: (this: void, params: PreviewNodeSetUpdateParams) => Promise<NodeSetUpdatePreview>;
     updateNodeSet?: (this: void, params: UpdateNodeSetParams) => Promise<UpdateNodeSetResult>;
     updateResolvedNodesBatch?: (this: void, params: ResolvedNodeUpdateBatchParams) => Promise<readonly NodeRow[]>;
-    compareAndSetNode?: (this: void, params: CompareAndSetNodeParams) => Promise<UpdateNodeSetResult>;
     deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
     hardDeleteNode: (this: void, params: HardDeleteNodeParams) => Promise<void>;
     hardDeleteNodesBatch?: (this: void, params: HardDeleteNodesBatchParams) => Promise<HardDeleteNodesBatchResult>;
@@ -3472,7 +3472,7 @@ export type NodeCreateCommandResult = Readonly<{
 export type NodeEntityReadBackend = Pick<GraphBackend, "getNode" | "getNodes" | "findNodesByKind" | "findNodesAcrossKinds" | "countNodesByKind">;
 
 // @public (undocumented)
-export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "compareAndSetNode" | "updateNodeSet" | "deleteNode" | "hardDeleteNode" | "hardDeleteNodesBatch" | "lockNodes">;
+export type NodeEntityWriteBackend = Pick<GraphBackend, "insertNode" | "insertNodeIfAbsent" | "insertNodeIfAbsentWithSchemaFence" | "insertNodeWithSchemaFence" | "commands" | "insertNodeNoReturn" | "insertNodesBatch" | "insertNodesBatchReturning" | "updateNode" | "upsertHeterogeneousNodes" | "updateResolvedNodesBatch" | "previewNodeSetUpdate" | "updateNodeSet" | "deleteNode" | "hardDeleteNode" | "hardDeleteNodesBatch" | "lockNodes">;
 
 // @public (undocumented)
 export type NodeIndexDeclaration = IndexDeclarationBase & Readonly<{
@@ -3557,6 +3557,25 @@ export type NodeRow = Readonly<{
 export type NodeRowLock = "edgeEndpoint" | "delete";
 
 // @public
+export type NodeSetUpdatePreview = Readonly<{
+    rows: readonly NodeSetUpdatePreviewRow[];
+}>;
+
+// @public
+export type NodeSetUpdatePreviewRow = Readonly<{
+    id: string;
+    version: number;
+    props: RowProps;
+    rowToken: string;
+}>;
+
+// @public
+export type NodeSetUpdateRowKey = Readonly<{
+    id: string;
+    rowToken: string;
+}>;
+
+// @public
 export type NormalizedColumnKind = "integer" | "text" | "timestamp-with-time-zone" | "other";
 
 // @public
@@ -3606,6 +3625,9 @@ export const POSTGRES_CAPABILITIES: BackendCapabilities;
 
 // @public
 export const POSTGRES_MAX_BIND_PARAMETERS = 65533;
+
+// @public
+export type PreviewNodeSetUpdateParams = UpdateWhereNodeSetParams | CompareAndSetNodeParams;
 
 // @public
 export type PurgeEdgeClaimsParams = Readonly<{
@@ -4894,11 +4916,11 @@ export const UNBUNDLED_OPTIONAL_MEMBERS: {
         readonly bundle: "trustedImport";
         readonly ceiling: 1;
     };
-    readonly compareAndSetNode: {
+    readonly previewNodeSetUpdate: {
         readonly kind: "deferred";
         readonly workstream: "WS5b";
         readonly bundle: "batchEntityWrite";
-        readonly ceiling: 6;
+        readonly ceiling: 4;
     };
     readonly updateNodeSet: {
         readonly kind: "deferred";
@@ -5127,6 +5149,21 @@ export type UpdateNodeParams = Readonly<{
 
 // @public
 export type UpdateNodeSetParams = Readonly<{
+    graphId: string;
+    kind: string;
+    patch: Readonly<Record<string, JsonValue>>;
+    unsetProperties?: readonly string[];
+    rows: readonly NodeSetUpdateRowKey[];
+}>;
+
+// @public
+export type UpdateNodeSetResult = Readonly<{
+    affectedCount: number;
+    rows: readonly NodeRow[];
+}>;
+
+// @public
+export type UpdateWhereNodeSetParams = Readonly<{
     operation: "updateWhere";
     graphId: string;
     kind: string;
@@ -5134,12 +5171,6 @@ export type UpdateNodeSetParams = Readonly<{
     unsetProperties?: readonly string[];
     candidateIds: CompiledSelectSql;
     candidateIdColumn: string;
-}>;
-
-// @public
-export type UpdateNodeSetResult = Readonly<{
-    affectedCount: number;
-    rows: readonly NodeRow[];
 }>;
 
 // @public
@@ -5385,7 +5416,7 @@ type WriteFenceTarget = Readonly<{
 
 // @public
 export const WS5B_SEED_BUNDLES: {
-    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "hardDeleteNodesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "compareAndSetNode", "updateNodeSet", "updateResolvedNodesBatch"];
+    readonly batchEntityWrite: readonly ["insertNodesBatch", "insertNodesBatchReturning", "insertEdgesBatch", "insertEdgesBatchReturning", "insertEdgesDurableBatchReturning", "deleteEdgesBatch", "hardDeleteEdgesBatch", "hardDeleteNodesBatch", "insertNodeNoReturn", "insertNodeIfAbsent", "insertEdgeNoReturn", "previewNodeSetUpdate", "updateNodeSet", "updateResolvedNodesBatch"];
     readonly heterogeneousEndpointSetRead: readonly ["findEdgesByHeterogeneousEndpointSet"];
     readonly vectorOperations: readonly ["upsertEmbedding", "deleteEmbedding", "upsertEmbeddingBatch", "deleteEmbeddingBatch", "vectorSearch", "vectorStrategy", "createVectorIndex", "dropVectorIndex"];
     readonly hybridSearch: readonly ["hybridSearch"];
