@@ -2439,7 +2439,12 @@ the read-only scope alone refuses TypeGraph's writes in it. Every context and ba
 caller's transaction refuses TypeGraph writes until the savepoint ends and accepts them again
 afterwards. A write that another call on the same transaction (under `Promise.all`, say) reaches
 while the savepoint is open is refused too, before any statement; one that was already past its
-refusal when the savepoint opened completes. Only a `store.transaction()` you open read-only opens
+refusal when the savepoint opened completes. That includes a read-write `store.transaction()` that
+is already open on the same caller's transaction when the read-only one opens beside it: its later
+writes are refused, so it rejects, and what it wrote before the refusal follows the caller's
+transaction rather than the unit (on node-postgres and PGlite it commits with the caller's
+transaction; postgres-js rolls it back with the unit). Do not overlap a read-write and a read-only
+unit on one caller's transaction. Only a `store.transaction()` you open read-only opens
 that scope. TypeGraph's own read-only units on such a Store (an export's snapshot, the confirm read
 of `getOrCreateByEndpoints()`, an algorithm's working table) open none and issue only their own
 statements, so they never refuse or end a call that overlaps them. A native read-only
