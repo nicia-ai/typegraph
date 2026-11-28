@@ -5,25 +5,35 @@
  * Usage:
  *   tsx src/real/snb-short-reads.ts [--profile=smoke|sf1|sf10] [--engines=a,b,c]
  *     [--data-dir=<extracted-datagen-dir>] [--requests-per-query=N]
- *     [--warmup-requests=N] [--seed=N] [--output=<dir>]
+ *     [--warmup-requests=N] [--seed=N] [--output=<dir>] [--check]
+ *     [--no-history] [--require-all-engines]
+ *
+ * Writes results.json, summary.json, competitor-doctor.json and report.md to
+ * the output directory. For a comparison across chosen engines and scales,
+ * use `./compare.ts` (`bench:snb:compare`), which runs this once per scale.
  */
+import { writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { parseSnbCliOptions } from "./cli";
 import { type SnbIdPools } from "./dataset/ldbc-csv";
 import { resolveDatasetRoot } from "./dataset/resolve";
 import { createLadybugEngine } from "./engines/ladybug";
 import { createNeo4jEngine } from "./engines/neo4j";
+import { createPgGraphEngine } from "./engines/pggraph";
 import { createTypegraphPostgresEngine } from "./engines/typegraph-postgres";
 import { createTypegraphSqliteEngine } from "./engines/typegraph-sqlite";
 import {
-  IS_QUERY_IDS,
-  type IsQueryId,
+  type EngineRuntimeVersion,
+  type MessageRef,
+  type PersonPair,
   type SnbEngineFactory,
+  type SnbQueryId,
   type SnbQueryResult,
 } from "./engines/types";
 import {
-  NEO4J_IMAGE,
   packageVersion,
   runDoctor,
   writeDoctorResult,
@@ -31,6 +41,7 @@ import {
 } from "./harness/doctor";
 import { writeLaneHistoryEntry } from "./harness/history";
 import { evaluateParity, type EngineQueryOutcomes } from "./harness/parity";
+import { renderSnbReport } from "./harness/report";
 import { writeJsonFile } from "./harness/process";
 import { computeLatencyStats, type LatencyStats } from "./harness/stats";
 import { writeSummary, type EngineVersion } from "./harness/summary";
@@ -45,6 +56,7 @@ const ENGINE_FACTORIES: Readonly<Record<SnbEngineName, SnbEngineFactory>> = {
   "typegraph-postgres": createTypegraphPostgresEngine,
   neo4j: createNeo4jEngine,
   ladybugdb: createLadybugEngine,
+  pggraph: createPgGraphEngine,
 };
 
 type EngineQueryMeasurement = Readonly<{
@@ -56,8 +68,15 @@ type EngineQueryMeasurement = Readonly<{
 type EngineRun = Readonly<{
   name: SnbEngineName;
   fairness: string;
+  target: string;
+  loadPath: string;
+  /** Read from the running engine after load, not from the pin. */
+  versions: readonly EngineRuntimeVersion[];
   loadMs: number;
-  queries: Readonly<Record<IsQueryId, EngineQueryMeasurement>>;
+  /** Only the queries this engine actually ran (unsupported ones are absent). */
+  queries: Partial<Record<SnbQueryId, EngineQueryMeasurement>>;
+  /** Declared capability gaps: queryId -> reason, never measured. */
+  unsupported: Partial<Record<SnbQueryId, string>>;
 }>;
 
 async function measureQuery<Request>(
@@ -83,45 +102,49 @@ async function measureQuery<Request>(
   return { samplesMs, rowCounts, digests };
 }
 
+/**
+ * summary.json's engine versions: what each engine reported while it ran
+ * (see `SnbEngineHandle.versions`), one row per component, plus the
+ * TypeGraph build the harness itself resolved.
+ */
 async function collectEngineVersions(
-  engines: readonly SnbEngineName[],
+  runs: readonly EngineRun[],
 ): Promise<readonly EngineVersion[]> {
-  const versions: EngineVersion[] = [];
-  if (
-    engines.includes("typegraph-sqlite") ||
-    engines.includes("typegraph-postgres")
-  ) {
-    versions.push({
-      engine: "@nicia-ai/typegraph",
-      version: (await packageVersion("@nicia-ai/typegraph")) ?? "unknown",
-    });
-  }
-  if (engines.includes("typegraph-sqlite")) {
-    versions.push({
-      engine: "better-sqlite3",
-      version: (await packageVersion("better-sqlite3")) ?? "unknown",
-    });
-  }
-  if (engines.includes("typegraph-postgres")) {
-    versions.push({
-      engine: "pg",
-      version: (await packageVersion("pg")) ?? "unknown",
-    });
-  }
-  if (engines.includes("neo4j")) {
-    versions.push({
-      engine: "neo4j",
-      version: NEO4J_IMAGE,
-      detail: `neo4j-driver ${(await packageVersion("neo4j-driver")) ?? "unknown"}`,
-    });
-  }
-  if (engines.includes("ladybugdb")) {
-    versions.push({
-      engine: "@ladybugdb/core",
-      version: (await packageVersion("@ladybugdb/core")) ?? "unknown",
-    });
-  }
-  return versions;
+  const harness: EngineVersion = {
+    engine: "harness/@nicia-ai/typegraph",
+    version: (await packageVersion("@nicia-ai/typegraph")) ?? "unknown",
+    detail: `git ${resolveGitSha()}`,
+  };
+  return [
+    harness,
+    ...runs.flatMap((run) =>
+      run.versions.map((version) => ({
+        engine: `${run.name}/${version.component}`,
+        version: version.version,
+        ...(version.detail === undefined ? {} : { detail: version.detail }),
+      })),
+    ),
+  ];
+}
+
+function formatEngineVersions(
+  versions: readonly EngineRuntimeVersion[],
+): string {
+  return versions
+    .map(
+      (version) =>
+        `${version.component} ${version.version}${version.detail === undefined ? "" : ` (${version.detail})`}`,
+    )
+    .join("; ");
+}
+
+/** One line naming the hardware a run measured on, for the report header. */
+function describeHost(): string {
+  const cpus = os.cpus();
+  return (
+    `${cpus[0]?.model ?? "unknown CPU"} x ${cpus.length}, ` +
+    `${(os.totalmem() / 1024 ** 3).toFixed(1)} GiB RAM, ${os.platform()}/${os.arch()}, node ${process.version}`
+  );
 }
 
 type RunEngineOptions = Readonly<{
@@ -152,66 +175,92 @@ async function runEngine(
     const pools = await handle.load();
     const loadMs = nowMs() - loadStarted;
     console.log(
-      `${engineName} loaded in ${formatMs(loadMs)} ` +
+      `${engineName} loaded in ${formatMs(loadMs)} via ${handle.loadPath} ` +
         `(${pools.counts.persons} persons, ${pools.counts.posts} posts, ${pools.counts.comments} comments)`,
     );
+    const versions = await handle.versions();
+    console.log(`  target: ${handle.target}`);
+    console.log(`  versions: ${formatEngineVersions(versions)}`);
 
     const requestPlan = getOrBuildRequestPlan(pools);
 
-    const queries: Record<IsQueryId, EngineQueryMeasurement> = {
-      IS1: await measureQuery(
-        requestPlan.IS1,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS1,
-      ),
-      IS2: await measureQuery(
-        requestPlan.IS2,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS2,
-      ),
-      IS3: await measureQuery(
-        requestPlan.IS3,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS3,
-      ),
-      IS4: await measureQuery(
-        requestPlan.IS4,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS4,
-      ),
-      IS5: await measureQuery(
-        requestPlan.IS5,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS5,
-      ),
-      IS6: await measureQuery(
-        requestPlan.IS6,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS6,
-      ),
-      IS7: await measureQuery(
-        requestPlan.IS7,
-        options.warmupRequests,
-        requestCount,
-        handle.queries.IS7,
-      ),
+    type QueryPlan = Readonly<{
+      requests: readonly unknown[];
+      run: (request: unknown) => Promise<SnbQueryResult>;
+    }>;
+    // One dispatch entry per query: its seeded request sequence plus a
+    // type-erased runner. Each cast is sound — `requestPlan[id]` is built with
+    // exactly this query's input type (see request-plan.ts) — and looping over
+    // this map (instead of a hand-written measureQuery call per query) is what
+    // lets the capability gate below skip an engine's unsupported queries
+    // uniformly, no matter how many queries the lane grows to.
+    const q = handle.queries;
+    const queryPlans: Record<SnbQueryId, QueryPlan> = {
+      IS1: { requests: requestPlan.IS1, run: (r) => q.IS1(r as string) },
+      IS2: { requests: requestPlan.IS2, run: (r) => q.IS2(r as string) },
+      IS3: { requests: requestPlan.IS3, run: (r) => q.IS3(r as string) },
+      IS4: { requests: requestPlan.IS4, run: (r) => q.IS4(r as MessageRef) },
+      IS5: { requests: requestPlan.IS5, run: (r) => q.IS5(r as MessageRef) },
+      IS6: { requests: requestPlan.IS6, run: (r) => q.IS6(r as MessageRef) },
+      IS7: { requests: requestPlan.IS7, run: (r) => q.IS7(r as MessageRef) },
+      IC13: { requests: requestPlan.IC13, run: (r) => q.IC13(r as PersonPair) },
+      IC14: { requests: requestPlan.IC14, run: (r) => q.IC14(r as PersonPair) },
+      BFS3: { requests: requestPlan.BFS3, run: (r) => q.BFS3(r as string) },
+      IC2: { requests: requestPlan.IC2, run: (r) => q.IC2(r as string) },
+      IC8: { requests: requestPlan.IC8, run: (r) => q.IC8(r as string) },
+      IC9: { requests: requestPlan.IC9, run: (r) => q.IC9(r as string) },
+      GA_DEGREE: {
+        requests: requestPlan.GA_DEGREE,
+        run: (r) => q.GA_DEGREE(r as string),
+      },
+      GA_WCC: {
+        requests: requestPlan.GA_WCC,
+        run: (r) => q.GA_WCC(r as string),
+      },
+      GA_BFS: {
+        requests: requestPlan.GA_BFS,
+        run: (r) => q.GA_BFS(r as string),
+      },
+      GA_SSSP: {
+        requests: requestPlan.GA_SSSP,
+        run: (r) => q.GA_SSSP(r as string),
+      },
     };
 
-    for (const queryId of IS_QUERY_IDS) {
-      const stats = computeLatencyStats(queries[queryId].samplesMs);
+    const queries: Partial<Record<SnbQueryId, EngineQueryMeasurement>> = {};
+    const unsupported: Partial<Record<SnbQueryId, string>> = {};
+    for (const queryId of options.queries) {
+      const reason = handle.unsupported?.[queryId];
+      if (reason !== undefined) {
+        unsupported[queryId] = reason;
+        console.log(`  ${queryId}: unsupported (${reason})`);
+        continue;
+      }
+      const plan = queryPlans[queryId];
+      const measurement = await measureQuery(
+        plan.requests,
+        options.warmupRequests,
+        requestCount,
+        plan.run,
+      );
+      queries[queryId] = measurement;
+      const stats = computeLatencyStats(measurement.samplesMs);
       console.log(
         `  ${queryId}: p50=${formatMs(stats.medianMs)} p95=${formatMs(stats.p95Ms)} ` +
           `p99=${formatMs(stats.p99Ms)}${stats.noisy ? " (NOISY, CV>25%)" : ""}`,
       );
     }
 
-    return { name: engineName, fairness: handle.fairness, loadMs, queries };
+    return {
+      name: engineName,
+      fairness: handle.fairness,
+      target: handle.target,
+      loadPath: handle.loadPath,
+      versions,
+      loadMs,
+      queries,
+      unsupported,
+    };
   } finally {
     await handle.close();
   }
@@ -225,6 +274,15 @@ async function main(argv: readonly string[]): Promise<void> {
   );
   console.log(
     `LDBC SNB short reads (profile=${options.profile}, dataset=${datasetRoot})`,
+  );
+  // A worktree run must measure that worktree's build; print the resolved
+  // library entry so a run against another checkout's build is visible.
+  console.log(
+    `@nicia-ai/typegraph resolved to ${fileURLToPath(import.meta.resolve("@nicia-ai/typegraph"))}`,
+  );
+  console.log(
+    `TypeGraph ${(await packageVersion("@nicia-ai/typegraph")) ?? "unknown"} at git ${resolveGitSha()}` +
+      `${resolveGitRefName() === undefined ? "" : ` (${resolveGitRefName()})`}`,
   );
 
   const doctorResult = await runDoctor({ engines: options.engines });
@@ -244,6 +302,17 @@ async function main(argv: readonly string[]): Promise<void> {
   const engineNames = options.engines.filter(
     (name) => doctorResult.runnable[name],
   );
+  const skipped = options.engines.filter(
+    (name) => !doctorResult.runnable[name],
+  );
+  if (skipped.length > 0 && options.requireAllEngines) {
+    console.error(
+      `Requested engines are not runnable (see competitor-doctor.json): ${skipped.join(", ")}. ` +
+        "--require-all-engines refuses to compare fewer engines than were asked for.",
+    );
+    process.exitCode = 1;
+    return;
+  }
   if (engineNames.length === 0) {
     console.log(
       "No requested engines are runnable on this machine (see competitor-doctor.json). " +
@@ -251,9 +320,6 @@ async function main(argv: readonly string[]): Promise<void> {
     );
     return;
   }
-  const skipped = options.engines.filter(
-    (name) => !doctorResult.runnable[name],
-  );
   if (skipped.length > 0) {
     console.log(`Skipping unavailable engines: ${skipped.join(", ")}`);
   }
@@ -298,32 +364,34 @@ async function main(argv: readonly string[]): Promise<void> {
     comparable: boolean;
     parityReason?: string;
   }>;
-  const resultsByQuery: Record<IsQueryId, QuerySummary[]> = {
-    IS1: [],
-    IS2: [],
-    IS3: [],
-    IS4: [],
-    IS5: [],
-    IS6: [],
-    IS7: [],
-  };
-  // One history line per engine covering all 7 queries — built up across
-  // the query loop below, written once per engine afterward.
+  const resultsByQuery = Object.fromEntries(
+    options.queries.map((queryId) => [queryId, [] as QuerySummary[]]),
+  ) as Record<SnbQueryId, QuerySummary[]>;
+  // One history line per engine covering all queries — built up across the
+  // query loop below, written once per engine afterward.
   const historyQueriesByEngine = new Map<
     SnbEngineName,
-    Map<IsQueryId, Readonly<{ stats: LatencyStats; comparable: boolean }>>
+    Map<SnbQueryId, Readonly<{ stats: LatencyStats; comparable: boolean }>>
   >(runs.map((run) => [run.name, new Map()]));
 
-  for (const queryId of IS_QUERY_IDS) {
-    const outcomesByEngine: EngineQueryOutcomes[] = runs.map((run) => ({
-      engine: run.name,
-      rowCounts: run.queries[queryId].rowCounts,
-      digests: run.queries[queryId].digests,
-    }));
+  for (const queryId of options.queries) {
+    // Only engines that actually ran this query participate — an engine that
+    // declared it unsupported (capability gap) is absent, not a zero.
+    const ranThisQuery = runs.filter(
+      (run) => run.queries[queryId] !== undefined,
+    );
+    const outcomesByEngine: EngineQueryOutcomes[] = ranThisQuery.map((run) => {
+      const measurement = run.queries[queryId]!;
+      return {
+        engine: run.name,
+        rowCounts: measurement.rowCounts,
+        digests: measurement.digests,
+      };
+    });
     const parity = evaluateParity(outcomesByEngine);
 
-    for (const run of runs) {
-      const stats = computeLatencyStats(run.queries[queryId].samplesMs);
+    for (const run of ranThisQuery) {
+      const stats = computeLatencyStats(run.queries[queryId]!.samplesMs);
       resultsByQuery[queryId].push({
         engine: run.name,
         stats,
@@ -336,7 +404,7 @@ async function main(argv: readonly string[]): Promise<void> {
     }
   }
 
-  for (const run of runs) {
+  for (const run of options.recordHistory ? runs : []) {
     writeLaneHistoryEntry({
       lane: LANE,
       engine: run.name,
@@ -349,21 +417,49 @@ async function main(argv: readonly string[]): Promise<void> {
 
   console.log("\n=== Parity (row count + value digest) ===");
   const mismatches: string[] = [];
-  for (const queryId of IS_QUERY_IDS) {
-    const [first] = resultsByQuery[queryId];
+  for (const queryId of options.queries) {
+    const summaries = resultsByQuery[queryId];
+    const ranCount = summaries.length;
+    const [first] = summaries;
     const comparable = first?.comparable ?? false;
     const reason = first?.parityReason;
-    console.log(
-      `  ${queryId}: comparable=${comparable ? "yes" : "no"}${reason === undefined ? "" : ` (${reason})`}`,
-    );
-    // Every engine that ran executed all 7 queries, so `runs.length >= 2`
-    // guarantees evaluateParity had 2+ engines' outcomes to compare —
-    // `!comparable` here is a genuine mismatch, never "not enough data".
-    // evaluateParity() always sets `reason` on a mismatch (see
-    // harness/parity.ts) — this fallback is defensive, not expected to fire.
-    if (runs.length >= 2 && !comparable) {
+    // Distinguish a genuine mismatch from "too few engines ran it" — the
+    // latter is expected for capability-gated queries (e.g. only pgGraph runs
+    // GA_WCC) and must never count as a parity failure.
+    const status =
+      ranCount === 0 ? "no engines ran it"
+      : ranCount === 1 ? `only ${first!.engine} ran it`
+      : comparable ? "yes"
+      : `no (${reason ?? "parity mismatch"})`;
+    console.log(`  ${queryId}: comparable=${status}`);
+    if (ranCount >= 2 && !comparable) {
       mismatches.push(`${queryId}: ${reason ?? "parity mismatch"}`);
     }
+  }
+
+  const gapLines: string[] = [];
+  for (const run of runs) {
+    for (const queryId of options.queries) {
+      const reason = run.unsupported[queryId];
+      if (reason !== undefined) {
+        gapLines.push(`  ${run.name} / ${queryId}: ${reason}`);
+      }
+    }
+  }
+  if (gapLines.length > 0) {
+    console.log("\n=== Capability gaps (declared unsupported) ===");
+    for (const line of gapLines) {
+      console.log(line);
+    }
+  }
+
+  console.log("\n=== Engines (versions read from the running engine) ===");
+  for (const run of runs) {
+    console.log(`  ${run.name}: ${formatEngineVersions(run.versions)}`);
+    console.log(`    target: ${run.target}`);
+    console.log(
+      `    load path: ${run.loadPath} (${formatMs(run.loadMs)}; load times compare only across runs with the same load path)`,
+    );
   }
 
   if (failures.length > 0) {
@@ -381,7 +477,11 @@ async function main(argv: readonly string[]): Promise<void> {
     engines: runs.map((run) => ({
       name: run.name,
       fairness: run.fairness,
+      target: run.target,
+      loadPath: run.loadPath,
+      versions: run.versions,
       loadMs: run.loadMs,
+      unsupported: run.unsupported,
     })),
     failures,
     queries: resultsByQuery,
@@ -393,14 +493,60 @@ async function main(argv: readonly string[]): Promise<void> {
     commands: [`tsx src/real/snb-short-reads.ts ${argv.join(" ")}`],
     gitSha: resolveGitSha(),
     gitRefName: resolveGitRefName(),
-    engineVersions: await collectEngineVersions(engineNames),
+    engineVersions: await collectEngineVersions(runs),
     dataset: { profile: options.profile, datasetRoot },
     warmupIterations: options.warmupRequests,
     sampleIterations: options.requestsPerQuery,
     durabilityLabels: runs.map((run) => `${run.name}: ${run.fairness}`),
   });
 
-  console.log(`\nWrote results to ${options.outputDir}`);
+  const reportPath = path.join(options.outputDir, "report.md");
+  await writeFile(
+    reportPath,
+    renderSnbReport({
+      profile: options.profile,
+      generatedAt: new Date().toISOString(),
+      typegraphVersion:
+        (await packageVersion("@nicia-ai/typegraph")) ?? "unknown",
+      gitSha: resolveGitSha(),
+      gitRefName: resolveGitRefName(),
+      datasetRoot,
+      requestsPerQuery: options.requestsPerQuery,
+      warmupRequests: options.warmupRequests,
+      seed: options.seed,
+      host: describeHost(),
+      command: `tsx src/real/snb-short-reads.ts ${argv.join(" ")}`,
+      skippedEngines: skipped,
+      engines: runs.map((run) => ({
+        name: run.name,
+        versions: run.versions,
+        target: run.target,
+        loadPath: run.loadPath,
+        loadMs: run.loadMs,
+        unsupported: run.unsupported,
+      })),
+      failures,
+      queries: options.queries.map((queryId) => {
+        const summaries = resultsByQuery[queryId];
+        return {
+          queryId,
+          results: summaries.map((entry) => ({
+            engine: entry.engine,
+            stats: entry.stats,
+          })),
+          comparable: summaries[0]?.comparable ?? false,
+          parityReason: summaries[0]?.parityReason,
+        };
+      }),
+    }),
+  );
+
+  console.log(
+    `\nWrote results to ${options.outputDir} (report: ${reportPath})`,
+  );
+  if (!options.recordHistory) {
+    console.log("Not appended to reports/history.jsonl (--no-history).");
+  }
 
   // A doctor-runnable engine that then failed mid-run is a real regression
   // signal (unlike "not runnable", which is expected in a no-Docker CI
