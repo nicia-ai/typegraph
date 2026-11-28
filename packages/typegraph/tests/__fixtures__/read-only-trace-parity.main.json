@@ -1948,6 +1948,22 @@
       "settledInsideSpan": ["registerGraphTemplate"],
       "rows": ["t1", "t2", "tracked:t1", "tracked:t2"]
     },
+    "read-only held: root backend.releaseUniquesByOwner() from another flow": {
+      "trace": [
+        "SELECT * FROM \"typegraph_schema_versions\" WHERE \"typegraph_schema_versions\".\"graph_id\" = ? AND \"typegraph_schema_versions\".\"is_active\" = 1",
+        "BEGIN",
+        "-- caller transaction callback begun",
+        "-- caller transaction callback released",
+        "COMMIT",
+        "UPDATE \"typegraph_node_uniques\" SET \"deleted_at\" = ? WHERE \"typegraph_node_uniques\".\"graph_id\" = ? AND \"typegraph_node_uniques\".\"concrete_kind\" = ? AND \"typegraph_node_uniques\".\"node_id\" = ? AND \"typegraph_node_uniques\".\"deleted_at\" IS NULL AND \"typegraph_node_uniques\".\"constraint_name\" IN (?)"
+      ],
+      "outcomes": {
+        "held transaction": "fulfilled",
+        "releaseUniquesByOwner": "fulfilled"
+      },
+      "settledInsideSpan": [],
+      "rows": ["t1", "t2", "tracked:t1", "tracked:t2"]
+    },
     "read-only held: root backend.repairContributions() from another flow": {
       "trace": [
         "SELECT * FROM \"typegraph_schema_versions\" WHERE \"typegraph_schema_versions\".\"graph_id\" = ? AND \"typegraph_schema_versions\".\"is_active\" = 1",
@@ -4259,6 +4275,22 @@
       "settledInsideSpan": ["registerGraphTemplate"],
       "rows": ["t1", "t2", "tracked:t1", "tracked:t2"]
     },
+    "read-only held: root backend.releaseUniquesByOwner() from another flow": {
+      "trace": [
+        "SELECT * FROM \"typegraph_schema_versions\" WHERE \"typegraph_schema_versions\".\"graph_id\" = ? AND \"typegraph_schema_versions\".\"is_active\" = 1",
+        "-- libsql transaction default",
+        "-- caller transaction callback begun",
+        "-- caller transaction callback released",
+        "-- libsql commit",
+        "UPDATE \"typegraph_node_uniques\" SET \"deleted_at\" = ? WHERE \"typegraph_node_uniques\".\"graph_id\" = ? AND \"typegraph_node_uniques\".\"concrete_kind\" = ? AND \"typegraph_node_uniques\".\"node_id\" = ? AND \"typegraph_node_uniques\".\"deleted_at\" IS NULL AND \"typegraph_node_uniques\".\"constraint_name\" IN (?)"
+      ],
+      "outcomes": {
+        "held transaction": "fulfilled",
+        "releaseUniquesByOwner": "fulfilled"
+      },
+      "settledInsideSpan": [],
+      "rows": ["t1", "t2", "tracked:t1", "tracked:t2"]
+    },
     "read-only held: root backend.repairContributions() from another flow": {
       "trace": [
         "SELECT * FROM \"typegraph_schema_versions\" WHERE \"typegraph_schema_versions\".\"graph_id\" = ? AND \"typegraph_schema_versions\".\"is_active\" = 1",
@@ -6533,6 +6565,22 @@
         "registerGraphTemplate": "fulfilled"
       },
       "settledInsideSpan": ["registerGraphTemplate"],
+      "rows": ["t1", "t2", "tracked:t1", "tracked:t2"]
+    },
+    "read-only held: root backend.releaseUniquesByOwner() from another flow": {
+      "trace": [
+        "SELECT * FROM \"typegraph_schema_versions\" WHERE \"typegraph_schema_versions\".\"graph_id\" = ? AND \"typegraph_schema_versions\".\"is_active\" = 1",
+        "BEGIN",
+        "-- caller transaction callback begun",
+        "-- caller transaction callback released",
+        "COMMIT",
+        "UPDATE \"typegraph_node_uniques\" SET \"deleted_at\" = ? WHERE \"typegraph_node_uniques\".\"graph_id\" = ? AND \"typegraph_node_uniques\".\"concrete_kind\" = ? AND \"typegraph_node_uniques\".\"node_id\" = ? AND \"typegraph_node_uniques\".\"deleted_at\" IS NULL AND \"typegraph_node_uniques\".\"constraint_name\" IN (?)"
+      ],
+      "outcomes": {
+        "held transaction": "fulfilled",
+        "releaseUniquesByOwner": "fulfilled"
+      },
+      "settledInsideSpan": [],
       "rows": ["t1", "t2", "tracked:t1", "tracked:t2"]
     },
     "read-only held: root backend.repairContributions() from another flow": {
@@ -9366,6 +9414,25 @@
       "outcomes": {
         "held transaction": "fulfilled",
         "releaseIndexMaterializationClaim": "fulfilled"
+      },
+      "settledInsideSpan": [],
+      "rows": ["t1", "t2", "tracked:t1", "tracked:t2"]
+    },
+    "read-only held: root backend.releaseUniquesByOwner() from another flow": {
+      "trace": [
+        "SELECT * FROM \"typegraph_schema_versions\" WHERE \"typegraph_schema_versions\".\"graph_id\" = $1 AND \"typegraph_schema_versions\".\"is_active\" = TRUE",
+        "BEGIN",
+        "set transaction read only",
+        "-- caller transaction callback begun",
+        "SET LOCAL typegraph.transaction_marker = '<marker>'",
+        "UPDATE \"typegraph_node_uniques\" SET \"deleted_at\" = $1 WHERE \"typegraph_node_uniques\".\"graph_id\" = $2 AND \"typegraph_node_uniques\".\"concrete_kind\" = $3 AND \"typegraph_node_uniques\".\"node_id\" = $4 AND \"typegraph_node_uniques\".\"deleted_at\" IS NULL AND \"typegraph_node_uniques\".\"constraint_name\" IN ($5)",
+        "-- caller transaction callback released",
+        "SELECT current_setting('typegraph.transaction_marker', true) AS marker",
+        "COMMIT"
+      ],
+      "outcomes": {
+        "held transaction": "fulfilled",
+        "releaseUniquesByOwner": "fulfilled"
       },
       "settledInsideSpan": [],
       "rows": ["t1", "t2", "tracked:t1", "tracked:t2"]
