@@ -25,17 +25,10 @@ import {
   defineEdge,
   defineGraph,
   defineNode,
-  type GraphDef,
 } from "../../../src";
 import { deriveBackend } from "../../../src/backend/derive-backend";
-import { createPostgresTables } from "../../../src/backend/drizzle/schema/postgres";
-import { createPostgresBackend } from "../../../src/backend/postgres";
-import {
-  createPostgresWorkingCopyManager,
-  type PostgresWorkingCopyManager,
-} from "../../../src/backend/postgres/working-copy";
+import { createPostgresWorkingCopyManager } from "../../../src/backend/postgres/working-copy";
 import type {
-  AdapterBackend,
   GraphBackend,
   TransactionBackend,
 } from "../../../src/backend/types";
@@ -46,6 +39,17 @@ import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import { requireDefined } from "../../../src/utils/presence";
 import { expectObservation } from "../../helpers/known-defect";
+import {
+  CALLER_LOCK_TIMEOUT,
+  CALLER_WORK_MEM,
+  failureOf,
+  inCallerTransaction,
+  liveAllocations,
+  managerOver,
+  requirePostgres,
+  run,
+  userRelations,
+} from "./caller-transaction";
 import type { IntegrationTestContext } from "./test-context";
 
 const SettingPerson = defineNode("SettingPerson", {
@@ -78,13 +82,7 @@ type Settings = Readonly<{
   search_path: string;
 }>;
 
-type SkipContext = Readonly<{ skip: (note?: string) => never }>;
-
 type CapturedStatement = Readonly<{ sql: string; params: readonly unknown[] }>;
-
-/** The caller's own values, neither of them a server default. */
-const CALLER_WORK_MEM = "5MB";
-const CALLER_LOCK_TIMEOUT = "7s";
 
 async function readSettings(session: TransactionBackend): Promise<Settings> {
   const [row] = await session.execute<Settings>(
@@ -93,13 +91,6 @@ async function readSettings(session: TransactionBackend): Promise<Settings> {
     ),
   );
   return requireDefined(row);
-}
-
-async function run(
-  session: TransactionBackend,
-  statement: ReturnType<typeof sql>,
-): Promise<readonly Record<string, unknown>[]> {
-  return session.execute(asCompiledRowsSql(statement));
 }
 
 /**
@@ -154,73 +145,6 @@ function statementsNaming(
   );
 }
 
-/** Every table and sequence outside the system schemas, as `schema.name`. */
-async function userRelations(
-  session: TransactionBackend,
-): Promise<readonly string[]> {
-  const found = await run(
-    session,
-    sql`SELECT n.nspname::text || '.' || c.relname::text AS relation FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'S') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%' ORDER BY 1`,
-  );
-  return found.map((row) => String(row["relation"]));
-}
-
-async function liveAllocations(
-  session: TransactionBackend,
-  ledgerSchema: string,
-): Promise<number> {
-  const [ledger] = await run(
-    session,
-    sql`SELECT count(*)::int AS live FROM ${sql.identifier(ledgerSchema)}.typegraph_working_copy_allocations`,
-  );
-  return Number(ledger?.["live"]);
-}
-
-const ROLLBACK = new Error("roll the caller's transaction back");
-
-function requirePostgres(
-  context: IntegrationTestContext,
-  ctx: SkipContext,
-): AdapterBackend<unknown> {
-  const backend = context.getBackend();
-  if (backend.dialect !== "postgres") {
-    ctx.skip("transaction-local settings are a PostgreSQL facility");
-  }
-  return backend;
-}
-
-/**
- * Runs `body` in a caller's native transaction that has set its own
- * `work_mem` and `lock_timeout`, hands it a backend over that transaction,
- * and rolls the transaction back afterwards.
- */
-async function inCallerTransaction<T>(
-  root: AdapterBackend<unknown>,
-  body: (
-    caller: TransactionBackend,
-    overCaller: (
-      options?: Parameters<typeof createPostgresBackend>[1],
-    ) => GraphBackend,
-  ) => Promise<T>,
-): Promise<T> {
-  const outcome: { value?: T } = {};
-  await root
-    .transactionWithNative(async (caller, native) => {
-      await run(
-        caller,
-        sql`SELECT set_config('work_mem', ${CALLER_WORK_MEM}, true), set_config('lock_timeout', ${CALLER_LOCK_TIMEOUT}, true)`,
-      );
-      outcome.value = await body(caller, (options) =>
-        createPostgresBackend(native as never, options),
-      );
-      throw ROLLBACK;
-    })
-    .catch((error: unknown) => {
-      if (error !== ROLLBACK) throw error;
-    });
-  return outcome.value as T;
-}
-
 async function seededStore(backend: GraphBackend, graph: SettingGraph) {
   const [store] = await createStoreWithSchema(graph, backend);
   const [alpha, beta, gamma] = await Promise.all([
@@ -231,33 +155,6 @@ async function seededStore(backend: GraphBackend, graph: SettingGraph) {
   await store.edges.settingKnows.create(alpha, beta, {});
   await store.edges.settingKnows.create(beta, gamma, {});
   return store;
-}
-
-function managerOver<G extends GraphDef>(
-  control: GraphBackend,
-  overCaller: (
-    options?: Parameters<typeof createPostgresBackend>[1],
-  ) => GraphBackend,
-  connect?: () => Promise<GraphBackend>,
-): PostgresWorkingCopyManager<G> {
-  return createPostgresWorkingCopyManager<G>({
-    control,
-    connect: (names) =>
-      connect?.() ??
-      Promise.resolve(
-        overCaller({ vector: false, tables: createPostgresTables(names) }),
-      ),
-  });
-}
-
-/** The error `promise` rejects with, or undefined when it fulfils. */
-async function failureOf(promise: Promise<unknown>): Promise<unknown> {
-  try {
-    await promise;
-  } catch (error) {
-    return error;
-  }
-  return undefined;
 }
 
 export function registerTransactionLocalSettingIntegrationTests(
