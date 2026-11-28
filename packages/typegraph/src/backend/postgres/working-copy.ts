@@ -2,6 +2,7 @@
 export type { MakeBackend } from "../../graph-merge/working-copy";
 export type {
   PostgresUnsealedAllocation,
+  PostgresWorkingCopyLedgerOptions,
   PostgresWorkingCopyLocator,
   PostgresWorkingCopyManager,
   PostgresWorkingCopyOptions,

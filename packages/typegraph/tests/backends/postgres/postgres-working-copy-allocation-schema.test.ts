@@ -665,10 +665,17 @@ describe.runIf(process.env["POSTGRES_URL"])(
 
         const provisioning = transactions.find((statements) =>
           statements.some((statement) =>
-            statement.startsWith(`INSERT INTO "${LEDGER}"`),
+            // The ledger is always qualified by the schema that holds it.
+            /^INSERT INTO "[^"]+"\."typegraph_working_copy_allocations"/.test(
+              statement,
+            ),
           ),
         );
-        expect(provisioning?.[0]).toContain("set_config('search_path'");
+        // The setting's name and the schema are bound values, which this
+        // rendering prints in place.
+        expect(provisioning?.[0]).toMatch(
+          /^SELECT set_config\(search_path, quote_ident\(.+\) \|\| ', ' \|\| current_setting\(search_path\), true\)$/,
+        );
         await manager.abortAllocation(await onlyUnsealedId(manager));
       } finally {
         await pool.end();

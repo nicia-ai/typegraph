@@ -5528,11 +5528,18 @@ export type PostgresUnsealedAllocation = Readonly<{
     allocationId: string;
     createdAt: string;
     state: "allocating" | "ephemeral";
+    ledgerSchema: string;
+}>;
+
+// @public
+export type PostgresWorkingCopyLedgerOptions = Readonly<{
+    ledgerSchema?: string;
 }>;
 
 // @public
 export type PostgresWorkingCopyLocator = Readonly<{
     allocationId: string;
+    ledgerSchema?: string;
 }>;
 
 // @public (undocumented)
@@ -5543,8 +5550,8 @@ export type PostgresWorkingCopyManager<G extends GraphDef> = Readonly<{
     listUnsealedAllocations: (options?: Readonly<{
         after?: string;
         limit?: number;
-    }>) => Promise<readonly PostgresUnsealedAllocation[]>;
-    abortAllocation: (allocationId: string) => Promise<void>;
+    }> & PostgresWorkingCopyLedgerOptions) => Promise<readonly PostgresUnsealedAllocation[]>;
+    abortAllocation: (allocationId: string, options?: PostgresWorkingCopyLedgerOptions) => Promise<void>;
 }>;
 
 // @public

@@ -190,7 +190,7 @@ export const sqliteDialect: BuiltinDialectAdapter = {
     return;
   },
 
-  setTransactionWorkingMemory(): undefined {
+  transactionWorkingMemory(): undefined {
     // SQLite has no per-transaction working-memory budget to raise.
     return;
   },

@@ -16,6 +16,7 @@
  */
 import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { backendDerivationChain } from "../derive-backend";
+import type { TransactionLocalSetting } from "../transaction-local-settings";
 import type { GraphBackend } from "../types";
 
 const NAMES_SCHEMA = new WeakMap<object, string>();
@@ -64,14 +65,18 @@ export function allocationSchemaOfBackend(
 }
 
 /**
- * Leads the transaction's `search_path` with the allocation schema, so an
- * unqualified `CREATE` in the same transaction lands there and an existing
- * relation is found where it lives. The rest of the path is kept so types and
- * extensions in other schemas still resolve. `is_local` scopes it to the
- * transaction; it must run inside one.
+ * The `search_path` that leads with the allocation schema, so an unqualified
+ * `CREATE` in the same unit lands there and an existing relation is found
+ * where it lives. The rest of the path is kept so types and extensions in
+ * other schemas still resolve. It is applied through
+ * `withTransactionLocalSettings`, which ends it with the unit.
  */
-export function allocationSchemaPin(schema: string): SqlFragment {
-  return sql`SELECT set_config('search_path', quote_ident(${schema}) || ', ' || current_setting('search_path'), true)`;
+export function allocationSearchPath(schema: string): TransactionLocalSetting {
+  return {
+    name: "search_path",
+    value: (previous: SqlFragment) =>
+      sql`quote_ident(${schema}) || ', ' || ${previous}`,
+  };
 }
 
 /**

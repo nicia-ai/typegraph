@@ -1973,9 +1973,9 @@ export interface DialectAdapter {
     readonly quoteIdentifier: (this: void, name: string) => string;
     readonly rowValueComparison?: (this: void, operator: ">" | "<", left: readonly SqlFragment[], right: readonly SqlFragment[]) => SqlFragment;
     readonly safeNumericConversion: (this: void, expression: SqlFragment) => SqlFragment;
-    readonly setTransactionWorkingMemory: (this: void, workingMemory: string) => SqlFragment | undefined;
     readonly supportsVectors: boolean;
     readonly textJsonArray: (this: void, values: readonly SqlFragment[]) => SqlFragment;
+    readonly transactionWorkingMemory: (this: void, workingMemory: string) => DialectTransactionSetting | undefined;
     unboundedLimit(): SqlFragment;
     readonly wrapSetOperationOperand: (this: void, inner: SqlFragment) => SqlFragment;
 }
@@ -2004,6 +2004,12 @@ export type DialectStandardQueryStrategy = "cte_project";
 
 // @public
 export type DialectSubgraphMembershipStrategy = "materialized-ids" | "inline-cte";
+
+// @public
+export type DialectTransactionSetting = Readonly<{
+    name: string;
+    value: string;
+}>;
 
 // @public
 export type DialectVectorPredicateStrategy = "native" | "unsupported";

@@ -1,4 +1,8 @@
 import {
+  settingScopeOfTransaction,
+  withTransactionLocalSettings,
+} from "../../backend/transaction-local-settings";
+import {
   type GraphBackend,
   INTERNAL_TEMPORARY_WRITES,
   type InternalTransactionOptions,
@@ -479,18 +483,38 @@ async function runWorkingTableRounds<State extends IterativeGraphState, Result>(
   };
 
   // Opt-in only: without an explicit workingMemory the rounds inherit
-  // the engine's configured setting. When requested, the override is
-  // transaction-scoped — `set_config(..., is_local => true)` reverts
-  // when this transaction ends, so the session/server setting is never
-  // touched. SQLite returns no statement here.
-  if (context.operation.workingMemory !== undefined) {
-    const workingMemoryStatement = ctx.dialect.setTransactionWorkingMemory(
-      context.operation.workingMemory,
-    );
-    if (workingMemoryStatement !== undefined) {
-      await context.executeTemporary(workingMemoryStatement);
-    }
+  // the engine's configured setting. When requested, the override lasts for
+  // this operation only: the end of a transaction TypeGraph opened ends it,
+  // and on a savepoint of a caller's transaction the caller's own value is
+  // restored before the operation returns. SQLite has no such setting.
+  const workingMemory =
+    context.operation.workingMemory === undefined ?
+      undefined
+    : ctx.dialect.transactionWorkingMemory(context.operation.workingMemory);
+  if (workingMemory === undefined) {
+    return runWorkingTableRoundsInContext(ctx, plan, context);
   }
+  return withTransactionLocalSettings(
+    {
+      execute: (query) => temporaryBackend.execute(asCompiledRowsSql(query)),
+    },
+    settingScopeOfTransaction(backend),
+    async (settings) => {
+      await settings.set(workingMemory);
+      return runWorkingTableRoundsInContext(ctx, plan, context);
+    },
+  );
+}
+
+/** The working-table rounds once the operation's settings are in force. */
+async function runWorkingTableRoundsInContext<
+  State extends IterativeGraphState,
+  Result,
+>(
+  ctx: AlgorithmContext,
+  plan: IterativeGraphPlan<State, Result>,
+  context: IterativeGraphRunContext,
+): Promise<Result> {
   try {
     await context.executeTemporary(plan.createWorkingTable(context));
   } catch (error) {

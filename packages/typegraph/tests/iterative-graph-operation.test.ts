@@ -61,23 +61,16 @@ describe("iterative graph working-table statistics", () => {
 });
 
 describe("iterative graph working-memory dialect seam", () => {
-  it("emits a parameterized, transaction-local work_mem override on PostgreSQL only", () => {
+  it("names PostgreSQL's work_mem as the transaction-local setting, and none on SQLite", () => {
     const workingMemory = "64MB";
-    const postgresStatement =
-      postgresDialect.setTransactionWorkingMemory(workingMemory);
-
-    if (postgresStatement === undefined) {
-      throw new Error("PostgreSQL must emit a work_mem override");
-    }
-    const compiled = renderPostgres(postgresStatement);
-    // set_config(..., is_local => true) is the parameterizable form of
-    // SET LOCAL: it reverts at transaction end and binds the value instead
-    // of splicing it into the statement text.
-    expect(compiled.sql).toBe("SELECT set_config('work_mem', $1, true)");
-    expect(compiled.params).toEqual([workingMemory]);
-
+    // The value stays data: the transaction-local settings owner binds it as
+    // a parameter of the statement that applies it.
+    expect(postgresDialect.transactionWorkingMemory(workingMemory)).toEqual({
+      name: "work_mem",
+      value: workingMemory,
+    });
     expect(
-      sqliteDialect.setTransactionWorkingMemory(workingMemory),
+      sqliteDialect.transactionWorkingMemory(workingMemory),
     ).toBeUndefined();
   });
 });

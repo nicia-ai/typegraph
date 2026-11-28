@@ -438,5 +438,13 @@
     "kind": "required-member-added",
     "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
     "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "DialectAdapter",
+    "member": "setTransactionWorkingMemory",
+    "kind": "member-removed",
+    "reason": "The dialect seam returned a finished `set_config` statement, which cannot be restored on a caller's transaction. It is replaced by `transactionWorkingMemory`, which returns the setting (`DialectTransactionSetting`) so TypeGraph's one transaction-local settings owner builds the statements that apply it and restore the caller's value. A custom dialect adapter renames the member and returns `{ name, value }` (or `undefined`) instead of a statement; the changeset carries the upgrade note.",
+    "issue": "#1013"
   }
 ]

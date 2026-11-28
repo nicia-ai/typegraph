@@ -40,6 +40,7 @@ export { registerDatabaseExpressionQueryIntegrationTests } from "./database-expr
 export { registerDateIndexExpressionIntegrationTests } from "./date-index-expressions";
 export { registerDatePredicateIntegrationTests } from "./date-predicates";
 export { registerDurableEdgeMatchIdentityIntegrationTests } from "./durable-edge-match-identity";
+export { registerDurableLedgerSchemaIntegrationTests } from "./durable-ledger-schema";
 export { registerEdgeAcyclicityIntegrationTests } from "./edge-acyclicity";
 export { registerEdgeBulkHardDeleteIntegrationTests } from "./edge-bulk-hard-delete";
 export { registerEdgeCardinalityTighteningIntegrationTests } from "./edge-cardinality-tightening";
@@ -154,6 +155,7 @@ export { registerTemporalOracleIntegrationTests } from "./temporal-oracle";
 export type { IntegrationTestContext } from "./test-context";
 export { registerTransactionBoundaryIntegrationTests } from "./transaction-boundaries";
 export { registerTransactionCommitOutcomeIntegrationTests } from "./transaction-commit-outcome";
+export { registerTransactionLocalSettingIntegrationTests } from "./transaction-local-settings";
 export { registerTransactionReceiptIntegrationTests } from "./transaction-receipt";
 export { registerTransactionSessionHazardTests } from "./transaction-session-hazards";
 export { registerTransactionPortCallBudgetTests } from "./transaction-statement-budget";

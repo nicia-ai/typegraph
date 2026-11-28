@@ -23,6 +23,7 @@ export type {
   DialectRecursiveQueryStrategy,
   DialectStandardQueryStrategy,
   DialectSubgraphMembershipStrategy,
+  DialectTransactionSetting,
   DialectVectorPredicateStrategy,
   InListParameterOptions,
   SqlDialect,

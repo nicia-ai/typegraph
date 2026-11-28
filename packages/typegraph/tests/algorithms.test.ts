@@ -198,6 +198,40 @@ function createPostgresTemporaryStatementFailureBackend(
 }
 
 /**
+ * A PostgreSQL-dialect backend whose transaction-local settings statement
+ * fails: `workingMemory` applies `work_mem` through the row-returning path,
+ * because on a transaction it does not own it reads the prior value there.
+ */
+function createPostgresSettingFailureBackend(
+  backend: GraphBackend,
+  failure: Error,
+): GraphBackend {
+  const compileSql = requireDefined(backend.compileSql);
+  return deriveBackend(backend, {
+    dialect: "postgres",
+    transaction<T>(
+      fn: (tx: TransactionBackend) => Promise<T>,
+      options?: TransactionOptions,
+    ): Promise<T> {
+      return backend.transaction(
+        async (tx) =>
+          fn(
+            deriveBackend(tx, {
+              dialect: "postgres",
+              execute<Row>(query: CompiledRowsSql): Promise<readonly Row[]> {
+                return compileSql(query).sql.includes("set_config") ?
+                    Promise.reject(failure)
+                  : tx.execute<Row>(query);
+              },
+            }),
+          ),
+        options,
+      );
+    },
+  });
+}
+
+/**
  * A standby rejects the read-write access mode in the `BEGIN` itself, so the
  * transaction callback never runs and no temporary statement is ever issued.
  */
@@ -538,7 +572,7 @@ describe("store.algorithms", () => {
       );
       const failingStore = createStore(
         testGraph,
-        createPostgresTemporaryStatementFailureBackend(backend, failure),
+        createPostgresSettingFailureBackend(backend, failure),
       );
 
       await expect(

@@ -18,6 +18,15 @@ import { type FulltextStrategy } from "./fulltext-strategy";
 export type SqlDialect = "sqlite" | "postgres";
 
 /**
+ * A transaction-local engine setting a dialect asks for: the parameter name
+ * and the value to give it for one TypeGraph unit.
+ */
+export type DialectTransactionSetting = Readonly<{
+  name: string;
+  value: string;
+}>;
+
+/**
  * Strategy for compiling standard (non-recursive, non-set-op) queries.
  */
 export type DialectStandardQueryStrategy = "cte_project";
@@ -209,18 +218,17 @@ export interface DialectAdapter {
   ) => SqlFragment | undefined;
 
   /**
-   * Builds the dialect's transaction-scoped working-memory override for
-   * sort/hash-heavy iterative rounds. PostgreSQL emits the parameterized
-   * `SET LOCAL work_mem` form (`set_config(..., is_local => true)`), which
-   * reverts automatically when the transaction ends and never touches the
-   * session or server setting. Returns undefined when the engine has no
-   * per-operation memory budget to raise (SQLite). Callers must run the
-   * statement inside a transaction and validate the value's shape first.
+   * The dialect's transaction-local working-memory setting for
+   * sort/hash-heavy iterative rounds: PostgreSQL's `work_mem`. Returns
+   * undefined when the engine has no per-operation memory budget to raise
+   * (SQLite). The caller applies it for its own unit only, restoring the
+   * prior value before it returns when the unit runs on a transaction
+   * TypeGraph does not own, and validates the value's shape first.
    */
-  readonly setTransactionWorkingMemory: (
+  readonly transactionWorkingMemory: (
     this: void,
     workingMemory: string,
-  ) => SqlFragment | undefined;
+  ) => DialectTransactionSetting | undefined;
 
   /**
    * Aggregates an ordered derived-table row set into one JSON array value.

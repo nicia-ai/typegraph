@@ -7,10 +7,11 @@
  *    (a DBA's deliberately conservative setting must not be silently
  *    overridden; `work_mem` is a per-sort/hash-operator threshold, so a
  *    blanket default would multiply under concurrency).
- * 2. When `workingMemory` IS passed, exactly one transaction-scoped
- *    override runs — the parameterized `SET LOCAL` form,
- *    `SELECT set_config('work_mem', $1, true)` — with the value bound as a
- *    parameter, before the working table is created.
+ * 2. When `workingMemory` IS passed on a transaction the backend opened,
+ *    exactly one transaction-scoped override runs — the parameterized
+ *    `SET LOCAL` form, `SELECT set_config($1, $2, true)` — with the name and
+ *    value bound as parameters, before the working table is created. The
+ *    transaction's end ends it, so no read or restore is added.
  *
  * Skipped automatically when `POSTGRES_URL` is unset.
  */
@@ -116,8 +117,9 @@ function withTransactionCapture(backend: GraphBackend): {
       options?: TransactionOptions,
     ): Promise<T> {
       return backend.transaction(async (tx) => {
-        const observedTransaction: TransactionBackend = {
-          ...tx,
+        // Derived, not spread: the transaction keeps the evidence that this
+        // backend opened it, so the override takes no restore.
+        const observedTransaction: TransactionBackend = deriveBackend(tx, {
           execute<Result>(query: CompiledRowsSql): Promise<readonly Result[]> {
             statements.push(compileSql(query));
             return tx.execute<Result>(query);
@@ -128,7 +130,7 @@ function withTransactionCapture(backend: GraphBackend): {
             statements.push(compileSql(query));
             await requireDefined(tx.executeTemporaryStatement)(query);
           },
-        };
+        });
         return fn(observedTransaction);
       }, options);
     },
@@ -136,7 +138,7 @@ function withTransactionCapture(backend: GraphBackend): {
   return { backend: captured, statements };
 }
 
-const WORK_MEM_OVERRIDE_SQL = "SELECT set_config('work_mem', $1, true)";
+const WORK_MEM_OVERRIDE_SQL = "SELECT set_config($1, $2, true)";
 
 describe("iterative working-memory wiring (Postgres)", () => {
   it("emits no set_config when workingMemory is not passed", async (ctx) => {
@@ -193,7 +195,7 @@ describe("iterative working-memory wiring (Postgres)", () => {
     );
     expect(overrides).toHaveLength(1);
     expect(overrides[0]?.sql).toBe(WORK_MEM_OVERRIDE_SQL);
-    expect(overrides[0]?.params).toEqual(["32MB"]);
+    expect(overrides[0]?.params).toEqual(["work_mem", "32MB"]);
 
     // The override precedes the working table so every round runs under it.
     const overrideIndex = statements.findIndex((statement) =>
