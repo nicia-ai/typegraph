@@ -2051,17 +2051,29 @@ tables that removal never finds.
   is nothing to recover, and removal deletes the ledger row, so a crashed owner's
   allocation cannot stay listed forever.
 - **Ledger rows from before the schema was recorded** (written by 0.72.0) carry
-  no schema. They resolve through the session that removes them and reopen
-  without binding, and follow the same removal rule: relations found in a schema
-  other than the removing session's refuse removal and name that schema. `control` adds the column to an
+  no schema. They resolve through the schema of the ledger that holds them and
+  reopen without binding, and follow the same removal rule: relations found in
+  any other schema refuse removal and name that schema. `control` adds the column to an
   existing ledger the first time it runs. Reopening such an allocation also
   adopts any missing base-schema steps unqualified, under the pooled
   connection's `search_path`, exactly as its other statements resolve.
 
 The connection must still be able to *resolve* the allocation's tables, so its
 `search_path` must include the schema, typically `public`. A per-role `"$user"`
-schema ahead of it is fine. The ledger itself lives where `control`'s session
-creates it, so run `control` with one consistent `search_path`.
+schema ahead of it is fine.
+
+The ledger an allocation is recorded in is the one in the allocation's own
+schema: provisioning creates it there if needed and writes the row there. Every
+later ledger statement about an allocation made by this process (attesting a
+connection, closing an ephemeral store or a `makeBackend` backend, cleanup
+after a failed allocation) is qualified with that schema, so a `control`
+session whose `search_path` changes while a copy is live (a caller that
+creates a schema ahead of the allocation's, or drops the allocation's schema
+from its path) still removes the copy from the ledger that owns it. A call that
+names an allocation only by id (`durable` seal, reopen, destroy, abort and
+operations, `abortAllocation`) or names none (`listUnsealedAllocations`) uses
+the ledger in `control`'s current schema at the time of the call, so run those
+with `control`'s current schema being the one the allocations were made in.
 
 #### `makeBackend` for branches, candidate planning, and evolution previews
 

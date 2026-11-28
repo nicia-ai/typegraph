@@ -50,7 +50,7 @@ import type {
   VectorSlot,
   VectorStrategy,
 } from "../../query/dialect/vector-strategy";
-import { sql } from "../../query/sql-fragment";
+import { sql, type SqlFragment } from "../../query/sql-fragment";
 import { markFixedSchemaWorkingCopyBackend } from "../../store/fixed-schema-working-copy";
 import {
   enterOperation,
@@ -166,6 +166,8 @@ type SealedRow = ObservedAllocationRow &
 /** A sealed row resolved against the graph the caller supplies. */
 type SealedAllocation = Readonly<{
   row: SealedRow;
+  /** The ledger the row was read from; every later ledger statement uses it. */
+  ledger: LedgerRelation;
   origin: DurableBranchOrigin;
   names: PostgresTableNames;
   /** Undefined for a row written before its schema was recorded. */
@@ -185,6 +187,36 @@ type SessionFacts = Readonly<{ role: string; schema: string }>;
 const ALLOCATION_COLUMNS = sql.raw(
   "allocation_id, physical_prefix, ownership_token, state, origin, history, revision_tracking, COALESCE(to_jsonb(l) -> 'vector_slots', '[]'::jsonb) AS vector_slots, COALESCE((to_jsonb(l) ->> 'operation_evidence')::boolean, false) AS operation_evidence, to_jsonb(l) ->> 'schema_name' AS schema_name, created_at::text",
 );
+
+/**
+ * The one spelling of the ledger relation, always qualified by the schema that
+ * holds it. Nothing addresses the ledger by its bare name, so no session's
+ * `search_path` decides which ledger a statement reads or writes.
+ *
+ * A new allocation's ledger is the one in the schema it is allocated in: the
+ * ledger is created there and the row written there, so that schema is a fact
+ * of the allocation and every later statement about it (attestation, locking,
+ * removal) carries it. A call addressed by allocation id alone (a durable
+ * locator, `abortAllocation`) or by no allocation (`listUnsealedAllocations`)
+ * has nothing to carry and uses the ledger in `control`'s current schema,
+ * observed once by {@link observeControlLedger}, for every statement it issues.
+ */
+type LedgerRelation = Readonly<{
+  /** The schema that holds the ledger. */
+  schema: string;
+  /** The relation, for a query. */
+  name: SqlFragment;
+  /** The relation, for DDL and `to_regclass`. */
+  ddlName: string;
+}>;
+
+function ledgerIn(schema: string): LedgerRelation {
+  return {
+    schema,
+    name: sql`${sqlName(schema)}.${sqlName(LEDGER)}`,
+    ddlName: `${quoteDdlIdentifier(schema)}.${quoteDdlIdentifier(LEDGER)}`,
+  };
+}
 
 /** A non-secret locator; only the ledger can map it to physical tables. */
 export type PostgresWorkingCopyLocator = Readonly<{ allocationId: string }>;
@@ -212,7 +244,12 @@ export type PostgresUnsealedAllocation = Readonly<{
  * interactive transaction.
  *
  * Every allocation lives in one schema, the `control` session's current schema
- * when it is allocated, recorded in the ledger. Provisioning, the connected
+ * when it is allocated, recorded in the ledger in that same schema. Every later
+ * ledger statement about an allocation this manager made is qualified with it,
+ * so a `control` session whose `search_path` changes while a copy is live still
+ * removes the copy. A call naming an allocation only by id (a durable locator,
+ * `abortAllocation`) or none (`listUnsealedAllocations`) uses the ledger in
+ * `control`'s current schema at the time of the call. Provisioning, the connected
  * backend's DDL, the allocation's vector storage and removal all name that
  * schema explicitly, so a pooled connection's own `search_path` never decides
  * where an allocation's relations are created or dropped. The connection must
@@ -912,22 +949,24 @@ async function cloneRelations<Transaction extends TransactionBackend>(
 
 function readAllocation(
   control: GraphBackend,
+  ledger: LedgerRelation,
   allocationId: string,
 ): Promise<ObservedAllocationRow | undefined> {
   return rows<ObservedAllocationRow>(
     control,
-    sql`SELECT ${ALLOCATION_COLUMNS}, current_user::text AS control_role FROM ${sqlName(LEDGER)} AS l WHERE allocation_id = ${allocationId}`,
+    sql`SELECT ${ALLOCATION_COLUMNS}, current_user::text AS control_role FROM ${ledger.name} AS l WHERE allocation_id = ${allocationId}`,
   ).then((found) => found[0]);
 }
 
 async function assertAllocationSession(
   session: QuerySession,
+  ledger: LedgerRelation,
   allocationId: string,
   ownershipToken: string,
 ): Promise<void> {
   const observed = await rows<Readonly<{ ownership_token: string }>>(
     session,
-    sql`SELECT ownership_token FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
+    sql`SELECT ownership_token FROM ${ledger.name} WHERE allocation_id = ${allocationId}`,
   );
   if (observed[0]?.ownership_token !== ownershipToken) {
     throw new BranchError(
@@ -980,6 +1019,7 @@ function assertSealedOrigin(
  */
 async function lockSealedAllocation(
   session: QuerySession,
+  ledger: LedgerRelation,
   allocationId: string,
   ownershipToken: string,
   expectedOrigin: DurableBranchOrigin,
@@ -989,7 +1029,7 @@ async function lockSealedAllocation(
     Pick<AllocationRow, "ownership_token" | "state" | "origin">
   >(
     session,
-    sql`SELECT ownership_token, state, origin FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
+    sql`SELECT ownership_token, state, origin FROM ${ledger.name} WHERE allocation_id = ${allocationId}`,
   );
   const row = attested[0];
   if (row?.ownership_token !== ownershipToken) throw allocationRemovedError();
@@ -1070,6 +1110,22 @@ async function observeAllocationSession(
     );
   }
   return facts;
+}
+
+/**
+ * The ledger a call with no allocation to carry it from uses: the one in
+ * `control`'s current schema, observed on `control`'s own session.
+ */
+async function observeControlLedger(
+  control: QuerySession,
+): Promise<LedgerRelation> {
+  const { schema } = await observeSessionFacts(control);
+  if (schema === "") {
+    throw new BranchError(
+      "The control backend has no schema holding the working-copy ledger: its search_path names no existing schema.",
+    );
+  }
+  return ledgerIn(schema);
 }
 
 type AllocationRelation = Readonly<{ schema: string; name: string }>;
@@ -1228,13 +1284,13 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     throw new BranchError("cleanupLockTimeoutMs must be a positive integer.");
   }
 
-  async function ensureLedger(): Promise<void> {
+  async function ensureLedger(ledger: LedgerRelation): Promise<void> {
     await control.transaction((transaction) =>
       withUnitSettings(transaction, async (settings) => {
         await settings.set(cleanupLockTimeout(cleanupLockTimeoutMs));
         await rows(
           transaction,
-          sql.raw(`CREATE TABLE IF NOT EXISTS ${quoteDdlIdentifier(LEDGER)} (
+          sql.raw(`CREATE TABLE IF NOT EXISTS ${ledger.ddlName} (
       allocation_id text PRIMARY KEY,
       physical_prefix text NOT NULL UNIQUE,
       ownership_token text NOT NULL,
@@ -1250,7 +1306,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         );
         const present = await rows<Readonly<{ name: string }>>(
           transaction,
-          sql`SELECT attname::text AS name FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass(${LEDGER}) AND attname = ANY(${ADDITIVE_LEDGER_COLUMNS.map((column) => column.name)}::text[]) AND attnum > 0 AND NOT attisdropped`,
+          sql`SELECT attname::text AS name FROM pg_catalog.pg_attribute WHERE attrelid = to_regclass(${ledger.ddlName}) AND attname = ANY(${ADDITIVE_LEDGER_COLUMNS.map((column) => column.name)}::text[]) AND attnum > 0 AND NOT attisdropped`,
         );
         const presentNames = new Set(present.map((column) => column.name));
         for (const column of ADDITIVE_LEDGER_COLUMNS) {
@@ -1260,7 +1316,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           await rows(
             transaction,
             sql.raw(
-              `ALTER TABLE ${quoteDdlIdentifier(LEDGER)} ADD COLUMN IF NOT EXISTS ${quoteDdlIdentifier(column.name)} ${column.definition}`,
+              `ALTER TABLE ${ledger.ddlName} ADD COLUMN IF NOT EXISTS ${quoteDdlIdentifier(column.name)} ${column.definition}`,
             ),
           );
         }
@@ -1269,10 +1325,11 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
   }
 
   async function dropAllocation(
+    ledger: LedgerRelation,
     allocationId: string,
     expectedOrigin?: DurableBranchOrigin,
   ): Promise<void> {
-    await ensureLedger();
+    await ensureLedger(ledger);
     await control.transaction(
       (transaction) =>
         withUnitSettings(transaction, async (settings) => {
@@ -1282,11 +1339,9 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           // READ COMMITTED before any fence read can rely on it. Everything below
           // reads after that wait, so it sees the holder's commit.
           await lockAllocation(transaction, allocationId);
-          const found = await rows<
-            AllocationRow & Readonly<{ session_schema: string | null }>
-          >(
+          const found = await rows<AllocationRow>(
             transaction,
-            sql`SELECT ${ALLOCATION_COLUMNS}, current_schema() AS session_schema FROM ${sqlName(LEDGER)} AS l WHERE allocation_id = ${allocationId} FOR UPDATE`,
+            sql`SELECT ${ALLOCATION_COLUMNS} FROM ${ledger.name} AS l WHERE allocation_id = ${allocationId} FOR UPDATE`,
           );
           const row = found[0];
           if (row === undefined)
@@ -1311,14 +1366,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
             parseVectorManifest(row.vector_slots),
             createPgvectorStrategyForAllocation(physicalPrefix),
           );
-          // A row written before its schema was recorded is resolved through this
-          // session, as removal always resolved it.
-          const schema = row.schema_name ?? row.session_schema;
-          if (schema === null) {
-            throw new BranchError(
-              `Working-copy allocation ${allocationId} records no schema and this session has none to resolve it in.`,
-            );
-          }
+          // A row written before its schema was recorded lives beside the ledger
+          // holding it: every release before the column created both in
+          // `control`'s current schema.
+          const schema = row.schema_name ?? ledger.schema;
           const plan = planAllocationRemoval(
             allocationId,
             schema,
@@ -1377,7 +1428,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           }
           await rows(
             transaction,
-            sql`DELETE FROM ${sqlName(LEDGER)} WHERE allocation_id = ${allocationId}`,
+            sql`DELETE FROM ${ledger.name} WHERE allocation_id = ${allocationId}`,
           );
         }),
       ALLOCATION_LOCK_TRANSACTION_OPTIONS,
@@ -1408,7 +1459,13 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
    */
   async function provisionAllocation(
     provision: AllocationProvision,
-  ): Promise<Readonly<{ ownershipToken: string; controlRole: string }>> {
+  ): Promise<
+    Readonly<{
+      ownershipToken: string;
+      controlRole: string;
+      ledger: LedgerRelation;
+    }>
+  > {
     const { allocationId, schema, state, names, indexNames, vectorStrategy } =
       provision;
     const physicalPrefix = allocationPhysicalPrefix(names);
@@ -1422,7 +1479,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     // member can tell a fresh durable allocation from one an older release made.
     const hasOperationEvidence = state === "allocating";
     const evidenceTable = operationEvidenceTableName(physicalPrefix);
-    await ensureLedger();
+    // The allocation's ledger is the one in its own schema; every handle on
+    // the allocation carries it and qualifies each later statement with it.
+    const ledger = ledgerIn(schema);
+    await ensureLedger(ledger);
     const ownershipToken = globalThis.crypto.randomUUID();
     const controlRole = await control.transaction((transaction) =>
       withUnitSettings(transaction, async (settings) => {
@@ -1437,7 +1497,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           }>
         >(
           transaction,
-          sql`INSERT INTO ${sqlName(LEDGER)} (allocation_id, physical_prefix, ownership_token, state, history, revision_tracking, vector_slots, schema_name, operation_evidence) VALUES (${allocationId}, ${physicalPrefix}, ${ownershipToken}, ${state}, ${provision.history}, ${provision.revisionTracking}, ${JSON.stringify(vectorManifest)}::jsonb, current_schema(), ${hasOperationEvidence}) ON CONFLICT DO NOTHING RETURNING allocation_id, current_user::text AS role, schema_name`,
+          sql`INSERT INTO ${ledger.name} (allocation_id, physical_prefix, ownership_token, state, history, revision_tracking, vector_slots, schema_name, operation_evidence) VALUES (${allocationId}, ${physicalPrefix}, ${ownershipToken}, ${state}, ${provision.history}, ${provision.revisionTracking}, ${JSON.stringify(vectorManifest)}::jsonb, current_schema(), ${hasOperationEvidence}) ON CONFLICT DO NOTHING RETURNING allocation_id, current_user::text AS role, schema_name`,
         );
         const claim = claimed[0];
         if (claimed.length !== 1 || claim === undefined) {
@@ -1487,17 +1547,18 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         return claim.role;
       }),
     );
-    return { ownershipToken, controlRole };
+    return { ownershipToken, controlRole, ledger };
   }
 
   /** Release a provisioned allocation whose setup failed; the caller's error wins. */
   async function discardAllocation(
     backend: GraphBackend | undefined,
+    ledger: LedgerRelation,
     allocationId: string,
   ): Promise<void> {
     await closeQuietly(backend);
     try {
-      await dropAllocation(allocationId);
+      await dropAllocation(ledger, allocationId);
     } catch {
       /* Orphan remains discoverable. */
     }
@@ -1514,6 +1575,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       // recorded capture. Each strategy builds its own store from this.
       backend: GraphBackend;
       descriptor: PostgresWorkingCopyLocator;
+      /** The ledger holding the allocation's row; its removal is bound to it. */
+      ledger: LedgerRelation;
     }>
   > {
     const sourceBackend = storeBackend(source);
@@ -1548,7 +1611,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       : createPgvectorStrategyForAllocation(physicalPrefix, schema);
     const targetTables = createPostgresTables(names);
     const indexNames = await allocationIndexNames(source.graph, names);
-    const { ownershipToken, controlRole } = await provisionAllocation({
+    const { ownershipToken, controlRole, ledger } = await provisionAllocation({
       allocationId,
       schema,
       state,
@@ -1578,7 +1641,12 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           "Working-copy connection does not expose PostgreSQL vector operations.",
         );
       }
-      await assertAllocationSession(backend, allocationId, ownershipToken);
+      await assertAllocationSession(
+        backend,
+        ledger,
+        allocationId,
+        ownershipToken,
+      );
       await sourceBackend.transaction(async (sourceTransaction) => {
         // The clone opened this transaction on the source: its session opens
         // here, and the clone is its one operation.
@@ -1588,6 +1656,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         const transaction = operation.backend;
         await assertAllocationSession(
           transaction,
+          ledger,
           allocationId,
           ownershipToken,
         );
@@ -1657,16 +1726,20 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       return {
         backend: fixedSchemaBackend(ownedBackend, indexNames),
         descriptor: { allocationId },
+        ledger,
       };
     } catch (error) {
-      await discardAllocation(backend, allocationId);
+      await discardAllocation(backend, ledger, allocationId);
       throw error;
     }
   }
 
   /** A sealed ledger row, read through `control` before any connection opens. */
-  async function readSealedRow(allocationId: string): Promise<SealedRow> {
-    const row = await readAllocation(control, allocationId);
+  async function readSealedRow(
+    ledger: LedgerRelation,
+    allocationId: string,
+  ): Promise<SealedRow> {
+    const row = await readAllocation(control, ledger, allocationId);
     if (row?.state !== "sealed" || row.origin === undefined) {
       throw new BranchError("PostgreSQL working copy is absent or unsealed.");
     }
@@ -1680,6 +1753,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
    */
   async function resolveSealedAllocation(
     graph: G,
+    ledger: LedgerRelation,
     row: SealedRow,
   ): Promise<SealedAllocation> {
     const names = await allocationNames(row.allocation_id);
@@ -1693,6 +1767,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     if (schema !== undefined) bindNamesToAllocationSchema(names, schema);
     return {
       row,
+      ledger,
       origin: row.origin,
       names,
       schema,
@@ -1713,16 +1788,18 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
    */
   async function assertAttachedSession(
     backend: GraphBackend,
+    ledger: LedgerRelation,
     row: SealedRow,
   ): Promise<void> {
     try {
       await assertAllocationSession(
         backend,
+        ledger,
         row.allocation_id,
         row.ownership_token,
       );
     } catch (error) {
-      const current = await readAllocation(control, row.allocation_id);
+      const current = await readAllocation(control, ledger, row.allocation_id);
       if (current?.ownership_token !== row.ownership_token) {
         throw allocationRemovedError(error);
       }
@@ -1741,7 +1818,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     graph: G,
     sealed: SealedAllocation,
   ): Promise<Readonly<{ store: Store<G>; backend: GraphBackend }>> {
-    const { row, names, schema, indexNames, vectorStrategy } = sealed;
+    const { row, ledger, names, schema, indexNames, vectorStrategy } = sealed;
     const backend =
       vectorStrategy === undefined ?
         await connect(names)
@@ -1757,7 +1834,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           "Working-copy connection did not bind its allocation-scoped vector strategy.",
         );
       }
-      await assertAttachedSession(backend, row);
+      await assertAttachedSession(backend, ledger, row);
       await adoptAllocationBaseSchema(backend, row.allocation_id);
       const store = createStore(
         graph,
@@ -1790,7 +1867,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     }>,
   ): Promise<T> {
     assertLocatorVersion(descriptorVersion);
-    const row = await readSealedRow(descriptor.allocationId);
+    const ledger = await observeControlLedger(control);
+    const row = await readSealedRow(ledger, descriptor.allocationId);
     assertSealedOrigin(
       row,
       expectedOrigin,
@@ -1798,7 +1876,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     );
     await assertGraphMatchesAttestedOrigin(operations.graph, row.origin);
     if (!row.operation_evidence) return members.withoutEvidence();
-    const sealed = await resolveSealedAllocation(operations.graph, row);
+    const sealed = await resolveSealedAllocation(operations.graph, ledger, row);
     // Evidence is only ever provisioned with its schema recorded, and it is
     // addressed through that schema, never through the connection's search_path.
     if (sealed.schema === undefined) {
@@ -1824,6 +1902,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         lockSealed: (session, origin) =>
           lockSealedAllocation(
             session,
+            ledger,
             descriptor.allocationId,
             row.ownership_token,
             origin,
@@ -1841,7 +1920,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     type: STRATEGY_TYPE,
     version: FORMAT_VERSION,
     create: async (source, base, _branchId, allocationId) => {
-      const { backend, descriptor } = await allocate(
+      const { backend, descriptor, ledger } = await allocate(
         source,
         base,
         allocationId,
@@ -1855,7 +1934,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         );
         return { store, descriptor, access: { kind: "engine-fenced" } };
       } catch (error) {
-        await discardAllocation(backend, allocationId);
+        await discardAllocation(backend, ledger, allocationId);
         throw error;
       }
     },
@@ -1865,10 +1944,11 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           "Working-copy seal origin allocation id does not match its locator.",
         );
       }
-      await ensureLedger();
+      const ledger = await observeControlLedger(control);
+      await ensureLedger(ledger);
       const updated = await rows<Readonly<{ allocation_id: string }>>(
         control,
-        sql`UPDATE ${sqlName(LEDGER)} SET state = 'sealed', origin = ${JSON.stringify(origin)}::jsonb WHERE allocation_id = ${descriptor.allocationId} AND state = 'allocating' RETURNING allocation_id`,
+        sql`UPDATE ${ledger.name} SET state = 'sealed', origin = ${JSON.stringify(origin)}::jsonb WHERE allocation_id = ${descriptor.allocationId} AND state = 'allocating' RETURNING allocation_id`,
       );
       if (updated.length !== 1) {
         throw new BranchError(
@@ -1876,13 +1956,19 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         );
       }
     },
-    abort: async (descriptor) => dropAllocation(descriptor.allocationId),
+    abort: async (descriptor) =>
+      dropAllocation(
+        await observeControlLedger(control),
+        descriptor.allocationId,
+      ),
     reopen: async (graph, descriptor, descriptorVersion) => {
       assertLocatorVersion(descriptorVersion);
-      await ensureLedger();
+      const ledger = await observeControlLedger(control);
+      await ensureLedger(ledger);
       const sealed = await resolveSealedAllocation(
         graph,
-        await readSealedRow(descriptor.allocationId),
+        ledger,
+        await readSealedRow(ledger, descriptor.allocationId),
       );
       const { store } = await attachAllocation(graph, sealed);
       return {
@@ -1893,7 +1979,11 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     },
     destroy: async (descriptor, origin, descriptorVersion) => {
       assertLocatorVersion(descriptorVersion);
-      await dropAllocation(descriptor.allocationId, origin);
+      await dropAllocation(
+        await observeControlLedger(control),
+        descriptor.allocationId,
+        origin,
+      );
     },
     ...(operations === undefined ?
       {}
@@ -1917,7 +2007,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       const allocationId = globalThis.crypto.randomUUID();
       const created = await allocate(source, base, allocationId, "ephemeral");
       const disposableBackend = wrapWithManagedClose(created.backend, () =>
-        dropAllocation(allocationId),
+        dropAllocation(created.ledger, allocationId),
       );
       bindRelationalIndexNames(
         disposableBackend,
@@ -1946,12 +2036,13 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     );
     // Connect first: every refusal below must precede the ledger claim and DDL.
     const connected = await connect(names, { vectorStrategy });
-    let provisioned = false;
+    // The ledger holding the allocation's row, once it is written.
+    let provisioned: LedgerRelation | undefined;
     try {
       assertTargetBindings(connected, names, controlFacts.schema);
       assertMakeBackendVectorStrategy(connected, vectorStrategy);
       await assertConnectionRole(controlFacts.role, connected);
-      const { ownershipToken } = await provisionAllocation({
+      const { ownershipToken, ledger } = await provisionAllocation({
         allocationId,
         schema: controlFacts.schema,
         state: "ephemeral",
@@ -1963,12 +2054,17 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         vectorSlots: [],
         vectorStrategy: undefined,
       });
-      provisioned = true;
-      await assertAllocationSession(connected, allocationId, ownershipToken);
+      provisioned = ledger;
+      await assertAllocationSession(
+        connected,
+        ledger,
+        allocationId,
+        ownershipToken,
+      );
       // Schema-mutable on purpose: no fixed-schema guard or marker.
       const disposableBackend = wrapWithManagedClose(
         withoutBootstrapDdl(connected),
-        () => dropAllocation(allocationId),
+        () => dropAllocation(ledger, allocationId),
       );
       // Graph-declared index names are database-global. The graph arrives with
       // the Store, so scope each declaration to this allocation when first seen.
@@ -1977,8 +2073,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       );
       return disposableBackend;
     } catch (error) {
-      if (provisioned) await discardAllocation(connected, allocationId);
-      else await closeQuietly(connected);
+      if (provisioned === undefined) await closeQuietly(connected);
+      else await discardAllocation(connected, provisioned, allocationId);
       throw error;
     }
   };
@@ -1993,10 +2089,11 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           "Unsealed-allocation inventory limit must be 1 to 1000.",
         );
       }
-      await ensureLedger();
+      const ledger = await observeControlLedger(control);
+      await ensureLedger(ledger);
       const found = await rows<AllocationRow>(
         control,
-        sql`SELECT ${ALLOCATION_COLUMNS} FROM ${sqlName(LEDGER)} AS l WHERE state IN ('allocating', 'ephemeral') AND allocation_id > ${after} ORDER BY allocation_id LIMIT ${limit}`,
+        sql`SELECT ${ALLOCATION_COLUMNS} FROM ${ledger.name} AS l WHERE state IN ('allocating', 'ephemeral') AND allocation_id > ${after} ORDER BY allocation_id LIMIT ${limit}`,
       );
       return found.map((row) => ({
         allocationId: row.allocation_id,
@@ -2007,6 +2104,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           : ("allocating" as const),
       }));
     },
-    abortAllocation: async (allocationId) => dropAllocation(allocationId),
+    abortAllocation: async (allocationId) =>
+      dropAllocation(await observeControlLedger(control), allocationId),
   };
 }

@@ -137,16 +137,43 @@ function capturing(base: GraphBackend): Readonly<{
   return { backend, statements };
 }
 
+/**
+ * Every captured statement that changes or reads `setting`: a standalone read
+ * of its value is a round trip too, so it counts as much as a change does.
+ */
 function statementsNaming(
   statements: readonly CapturedStatement[],
   setting: string,
 ): readonly CapturedStatement[] {
   return statements.filter(
     (statement) =>
-      statement.sql.includes("set_config") &&
+      (statement.sql.includes("set_config") ||
+        statement.sql.includes("current_setting")) &&
       (statement.sql.includes(`'${setting}'`) ||
         statement.params.includes(setting)),
   );
+}
+
+/** Every table and sequence outside the system schemas, as `schema.name`. */
+async function userRelations(
+  session: TransactionBackend,
+): Promise<readonly string[]> {
+  const found = await run(
+    session,
+    sql`SELECT n.nspname::text || '.' || c.relname::text AS relation FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r', 'p', 'S') AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%' ORDER BY 1`,
+  );
+  return found.map((row) => String(row["relation"]));
+}
+
+async function liveAllocations(
+  session: TransactionBackend,
+  ledgerSchema: string,
+): Promise<number> {
+  const [ledger] = await run(
+    session,
+    sql`SELECT count(*)::int AS live FROM ${sql.identifier(ledgerSchema)}.typegraph_working_copy_allocations`,
+  );
+  return Number(ledger?.["live"]);
 }
 
 const ROLLBACK = new Error("roll the caller's transaction back");
@@ -303,7 +330,8 @@ export function registerTransactionLocalSettingIntegrationTests(
       // a time, not unit by unit, so their apply and restore statements can
       // interleave. That is the session hazard of overlapping units on a
       // caller transaction, which main has for every unit; it is pinned here
-      // at the value it produces, not fixed.
+      // at the value it produces, not fixed: the documented contract is that
+      // a caller awaits each setting-changing call before starting other work.
       it("two algorithms started together on a caller transaction", async (ctx) => {
         const root = requirePostgres(context, ctx);
         const observed = await inCallerTransaction(
@@ -488,14 +516,9 @@ export function registerTransactionLocalSettingIntegrationTests(
         });
       });
 
-      // The ledger is addressed by its unqualified name, in the control
-      // session's current schema, so the manager documents that `control`
-      // runs with one consistent search_path. A caller that creates the schema
-      // leading its path while a copy is live moves its current schema, and
-      // the copy's removal then looks in a ledger that does not know it. Main
-      // hid that on this path only because provisioning's search_path pin
-      // stayed on the caller's transaction; any control session whose current
-      // schema changes has it. Pinned at the value it produces, not fixed.
+      // The allocation's ledger is the one in the schema it was allocated in,
+      // and its removal is bound to that ledger whatever the caller's path
+      // resolves by the time the copy closes.
       it("closes a live copy after the caller creates the schema leading its path", async (ctx) => {
         const root = requirePostgres(context, ctx);
         const later = `tg_setting_live_${globalThis.crypto.randomUUID().slice(0, 8)}`;
@@ -515,33 +538,77 @@ export function registerTransactionLocalSettingIntegrationTests(
               overCaller({ vector: false }),
               overCaller,
             );
+            // The ledger exists before the snapshot, so the snapshot holds it.
+            await manager.listUnsealedAllocations();
+            const before = await userRelations(caller);
             const working = await manager.makeBackend();
+            const liveBeforeClose = await liveAllocations(
+              caller,
+              allocationSchema,
+            );
             await run(caller, sql.raw(`CREATE SCHEMA "${later}"`));
             const close = await failureOf(working.close());
-            const [ledger] = await run(
-              caller,
-              sql`SELECT count(*)::int AS live FROM ${sql.identifier(allocationSchema)}.typegraph_working_copy_allocations`,
-            );
             return {
-              closed: close === undefined,
-              liveInAllocationLedger: Number(ledger?.["live"]),
+              liveBeforeClose,
+              close,
+              liveAfterClose: await liveAllocations(caller, allocationSchema),
+              before,
+              after: await userRelations(caller),
             };
           },
         );
 
-        expectObservation({
-          lane: { driver: context.driver },
-          observed,
-          correct: { closed: true, liveInAllocationLedger: 0 },
-          defects: [
-            {
-              label:
-                "working-copy ledger follows the control session's current schema",
-              on: { driver: ["pglite", "node-postgres", "postgres-js"] },
-              today: { closed: false, liveInAllocationLedger: 1 },
-            },
-          ],
-        });
+        expect(observed.liveBeforeClose).toBe(1);
+        expect(observed.close).toBeUndefined();
+        expect(observed.liveAfterClose).toBe(0);
+        expect(observed.after).toEqual(observed.before);
+      });
+
+      it("closes a live copy after the caller drops its schema from the path", async (ctx) => {
+        const root = requirePostgres(context, ctx);
+        const dropped = `tg_setting_dropped_${globalThis.crypto.randomUUID().slice(0, 8)}`;
+        const observed = await inCallerTransaction(
+          root,
+          async (caller, overCaller) => {
+            const [current] = await run(
+              caller,
+              sql`SELECT current_schema()::text AS schema`,
+            );
+            const remaining = String(current?.["schema"]);
+            await run(caller, sql.raw(`CREATE SCHEMA "${dropped}"`));
+            await run(
+              caller,
+              sql`SELECT set_config('search_path', ${`${dropped}, ${remaining}`}, true)`,
+            );
+            const manager = managerOver(
+              overCaller({ vector: false }),
+              overCaller,
+            );
+            await manager.listUnsealedAllocations();
+            const before = await userRelations(caller);
+            const working = await manager.makeBackend();
+            const liveBeforeClose = await liveAllocations(caller, dropped);
+            // The allocation's schema leaves the path; the schema after it,
+            // which may hold a ledger of its own, becomes current.
+            await run(
+              caller,
+              sql`SELECT set_config('search_path', ${remaining}, true)`,
+            );
+            const close = await failureOf(working.close());
+            return {
+              liveBeforeClose,
+              close,
+              liveAfterClose: await liveAllocations(caller, dropped),
+              before,
+              after: await userRelations(caller),
+            };
+          },
+        );
+
+        expect(observed.liveBeforeClose).toBe(1);
+        expect(observed.close).toBeUndefined();
+        expect(observed.liveAfterClose).toBe(0);
+        expect(observed.after).toEqual(observed.before);
       });
 
       it("restores every setting after an ephemeral copy, and after one whose connection fails", async (ctx) => {
