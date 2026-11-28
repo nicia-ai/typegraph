@@ -142,6 +142,16 @@ refinement. So these still read as stored:
   object (`get children() { return z.array(Tree) }`) the root's date
   properties read as `Date`s, and everything under `children` reads as
   stored.
+- A position one branch of a union types through an object and another
+  through a record (`z.object({ at: z.date() })` and
+  `z.record(z.enum(["at"]), z.date())`), in the union's schema and in a
+  `unionAll()` of projections of the two. The shared position reads as
+  stored text.
+- A selected field of an alias over several kinds (`from(["Event", "Log"],
+  "e")`) when the kinds disagree on whether the field is a date, for example
+  one declares `at` as a `z.date()` and another through a `.transform()`.
+  `select()` reads that field as stored text for every row. Selecting the
+  whole alias decodes each row for its own kind.
 - Stored text that is not the canonical form the store writes (years 0001 to
   9999, UTC, milliseconds), for example text an older schema or raw SQL
   wrote. A read returns it exactly as stored and never an `Invalid Date`, and
@@ -171,6 +181,14 @@ PostgreSQL renders for an instant before a zone adopted standard time
 casts to a BC date has no canonical text, so `expr.collect()` and
 `batchOnce()` return it on PostgreSQL as its era-bearing UTC text
 (`0001-06-01T00:00:00.000Z BC`), never as a `Date` of a CE instant.
+A late instant that PostgreSQL renders with a five-digit year in a session
+zone east of UTC (`9999-12-31T23:59:59.999Z` is `10000-01-01 13:59:59.999+14`
+in `Pacific/Kiritimati`) reads as that text in a scalar projection, while
+`batchOnce()` returns it as a `Date`. A `unionAll()` (or another set
+operation) of a relation projecting an `expr.literal()` date and one
+projecting a stored date property runs on SQLite, but PostgreSQL rejects it,
+as it did before reads decoded dates, because the two operands are `text` and
+`timestamptz`.
 
 A write that parses stored properties again first turns that stored text back
 into a `Date`, so an update that does not touch a date property leaves it as
