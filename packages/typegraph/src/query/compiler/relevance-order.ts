@@ -11,7 +11,7 @@ import {
  * - `hybrid_score`: the reciprocal-rank-fusion score of both legs
  * - `hybrid_node_id`: the matched node's id, the hybrid tiebreak
  */
-export type RelevanceSortSource =
+type RelevanceSortSource =
   "fulltext_rank" | "vector_distance" | "hybrid_score" | "hybrid_node_id";
 
 /**
