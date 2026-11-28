@@ -198,6 +198,27 @@ const peopleWithOptionalEmployer = await store
 // Includes all people, even those without a worksAt edge
 ```
 
+A predicate on the optional target filters the traversal, not the start rows. A start row whose targets
+all fail it, or that has none, comes back once with the optional side absent. That holds for a search
+predicate too: `$fulltext.matches()`, `.similarTo()` or both on the optional target keep every start
+row, with only the targets in the search's top-k candidates on the optional side. In the relevance order,
+a row whose optional side is absent has no score and sorts after every matched row on every backend;
+`orderBy()` breaks ties among such rows.
+
+```typescript
+const peopleWithClimateArticles = await store
+  .query()
+  .from("Person", "p")
+  .optionalTraverse("authored", "a", { direction: "in" })
+  .to("Document", "d")
+  .whereNode("d", (d) => d.$fulltext.matches("climate", 10))
+  .select((ctx) => ({
+    person: ctx.p.name,
+    title: ctx.d?.title, // undefined when no article of theirs matched
+  }))
+  .execute();
+```
+
 ### Mixing Required and Optional
 
 ```typescript

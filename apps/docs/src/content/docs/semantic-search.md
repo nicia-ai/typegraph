@@ -712,6 +712,11 @@ const personalizedSearch = await store
   .execute();
 ```
 
+On an `optionalTraverse()` target, `.similarTo()` (alone or fused with `$fulltext.matches()`) filters
+the optional side and keeps every start row: a start row with no target in the top-k comes back once with
+that side absent, and sorts after every matched row. See
+[Optional Traversals](/queries/traverse#optional-traversals).
+
 `.similarTo()` and `$fulltext.matches()` on an alias a recursive traversal walks from or to are
 refused with `UnsupportedPredicateError`, unless that traversal is the query's only one and is one
 hop (`minHops` and `maxHops` both 1, with no `depth`, `path` or `stopExpansion()`): the ranked top-k set has no

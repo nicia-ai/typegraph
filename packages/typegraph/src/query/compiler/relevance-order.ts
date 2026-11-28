@@ -11,7 +11,7 @@ import {
  * - `hybrid_score`: the reciprocal-rank-fusion score of both legs
  * - `hybrid_node_id`: the matched node's id, the hybrid tiebreak
  */
-export type RelevanceSortSource =
+type RelevanceSortSource =
   "fulltext_rank" | "vector_distance" | "hybrid_score" | "hybrid_node_id";
 
 /**
@@ -22,20 +22,30 @@ export type RelevanceSortSource =
 export type RelevanceSortKey = Readonly<{
   source: RelevanceSortSource;
   direction: SortDirection;
+  /**
+   * `"last"` when a row can carry no relevance value (an absent optional
+   * side, {@link optionalRelevanceTargets}): such a row is the least relevant
+   * on every engine. `undefined` when every row carries a value, and the term
+   * states no NULL placement.
+   */
+  nulls: "last" | undefined;
   placement: "leading" | "trailing";
 }>;
 
-function relevanceSortKey(source: RelevanceSortSource): RelevanceSortKey {
+function relevanceSortKey(
+  source: RelevanceSortSource,
+  nulls: RelevanceSortKey["nulls"],
+): RelevanceSortKey {
   switch (source) {
     case "fulltext_rank":
     case "hybrid_score": {
-      return { source, direction: "desc", placement: "leading" };
+      return { source, direction: "desc", nulls, placement: "leading" };
     }
     case "vector_distance": {
-      return { source, direction: "asc", placement: "leading" };
+      return { source, direction: "asc", nulls, placement: "leading" };
     }
     case "hybrid_node_id": {
-      return { source, direction: "asc", placement: "trailing" };
+      return { source, direction: "asc", nulls, placement: "trailing" };
     }
   }
 }
@@ -51,8 +61,28 @@ export function describeRelevanceOrder(
 ): readonly RelevanceSortKey[] {
   const vector = extractVectorSimilarityPredicates(ast.predicates).length > 0;
   const fulltext = extractFulltextMatchPredicates(ast.predicates).length > 0;
+  const nulls = optionalRelevanceTargets(ast).size > 0 ? "last" : undefined;
   return relevanceSortSources(vector, fulltext).map((source) =>
-    relevanceSortKey(source),
+    relevanceSortKey(source, nulls),
+  );
+}
+
+/**
+ * The aliases a fulltext or vector predicate targets that are the node alias
+ * of an optional traversal. The one owner of "this relevance relation sits on
+ * an optional side": the FROM clause joins such a relation inside the optional
+ * traversal's join, so a start row whose targets all fail the search keeps
+ * one row with that side absent, and the relevance ORDER BY then reads a NULL
+ * value from that row and sorts it last.
+ */
+export function optionalRelevanceTargets(ast: QueryAst): ReadonlySet<string> {
+  const targets = relevanceTargets(ast);
+  return new Set(
+    ast.traversals
+      .filter(
+        (traversal) => traversal.optional && targets.has(traversal.nodeAlias),
+      )
+      .map((traversal) => traversal.nodeAlias),
   );
 }
 
@@ -64,6 +94,16 @@ function relevanceSortSources(
   if (vector) return ["vector_distance"];
   if (fulltext) return ["fulltext_rank"];
   return [];
+}
+
+/** The aliases the statement's fulltext and vector predicates target. */
+function relevanceTargets(ast: QueryAst): ReadonlySet<string> {
+  return new Set(
+    [
+      ...extractVectorSimilarityPredicates(ast.predicates),
+      ...extractFulltextMatchPredicates(ast.predicates),
+    ].map((predicate) => predicate.field.alias),
+  );
 }
 
 /**
