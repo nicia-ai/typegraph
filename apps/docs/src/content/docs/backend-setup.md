@@ -2786,8 +2786,11 @@ for (const violation of await store.verifyConstraintFences()) {
     case "nodeUniqueness":
     case "nodeDisjointness":
     case "edgeCardinality":
-    case "composition": {
-      // violation.target names the claim row two claimants contend for
+    case "composition":
+    case "nodeUniquenessClaimStale":
+    case "nodeUniquenessClaimMissing": {
+      // violation.target names the claim row two claimants contend for, or,
+      // for the two claim findings, the stale row or the row a holder owes
       // (axis and key are storage encodings). `edgeCardinality` also carries
       // plain `edgeKind`, `direction` and `keyedOn`; `composition` carries `part`.
       console.warn(violation.family, violation.target.axis, violation.target.key);
@@ -2802,12 +2805,14 @@ for (const violation of await store.verifyConstraintFences()) {
 ```
 
 `target` exists only on the families that are a contended claim row. Narrow on
-`violation.family` before reading it: five of the nine members carry none.
+`violation.family` before reading it: five of the eleven members carry none.
 The audit reports these families:
 
 | `family` | Reports | Carries |
 | --- | --- | --- |
-| `nodeUniqueness` | a uniqueness axis held by more than one live node | `target`, `owners` (each a `concreteKind` / `nodeId` pair, because ids are unique only per kind) |
+| `nodeUniqueness` | a uniqueness axis held by more than one live node, or one value more than one live node stores under a constraint whatever claims they hold | `target`, `owners` (each a `concreteKind` / `nodeId` pair, because ids are unique only per kind) |
+| `nodeUniquenessClaimStale` | a live uniqueness claim whose key is not the one its owner derives from the row it stores today | `target` (the stored row), `owner`, `expectedKey` |
+| `nodeUniquenessClaimMissing` | a live holder with no live claim of the key it derives, or (`released: true`) a soft-deleted holder whose released claim has another form | `target` (the owed row), `owner`, `released` |
 | `nodeDisjointness` | a `disjointWith` axis held by more than one live node | `target`, `owners` |
 | `edgeCardinality` | a source- or target-side cardinality axis held by more than one live edge | `target`, `edgeIds` |
 | `composition` | a part holding more than one live whole across every declared composition relation | `target`, `edgeIds` |
@@ -2820,7 +2825,12 @@ The audit reports these families:
 The audit reads the nodes, edges and `uniques` relations, so it finds
 violations that predate the claim tables; it writes nothing, and it repairs
 nothing — choosing which claimant keeps the axis is a data-loss decision that
-stays with you. `edgeEndpointAssignability` is the same shrink an
+stays with you. The two claim findings are the exception that has a repair
+beside the audit: `store.repairUniquenessClaims()` re-keys stale and missing
+claims in place and leaves every constraint with a `nodeUniqueness` violation
+alone (see
+[Re-keying claims after an upgrade](/limitations#re-keying-claims-after-an-upgrade)).
+`edgeEndpointAssignability` is the same shrink an
 [ontology tightening](/schema-evolution#ontology-tightenings-are-checked-against-your-data)
 checks against, but reported for a whole graph rather than just the delta one
 schema commit proposes.

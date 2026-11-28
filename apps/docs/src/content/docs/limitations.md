@@ -829,33 +829,18 @@ collides with the other:
   `onUnknownProperty: "allow"` or a provenance revival on an earlier release
   could key a date claim from its unquoted ISO text, where a create keys the
   JSON-quoted text of the `Date`. A create of the same date is admitted beside
-  such a claim. An update that leaves the key where it was leaves the claim as
-  it is, even when it restates the field. To re-key it, move the holder's
-  value off and back with two updates: the update back claims the value as a
-  create does, and refuses with `UniquenessError` when a duplicate was already
-  admitted; resolve the duplicate (for example by hard-deleting one of the two
-  nodes) and update the holder again. Until then,
-  `getOrCreateByConstraint()` does not resurrect a soft-deleted holder whose
-  released claim has the other form, and creates a new node instead.
+  such a claim, an update that leaves the key where it was leaves the claim as
+  it is, and `getOrCreateByConstraint()` does not resurrect a soft-deleted
+  holder whose released claim has the other form. Re-key these claims as
+  described in [Re-keying claims after an upgrade](#re-keying-claims-after-an-upgrade).
 - **Object claims written in another key order before this release.** A
   `.default()` or `.catch()` object whose literal states its keys in another
   order than its schema was claimed in the literal's order and is now claimed
-  in the schema's. A create of the same value is admitted beside such a
-  claim until the holder's next write that moves the value or releases its
-  claims (an update to another value, a soft delete, a retraction). Where the
-  object can hold another value, move the holder's value off and back with two
-  updates to re-key it at once. Where the object holds only fixed literals, so
-  the default is the only value the field can take, no update moves the key:
-  restating the field leaves the old claim alone. Re-key it by soft-deleting
-  the holder and reviving it with `upsertById` under the same id in one
-  transaction; the revival claims the value as a create does, and refuses with
-  `UniquenessError`, rolling the delete back, while a duplicate admitted since
-  the upgrade holds it. The revival resets the row's validity window like any
-  resurrection. A holder with live edges cannot be repaired this way with its
-  edges as they are (`onDelete: "restrict"` refuses the delete, `"cascade"`
-  deletes the edges and `"disconnect"` soft-deletes them, and the revival
-  does not restore them); for a holder whose edges must stay, the one stale
-  claim stays until the row is deleted.
+  in the schema's. A create of the same value is admitted beside such a claim
+  until the holder's next write that moves the value or releases its claims.
+  Where the object holds only fixed literals, so the default is the only value
+  the field can take, no update moves the key at all. Re-key these claims as
+  described in [Re-keying claims after an upgrade](#re-keying-claims-after-an-upgrade).
 - **Dates under a union whose branches disagree.** A date under
   `z.union([z.date(), z.string()])` is read from a stored row as its ISO text,
   while a create keys the `Date`. Such a value imported under
@@ -874,6 +859,68 @@ collides with the other:
   returns an object's keys in its own order. Declare unique constraints over
   `z.object()` values, whose validated keys follow the schema, or over
   scalars.
+
+### Re-keying claims after an upgrade
+
+`store.verifyConstraintFences()` derives each holder's key again from the row
+it stores and compares it with the claims the holder holds. It reports three
+things for every kind that declares a unique constraint:
+
+- `nodeUniquenessClaimStale`: a live claim whose key is not the one its owner
+  derives today (`target` is the stored row, `expectedKey` the derived key, or
+  `undefined` when the owner is soft-deleted, gone, or its `where` no longer
+  holds).
+- `nodeUniquenessClaimMissing`: a live holder with no live claim of the key it
+  derives, or, with `released: true`, a soft-deleted holder whose released
+  claim has another form, so `getOrCreateByConstraint()` cannot find it.
+- `nodeUniqueness`: two or more live nodes that store the same value under
+  one constraint, whatever claims they hold.
+
+`store.repairUniquenessClaims()` repairs the first two in place. It is a dry
+run by default and returns the plan; `{ dryRun: false }` applies it:
+
+```typescript
+const plan = await store.repairUniquenessClaims();
+for (const duplicate of plan.duplicates) {
+  // Two live nodes store one value. Decide which keeps it, for example by
+  // hard-deleting the other, then run the repair again.
+  console.warn(duplicate.target.constraintName, duplicate.owners);
+}
+const applied = await store.repairUniquenessClaims({ dryRun: false });
+// applied.repaired: the claims re-keyed
+// applied.blocked: claims of a constraint with a duplicate, left unchanged
+```
+
+The repair writes only claim rows. A live holder's stale claims are released
+and the claim of its derived key is taken, so a create of its value is refused
+again. A soft-deleted holder gets a released claim of its derived key, so
+`getOrCreateByConstraint()` resurrects it with its original id. Node ids,
+edges, history, revisions and validity windows are untouched, so a holder with
+live edges keeps them. A constraint that carries a duplicate is reported in
+`duplicates` and none of its claims change: choosing which node keeps the value
+is yours. Resolve each duplicate and run the repair again; a run with nothing to
+do changes nothing.
+
+To establish uniqueness before writes resume after an upgrade, stop the
+graph's writers, run `repairUniquenessClaims()` until it reports no
+`duplicates` and `repaired` is empty, check that `verifyConstraintFences()`
+reports no uniqueness family, and then start the writers.
+
+The repair is also safe while writers run, but cannot promise a clean graph
+then. An applying run is one transaction: it takes the graph's write fence,
+row-locks every holder it re-keys, and audits again before writing. A holder a
+concurrent write changed in between refuses the run with `ConfigurationError`
+(`UNIQUENESS_CLAIM_REPAIR_CONCURRENT_WRITE`). Each claim it takes is fenced by
+the claim relation's key, as a create's is, so a concurrent create of the
+value is refused by the repaired claim or, when it took the key first, refuses
+the run with `UniquenessError`. Either refusal writes nothing. A backend with
+no transactions refuses an applying run with `ConfigurationError`
+(`CONSTRAINT_WRITE_FENCE_UNSUPPORTED`); its dry run and the audit still work.
+
+The audit and the repair read every node row of each constrained kind, live
+and soft-deleted, in pages, and hold every claim key and derived key in
+memory. They read the claim relation through `execute` against the
+backend's `tableNames`, as the acyclicity audit reads edges.
 
 ## Provenance Writes Are Not Checked Against Premise State
 
