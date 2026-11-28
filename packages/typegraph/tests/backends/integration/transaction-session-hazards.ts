@@ -32,6 +32,7 @@
  */
 import { inspect, isDeepStrictEqual } from "node:util";
 
+import { sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -49,6 +50,7 @@ import {
 } from "../../../src/backend/derive-backend";
 import { GRAPH_BACKEND_PROJECTION_KEYS } from "../../../src/backend/graph-backend-keys";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { createSqliteBackend } from "../../../src/backend/sqlite";
 import type {
   AdapterBackend,
   GraphBackend,
@@ -125,10 +127,17 @@ const POSTGRES_DRIVERS: readonly IntegrationLaneDriver[] = [
   "postgres-js",
 ];
 
+/**
+ * The drivers whose transaction handle a backend can be built over and open
+ * savepoints on: every PostgreSQL driver, and libSQL (Drizzle-framed).
+ */
+const CALLER_TRANSACTION_DRIVERS: readonly IntegrationLaneDriver[] = [
+  ...POSTGRES_DRIVERS,
+  "libsql",
+];
+
 /** The scope of a known defect every driver shows today. */
 const ON_EVERY_DRIVER: DefectScope = { driver: ALL_DRIVERS };
-/** The scope of a known defect every PostgreSQL driver shows today. */
-const ON_POSTGRES_DRIVERS: DefectScope = { driver: POSTGRES_DRIVERS };
 
 /**
  * Asserts a case's one observation on this lane: the correct value, or the
@@ -1330,111 +1339,332 @@ export function registerTransactionSessionHazardTests(
         );
       });
 
-      async function withTransactionStore(
-        run: (store: ItemCreatorWithTransaction) => Promise<void>,
-      ): Promise<readonly string[]> {
+      /**
+       * A backend built over the caller's own transaction handle: every
+       * transaction it opens for a call is a savepoint on that handle. On
+       * SQLite only Drizzle-framed transactions take one (libSQL's
+       * transaction handle); a raw-BEGIN profile cannot open a transaction
+       * over a caller's at all.
+       */
+      function backendOverCallerTransaction(
+        native: unknown,
+      ): AdapterBackend<unknown> {
+        return context.driver === "libsql" ?
+            (createSqliteBackend(native as never, {
+              executionProfile: { transactionMode: "drizzle" },
+            }) as AdapterBackend<unknown>)
+          : (createPostgresBackend(native as never) as AdapterBackend<unknown>);
+      }
+
+      /** Runs one statement of the caller's own on its transaction handle. */
+      async function callerStatement(
+        native: unknown,
+        text: string,
+      ): Promise<void> {
+        const handle = native as Readonly<{
+          execute?: (query: unknown) => Promise<unknown>;
+          run?: (query: unknown) => Promise<unknown>;
+        }>;
+        const query = drizzleSql.raw(text);
+        await (handle.execute === undefined ?
+          requireDefined(handle.run).call(handle, query)
+        : handle.execute(query));
+      }
+
+      /**
+       * `backend`, with every member call of it and of the transactions it
+       * opens appended to `trace` once the call has RESOLVED: the work a call
+       * completed, so a refused call leaves no entry.
+       */
+      function completedCallsOf(backend: AdapterBackend<unknown>): Readonly<{
+        backend: AdapterBackend<unknown>;
+        trace: TracedCall[];
+      }> {
+        const trace: TracedCall[] = [];
+        function traced<TBackend extends object>(
+          target: TBackend,
+          extra: Readonly<Record<string, unknown>> = {},
+        ): TBackend {
+          const overrides: Record<string, unknown> = { ...extra };
+          for (const key of GRAPH_BACKEND_PROJECTION_KEYS) {
+            const member: unknown = (target as Record<string, unknown>)[key];
+            if (typeof member !== "function" || key in overrides) continue;
+            overrides[key] = async (...args: unknown[]) => {
+              const result: unknown = await (
+                member as (...memberArguments: unknown[]) => Promise<unknown>
+              ).apply(target, args);
+              trace.push({
+                member: key,
+                rendered: inspect(args, {
+                  depth: 8,
+                  maxStringLength: Infinity,
+                }),
+              });
+              return result;
+            };
+          }
+          return deriveBackend(target as never, overrides as never);
+        }
+        return {
+          trace,
+          backend: traced(backend, {
+            transaction: (
+              callback: (tx: TransactionBackend) => Promise<unknown>,
+              options?: Parameters<GraphBackend["transaction"]>[1],
+            ) => backend.transaction((raw) => callback(traced(raw)), options),
+          }),
+        };
+      }
+
+      type CallerTransactionStore = Readonly<{
+        nodes: Readonly<{
+          HzItem: Readonly<{
+            create: (
+              props: { label: string },
+              options?: { id: string },
+            ) => Promise<unknown>;
+            find: () => Promise<readonly unknown[]>;
+          }>;
+        }>;
+        transaction: (
+          fn: (tx: CallerTransactionStore) => Promise<unknown>,
+        ) => Promise<unknown>;
+      }>;
+
+      /**
+       * Runs `run` with a Store over a backend built on a caller's open
+       * transaction, and returns the ids committed with it and the calls the
+       * Store completed.
+       */
+      async function withCallerTransactionStore(
+        run: (store: CallerTransactionStore, native: unknown) => Promise<void>,
+      ): Promise<
+        Readonly<{ items: readonly string[]; trace: readonly TracedCall[] }>
+      > {
         const graph = buildGraph();
         const backend = context.getBackend();
         const [setup] = await createAdapterStoreWithSchema(graph, backend);
         await setup.nodes.HzItem.create({ label: "taken" }, { id: "taken" });
+        let trace: readonly TracedCall[] = [];
         await backend.transactionWithNative(async (_target, native) => {
+          const completed = completedCallsOf(
+            backendOverCallerTransaction(native),
+          );
           const [store] = await createAdapterStoreWithSchema(
             graph,
-            createPostgresBackend(native as never) as AdapterBackend<unknown>,
+            completed.backend,
           );
-          await run(store as unknown as ItemCreatorWithTransaction);
+          // Traced only from here: the schema load above is setup.
+          completed.trace.length = 0;
+          await run(store as unknown as CallerTransactionStore, native);
+          trace = completed.trace;
         });
-        return ids(() => setup.nodes.HzItem.find());
+        return { items: await ids(() => setup.nodes.HzItem.find()), trace };
       }
 
-      // SQLite has no factory for a backend over a caller's transaction.
-      describe.runIf(POSTGRES_DRIVERS.includes(context.driver))(
-        "a Store over createPostgresTransactionBackend",
+      // Each call that writes opens a savepoint on the caller's transaction,
+      // in a transaction session of its own: a call started while another
+      // call's savepoint is open would run inside it and be rolled back with
+      // it, so it is refused before any statement (`savepoint-open`).
+      describe.runIf(CALLER_TRANSACTION_DRIVERS.includes(context.driver))(
+        "a Store over a backend built on a caller's transaction",
         () => {
-          it("commits two overlapping creates", async () => {
-            let creates: readonly Status[] = [];
-            const items = await withTransactionStore(async (store) => {
-              creates = await Promise.all([
-                statusOf(
-                  store.nodes.HzItem.create({ label: "a" }, { id: "a" }),
-                ),
-                statusOf(
-                  store.nodes.HzItem.create({ label: "b" }, { id: "b" }),
-                ),
-              ]);
-            });
-            expect({ creates, items }).toEqual({
-              creates: ["fulfilled", "fulfilled"],
-              items: ["a", "b", "taken"],
-            });
-          });
-
-          it("commits a create that succeeded beside an overlapping create that failed", async () => {
-            let creates: readonly Status[] = [];
-            const items = await withTransactionStore(async (store) => {
-              creates = await Promise.all([
-                statusOf(
-                  store.nodes.HzItem.create({ label: "c" }, { id: "c" }),
-                ),
-                statusOf(
-                  store.nodes.HzItem.create({ label: "taken" }, { id: "d" }),
-                ),
-              ]);
-            });
-            expectOnLane(
-              context,
-              { creates, items },
-              { creates: ["fulfilled", "rejected"], items: ["c", "taken"] },
-              [
-                {
-                  label: "hazard 4b",
-                  on: ON_POSTGRES_DRIVERS,
-                  today: {
-                    creates: ["fulfilled", "rejected"],
-                    items: ["taken"],
-                  },
-                },
-              ],
+          it("refuses the later of two overlapping creates before any statement, and commits the earlier", async () => {
+            let creates: readonly Refusal[] = [];
+            const { items, trace } = await withCallerTransactionStore(
+              async (store) => {
+                creates = await Promise.all([
+                  refusalOf(
+                    store.nodes.HzItem.create({ label: "a" }, { id: "a" }),
+                  ),
+                  refusalOf(
+                    store.nodes.HzItem.create({ label: "b" }, { id: "b" }),
+                  ),
+                ]);
+              },
             );
+            expect({
+              creates,
+              items,
+              laterStatements: statementsMentioning(trace, "'b'"),
+            }).toEqual({
+              creates: [{ fulfilled: true }, SAVEPOINT_OPEN_REFUSAL],
+              items: ["a", "taken"],
+              laterStatements: [],
+            });
           });
 
-          it("commits a create that overlapped a nested store.transaction() that rolled back", async () => {
-            let outcomes: readonly Status[] = [];
-            const items = await withTransactionStore(async (store) => {
-              const innerWritten = createGate();
-              const siblingStarted = createGate();
-              let sibling: Promise<Status> = Promise.resolve("rejected");
-              const nested = statusOf(
+          it("refuses a create beside an overlapping create that fails, before any statement, and keeps neither", async () => {
+            let creates: readonly Refusal[] = [];
+            const { items, trace } = await withCallerTransactionStore(
+              async (store) => {
+                creates = await Promise.all([
+                  refusalOf(
+                    store.nodes.HzItem.create({ label: "taken" }, { id: "d" }),
+                  ),
+                  refusalOf(
+                    store.nodes.HzItem.create({ label: "c" }, { id: "c" }),
+                  ),
+                ]);
+              },
+            );
+            expect({
+              failed: (creates[0] as TypedError | undefined)?.code,
+              refused: creates[1],
+              items,
+              refusedStatements: statementsMentioning(trace, "'c'"),
+            }).toEqual({
+              failed: "UNIQUENESS_VIOLATION",
+              refused: SAVEPOINT_OPEN_REFUSAL,
+              items: ["taken"],
+              refusedStatements: [],
+            });
+          });
+
+          it("commits a create that succeeded and refuses an overlapping create beside it", async () => {
+            let creates: readonly Refusal[] = [];
+            const { items, trace } = await withCallerTransactionStore(
+              async (store) => {
+                creates = await Promise.all([
+                  refusalOf(
+                    store.nodes.HzItem.create({ label: "c" }, { id: "c" }),
+                  ),
+                  refusalOf(
+                    store.nodes.HzItem.create({ label: "taken" }, { id: "d" }),
+                  ),
+                ]);
+              },
+            );
+            expect({
+              creates,
+              items,
+              refusedStatements: statementsMentioning(trace, "'d'"),
+            }).toEqual({
+              creates: [{ fulfilled: true }, SAVEPOINT_OPEN_REFUSAL],
+              items: ["c", "taken"],
+              refusedStatements: [],
+            });
+          });
+
+          it("refuses a create that starts while a nested store.transaction() is open, before any statement", async () => {
+            let outcomes: readonly Refusal[] = [];
+            const { items, trace } = await withCallerTransactionStore(
+              async (store) => {
+                const innerWritten = createGate();
+                const siblingStarted = createGate();
+                let sibling: Promise<Refusal> =
+                  Promise.resolve("never started");
+                const nested = refusalOf(
+                  store.transaction(async (tx) => {
+                    await tx.nodes.HzItem.create({ label: "e" }, { id: "e" });
+                    innerWritten.open();
+                    await siblingStarted.opened;
+                    await sibling;
+                    throw new Error("the nested transaction fails");
+                  }),
+                );
+                await innerWritten.opened;
+                sibling = refusalOf(
+                  store.nodes.HzItem.create({ label: "f" }, { id: "f" }),
+                );
+                siblingStarted.open();
+                outcomes = await Promise.all([nested, sibling]);
+              },
+            );
+            expect({
+              outcomes,
+              items,
+              siblingStatements: statementsMentioning(trace, "'f'"),
+            }).toEqual({
+              outcomes: [
+                "Error: the nested transaction fails",
+                SAVEPOINT_OPEN_REFUSAL,
+              ],
+              items: ["taken"],
+              siblingStatements: [],
+            });
+          });
+
+          it("refuses a read that starts while a nested store.transaction() is open, before any statement", async () => {
+            let read: Refusal = "never read";
+            const { items, trace } = await withCallerTransactionStore(
+              async (store) => {
+                await store.transaction(async (tx) => {
+                  await tx.nodes.HzItem.create({ label: "r" }, { id: "r" });
+                  read = await refusalOf(store.nodes.HzItem.find());
+                });
+              },
+            );
+            expect({
+              read,
+              items,
+              reads: trace
+                .map((call) => call.member)
+                .filter((member) => member.startsWith("find")),
+            }).toEqual({
+              read: SAVEPOINT_OPEN_REFUSAL,
+              items: ["r", "taken"],
+              reads: [],
+            });
+          });
+
+          it("runs calls awaited in sequence, each in a savepoint of its own", async () => {
+            let found = 0;
+            const { items } = await withCallerTransactionStore(
+              async (store) => {
+                await store.nodes.HzItem.create({ label: "g" }, { id: "g" });
+                await store.transaction(async (tx) => {
+                  await tx.nodes.HzItem.create({ label: "h" }, { id: "h" });
+                });
+                const rows = await store.nodes.HzItem.find();
+                found = rows.length;
+                await store.nodes.HzItem.create({ label: "i" }, { id: "i" });
+              },
+            );
+            expect({ found, items }).toEqual({
+              found: 3,
+              items: ["g", "h", "i", "taken"],
+            });
+          });
+
+          // The caller's own statements on its transaction are not TypeGraph
+          // calls and are never refused. One issued while a call's savepoint
+          // is open runs inside that savepoint, and the call's rollback takes
+          // it with it.
+          it("keeps a statement the caller runs on its transaction while a call's savepoint is open", async () => {
+            let callerRows = -1;
+            await withCallerTransactionStore(async (store, native) => {
+              await callerStatement(
+                native,
+                "CREATE TEMP TABLE hz_caller_rows (id TEXT)",
+              );
+              const failed = await statusOf(
                 store.transaction(async (tx) => {
-                  await tx.nodes.HzItem.create({ label: "e" }, { id: "e" });
-                  innerWritten.open();
-                  await siblingStarted.opened;
-                  await sibling;
+                  await tx.nodes.HzItem.create({ label: "u" }, { id: "u" });
+                  await callerStatement(
+                    native,
+                    "INSERT INTO hz_caller_rows (id) VALUES ('caller')",
+                  );
                   throw new Error("the nested transaction fails");
                 }),
               );
-              await innerWritten.opened;
-              sibling = statusOf(
-                store.nodes.HzItem.create({ label: "f" }, { id: "f" }),
+              expect(failed).toBe("rejected");
+              const backend = backendOverCallerTransaction(native);
+              const rows = await backend.execute<{ count: number | string }>(
+                asCompiledRowsSql(
+                  sql`SELECT COUNT(*) AS count FROM ${sql.identifier("hz_caller_rows")}`,
+                ),
               );
-              siblingStarted.open();
-              outcomes = await Promise.all([nested, sibling]);
+              callerRows = Number(requireDefined(rows[0]).count);
+              await callerStatement(native, "DROP TABLE hz_caller_rows");
             });
-            expectOnLane(
-              context,
-              { outcomes, items },
-              { outcomes: ["rejected", "fulfilled"], items: ["f", "taken"] },
-              [
-                {
-                  label: "hazard 4c",
-                  on: ON_POSTGRES_DRIVERS,
-                  today: {
-                    outcomes: ["rejected", "fulfilled"],
-                    items: ["taken"],
-                  },
-                },
-              ],
-            );
+            expectOnLane(context, { callerRows }, { callerRows: 1 }, [
+              {
+                label: "hazard 4d",
+                on: { driver: CALLER_TRANSACTION_DRIVERS },
+                today: { callerRows: 0 },
+              },
+            ]);
           });
         },
       );
@@ -1805,18 +2035,3 @@ export function registerTransactionSessionHazardTests(
     });
   });
 }
-
-/** A Store over a caller's transaction, as these cases call it. */
-type ItemCreatorWithTransaction = Readonly<{
-  nodes: Readonly<{
-    HzItem: Readonly<{
-      create: (
-        props: { label: string },
-        options?: { id: string },
-      ) => Promise<unknown>;
-    }>;
-  }>;
-  transaction: (
-    fn: (tx: ItemCreatorWithTransaction) => Promise<unknown>,
-  ) => Promise<unknown>;
-}>;
