@@ -31,7 +31,11 @@ import {
   SELECTABLE_ALIAS_MARKER,
   type SelectableAliasMarker,
 } from "./selectable-alias";
-import { decodeSelectedValue, nullToUndefined } from "./value-decoder";
+import {
+  decodeSelectedStoredValue,
+  decodeSelectedValue,
+  nullToUndefined,
+} from "./value-decoder";
 
 // ============================================================
 // Errors
@@ -64,12 +68,26 @@ type MetaFieldPlan = Readonly<{
   outputName: string;
 }>;
 
+/**
+ * How a selective projection reads its property fields: decoding their dates
+ * as every read does, in the dialect the query compiled for, or returning them
+ * as stored — the whole-row reading of a prepared query configured without a
+ * registry (`PreparedQueryConfig.registry`), which its selective path follows.
+ */
+export type SelectiveDateReads =
+  | Readonly<{ kind: "decoded"; dialect: SqlDialect }>
+  | Readonly<{ kind: "stored" }>;
+
+/** A property field's read: `dateOrigin` is its column's origin when the field itself is a date (`resultDateOrigin`). */
+type PropsFieldRead =
+  | Readonly<{ kind: "decoded"; dateOrigin: DateOrigin | undefined }>
+  | Readonly<{ kind: "stored" }>;
+
 type PropsFieldPlan = Readonly<{
   field: string;
   outputName: string;
   typeInfo: FieldTypeInfo | undefined;
-  /** The origin of the column when the field itself is a date (`resultDateOrigin`). */
-  dateOrigin: DateOrigin | undefined;
+  read: PropsFieldRead;
 }>;
 
 type AliasPlan = Readonly<{
@@ -116,13 +134,18 @@ export function mapSelectiveResults<
   selectiveFields: readonly SelectiveField[],
   schemaIntrospector: SchemaIntrospector,
   selectFunction: (context: SelectContext<Aliases, EdgeAliases>) => R,
-  dialect: SqlDialect,
+  dateReads: SelectiveDateReads,
 ): readonly R[] {
   const plans = buildAliasPlans(
     state,
     selectiveFields,
     schemaIntrospector,
-    resultDateOrigin(undefined, dialect),
+    dateReads.kind === "stored" ?
+      dateReads
+    : {
+        kind: "decoded",
+        dateOrigin: resultDateOrigin(undefined, dateReads.dialect),
+      },
   );
 
   return rows.map((row) => {
@@ -154,7 +177,7 @@ function buildAliasPlans(
   state: QueryBuilderState,
   selectiveFields: readonly SelectiveField[],
   schemaIntrospector: SchemaIntrospector,
-  propsDateOrigin: DateOrigin | undefined,
+  propsRead: PropsFieldRead,
 ): readonly AliasPlan[] {
   const aliasInfo = new Map<
     string,
@@ -234,7 +257,7 @@ function buildAliasPlans(
           field: field.field,
           outputName: field.outputName,
           typeInfo,
-          dateOrigin: propsDateOrigin,
+          read: propsRead,
         });
       }
     }
@@ -353,12 +376,11 @@ function buildRequiredAliasValue(
   }
 
   for (const field of plan.propsFields) {
-    const decoded = decodeSelectedValue(
-      row[field.outputName],
-      field.typeInfo,
-      field.dateOrigin,
-    );
-    base[field.field] = decoded;
+    const value = row[field.outputName];
+    base[field.field] =
+      field.read.kind === "stored" ?
+        decodeSelectedStoredValue(value, field.typeInfo)
+      : decodeSelectedValue(value, field.typeInfo, field.read.dateOrigin);
   }
 
   return createGuardedProxy(base, plan.alias);

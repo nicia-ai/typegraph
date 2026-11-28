@@ -1137,7 +1137,7 @@ export class ExecutableQuery<
         selectiveFields,
         this.#config.schemaIntrospector,
         this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
-        this.#dialect(),
+        { kind: "decoded", dialect: this.#dialect() },
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
@@ -1338,7 +1338,7 @@ export class ExecutableQuery<
         selectiveFields,
         this.#config.schemaIntrospector,
         this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
-        this.#dialect(),
+        { kind: "decoded", dialect: this.#dialect() },
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {

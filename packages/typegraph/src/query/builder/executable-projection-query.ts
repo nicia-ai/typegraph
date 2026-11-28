@@ -15,7 +15,11 @@ import { resultDateOrigin } from "../compiler/typed-json-extract";
 import { type SqlDialect } from "../dialect/types";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
 import { decodeExpressionDate } from "../execution/value-decoder";
-import { dateReadOf } from "../expression-date-read";
+import {
+  dateReadOf,
+  elementDateOriginOf,
+  type ExpressionDateRead,
+} from "../expression-date-read";
 import {
   type DatabaseExpression,
   type DateOrigin,
@@ -609,7 +613,7 @@ export function decodeExpressionValue(
           : decodeRecordExpressionValue(
               element,
               elementFields,
-              dateReadOf(expression).elementDateOrigins,
+              dateReadOf(expression),
             );
       });
     }
@@ -623,7 +627,7 @@ export function decodeExpressionValue(
 function decodeRecordExpressionValue(
   value: unknown,
   fields: Readonly<Record<string, ValueType>>,
-  dateOrigins: Readonly<Record<string, DateOrigin>> | undefined,
+  dateRead: ExpressionDateRead,
 ): Readonly<Record<string, unknown>> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw new ConfigurationError(
@@ -637,7 +641,11 @@ function decodeRecordExpressionValue(
         key,
         field === null || field === undefined ?
           undefined
-        : decodeScalarExpressionValue(field, valueType, dateOrigins?.[key]),
+        : decodeScalarExpressionValue(
+            field,
+            valueType,
+            elementDateOriginOf(dateRead, key),
+          ),
       ];
     }),
   );

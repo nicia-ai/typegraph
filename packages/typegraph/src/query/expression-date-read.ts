@@ -13,6 +13,7 @@ import {
   sharedStoredReadPlan,
   type StoredReadPlan,
 } from "../store/stored-date-revival";
+import { hasOwnKey } from "../utils/object";
 
 /** @internal What a result decode needs to know about the dates it yields. */
 export type ExpressionDateRead = Readonly<{
@@ -40,6 +41,21 @@ const EXPRESSION_DATE_READ = Symbol("typegraph.expressionDateRead");
 type DateReadCarrier = Readonly<{
   [EXPRESSION_DATE_READ]: ExpressionDateRead;
 }>;
+
+/**
+ * @internal The origin `read` gives the collected record field `name`: an
+ * own-key lookup, because a field name is the caller's, and `constructor` or
+ * `__proto__` must never read an `Object.prototype` member as an origin.
+ */
+export function elementDateOriginOf(
+  read: ExpressionDateRead,
+  name: string,
+): "stated" | undefined {
+  const origins = read.elementDateOrigins;
+  return origins !== undefined && hasOwnKey(origins, name) ?
+      origins[name]
+    : undefined;
+}
 
 /** The date read of a value carrying none: nothing it yields is decoded as a date. */
 export const NO_DATE_READ: ExpressionDateRead = Object.freeze({});
@@ -111,7 +127,7 @@ export function sharedDateRead(
   }
   const statedFields = Object.keys(first.elementDateOrigins ?? {}).filter(
     (name) =>
-      reads.every((read) => read.elementDateOrigins?.[name] === "stated"),
+      reads.every((read) => elementDateOriginOf(read, name) === "stated"),
   );
   return compactDateRead({
     readPlan,

@@ -573,6 +573,8 @@ export class PreparedQuery<R> {
   readonly #selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
   readonly #schemaIntrospector: SchemaIntrospector;
   readonly #propsReaders: StoredPropsReaders;
+  /** Whether rows read props as stored: the config states no registry. */
+  readonly #readsStoredProps: boolean;
   readonly #parameterMetadata: ParameterMetadata;
   #selectiveExecutionDisabled = false;
   /**
@@ -599,6 +601,7 @@ export class PreparedQuery<R> {
     this.#selectiveFields = config.selectiveFields;
     this.#selectFn = config.selectFn;
     this.#schemaIntrospector = config.schemaIntrospector;
+    this.#readsStoredProps = config.registry === undefined;
     this.#propsReaders =
       config.registry === undefined ?
         { node: passStoredProps, edge: passStoredProps }
@@ -658,7 +661,9 @@ export class PreparedQuery<R> {
           this.#selectiveFields,
           this.#schemaIntrospector,
           this.#selectFn,
-          this.#dialect,
+          this.#readsStoredProps ?
+            { kind: "stored" }
+          : { kind: "decoded", dialect: this.#dialect },
         );
       } catch (error) {
         if (error instanceof MissingSelectiveFieldError) {

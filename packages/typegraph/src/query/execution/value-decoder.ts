@@ -77,6 +77,20 @@ export function decodeSelectedValue(
   );
 }
 
+/**
+ * A selected property field's value as stored: decoded by its value type only,
+ * with no date position decoded — what a whole row's props are for a reader
+ * that returns them as stored (`passStoredProps`).
+ */
+export function decodeSelectedStoredValue(
+  value: unknown,
+  typeInfo: FieldTypeInfo | undefined,
+): unknown {
+  const normalized = nullToUndefined(value);
+  if (normalized === undefined || typeInfo === undefined) return normalized;
+  return decodeByValueType(normalized, typeInfo.valueType);
+}
+
 function decodeByValueType(value: unknown, valueType: ValueType): unknown {
   switch (valueType) {
     case "boolean": {

@@ -35,6 +35,7 @@ import { getDialect } from "../dialect";
 import { type SqlDialect } from "../dialect/types";
 import {
   dateReadOf,
+  NO_DATE_READ,
   sharedDateRead,
   withDateRead,
 } from "../expression-date-read";
@@ -523,22 +524,33 @@ function mergedSetColumns(
 }
 
 /**
- * The rows of a set operation, as a read returns them: each column decoded
- * by the date facts both operands share ({@link mergedSetColumns}), never by
- * one operand's own decoder, so a row the other operand produced is not
- * decoded under the first's typing.
+ * The rows of a set operation, as a read returns them: the left operand's own
+ * decoder, as before reads decoded dates, except for each column the left
+ * operand carries date facts for. Those are decoded by the facts both
+ * operands share ({@link mergedSetColumns}), so a row the other operand
+ * produced is not decoded under the left's typing. A column the left carries
+ * no date facts for shares none either, so it keeps exactly the value the
+ * left decoder gives it — a legacy aggregate's driver text included.
  */
 function setOperationRowDecoder<Result>(
+  leftColumns: readonly RelationColumn[],
+  leftDecodeRow: (row: Record<string, unknown>) => Result,
   columns: readonly RelationColumn[],
   dialect: SqlDialect,
 ): (row: Record<string, unknown>) => Result {
+  const reconciled = columns.filter(
+    (_column, index) =>
+      dateReadOf(requireDefined(leftColumns[index])) !== NO_DATE_READ,
+  );
+  if (reconciled.length === 0) return leftDecodeRow;
   const context = buildContext<RelationProjection>(
-    columns,
+    reconciled,
     relationScope(),
   ) as Readonly<Record<string, DatabaseExpression>>;
-  return (row) =>
-    Object.fromEntries(
-      columns.map((column) => [
+  return (row) => ({
+    ...leftDecodeRow(row),
+    ...Object.fromEntries(
+      reconciled.map((column) => [
         column.outputName,
         decodeExpressionValue(
           row[column.outputName],
@@ -546,7 +558,8 @@ function setOperationRowDecoder<Result>(
           dialect,
         ),
       ]),
-    ) as Result;
+    ),
+  });
 }
 
 /** {@link executeRelationOn}'s work, as the relation class hands it out. */
@@ -974,6 +987,8 @@ export class ExecutableRelationQuery<
       ...this.#definition,
       columns,
       decodeRow: setOperationRowDecoder<Result>(
+        this.#definition.columns,
+        this.#definition.decodeRow,
         columns,
         compileDialect(this.#definition.config),
       ),

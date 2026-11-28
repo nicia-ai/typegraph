@@ -17,11 +17,12 @@
  * export document, a keyset cursor and graph-merge wire props keep their
  * bytes; the golden strings below are those bytes.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
   asNodeId,
+  count,
   defineEdge,
   defineGraph,
   defineNode,
@@ -33,15 +34,21 @@ import {
   subClassOf,
 } from "../../../src";
 import {
+  applyMergePlan,
   isErr,
   type MergeError,
   type Result,
   unwrap,
 } from "../../../src/graph-merge";
 import { branch } from "../../../src/graph-merge/branch";
-import { planMerge } from "../../../src/graph-merge/merge";
+import {
+  planMerge,
+  planMergeIncremental,
+} from "../../../src/graph-merge/merge";
 import { asBranchId } from "../../../src/graph-merge/types";
 import { exportGraph } from "../../../src/interchange";
+import * as preparedQueryModule from "../../../src/query/builder/prepared-query";
+import { type PreparedQueryConfig } from "../../../src/query/builder/prepared-query";
 import { requireDefined } from "../../../src/utils/presence";
 import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
@@ -180,6 +187,38 @@ async function writeOutcome(write: () => Promise<unknown>): Promise<string> {
     return `${error.name}: ${reason}`;
   }
 }
+
+/** Rows in the order of their `score`, whatever type a driver returns it as. */
+function byScore<Row extends Readonly<{ score: unknown }>>(
+  rows: readonly Row[],
+): readonly Row[] {
+  return rows.toSorted((left, right) =>
+    String(left.score).localeCompare(String(right.score)),
+  );
+}
+
+/** A numeric property a legacy aggregate groups by, beside a date. */
+const Scored = defineNode("Scored", {
+  schema: z.object({ score: z.number(), at: z.date() }),
+});
+
+/**
+ * A dated kind whose `piped` date reads as a `Date` but whose schema input
+ * is a string, for an incremental merge that updates a committed row.
+ */
+const IncrementalDated = defineNode("IncrementalDated", {
+  schema: z.object({
+    title: z.string(),
+    at: z.date(),
+    piped: z.string().pipe(z.coerce.date()),
+  }),
+});
+
+const INCREMENTAL_GRAPH = defineGraph({
+  id: "date_reads_incremental_merge",
+  nodes: { IncrementalDated: { type: IncrementalDated } },
+  edges: {},
+});
 
 const datedReadLink = defineEdge("datedReadLink", {
   schema: z.object({
@@ -874,6 +913,56 @@ export function registerDatePropertyReadIntegrationTests(
       });
     });
 
+    it("an incremental merge that updates a committed dated row plans and applies its stored text", async () => {
+      // The incremental planner and commit read the committed row through
+      // the public read surface, which decodes its dates, and compare and
+      // re-validate it in the stored form: `piped` reads as a `Date` but
+      // its schema input is a string, so only the stored text validates.
+      const forkPoint = await context.createStore(INCREMENTAL_GRAPH, {
+        revisionTracking: true,
+      });
+      await forkPoint.nodes.IncrementalDated.create(
+        { title: "committed", at: PLAIN, piped: PIPED.toISOString() },
+        { id: "committed" },
+      );
+      const fork = unwrap(
+        await branch(forkPoint, () => context.createIsolatedBackend(), {
+          id: asBranchId("incremental-fork"),
+        }),
+      );
+      await fork.store.nodes.IncrementalDated.update(
+        asNodeId<typeof IncrementalDated>("committed"),
+        { title: "edited" },
+      );
+      const artifact = unwrap(
+        await planMergeIncremental({
+          forkPoint,
+          target: forkPoint,
+          branches: [fork],
+        }),
+      );
+      expect(
+        artifact.writes.nodeUpserts.map((write) => [write.id, write.setProps]),
+      ).toEqual([
+        [
+          "committed",
+          {
+            title: "edited",
+            at: PLAIN.toISOString(),
+            piped: PIPED.toISOString(),
+          },
+        ],
+      ]);
+      unwrap(await applyMergePlan(forkPoint, artifact));
+      expect(
+        propsOf(
+          await forkPoint.nodes.IncrementalDated.getById(
+            asNodeId<typeof IncrementalDated>("committed"),
+          ),
+        ),
+      ).toEqual({ title: "edited", at: PLAIN, piped: PIPED });
+    });
+
     it("pins the write-direction gaps: an update or a branch over a stored record of dates or a transformed date refuses", async () => {
       const recordStore = await context.createStore(
         buildWriteGapGraph("date_reads_record_gap"),
@@ -1233,6 +1322,171 @@ export function registerDatePropertyReadIntegrationTests(
         }))
         .execute();
       expect(row).toEqual({ arr: FULL_READ.arr });
+    });
+  });
+
+  describe("a value the date read path does not claim reads as before", () => {
+    it("a collected record field named like an Object.prototype member decodes its own date", async () => {
+      const { store } = await seed(context, "date_reads_collect_member_keys");
+      const [row] = await store
+        .query()
+        .from("DatedRead", "d")
+        .aggregate((fields) => ({
+          records: expr.collect(
+            {
+              // A stated field gives the record its date origins; the others
+              // are stored dates under inherited member names.
+              stated: expr.literal(YEAR_ZERO),
+              constructor: fields.d.plain,
+              toString: fields.d.plain,
+              ["__proto__"]: fields.d.plain,
+            },
+            { orderBy: [{ expression: fields.d.title }] },
+          ),
+        }))
+        .asRelation()
+        .execute();
+      const records = requireDefined(row).records as readonly Record<
+        string,
+        unknown
+      >[];
+      expect(
+        records.map((record): readonly unknown[] => [
+          record["stated"],
+          Object.getOwnPropertyDescriptor(record, "constructor")?.value,
+          Object.getOwnPropertyDescriptor(record, "toString")?.value,
+          Object.getOwnPropertyDescriptor(record, "__proto__")?.value,
+        ]),
+      ).toEqual([
+        [YEAR_ZERO, PLAIN, PLAIN, PLAIN],
+        [YEAR_ZERO, LATER, LATER, LATER],
+      ]);
+    });
+
+    it("a set operation of legacy aggregates returns each column as its operands return it", async () => {
+      const store = await context.createStore(
+        defineGraph({
+          id: "date_reads_set_numeric",
+          nodes: { Scored: { type: Scored } },
+          edges: {},
+        }),
+      );
+      await store.nodes.Scored.create({ score: 1, at: PLAIN });
+      await store.nodes.Scored.create({ score: 2, at: LATER });
+      function groups() {
+        return store
+          .query()
+          .from("Scored", "s")
+          .groupBy("s", "score")
+          .aggregate({ score: field("s", "score"), total: count("s") })
+          .asRelation();
+      }
+      const operand = await groups().execute();
+      const combined = await groups().unionAll(groups()).execute();
+      // Whatever a driver hands back for a numeric group key (text on
+      // PostgreSQL), the set operation returns it as each operand does.
+      expect(byScore(combined)).toEqual(byScore([...operand, ...operand]));
+    });
+
+    it("pins PostgreSQL's refusal of a set operation of a stated date and a stored date", async () => {
+      const { store } = await seed(context, "date_reads_set_literal_field");
+      const stated = store
+        .query()
+        .from("DatedRead", "d")
+        .project(() => ({ at: expr.literal(YEAR_ZERO) }))
+        .asRelation();
+      const stored = store
+        .query()
+        .from("DatedRead", "d")
+        .project((fields) => ({ at: fields.d.plain }))
+        .asRelation();
+      let observed: unknown;
+      try {
+        const rows = await stated.unionAll(stored).execute();
+        observed = rows
+          .map((row) =>
+            row.at instanceof Date ? row.at.toISOString() : String(row.at),
+          )
+          .toSorted();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        observed =
+          /types text and timestamp with time zone cannot be matched/u.exec(
+            message,
+          )?.[0] ?? message;
+      }
+      // The two operands are text and timestamptz in PostgreSQL's UNION;
+      // SQLite holds both as text. Main refuses the same way.
+      expectObservation({
+        lane: { dialect: store.backend.dialect },
+        observed,
+        correct: [
+          YEAR_ZERO.toISOString(),
+          YEAR_ZERO.toISOString(),
+          PLAIN.toISOString(),
+          LATER.toISOString(),
+        ].toSorted(),
+        defects: [
+          {
+            label: "set operation of a date literal and a date property",
+            on: { dialect: ["postgres"] },
+            today: "types text and timestamp with time zone cannot be matched",
+          },
+        ],
+      });
+    });
+
+    it("a prepared query configured without a registry reads stored values on the selective path too", async () => {
+      const { store } = await seed(context, "date_reads_prepared_no_registry");
+      const configs: PreparedQueryConfig<unknown>[] = [];
+      const { PreparedQuery } = preparedQueryModule;
+      const constructed = vi
+        .spyOn(preparedQueryModule, "PreparedQuery")
+        .mockImplementation(
+          class RecordingPreparedQuery<R> extends PreparedQuery<R> {
+            constructor(config: PreparedQueryConfig<R>) {
+              configs.push(config);
+              super(config);
+            }
+          },
+        );
+      try {
+        store
+          .query()
+          .from("DatedRead", "d")
+          .orderBy("d", "title", "asc")
+          .select((ctx) => ({ plain: ctx.d.plain, nested: ctx.d.nested }))
+          .prepare();
+        store
+          .query()
+          .from("DatedRead", "d")
+          .orderBy("d", "title", "asc")
+          .select((ctx) => ctx.d)
+          .prepare();
+      } finally {
+        constructed.mockRestore();
+      }
+      expect(configs).toHaveLength(2);
+      const [selective, whole] = configs.map((config) => {
+        const { registry: _registry, ...withoutRegistry } = config;
+        return new PreparedQuery(withoutRegistry);
+      });
+      const stored = [
+        [PLAIN.toISOString(), { at: NESTED.toISOString(), by: "editor" }],
+        [LATER.toISOString(), { at: LATER.toISOString(), by: "reviewer" }],
+      ];
+      const selectedRows = (await requireDefined(
+        selective,
+      ).execute()) as readonly Record<string, unknown>[];
+      expect(
+        selectedRows.map((selected) => [selected["plain"], selected["nested"]]),
+      ).toEqual(stored);
+      const wholeRows = (await requireDefined(
+        whole,
+      ).execute()) as readonly Record<string, unknown>[];
+      expect(wholeRows.map((node) => [node["plain"], node["nested"]])).toEqual(
+        stored,
+      );
     });
   });
 }
