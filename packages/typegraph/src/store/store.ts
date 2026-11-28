@@ -368,8 +368,8 @@ import {
 } from "./neighbors";
 import { readNodeByReference } from "./node-reference-read";
 import {
-  decorateOperation,
   countReadCall,
+  decorateOperation,
   enterCall,
   enterOperation,
   enterTargetOperation,
