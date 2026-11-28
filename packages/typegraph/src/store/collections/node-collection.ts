@@ -959,61 +959,68 @@ export function createNodeCollection<
       if (options?.clearValidTo === true) {
         assertClearValidToSupported(backend, "node");
       }
-      const existing = await backend.getNode(graphId, kind, id);
-
-      // Coalesce a value-identical replay: skip the write entirely (no
-      // updateNode, no recorded capture, no revision advance, no hooks) and
-      // resolve with the existing node. See
-      // BaseStoreOptions.coalesceUnchangedUpserts.
-      const coalesces = (row: NonNullable<typeof existing>): boolean => {
-        const runDirtyCheck =
-          config.upsertDirtyCheck &&
-          (() =>
-            requireDefined(config.upsertDirtyCheck)(
-              kind,
-              id,
-              rowPropsToObject(row.props),
-              data,
-            ));
-        return shouldCoalesceUpsert(row, options, runDirtyCheck);
-      };
-
-      // INVARIANT: a coalescing upsert's decision to SKIP is both taken and
-      // executed inside one transaction. The read that justifies the skip and
-      // the skip itself are the same transaction; the skip IS that
-      // transaction's empty commit, and nothing after the commit writes, so
-      // there is no window between deciding and acting for a competitor to
-      // occupy.
-      //
-      // Coalescing must be an optimization, never a semantic: with the flag
-      // off, `executeNodeUpdate` opens a transaction, re-reads, and merges the
-      // caller's props over whatever it finds, so a writer that commits between
-      // the autocommit read above and the write still has the caller's props
-      // applied on top. Deciding "skip" from that earlier read gave a DIFFERENT
-      // answer — the caller was told its props were stored while the store held
-      // the other writer's — so the flag changed the outcome instead of the
-      // cost. Deciding inside the transaction restores the equivalence: a
-      // "write" verdict falls through to the ordinary path, whose own
-      // in-transaction re-read merges over the current row.
-      //
-      // Note the shape difference from a plain re-read: the verdict is computed
-      // where `target` is live, not after the transaction closed. Committing
-      // and THEN deciding would narrow the window rather than close it, which
-      // is what the bulk paths avoid by deciding inside `upsertAll`.
-      //
-      // Only a coalescing store that is ABOUT to skip pays the second read; a
-      // store without the flag, or one whose props differ, keeps the single
-      // read and the single write it always had. On SQLite the transaction is
-      // `BEGIN IMMEDIATE`, which excludes every other writer for its duration;
-      // on a backend without transactions there is nothing to open and the
-      // decision is as fenced as that backend's writes are — which is to say
-      // not at all, matching the atomicity it already cannot offer.
-      type UpsertVerdict =
-        | Readonly<{ verdict: "skip"; row: NodeRow }>
-        | Readonly<{ verdict: "write"; row: NodeRow | undefined }>;
-
+      // Admitted before its first statement, the pre-read included: a call
+      // that starts inside another call's savepoint unit is refused before it
+      // reads, and a unit cannot open while this read is in flight.
       const call = enterCall(enterOperation(writes, parent));
       try {
+        const existing = await operationEntryBackend(call).getNode(
+          graphId,
+          kind,
+          id,
+        );
+
+        // Coalesce a value-identical replay: skip the write entirely (no
+        // updateNode, no recorded capture, no revision advance, no hooks) and
+        // resolve with the existing node. See
+        // BaseStoreOptions.coalesceUnchangedUpserts.
+        const coalesces = (row: NonNullable<typeof existing>): boolean => {
+          const runDirtyCheck =
+            config.upsertDirtyCheck &&
+            (() =>
+              requireDefined(config.upsertDirtyCheck)(
+                kind,
+                id,
+                rowPropsToObject(row.props),
+                data,
+              ));
+          return shouldCoalesceUpsert(row, options, runDirtyCheck);
+        };
+
+        // INVARIANT: a coalescing upsert's decision to SKIP is both taken and
+        // executed inside one transaction. The read that justifies the skip and
+        // the skip itself are the same transaction; the skip IS that
+        // transaction's empty commit, and nothing after the commit writes, so
+        // there is no window between deciding and acting for a competitor to
+        // occupy.
+        //
+        // Coalescing must be an optimization, never a semantic: with the flag
+        // off, `executeNodeUpdate` opens a transaction, re-reads, and merges the
+        // caller's props over whatever it finds, so a writer that commits between
+        // the autocommit read above and the write still has the caller's props
+        // applied on top. Deciding "skip" from that earlier read gave a DIFFERENT
+        // answer — the caller was told its props were stored while the store held
+        // the other writer's — so the flag changed the outcome instead of the
+        // cost. Deciding inside the transaction restores the equivalence: a
+        // "write" verdict falls through to the ordinary path, whose own
+        // in-transaction re-read merges over the current row.
+        //
+        // Note the shape difference from a plain re-read: the verdict is computed
+        // where `target` is live, not after the transaction closed. Committing
+        // and THEN deciding would narrow the window rather than close it, which
+        // is what the bulk paths avoid by deciding inside `upsertAll`.
+        //
+        // Only a coalescing store that is ABOUT to skip pays the second read; a
+        // store without the flag, or one whose props differ, keeps the single
+        // read and the single write it always had. On SQLite the transaction is
+        // `BEGIN IMMEDIATE`, which excludes every other writer for its duration;
+        // on a backend without transactions there is nothing to open and the
+        // decision is as fenced as that backend's writes are — which is to say
+        // not at all, matching the atomicity it already cannot offer.
+        type UpsertVerdict =
+          | Readonly<{ verdict: "skip"; row: NodeRow }>
+          | Readonly<{ verdict: "write"; row: NodeRow | undefined }>;
+
         const decision: UpsertVerdict =
           existing !== undefined && coalesces(existing) ?
             await runInWriteEntryTransaction(

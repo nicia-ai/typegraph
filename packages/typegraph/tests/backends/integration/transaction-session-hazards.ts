@@ -204,6 +204,16 @@ function typedErrorOf(error: unknown): TypedError | string {
   };
 }
 
+/** What a synchronous call did, as {@link refusalOf} reports a promise. */
+function typedErrorOrFulfilled(call: () => void): Refusal {
+  try {
+    call();
+    return { fulfilled: true };
+  } catch (error) {
+    return typedErrorOf(error);
+  }
+}
+
 function refusalOf(pending: Promise<unknown>): Promise<Refusal> {
   return pending.then(
     (): Refusal => ({ fulfilled: true }),
@@ -1083,6 +1093,79 @@ export function registerTransactionSessionHazardTests(
           siblingStatements: [],
           notes: [],
           items: ["s1"],
+        });
+      });
+
+      it("refuses an upsert that starts inside a failing bulkHardDelete's unit before its pre-read", async () => {
+        const graph = buildGraph();
+        const insideUnit = createGate();
+        const siblingStarted = createGate();
+        let sibling: Promise<Refusal> = Promise.resolve("never started");
+        const gated = gatedBackend(context.getBackend(), {
+          after: {
+            hardDeleteNodesBatch: async () => {
+              insideUnit.open();
+              await siblingStarted.opened;
+              await sibling;
+              throw new Error("injected failure after the delete");
+            },
+          },
+        });
+        const [store] = await createStoreWithSchema(graph, gated.backend);
+        await store.nodes.HzItem.bulkCreate([
+          { props: { label: "s1" }, id: "s1" },
+        ]);
+        const result = await store.transaction(async (tx) => {
+          const unit = statusOf(
+            tx.nodes.HzItem.bulkHardDelete([asNodeId("s1")]),
+          );
+          await insideUnit.opened;
+          sibling = refusalOf(
+            tx.nodes.HzItem.upsertById("upserted", { label: "upserted" }),
+          );
+          siblingStarted.open();
+          return { unit: await unit, sibling: await sibling };
+        });
+        expect({
+          ...result,
+          siblingStatements: statementsMentioning(gated.trace, "'upserted'"),
+          items: await ids(() => store.nodes.HzItem.find()),
+        }).toEqual({
+          unit: "rejected",
+          sibling: SAVEPOINT_OPEN_REFUSAL,
+          siblingStatements: [],
+          items: ["s1"],
+        });
+      });
+
+      it("refuses a recorded-revision request made inside a bulkHardDelete's unit", async () => {
+        const graph = buildGraph();
+        let requestInsideUnit: Refusal = "never requested";
+        let captured:
+          Readonly<{ requestRecordedRevision: () => void }> | undefined;
+        const gated = gatedBackend(context.getBackend(), {
+          after: {
+            hardDeleteNodesBatch: () => {
+              requestInsideUnit = typedErrorOrFulfilled(() => {
+                requireDefined(captured).requestRecordedRevision();
+              });
+              throw new Error("injected failure after the delete");
+            },
+          },
+        });
+        const [store] = await createStoreWithSchema(graph, gated.backend, {
+          history: true,
+        });
+        await store.nodes.HzItem.bulkCreate([
+          { props: { label: "s1" }, id: "s1" },
+        ]);
+        const unit = await store.transaction(async (tx) => {
+          captured = tx;
+          return statusOf(tx.nodes.HzItem.bulkHardDelete([asNodeId("s1")]));
+        });
+        expect({ unit, requestInsideUnit }).toEqual({
+          unit: "rejected",
+          requestInsideUnit: SAVEPOINT_OPEN_REFUSAL,
         });
       });
 

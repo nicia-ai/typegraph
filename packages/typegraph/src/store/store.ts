@@ -5983,7 +5983,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 "Use a backend with TypeGraph-owned history capture; engine-native revision allocation is controlled by the database engine.",
               );
             }
-            if (!forceRecordedGraphRevision(contextOperation, this.graphId)) {
+            // A call of its own: refused while another call's savepoint unit
+            // is open, whose rollback would drop the request.
+            if (
+              !forceRecordedGraphRevision(enterOperation(session), this.graphId)
+            ) {
               throw new ConfigurationError(
                 "The history transaction is not bound to a recorded-time capture session.",
                 { graphId: this.graphId },
