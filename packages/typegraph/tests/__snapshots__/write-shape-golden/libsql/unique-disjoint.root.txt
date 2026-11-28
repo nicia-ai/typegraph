@@ -76,8 +76,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","\u001edisjoint\u001eItem|Other","\u001edisjointWith","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ( ?, ?, ?, ?, ?, ?, NULL ) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "node_id" END, "concrete_kind" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "concrete_kind" END, "deleted_at" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN NULL WHEN "deleted_at" IS NOT NULL THEN NULL ELSE "deleted_at" END RETURNING "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
-    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead",1]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = ? WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" = ? AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN (?) AND ("typegraph_node_uniques"."constraint_name", "typegraph_node_uniques"."key") NOT IN (VALUES (?, ?))
     ["<timestamp>","<graph1>","Item","item-dead","item_name","item_name","item-dead"]
 libsql commit
@@ -271,8 +271,8 @@ sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph
     ["<graph1>","Item","item_name","renamed"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ( ?, ?, ?, ?, ?, ?, NULL ) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "node_id" END, "concrete_kind" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "concrete_kind" END, "deleted_at" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN NULL WHEN "deleted_at" IS NOT NULL THEN NULL ELSE "deleted_at" END RETURNING "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","renamed","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = ? WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" = ? AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN (?) AND ("typegraph_node_uniques"."constraint_name", "typegraph_node_uniques"."key") NOT IN (VALUES (?, ?))
     ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","renamed"]
 libsql commit
@@ -301,8 +301,8 @@ sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph
     ["<graph1>","Item","item_name","renamed"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ( ?, ?, ?, ?, ?, ?, NULL ) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "node_id" END, "concrete_kind" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "concrete_kind" END, "deleted_at" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN NULL WHEN "deleted_at" IS NOT NULL THEN NULL ELSE "deleted_at" END RETURNING "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","renamed","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_to" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_to" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = ? WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" = ? AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN (?) AND ("typegraph_node_uniques"."constraint_name", "typegraph_node_uniques"."key") NOT IN (VALUES (?, ?))
     ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","renamed"]
 libsql commit
@@ -331,8 +331,8 @@ sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph
     ["<graph1>","Item","item_name","upserted"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ( ?, ?, ?, ?, ?, ?, NULL ) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "node_id" END, "concrete_kind" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "concrete_kind" END, "deleted_at" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN NULL WHEN "deleted_at" IS NOT NULL THEN NULL ELSE "deleted_at" END RETURNING "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","upserted","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = ? WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" = ? AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN (?) AND ("typegraph_node_uniques"."constraint_name", "typegraph_node_uniques"."key") NOT IN (VALUES (?, ?))
     ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","upserted"]
 libsql commit
@@ -377,8 +377,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","\u001edisjoint\u001eItem|Other","\u001edisjointWith","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ( ?, ?, ?, ?, ?, ?, NULL ) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "node_id" END, "concrete_kind" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "concrete_kind" END, "deleted_at" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN NULL WHEN "deleted_at" IS NOT NULL THEN NULL ELSE "deleted_at" END RETURNING "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
-    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead",1]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = ? WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" = ? AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN (?) AND ("typegraph_node_uniques"."constraint_name", "typegraph_node_uniques"."key") NOT IN (VALUES (?, ?))
     ["<timestamp>","<graph1>","Item","item-dead","item_name","item_name","item-dead"]
 libsql commit
@@ -407,8 +407,8 @@ sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph
     ["<graph1>","Item","item_name","upserted"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ( ?, ?, ?, ?, ?, ?, NULL ) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "node_id" END, "concrete_kind" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "concrete_kind" END, "deleted_at" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN NULL WHEN "deleted_at" IS NOT NULL THEN NULL ELSE "deleted_at" END RETURNING "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","upserted","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = ? WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" = ? AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN (?) AND ("typegraph_node_uniques"."constraint_name", "typegraph_node_uniques"."key") NOT IN (VALUES (?, ?))
     ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","upserted"]
 libsql commit
@@ -452,8 +452,8 @@ sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph
     ["<graph1>","Item","item_name","first"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ( ?, ?, ?, ?, ?, ?, NULL ) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "node_id" END, "concrete_kind" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "concrete_kind" END, "deleted_at" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN NULL WHEN "deleted_at" IS NOT NULL THEN NULL ELSE "deleted_at" END RETURNING "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","first","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"first\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"first\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = ? WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" = ? AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN (?) AND ("typegraph_node_uniques"."constraint_name", "typegraph_node_uniques"."key") NOT IN (VALUES (?, ?))
     ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","first"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
@@ -462,8 +462,8 @@ sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph
     ["<graph1>","Item","item_name","second"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ( ?, ?, ?, ?, ?, ?, NULL ) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "node_id" END, "concrete_kind" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "concrete_kind" END, "deleted_at" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN NULL WHEN "deleted_at" IS NOT NULL THEN NULL ELSE "deleted_at" END RETURNING "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","second","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"second\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"second\"}","<timestamp>","<graph1>","Item","item-a",2]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = ? WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" = ? AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN (?) AND ("typegraph_node_uniques"."constraint_name", "typegraph_node_uniques"."key") NOT IN (VALUES (?, ?))
     ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","second"]
 libsql commit
@@ -502,8 +502,8 @@ sql SELECT * FROM "typegraph_node_uniques" WHERE "typegraph_node_uniques"."graph
     ["<graph1>","Item","item_name","upserted"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ( ?, ?, ?, ?, ?, ?, NULL ) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "node_id" END, "concrete_kind" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "concrete_kind" END, "deleted_at" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN NULL WHEN "deleted_at" IS NOT NULL THEN NULL ELSE "deleted_at" END RETURNING "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","upserted","item-a","Item","item-a","Item","item-a","item-a","item-a","Item","Item","Item","item-a","Item"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = ? WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" = ? AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN (?) AND ("typegraph_node_uniques"."constraint_name", "typegraph_node_uniques"."key") NOT IN (VALUES (?, ?))
     ["<timestamp>","<graph1>","Item","item-a","item_name","item_name","upserted"]
 libsql commit
@@ -767,8 +767,8 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a",1]
 libsql commit
 => ok updated
 
@@ -782,8 +782,8 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a",1]
 libsql commit
 => ok updated
 
@@ -812,8 +812,8 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
@@ -824,8 +824,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","\u001edisjoint\u001eItem|Other","\u001edisjointWith","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ( ?, ?, ?, ?, ?, ?, NULL ) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "node_id" END, "concrete_kind" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "concrete_kind" END, "deleted_at" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN NULL WHEN "deleted_at" IS NOT NULL THEN NULL ELSE "deleted_at" END RETURNING "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
-    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead",1]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = ? WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" = ? AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN (?) AND ("typegraph_node_uniques"."constraint_name", "typegraph_node_uniques"."key") NOT IN (VALUES (?, ?))
     ["<timestamp>","<graph1>","Item","item-dead","item_name","item_name","item-dead"]
 sql UPDATE "typegraph_nodes" SET graph_id = graph_id WHERE 0
@@ -867,8 +867,8 @@ sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions".
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"item-a\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql SELECT * FROM "typegraph_schema_versions" WHERE "typegraph_schema_versions"."graph_id" = ? AND "typegraph_schema_versions"."is_active" = 1
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ?
@@ -879,8 +879,8 @@ sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_n
     ["<graph1>","\u001edisjoint\u001eItem|Other","\u001edisjointWith","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
 sql INSERT INTO "typegraph_node_uniques" ("graph_id", "node_kind", "constraint_name", "key", "node_id", "concrete_kind", "deleted_at") VALUES ( ?, ?, ?, ?, ?, ?, NULL ) ON CONFLICT ("graph_id", "node_kind", "constraint_name", "key") DO UPDATE SET "node_id" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "node_id" END, "concrete_kind" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN ? WHEN "deleted_at" IS NOT NULL THEN ? ELSE "concrete_kind" END, "deleted_at" = CASE WHEN "node_id" = ? AND "concrete_kind" = ? THEN NULL WHEN "deleted_at" IS NOT NULL THEN NULL ELSE "deleted_at" END RETURNING "node_id" as node_id, "concrete_kind" as concrete_kind
     ["<graph1>","Item","item_name","item-dead","item-dead","Item","item-dead","Item","item-dead","item-dead","item-dead","Item","Item","Item","item-dead","Item"]
-sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
-    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = ?, "updated_at" = ?, "version" = "version" + 1, "valid_from" = ?, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = ? AND "typegraph_nodes"."kind" = ? AND "typegraph_nodes"."id" = ? AND "typegraph_nodes"."version" = ? AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead",1]
 sql UPDATE "typegraph_node_uniques" SET "deleted_at" = ? WHERE "typegraph_node_uniques"."graph_id" = ? AND "typegraph_node_uniques"."concrete_kind" = ? AND "typegraph_node_uniques"."node_id" = ? AND "typegraph_node_uniques"."deleted_at" IS NULL AND "typegraph_node_uniques"."constraint_name" IN (?) AND ("typegraph_node_uniques"."constraint_name", "typegraph_node_uniques"."key") NOT IN (VALUES (?, ?))
     ["<timestamp>","<graph1>","Item","item-dead","item_name","item_name","item-dead"]
 sql UPDATE "typegraph_nodes" SET graph_id = graph_id WHERE 0

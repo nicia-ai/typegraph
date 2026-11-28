@@ -11454,6 +11454,7 @@ type UpdateNodeParams = Readonly<{
     props: Readonly<Record<string, unknown>>;
     validFrom?: string | null;
     expectedValidFrom?: string | null;
+    expectedVersion?: number;
     incrementVersion?: boolean;
     clearDeleted?: boolean;
 }> & BackendValidityEndMutation;

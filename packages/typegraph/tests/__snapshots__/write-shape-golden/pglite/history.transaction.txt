@@ -85,8 +85,8 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-dead"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-dead"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
-    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."version" = $7 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead",1]
 sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
     ["typegraph:recorded-clock","<graph1>"]
 sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = $2
@@ -333,8 +333,8 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
     ["typegraph:recorded-clock","<graph1>"]
 sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = $2
@@ -373,8 +373,8 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_to" = NULL WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_to" = NULL WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
     ["typegraph:recorded-clock","<graph1>"]
 sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = $2
@@ -415,8 +415,8 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
     ["typegraph:recorded-clock","<graph1>"]
 sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = $2
@@ -471,8 +471,8 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-dead"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
-    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."version" = $7 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead",1]
 sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
     ["typegraph:recorded-clock","<graph1>"]
 sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = $2
@@ -511,8 +511,8 @@ sql WITH "schema_fence" AS MATERIALIZED ( SELECT "typegraph_schema_versions"."ve
     ["<graph1>",1,"typegraph:recorded-graph-write","<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
     ["typegraph:recorded-clock","<graph1>"]
 sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = $2
@@ -545,12 +545,12 @@ sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_sche
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"first\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"first\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"second\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"second\"}","<timestamp>","<graph1>","Item","item-a",2]
 sql SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))
     ["typegraph:recorded-clock","<graph1>"]
 sql SELECT clock.graph_id AS clock_graph_id, clock.revision, clock.recorded_at, origins.graph_id AS origin_graph_id, origins.origin FROM (SELECT 1) seed LEFT JOIN "typegraph_recorded_clock" clock ON clock.graph_id = $1 LEFT JOIN "typegraph_revision_origins" origins ON origins.graph_id = $2

@@ -1328,7 +1328,9 @@ function registerPatchStatementCases(context: IntegrationTestContext): void {
  * A backend whose next `getNode` read, once armed, runs `intervene` on the
  * same target right after the read returns: a write committed by another
  * session between an update's read of the row and its own row write, as
- * READ COMMITTED allows on a server PostgreSQL.
+ * READ COMMITTED allows on a server PostgreSQL. The two-connection form of the
+ * same schedule, and every other update entry point, live in
+ * `update-row-version.ts`.
  */
 function createReadInterleaver(
   backend: GraphBackend,
@@ -1402,17 +1404,16 @@ function registerInterleavedUpdateCases(context: IntegrationTestContext): void {
   describe("an update racing another update of the same row (READ COMMITTED)", () => {
     // The row holds `before`. Update 1 patches an unrelated field and reads
     // `before`; update 2 then moves the row to `after`, claims it, releases
-    // `before` and commits; update 1 writes its whole props back, `before`
-    // included. Its claim decision compared `before` with `before`, so it
-    // claims nothing, and its row write carries no version predicate: the row
-    // holds `before`, its claim is `after`, and `before` is unclaimed. Main
-    // has the same lost update — its claim diff skips an unchanged key in
-    // memory too. For a string field main ends in exactly this state; for a
-    // date field main re-claims the date on every update (it keyed the stored
-    // date text and the validated `Date` differently, so every date looked
-    // moved), which leaves both claims live and the duplicate refused.
+    // `before` and commits. Update 1's row write is predicated on the version
+    // it read, so it matches nothing; update 1 re-reads the row, re-applies its
+    // patch over `after` and plans its claims from it. The row holds `after`
+    // and the patched name, its one claim is `after`, and a create of `after`
+    // is refused. Before the version predicate, update 1 wrote its whole props
+    // back — `before` included — while its claim decision compared `before`
+    // with `before`: the row held `before`, its claim was `after`, and a
+    // duplicate of `before` was admitted.
     for (const shape of INTERLEAVED_FIELDS) {
-      it(`a patch of an unrelated field that read the row before a concurrent move writes the stale value back unclaimed (${shape.name})`, async () => {
+      it(`a patch of an unrelated field that read the row before a concurrent move re-applies to the moved row (${shape.name})`, async () => {
         const graphId = nextGraphId();
         const claimOf = (value: unknown) => ({
           graphId,
@@ -1425,11 +1426,14 @@ function registerInterleavedUpdateCases(context: IntegrationTestContext): void {
         const interleaver = createReadInterleaver(
           context.getBackend(),
           async (target) => {
+            // A store write, version increment included: the predicate the
+            // update's own row write carries is what this move falsifies.
             await target.updateNode({
               graphId,
               kind: shape.kind,
               id: "row",
               props: shape.moved,
+              incrementVersion: true,
             });
             await target.insertUnique(claimOf(shape.after));
             await target.deleteUnique(claimOf(shape.before));
@@ -1447,52 +1451,36 @@ function registerInterleavedUpdateCases(context: IntegrationTestContext): void {
           name: "renamed",
         });
 
-        expectObservation({
-          lane: { driver: context.driver },
-          observed: {
-            stored: shape.storedText(updated as Record<string, unknown>),
-            claims: await liveClaims(
-              interleaver.backend,
-              graphId,
-              shape.constraintName,
-            ),
-            duplicate: await outcome(() =>
-              nodes.create({
-                ...shape.created,
-                name: "dup",
-                ...(shape.kind === "OcrPair" && { right: "r9" }),
-              } as never),
-            ),
-          },
-          correct: {
-            stored: shape.storedText(shape.created),
-            claims: [
-              claim(
-                shape.constraintName,
-                keyOf(shape.field, shape.before),
-                "row",
-              ),
-            ],
-            duplicate: "UniquenessError",
-          },
-          defects: [
-            {
-              label:
-                "update lost update: stale props written without a version predicate",
-              on: {},
-              today: {
-                stored: shape.storedText(shape.created),
-                claims: [
-                  claim(
-                    shape.constraintName,
-                    keyOf(shape.field, shape.after),
-                    "row",
-                  ),
-                ],
-                duplicate: "written",
-              },
-            },
+        expect({
+          name: (updated as Record<string, unknown>)["name"],
+          stored: shape.storedText(updated as Record<string, unknown>),
+          claims: await liveClaims(
+            interleaver.backend,
+            graphId,
+            shape.constraintName,
+          ),
+          duplicate: await outcome(() =>
+            nodes.create({
+              name: "dup",
+              [shape.field]: shape.after,
+              ...(shape.kind === "OcrPair" && { right: "r9" }),
+            } as never),
+          ),
+          vacated: await outcome(() =>
+            nodes.create({
+              name: "vacated",
+              [shape.field]: shape.before,
+              ...(shape.kind === "OcrPair" && { right: "r8" }),
+            } as never),
+          ),
+        }).toEqual({
+          name: "renamed",
+          stored: shape.storedText(shape.moved),
+          claims: [
+            claim(shape.constraintName, keyOf(shape.field, shape.after), "row"),
           ],
+          duplicate: "UniquenessError",
+          vacated: "written",
         });
       });
     }

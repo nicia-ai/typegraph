@@ -2132,9 +2132,10 @@ async function prepareNodeUpdate<G extends GraphDef>(
 
 /**
  * How many probe-and-write rounds a node update gets before it stops trying to
- * converge. One retry: enough to absorb a single concurrent recreate, bounded
- * so a peer that keeps replacing the row cannot livelock this caller (the same
- * shape, and the same reasoning, as `getOrCreateByEndpoints`'s bounded loop).
+ * converge. One retry: enough to absorb a single concurrent write to the row —
+ * an update that moved its version, or a recreate — bounded so a peer that
+ * keeps rewriting the row cannot livelock this caller (the same shape, and the
+ * same reasoning, as `getOrCreateByEndpoints`'s bounded loop).
  */
 const NODE_UPDATE_ATTEMPTS = 2;
 
@@ -2142,17 +2143,20 @@ const NODE_UPDATE_ATTEMPTS = 2;
  * Runs a node update and CONVERGES on the row that is actually there when a
  * predicated UPDATE matches nothing.
  *
- * `performNodeUpdate` is a probe-and-write pair, and both of the predicates its
+ * `performNodeUpdate` is a probe-and-write pair, and every predicate its
  * statement carries beyond `(graph_id, kind, id)` can stop matching between the
  * two under PostgreSQL READ COMMITTED:
  *
+ *  - `version` on both legs — a peer wrote the row after this update read it,
+ *    so the props it merged and the claims it planned describe a superseded
+ *    row (`rowVersionWrite`, `node-write-pipeline.ts`);
  *  - `deleted_at IS NOT NULL` on the resurrecting leg — a peer resurrected the
  *    tombstone first;
  *  - `expectedValidFrom` on the in-place leg — a peer hard-deleted and
  *    recreated the row, so the bound this update's window verdict was computed
  *    against is gone.
  *
- * Both are the SAME event from the caller's side: the row moved under a
+ * All are the SAME event from the caller's side: the row moved under a
  * decision already made. Neither may surface as the zero-row
  * `DatabaseOperationError` the backend raises, which is an internal sentinel
  * and names nothing a caller can act on. So this re-reads and re-derives:
@@ -2462,12 +2466,12 @@ async function writeNodeUpdateSet<G extends GraphDef>(
  * missing node — the node is present, it just is not staying still.
  */
 function nodeUpdateRaceError(
-  input: UpsertUpdateNodeInput,
+  input: Readonly<{ kind: string; id: string }>,
   error: unknown,
 ): unknown {
   if (!isNodeUpdateNoRowError(error)) return error;
   return new DatabaseOperationError(
-    `Node update for ${input.kind} "${input.id}" could not be applied to a stable row after ${NODE_UPDATE_ATTEMPTS} attempts: the row was removed and recreated between each read and its write. A concurrent writer is replacing this node faster than it can be read; serialize the writers, or retry.`,
+    `Node update for ${input.kind} "${input.id}" could not be applied to a stable row after ${NODE_UPDATE_ATTEMPTS} attempts: the row was written by another session, or removed and recreated, between each read and its write. A concurrent writer is rewriting this node faster than it can be read; serialize the writers, or retry.`,
     {
       operation: "update",
       entity: "node",
@@ -3293,7 +3297,33 @@ function isNodeUpdateNoRowError(
   );
 }
 
+/**
+ * A create landing on a tombstone: the tombstone is rewritten with the
+ * create's props. The write is bound to the tombstone's version
+ * (`rowVersionWrite`), so a peer that wrote the row after it was read makes it
+ * match nothing; the create then converges as an update does — a row a peer
+ * brought back is the create's duplicate, and a tombstone still there is
+ * resurrected again, from the row as it is now, within the same bounded
+ * attempts.
+ */
 async function resurrectPreparedNode<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  session: NodeWriteSession,
+  target: WriteTarget,
+  prepared: NodeCreatePrepared,
+): Promise<BackendNodeRow> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await resurrectPreparedNodeOnce(ctx, session, target, prepared);
+    } catch (error) {
+      if (!isNodeUpdateNoRowError(error) || attempt >= NODE_UPDATE_ATTEMPTS) {
+        throw nodeUpdateRaceError(prepared, error);
+      }
+    }
+  }
+}
+
+async function resurrectPreparedNodeOnce<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   session: NodeWriteSession,
   target: WriteTarget,
@@ -7528,12 +7558,28 @@ export async function executeNodeRevive<G extends GraphDef>(
     ),
     entry,
     async (session, target): Promise<boolean> => {
-      const existing = await target.getNode(ctx.graphId, kind, id);
-      if (existing === undefined || !isTombstonedNodeRow(existing)) {
-        return false;
+      // The revival writes the tombstone's stored props back, bound to the
+      // version it read them at. A peer that wrote the row in between makes
+      // that write match nothing; the revival then converges on the row that
+      // is there: gone or live means there is nothing left to revive, and a
+      // tombstone still is revived with the props it holds now.
+      for (let attempt = 1; ; attempt += 1) {
+        const existing = await target.getNode(ctx.graphId, kind, id);
+        if (existing === undefined || !isTombstonedNodeRow(existing)) {
+          return false;
+        }
+        try {
+          await reviveNodeRowInFrame(ctx, session, target, existing);
+          return true;
+        } catch (error) {
+          if (
+            !isNodeUpdateNoRowError(error) ||
+            attempt >= NODE_UPDATE_ATTEMPTS
+          ) {
+            throw nodeUpdateRaceError({ kind, id }, error);
+          }
+        }
       }
-      await reviveNodeRowInFrame(ctx, session, target, existing);
-      return true;
     },
     { didWrite: (revived) => revived },
   );

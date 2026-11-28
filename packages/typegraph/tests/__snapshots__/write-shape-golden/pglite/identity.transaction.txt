@@ -52,8 +52,8 @@ sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND 
     ["<graph1>","Item","item-dead"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-dead"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
-    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."version" = $7 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead",1]
 sql COMMIT
 hook end create node:Item item-dead written
 => ok
@@ -222,8 +222,8 @@ sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_sche
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql COMMIT
 hook end update node:Item item-a written
 => ok
@@ -254,8 +254,8 @@ sql SELECT member_kind, member_id FROM "typegraph_identity_closure" WHERE graph_
     ["<graph1>","Item","item-a"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_to" = NULL WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_to" = NULL WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"renamed\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql COMMIT
 hook end update node:Item item-a written
 => ok
@@ -278,8 +278,8 @@ sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_sche
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql COMMIT
 hook end update node:Item item-a written
 => ok
@@ -314,8 +314,8 @@ sql SELECT kind, id FROM "typegraph_nodes" WHERE graph_id = $1 AND id IN ($2) AN
     ["<graph1>","item-dead"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-dead"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
-    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1, "valid_from" = $3, "valid_to" = NULL, "deleted_at" = NULL WHERE "typegraph_nodes"."graph_id" = $4 AND "typegraph_nodes"."kind" = $5 AND "typegraph_nodes"."id" = $6 AND "typegraph_nodes"."version" = $7 AND "typegraph_nodes"."deleted_at" IS NOT NULL RETURNING *
+    ["{\"name\":\"item-dead\"}","<timestamp>","<timestamp>","<graph1>","Item","item-dead",1]
 sql COMMIT
 hook end update node:Item item-dead written
 => ok
@@ -338,8 +338,8 @@ sql SELECT "typegraph_schema_versions"."version" AS version FROM "typegraph_sche
     ["<graph1>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"upserted\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql COMMIT
 hook end update node:Item item-a written
 => ok
@@ -360,12 +360,12 @@ sql INSERT INTO "typegraph_nodes" ("graph_id", "kind", "id", "props", "version",
     ["<graph1>","Item","item-new","{\"name\":\"item-new\"}","<timestamp>","<timestamp>","<timestamp>"]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"first\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"first\"}","<timestamp>","<graph1>","Item","item-a",1]
 sql SELECT * FROM "typegraph_nodes" WHERE "typegraph_nodes"."graph_id" = $1 AND "typegraph_nodes"."kind" = $2 AND "typegraph_nodes"."id" = $3
     ["<graph1>","Item","item-a"]
-sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
-    ["{\"name\":\"second\"}","<timestamp>","<graph1>","Item","item-a"]
+sql UPDATE "typegraph_nodes" SET "props" = $1, "updated_at" = $2, "version" = "version" + 1 WHERE "typegraph_nodes"."graph_id" = $3 AND "typegraph_nodes"."kind" = $4 AND "typegraph_nodes"."id" = $5 AND "typegraph_nodes"."version" = $6 AND "typegraph_nodes"."deleted_at" IS NULL RETURNING *
+    ["{\"name\":\"second\"}","<timestamp>","<graph1>","Item","item-a",2]
 sql COMMIT
 => ok
 

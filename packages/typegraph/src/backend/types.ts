@@ -882,6 +882,27 @@ export type UpdateNodeParams = Readonly<{
    * zero rows and surfaces as a `no_row_returned` `DatabaseOperationError`.
    */
   expectedValidFrom?: string | null;
+  /**
+   * The row `version` this write ASSERTS the target row still carries: the
+   * version of the row the caller read and decided this write from.
+   *
+   * A node update is a read-then-write pair. Its props are merged over, and its
+   * uniqueness claims planned from, the row it read; under PostgreSQL READ
+   * COMMITTED another session can commit a write to the same row between the
+   * two. An UPDATE predicated on identity alone then writes props computed from
+   * a superseded row over the newer one, and leaves claims planned for neither.
+   * Stating the version puts it in the UPDATE's own `WHERE`, where a row that
+   * moved matches nothing and surfaces as the `no_row_returned`
+   * `DatabaseOperationError`: the store's cue to re-read and decide again.
+   *
+   * The store states it on every node update it plans from a read row, and
+   * checks that the returned row's `version` is exactly one past it. A backend
+   * MUST apply the predicate when it is present, on the same terms as
+   * {@link expectedValidFrom}; a store write through a backend that ignores it
+   * is refused with a `ConfigurationError` after the statement, which aborts
+   * the write's transaction.
+   */
+  expectedVersion?: number;
   incrementVersion?: boolean;
   /** If true, clears deleted_at (un-deletes the node). Used by upsert. */
   clearDeleted?: boolean;

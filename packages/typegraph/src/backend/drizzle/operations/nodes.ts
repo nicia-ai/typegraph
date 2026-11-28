@@ -712,6 +712,13 @@ export function buildUpdateNode(
     nodes.validFrom,
     params.expectedValidFrom,
   );
+  // The version of the row the caller planned this write from — see
+  // `UpdateNodeParams.expectedVersion`. It rides on this UPDATE, so a write
+  // that meets no concurrent writer issues no statement it did not before.
+  const expectedVersion =
+    params.expectedVersion === undefined ?
+      sql.empty()
+    : sql` AND ${nodes.version} = ${params.expectedVersion}`;
 
   if (params.clearDeleted) {
     return sql`
@@ -719,7 +726,7 @@ export function buildUpdateNode(
       SET ${setClause}
       WHERE ${nodes.graphId} = ${params.graphId}
         AND ${nodes.kind} = ${params.kind}
-        AND ${nodes.id} = ${params.id}${expectedValidFrom}
+        AND ${nodes.id} = ${params.id}${expectedValidFrom}${expectedVersion}
         AND ${nodes.deletedAt} IS NOT NULL
       RETURNING *
     `;
@@ -730,7 +737,7 @@ export function buildUpdateNode(
     SET ${setClause}
     WHERE ${nodes.graphId} = ${params.graphId}
       AND ${nodes.kind} = ${params.kind}
-      AND ${nodes.id} = ${params.id}${expectedValidFrom}
+      AND ${nodes.id} = ${params.id}${expectedValidFrom}${expectedVersion}
       AND ${nodes.deletedAt} IS NULL
     RETURNING *
   `;

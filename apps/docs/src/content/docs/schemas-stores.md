@@ -1033,6 +1033,36 @@ store.nodes.Person.update(
 ): Promise<Node<Person>>;
 ```
 
+**Concurrent writers.** An update reads the row, merges `props` over it, plans
+its uniqueness claims from it, and then writes. The write is predicated on the
+row's `version`, so it lands only on the row it was planned from. When another
+session commits a write to the same row in between — which PostgreSQL's
+`READ COMMITTED` allows; SQLite admits one writer at a time, so it cannot
+happen there — the write matches no row, and what happens next depends on what
+the entry point promises:
+
+- `update()`, `upsertById()`, `upsertByIdFromRecord()` and `bulkUpsertById()`
+  name the fields they change, so they re-read the row and apply those fields
+  to it again, with claims planned from the row as it is now. The other
+  session's write survives in every field the call does not name. Merge apply
+  writes through `upsertByIdFromRecord()` and follows the same rule.
+- `bulkReplaceById()` states the whole row, so it re-reads only to plan its
+  claims from the row it replaces, and stores the row it was given.
+- A provenance reopen, and a `create()` landing on a tombstone, re-read the
+  row and start again from it: a row another session brought back is left as
+  it is (for `create()`, an already-exists error), and a row still deleted is
+  revived from what it holds now.
+- `importGraph()` with `onConflict: "update"` does not retry: the row is
+  reported with `INTERCHANGE_NODE_UPDATE_TARGET_CHANGED` and keeps the other
+  session's write (see [Interchange](/interchange)).
+
+A call that retries does so once. If the row moves again before the second
+write, the call fails with a `DatabaseOperationError` saying the row could not
+be applied to a stable row; nothing it planned is written. Before this
+predicate the second writer's full props were written over the first writer's
+change, and its claims were planned for neither row: the row could store a
+unique value no claim reserved, so a duplicate of it was admitted.
+
 #### `compareAndSet(id, params)`
 
 Applies a patch only while the current live row still has the supplied exact
