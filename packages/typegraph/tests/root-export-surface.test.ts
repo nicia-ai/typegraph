@@ -81,6 +81,7 @@ const ROOT_VALUE_EXPORTS = [
   "StoreNotInitializedError",
   "subClassOf",
   "sum",
+  "TransactionCallRefusedError",
   "TransactionConflictError",
   "TransactionOutcomeUnknownError",
   "TransactionRolledBackError",
@@ -129,11 +130,13 @@ const ROOT_TYPE_EXPORTS = [
   "Store",
   "StoreOptions",
   "TemporalMode",
+  "TransactionCallRefusalReason",
+  "TransactionCallRefusedErrorDetails",
   "TransactionContext",
   "TypedOntologyRelation",
 ] as const;
 
-const EXPECTED_ROOT_EXPORT_COUNT = 106;
+const EXPECTED_ROOT_EXPORT_COUNT = 109;
 
 const PACKAGE_ROOT = path.resolve(import.meta.dirname, "..");
 const ROOT_ENTRY = path.join(PACKAGE_ROOT, "src/index.ts");
