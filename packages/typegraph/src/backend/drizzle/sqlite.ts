@@ -1504,6 +1504,10 @@ export function buildSqliteEngineProfile(
   // contribution members' `ensureTable` dep and `provisioning.ensureTable`
   // below.
   const runDdlStatement = async (ddl: string): Promise<void> => {
+    // Straight through `db`: over a caller's transaction object, refused
+    // while another call's savepoint unit is open on it.
+    const refusal = sqliteRootStatementRefusal(db);
+    if (refusal !== undefined) throw refusal;
     await db.run(sql.raw(ddl));
   };
 
@@ -1734,15 +1738,13 @@ export function buildSqliteEngineProfile(
   }
 
   const provisioning: EngineProvisioning = {
-    executeDdl: async (ddl) => {
-      await db.run(sql.raw(ddl));
-    },
+    executeDdl: runDdlStatement,
     ensureTable: runDdlStatement,
     generateDdl: () => generateSqliteDDL(tables, fulltextStrategy ?? false),
     catalog: createSqliteCatalogProbes(
       executionAdapter,
       operationStrategy,
-      serializedQueue,
+      operationQueue,
     ),
   };
 
@@ -2594,6 +2596,10 @@ export function buildSqliteEngineProfile(
 
       maintenance: {
         async refreshStatistics(): Promise<void> {
+          // Straight through `db`: over a caller's transaction object,
+          // refused while another call's savepoint unit is open on it.
+          const refusal = sqliteRootStatementRefusal(db);
+          if (refusal !== undefined) throw refusal;
           // `ANALYZE` populates `sqlite_stat1`. With no stat table, the
           // planner falls back to heuristics that, at least for FTS5
           // virtual-table queries and multi-column index selection, can be

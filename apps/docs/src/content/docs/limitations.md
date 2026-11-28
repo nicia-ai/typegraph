@@ -803,7 +803,10 @@ application's own statements on `tx` are not TypeGraph calls and are not refused
 TypeGraph call's savepoint is open runs inside it: if that call fails, its savepoint rolls back and takes
 the application's statement with it, although the statement itself succeeded. Run application statements
 between TypeGraph calls, not beside them. A backend built over a TypeGraph savepoint's own handle (code
-running inside the call that opened it) is the call's own work and is not refused.
+running inside the call that opened it) is the call's own work and is not refused. The refusal relies on
+the driver proving which native transaction the handle runs in: PostgreSQL transaction objects and libSQL
+transaction handles do. A Drizzle-framed SQLite transaction handle whose driver offers no such proof gets
+no refusal, as before this check existed; await each call on a Store built over one.
 
 ## Graph Analytics Limits
 
