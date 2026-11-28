@@ -2433,13 +2433,16 @@ A backend you write yourself gets the Store's refusals but no refusal of its own
 ties its objects to a native transaction.
 
 A read-only `store.transaction()` on a Store over a caller's read-write transaction runs as a
-savepoint of that transaction. On PostgreSQL that savepoint is read-only at the engine: its first
-statement sets `transaction_read_only`, which PostgreSQL applies to the savepoint and every savepoint
-opened inside it, and reads the mode back in the same statement. A session that did not take the
-mode (a proxy that runs the statement on another server session, say) is refused with
-`ConfigurationError` (`POSTGRES_READ_ONLY_MODE_NOT_TAKEN`) before the callback runs. PostgreSQL
-restores the caller's access mode when the savepoint ends. The caller's transaction refuses
-TypeGraph writes until the savepoint ends and accepts them again afterwards. A native read-only
+savepoint of that transaction, and issues the same statements as any other unit there: TypeGraph
+leaves the caller's transaction's access mode alone, so the savepoint is read-write at the engine and
+the read-only scope alone refuses TypeGraph's writes in it. Every context and backend over the
+caller's transaction refuses TypeGraph writes until the savepoint ends and accepts them again
+afterwards. A write that another call on the same transaction (under `Promise.all`, say) reaches
+while the savepoint is open is refused too, before any statement; one that was already past its
+refusal when the savepoint opened completes. Only a `store.transaction()` you open read-only opens
+that scope. TypeGraph's own read-only units on such a Store (an export's snapshot, the confirm read
+of `getOrCreateByEndpoints()`, an algorithm's working table) open none and issue only their own
+statements, so they never refuse or end a call that overlaps them. A native read-only
 transaction the Store did not open (your own `db.transaction(fn, { accessMode: "read only" })`)
 carries no read-only fact: TypeGraph writes through it as before, so PostgreSQL rejects the write
 and aborts the transaction, and SQLite has no read-only transaction to refuse it.
@@ -2452,24 +2455,27 @@ Object storage), a context you bound in an earlier transaction on the same bette
 connection, or a savepoint you open yourself with `tx.sql.transaction(...)` on node-postgres, which
 keeps the pooled client. A backend you build over `tx.sql` where `tx.sql` is the database handle
 itself is a root backend unless the driver proves the transaction: on better-sqlite3, which reports
-an open transaction, one built inside the callback is bound to the transaction until it ends; on
+an open transaction, one built while the transaction is open is bound to it until it ends, since its
+statements run inside it. That holds wherever it is built: the handle is the same database object
+inside the callback and in another flow, so a backend another flow builds over it then is refused
+too. On
 `@libsql/client` before 0.18, sql.js and Durable Object storage nothing ties it to the transaction,
 so it runs as a root backend does.
 
 A savepoint you open yourself and hand to `withTransaction()` is refused the same way on
 better-sqlite3, libSQL and PGlite, whose drivers show which transaction it runs in. On postgres-js
 it gets a client of its own that TypeGraph cannot tie to the read-only transaction, so the engine
-decides: in a read-only transaction, and in a read-only `store.transaction()` that runs as a
-savepoint of your read-write transaction, PostgreSQL rejects its writes (SQLSTATE `25006`) and the
-driver rolls your savepoint back.
+decides: in a read-only transaction PostgreSQL rejects its writes (SQLSTATE `25006`) and the driver
+rolls your savepoint back. In a read-only `store.transaction()` that runs as a savepoint of your
+read-write transaction the engine accepts them, and they commit with your transaction.
 
 The refusal covers what TypeGraph writes. A statement issued through the native `tx.sql` handle is
-not checked by TypeGraph: PostgreSQL rejects a write there, in a read-only transaction and in a
-read-only savepoint alike. In a read-only transaction that aborts the transaction (which then
-rejects with `TransactionOutcomeUnknownError`, even if the callback caught the refusal, since the
-callback read `tx.sql`); in a read-only savepoint the savepoint's `store.transaction()` rejects with
-the engine's error and your transaction carries on. SQLite, which has no read-only transaction or
-savepoint at the engine, runs the statement and commits it.
+not checked by TypeGraph. In a read-only transaction TypeGraph opened, PostgreSQL rejects a write
+there and aborts the transaction (which then rejects with `TransactionOutcomeUnknownError`, even if
+the callback caught the refusal, since the callback read `tx.sql`). In a read-only
+`store.transaction()` that runs as a savepoint of your read-write transaction, the engine runs the
+statement and it commits with your transaction, on every dialect. SQLite, which has no read-only
+transaction at the engine, runs the statement and commits it in either case.
 
 #### Overlapping calls in one transaction
 
