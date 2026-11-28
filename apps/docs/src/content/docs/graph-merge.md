@@ -1898,8 +1898,10 @@ its tables. `listUnsealedAllocations({ after, limit })` pages through durable
 allocations awaiting seal and ephemeral allocations. These rows may still have
 active owners; the ledger alone cannot identify a crashed process. After
 confirming that no live branch or allocation uses a row, call
-`abortAllocation(id)` to remove it. A durable branch's descriptor contains only
-the allocation ID, not connection credentials. Pass `sourceTableNames` when the source backend uses
+`abortAllocation(id, { ledgerSchema })` with the `ledgerSchema` the listing
+reported to remove it. A durable branch's descriptor contains only the
+allocation ID and the schema of the ledger that recorded it, not connection
+credentials. Pass `sourceTableNames` when the source backend uses
 custom status table names; pass `reopenOptions` to restore process-local hooks
 or query options on a later process. An external `recordedRead` binding is
 refused because its relation is outside the owned table inventory. Reopen
@@ -2069,11 +2071,25 @@ connection, closing an ephemeral store or a `makeBackend` backend, cleanup
 after a failed allocation) is qualified with that schema, so a `control`
 session whose `search_path` changes while a copy is live (a caller that
 creates a schema ahead of the allocation's, or drops the allocation's schema
-from its path) still removes the copy from the ledger that owns it. A call that
-names an allocation only by id (`durable` seal, reopen, destroy, abort and
-operations, `abortAllocation`) or names none (`listUnsealedAllocations`) uses
-the ledger in `control`'s current schema at the time of the call, so run those
-with `control`'s current schema being the one the allocations were made in.
+from its path) still removes the copy from the ledger that owns it.
+
+A durable locator records that ledger's schema as well (locator version 2:
+`{ allocationId, ledgerSchema }`), so every call by locator (`durable` seal,
+abort, reopen, destroy and operations) uses the ledger the allocation was
+recorded in, whatever `control`'s `search_path` resolves by then, including
+on a manager built afresh from the stored descriptor. A version 1 locator,
+written by an earlier release, records no schema; it is still read and
+managed, and resolves the ledger through `control`'s current schema at the
+time of the call, so use it with `control`'s current schema being the one the
+allocation was made in. A version 2 locator without `ledgerSchema`, or a
+version 1 locator with one, is refused with a `BranchError`. Reopening still
+needs a connection whose `search_path` resolves the allocation's tables, as
+above.
+
+`listUnsealedAllocations` and `abortAllocation` read the ledger their
+`ledgerSchema` option names, or the one in `control`'s current schema at the
+time of the call without it. Each listed allocation carries the
+`ledgerSchema` it was listed from, to pass back to `abortAllocation`.
 
 #### `makeBackend` for branches, candidate planning, and evolution previews
 

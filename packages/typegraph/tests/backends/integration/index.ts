@@ -40,6 +40,7 @@ export { registerDatabaseExpressionQueryIntegrationTests } from "./database-expr
 export { registerDateIndexExpressionIntegrationTests } from "./date-index-expressions";
 export { registerDatePredicateIntegrationTests } from "./date-predicates";
 export { registerDurableEdgeMatchIdentityIntegrationTests } from "./durable-edge-match-identity";
+export { registerDurableLedgerSchemaIntegrationTests } from "./durable-ledger-schema";
 export { registerEdgeAcyclicityIntegrationTests } from "./edge-acyclicity";
 export { registerEdgeBulkHardDeleteIntegrationTests } from "./edge-bulk-hard-delete";
 export { registerEdgeCardinalityTighteningIntegrationTests } from "./edge-cardinality-tightening";

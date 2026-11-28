@@ -115,7 +115,10 @@ import {
 } from "./schema/postgres";
 
 const LEDGER = "typegraph_working_copy_allocations";
-const FORMAT_VERSION = 1;
+/** Version 2 locators name the ledger schema; see {@link PostgresWorkingCopyLocator}. */
+const FORMAT_VERSION = 2;
+/** The released locator format, which names no ledger schema. */
+const LEGACY_LOCATOR_VERSION = 1;
 const STRATEGY_TYPE = "typegraph-postgres-tables";
 const DEFAULT_CLEANUP_LOCK_TIMEOUT_MS = 5000;
 const WORKING_COPY_ROLE_MISMATCH = "WORKING_COPY_ROLE_MISMATCH";
@@ -196,10 +199,12 @@ const ALLOCATION_COLUMNS = sql.raw(
  * A new allocation's ledger is the one in the schema it is allocated in: the
  * ledger is created there and the row written there, so that schema is a fact
  * of the allocation and every later statement about it (attestation, locking,
- * removal) carries it. A call addressed by allocation id alone (a durable
- * locator, `abortAllocation`) or by no allocation (`listUnsealedAllocations`)
- * has nothing to carry and uses the ledger in `control`'s current schema,
- * observed once by {@link observeControlLedger}, for every statement it issues.
+ * removal) carries it. A durable locator records it, and
+ * `listUnsealedAllocations` and `abortAllocation` accept it. A call that is
+ * given no ledger schema (a version 1 locator, or a recovery call without the
+ * option) uses the ledger in `control`'s current schema, observed once, for
+ * every statement it issues; {@link resolveLedger} is the one owner of that
+ * decision.
  */
 type LedgerRelation = Readonly<{
   /** The schema that holds the ledger. */
@@ -218,14 +223,42 @@ function ledgerIn(schema: string): LedgerRelation {
   };
 }
 
-/** A non-secret locator; only the ledger can map it to physical tables. */
-export type PostgresWorkingCopyLocator = Readonly<{ allocationId: string }>;
+/**
+ * A non-secret locator; only the ledger can map it to physical tables.
+ *
+ * A version 2 locator (written by this release) names `ledgerSchema`, the
+ * schema whose ledger recorded the allocation: `control`'s current schema when
+ * the branch was created. Every call by locator (seal, abort, reopen, destroy,
+ * and the `operations` members) uses that ledger, whatever `control`'s
+ * `search_path` resolves by then, so a manager built afresh from the stored
+ * descriptor alone still finds it. A version 1 locator, written by an earlier
+ * release, names none; it is still read and managed, and resolves the ledger
+ * through `control`'s current schema at the time of the call, as that release
+ * did. A version 2 locator without a schema name, or a version 1 locator with
+ * one, is refused with a `BranchError`.
+ */
+export type PostgresWorkingCopyLocator = Readonly<{
+  allocationId: string;
+  /** The schema holding the allocation's ledger; absent in a version 1 locator. */
+  ledgerSchema?: string;
+}>;
 
 /** An unsealed allocation, which may still have an active owner. */
 export type PostgresUnsealedAllocation = Readonly<{
   allocationId: string;
   createdAt: string;
   state: "allocating" | "ephemeral";
+  /** The schema whose ledger lists it; pass it back to `abortAllocation`. */
+  ledgerSchema: string;
+}>;
+
+/** Names the working-copy ledger a recovery call reads. */
+export type PostgresWorkingCopyLedgerOptions = Readonly<{
+  /**
+   * The schema holding the ledger. Absent, the ledger in `control`'s current
+   * schema at the time of the call.
+   */
+  ledgerSchema?: string;
 }>;
 
 /**
@@ -247,9 +280,12 @@ export type PostgresUnsealedAllocation = Readonly<{
  * when it is allocated, recorded in the ledger in that same schema. Every later
  * ledger statement about an allocation this manager made is qualified with it,
  * so a `control` session whose `search_path` changes while a copy is live still
- * removes the copy. A call naming an allocation only by id (a durable locator,
- * `abortAllocation`) or none (`listUnsealedAllocations`) uses the ledger in
- * `control`'s current schema at the time of the call. Provisioning, the connected
+ * removes the copy. A durable locator records the ledger's schema, so a call
+ * by locator finds the same ledger after such a change too (see
+ * {@link PostgresWorkingCopyLocator}). `listUnsealedAllocations` and
+ * `abortAllocation` read the ledger in the schema their `ledgerSchema` option
+ * names, or in `control`'s current schema at the time of the call without it;
+ * each listed allocation carries the schema it was listed from. Provisioning, the connected
  * backend's DDL, the allocation's vector storage and removal all name that
  * schema explicitly, so a pooled connection's own `search_path` never decides
  * where an allocation's relations are created or dropped. The connection must
@@ -335,9 +371,14 @@ export type PostgresWorkingCopyManager<G extends GraphDef> = Readonly<{
    */
   makeBackend: MakeBackend;
   durable: DurableWorkingCopyStrategy<G, PostgresWorkingCopyLocator>;
-  /** Bounded, ordered inventory of unsealed allocations, including live ones. */
+  /**
+   * Bounded, ordered inventory of unsealed allocations, including live ones,
+   * in the ledger `ledgerSchema` names (by default the one in `control`'s
+   * current schema).
+   */
   listUnsealedAllocations: (
-    options?: Readonly<{ after?: string; limit?: number }>,
+    options?: Readonly<{ after?: string; limit?: number }> &
+      PostgresWorkingCopyLedgerOptions,
   ) => Promise<readonly PostgresUnsealedAllocation[]>;
   /**
    * Explicit recovery after the caller confirms no active owner uses this
@@ -345,9 +386,14 @@ export type PostgresWorkingCopyManager<G extends GraphDef> = Readonly<{
    * ledger row, including an allocation whose tables were dropped entirely.
    * Refuses with a `BranchError`, keeping the row, only while relations
    * carrying the allocation's reserved prefixes exist in another schema; the
-   * error names the schemas found.
+   * error names the schemas found. Reads the ledger `ledgerSchema` names (by
+   * default the one in `control`'s current schema); pass the `ledgerSchema`
+   * `listUnsealedAllocations` reported.
    */
-  abortAllocation: (allocationId: string) => Promise<void>;
+  abortAllocation: (
+    allocationId: string,
+    options?: PostgresWorkingCopyLedgerOptions,
+  ) => Promise<void>;
 }>;
 
 function strictCreateDdl(ddl: string): string {
@@ -1040,11 +1086,35 @@ async function lockSealedAllocation(
   );
 }
 
-function assertLocatorVersion(descriptorVersion: number): void {
-  if (descriptorVersion !== FORMAT_VERSION)
+/**
+ * The ledger schema a locator names, checked against the format its version
+ * declares: a version 2 locator must name one, and a version 1 locator, which
+ * predates the field, must not. `undefined` for a version 1 locator.
+ */
+function locatorLedgerSchema(
+  descriptor: PostgresWorkingCopyLocator,
+  descriptorVersion: number,
+): string | undefined {
+  const { ledgerSchema } = descriptor;
+  if (descriptorVersion === LEGACY_LOCATOR_VERSION) {
+    if (ledgerSchema !== undefined) {
+      throw new BranchError(
+        "A version 1 PostgreSQL working-copy locator records no ledger schema, but this one names one.",
+      );
+    }
+    return undefined;
+  }
+  if (descriptorVersion !== FORMAT_VERSION) {
     throw new BranchError(
       "Unsupported PostgreSQL working-copy locator version.",
     );
+  }
+  if (ledgerSchema === undefined) {
+    throw new BranchError(
+      `A version ${String(FORMAT_VERSION)} PostgreSQL working-copy locator must name its ledger schema.`,
+    );
+  }
+  return ledgerSchema;
 }
 
 /**
@@ -1113,8 +1183,40 @@ async function observeAllocationSession(
 }
 
 /**
- * The ledger a call with no allocation to carry it from uses: the one in
- * `control`'s current schema, observed on `control`'s own session.
+ * The one owner of which ledger a call that holds no allocation handle uses. A
+ * named schema is the ledger's and is used as given, whatever `control`'s
+ * `search_path` resolves; without one (a version 1 locator, a recovery call
+ * without `ledgerSchema`) the ledger is the one in `control`'s current schema,
+ * as every release before the locator recorded it resolved it.
+ */
+async function resolveLedger(
+  control: QuerySession,
+  ledgerSchema: unknown,
+): Promise<LedgerRelation> {
+  if (ledgerSchema === undefined) return observeControlLedger(control);
+  if (typeof ledgerSchema !== "string" || ledgerSchema === "") {
+    throw new BranchError(
+      "A working-copy ledger schema must be a non-empty schema name.",
+    );
+  }
+  return ledgerIn(ledgerSchema);
+}
+
+/** The ledger a call by locator uses; see {@link PostgresWorkingCopyLocator}. */
+async function locatorLedger(
+  control: QuerySession,
+  descriptor: PostgresWorkingCopyLocator,
+  descriptorVersion: number,
+): Promise<LedgerRelation> {
+  return resolveLedger(
+    control,
+    locatorLedgerSchema(descriptor, descriptorVersion),
+  );
+}
+
+/**
+ * The ledger in `control`'s current schema, observed on `control`'s own
+ * session.
  */
 async function observeControlLedger(
   control: QuerySession,
@@ -1725,7 +1827,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       if (options.refreshStatistics === true) await store.refreshStatistics();
       return {
         backend: fixedSchemaBackend(ownedBackend, indexNames),
-        descriptor: { allocationId },
+        descriptor: { allocationId, ledgerSchema: ledger.schema },
         ledger,
       };
     } catch (error) {
@@ -1866,8 +1968,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       withoutEvidence: () => T;
     }>,
   ): Promise<T> {
-    assertLocatorVersion(descriptorVersion);
-    const ledger = await observeControlLedger(control);
+    const ledger = await locatorLedger(control, descriptor, descriptorVersion);
     const row = await readSealedRow(ledger, descriptor.allocationId);
     assertSealedOrigin(
       row,
@@ -1919,6 +2020,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
   const durable: DurableWorkingCopyStrategy<G, PostgresWorkingCopyLocator> = {
     type: STRATEGY_TYPE,
     version: FORMAT_VERSION,
+    readableVersions: [LEGACY_LOCATOR_VERSION],
     create: async (source, base, _branchId, allocationId) => {
       const { backend, descriptor, ledger } = await allocate(
         source,
@@ -1944,7 +2046,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           "Working-copy seal origin allocation id does not match its locator.",
         );
       }
-      const ledger = await observeControlLedger(control);
+      // Seal and abort only ever receive the locator `create` just wrote.
+      const ledger = await locatorLedger(control, descriptor, FORMAT_VERSION);
       await ensureLedger(ledger);
       const updated = await rows<Readonly<{ allocation_id: string }>>(
         control,
@@ -1958,12 +2061,11 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     },
     abort: async (descriptor) =>
       dropAllocation(
-        await observeControlLedger(control),
+        await locatorLedger(control, descriptor, FORMAT_VERSION),
         descriptor.allocationId,
       ),
     reopen: async (graph, descriptor, descriptorVersion) => {
-      assertLocatorVersion(descriptorVersion);
-      const ledger = await observeControlLedger(control);
+      const ledger = await locatorLedger(control, descriptor, descriptorVersion);
       await ensureLedger(ledger);
       const sealed = await resolveSealedAllocation(
         graph,
@@ -1978,9 +2080,8 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
       };
     },
     destroy: async (descriptor, origin, descriptorVersion) => {
-      assertLocatorVersion(descriptorVersion);
       await dropAllocation(
-        await observeControlLedger(control),
+        await locatorLedger(control, descriptor, descriptorVersion),
         descriptor.allocationId,
         origin,
       );
@@ -2083,13 +2184,17 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     ephemeral,
     makeBackend,
     durable,
-    listUnsealedAllocations: async ({ after = "", limit = 100 } = {}) => {
+    listUnsealedAllocations: async ({
+      after = "",
+      limit = 100,
+      ledgerSchema,
+    } = {}) => {
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
         throw new BranchError(
           "Unsealed-allocation inventory limit must be 1 to 1000.",
         );
       }
-      const ledger = await observeControlLedger(control);
+      const ledger = await resolveLedger(control, ledgerSchema);
       await ensureLedger(ledger);
       const found = await rows<AllocationRow>(
         control,
@@ -2102,9 +2207,10 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           row.state === "ephemeral" ?
             ("ephemeral" as const)
           : ("allocating" as const),
+        ledgerSchema: ledger.schema,
       }));
     },
-    abortAllocation: async (allocationId) =>
-      dropAllocation(await observeControlLedger(control), allocationId),
+    abortAllocation: async (allocationId, { ledgerSchema } = {}) =>
+      dropAllocation(await resolveLedger(control, ledgerSchema), allocationId),
   };
 }

@@ -76,6 +76,7 @@ import type { TransactionContext } from "../../store/types";
 import { isMissingTableError } from "../../utils/sql-errors";
 import type { TransactionBackend, TransactionOptions } from "../types";
 import { quoteDdlIdentifier } from "./ddl";
+import type { PostgresWorkingCopyLocator } from "./postgres-working-copy";
 import { ALLOCATION_LOCK_TRANSACTION_OPTIONS } from "./postgres-working-copy-lock";
 import { type QuerySession, rows, sqlName } from "./postgres-working-copy-sql";
 
@@ -133,7 +134,7 @@ export type OperationAllocation<G extends GraphDef> = Readonly<{
  * for one provisioned before evidence existed, which needs no `connect` call.
  */
 export type OperationAllocationAccess<G extends GraphDef> = <T>(
-  descriptor: Readonly<{ allocationId: string }>,
+  descriptor: PostgresWorkingCopyLocator,
   descriptorVersion: number,
   expectedOrigin: DurableBranchOrigin,
   members: Readonly<{
@@ -534,7 +535,7 @@ async function markEvidenceDelivered<G extends GraphDef>(
 export function createPostgresOperationCapability<G extends GraphDef>(
   operations: PostgresWorkingCopyOperations<G>,
   withAllocation: OperationAllocationAccess<G>,
-): DurableOperationCapability<Readonly<{ allocationId: string }>> {
+): DurableOperationCapability<PostgresWorkingCopyLocator> {
   return {
     operate: ({ descriptor, descriptorVersion, expectedOrigin, request }) =>
       withAllocation(descriptor, descriptorVersion, expectedOrigin, {
