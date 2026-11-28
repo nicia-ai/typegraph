@@ -71,6 +71,7 @@ export const GRAPH_BACKEND_PROJECTION_KEYS = [
   "insertUnique",
   "insertUniqueBatch",
   "deleteUnique",
+  "releaseUniquesByOwner",
   "hardDeleteUniquesByNodeIds",
   "hardDeleteUniquesByConcreteKind",
   "checkUnique",

@@ -64,6 +64,7 @@ export const PGLITE_TEST_FILES = [
   "tests/provenance-lock-order.test.ts",
   "tests/recorded-capture-write-parity.test.ts",
   "tests/recorded-time-transaction-threading.test.ts",
+  "tests/release-uniques-by-owner-chunking.test.ts",
   "tests/row-fence-statements.test.ts",
   "tests/schema-fence-plan.test.ts",
   "tests/schema-fused-insert.test.ts",

@@ -96,7 +96,11 @@ import {
   type TombstonedNodeRow,
   type UniqueRow,
 } from "../../backend/types";
-import { checkDisjointness, uniqueConstraintKey } from "../../constraints";
+import {
+  checkDisjointness,
+  uniqueConstraintKey,
+  uniqueConstraintKeyMoves,
+} from "../../constraints";
 import { type GraphDef } from "../../core/define-graph";
 import { assertJsonValue } from "../../core/json-value";
 import {
@@ -173,6 +177,7 @@ import {
   isUniquenessClaimEntry,
   nodeClaimEntries,
   type NodeClaimItem,
+  nodeClaimKeySchema,
   type NodeClaimTransition,
   type NodeCreateClaimPlan,
   planNodeCreateClaims,
@@ -1234,7 +1239,7 @@ export function createNodeBatchValidationSeams(
   registerAppliedNodeUpdate: (
     kind: string,
     id: string,
-    oldProps: Record<string, unknown>,
+    storedProps: Record<string, unknown>,
     newProps: Record<string, unknown>,
     constraints: readonly UniqueConstraint[],
   ) => void;
@@ -1253,6 +1258,21 @@ export function createNodeBatchValidationSeams(
   // under different kinds are two claimants, and an id-keyed cache reads them
   // as one.
   const pendingUniqueOwners = new Map<string, ClaimOwner>();
+  // Per (constraint, owner) an in-slice update gave its claims back for: the
+  // key it kept, if any. The update released BY OWNER, so every other claim
+  // that owner holds under the constraint reads as free, whatever its key.
+  const releasedOwners = new Map<string, string | undefined>();
+
+  function releasedByOwner(row: UniqueRow): boolean {
+    const release = encodeTupleKey([
+      row.constraint_name,
+      row.concrete_kind,
+      row.node_id,
+    ]);
+    return (
+      releasedOwners.has(release) && releasedOwners.get(release) !== row.key
+    );
+  }
 
   async function getNodeCached(
     lookupGraphId: string,
@@ -1269,6 +1289,13 @@ export function createNodeBatchValidationSeams(
   }
 
   async function checkUniqueCached(
+    params: Parameters<GraphBackend["checkUnique"]>[0],
+  ): Promise<CachedUniqueRow> {
+    const row = await lookupUniqueCached(params);
+    return row !== undefined && releasedByOwner(row) ? undefined : row;
+  }
+
+  async function lookupUniqueCached(
     params: Parameters<GraphBackend["checkUnique"]>[0],
   ): Promise<CachedUniqueRow> {
     const cacheKey = buildUniqueCacheKey(
@@ -1353,76 +1380,65 @@ export function createNodeBatchValidationSeams(
   // create either (a) claims a value this update just freed yet gets rejected
   // against the stale reservation, or (b) passes the stale "free" cache for a
   // value this update just took and then violates the real constraint at
-  // flush, aborting the whole import. Mirrors the claim transition's key diff:
-  // for each constraint whose key changed, the released old key becomes free
-  // and the reserved new key becomes owned by this node AT ITS AXIS — the one
-  // row the transition actually wrote — while the remaining kinds the probe
-  // reads are recorded as vacant, which they are: the probe that let this
-  // update through visited every one of them.
+  // flush, aborting the whole import. Mirrors the claim transition: for each
+  // constraint whose key moved (`uniqueConstraintKeyMoves`, the decision the
+  // transition itself makes from the same stored and new props), the update
+  // gave back every other claim its owner held under it — by owner, so the
+  // overlay frees them by owner too, never by a key recomputed from the row it
+  // replaced — and holds the new key AT ITS AXIS, the one row the transition
+  // wrote, while the remaining kinds the probe reads are recorded as vacant,
+  // which they are: the probe that let this update through visited every one
+  // of them. A constraint whose key did not move was not touched, and neither
+  // is its overlay.
   function registerAppliedNodeUpdate(
     kind: string,
     id: string,
-    oldProps: Record<string, unknown>,
+    storedProps: Record<string, unknown>,
     newProps: Record<string, unknown>,
     constraints: readonly UniqueConstraint[],
   ): void {
     const owner: ClaimOwner = { concreteKind: kind, nodeId: id };
-    const oldEntries = new Map(
-      nodeClaimEntries(registry, kind, id, oldProps, constraints, "update").map(
-        (entry) => [entry.constraintName, entry],
-      ),
-    );
     const newEntries = new Map(
       nodeClaimEntries(registry, kind, id, newProps, constraints, "update").map(
         (entry) => [entry.constraintName, entry],
       ),
     );
 
+    const schema =
+      constraints.length === 0 ? undefined : nodeClaimKeySchema(registry, kind);
     for (const constraint of constraints) {
-      const oldEntry = oldEntries.get(constraint.name);
+      if (
+        schema === undefined ||
+        !uniqueConstraintKeyMoves(constraint, schema, storedProps, newProps)
+      ) {
+        continue;
+      }
       const newEntry = newEntries.get(constraint.name);
-      if (oldEntry?.key === newEntry?.key) continue;
-
-      const kindsToCheck = uniquenessProbeKinds(
+      releasedOwners.set(
+        encodeTupleKey([constraint.name, kind, id]),
+        newEntry?.key,
+      );
+      if (newEntry === undefined) continue;
+      for (const kindToCheck of uniquenessProbeKinds(
         kind,
         constraint.scope,
         registry,
-      );
-
-      if (oldEntry !== undefined) {
-        for (const kindToCheck of kindsToCheck) {
-          const cacheKey = buildUniqueCacheKey(
-            graphId,
-            kindToCheck,
-            constraint.name,
-            oldEntry.key,
-          );
-          // This node released the key on the real backend, so it is now
-          // free. Clear any pending reservation and record the known-free
-          // state (overwriting a stale seeded owner) so a later create's
-          // pre-check sees a vacancy instead of a redundant backend read.
-          pendingUniqueOwners.delete(cacheKey);
-          uniqueCache.set(cacheKey, undefined);
+      )) {
+        const cacheKey = buildUniqueCacheKey(
+          graphId,
+          kindToCheck,
+          constraint.name,
+          newEntry.key,
+        );
+        if (kindToCheck === newEntry.axis) {
+          // This node now holds the key on the real backend. A pending owner
+          // shadows the seeded uniqueCache entry (checkUniqueCached consults
+          // it first), matching registerPendingUniqueEntries' reservation.
+          pendingUniqueOwners.set(cacheKey, owner);
+          continue;
         }
-      }
-      if (newEntry !== undefined) {
-        for (const kindToCheck of kindsToCheck) {
-          const cacheKey = buildUniqueCacheKey(
-            graphId,
-            kindToCheck,
-            constraint.name,
-            newEntry.key,
-          );
-          if (kindToCheck === newEntry.axis) {
-            // This node now holds the key on the real backend. A pending owner
-            // shadows the seeded uniqueCache entry (checkUniqueCached consults
-            // it first), matching registerPendingUniqueEntries' reservation.
-            pendingUniqueOwners.set(cacheKey, owner);
-            continue;
-          }
-          pendingUniqueOwners.delete(cacheKey);
-          uniqueCache.set(cacheKey, undefined);
-        }
+        pendingUniqueOwners.delete(cacheKey);
+        uniqueCache.set(cacheKey, undefined);
       }
     }
   }
@@ -2289,7 +2305,7 @@ async function prepareNodeUpdateSet<G extends GraphDef>(
     transitions.push({
       kind: created.kind,
       id: created.id,
-      heldProps: undefined,
+      restores: true,
       props: created.validatedProps,
       constraints: created.uniqueConstraints,
     });
@@ -3518,6 +3534,10 @@ function ownerClaimConstraint<G extends GraphDef>(
  * longer claiming here — is inert, which is what keeps a lookup from handing
  * back, or rewriting, a node the key no longer belongs to. Read rather than
  * written away because databases already carry such rows.
+ *
+ * The node's key is derived from the value it stores, through its OWN kind's
+ * schema by the key owner, never a re-parse, which would key a value the row
+ * does not hold.
  */
 function claimedNodeRow<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -3538,6 +3558,7 @@ function claimedNodeRow<G extends GraphDef>(
   if (ownerConstraint === undefined) return undefined;
   const heldKey = uniqueConstraintKey(
     ownerConstraint,
+    getNodeRegistration(ctx.graph, node.kind).type.schema,
     rowPropsToObject(node.props),
   );
   return heldKey === key ? node : undefined;
@@ -5002,7 +5023,7 @@ function newRowClaimTransitions<G extends GraphDef>(
   return creates.map((input) => ({
     kind: input.kind,
     id: generateId(),
-    heldProps: undefined,
+    restores: true,
     props: input.props,
     constraints: getNodeRegistration(ctx.graph, input.kind).unique ?? [],
   }));
@@ -8133,7 +8154,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
 
   const constraint = resolveConstraint(ctx.graph, kind, constraintName);
 
-  const key = uniqueConstraintKey(constraint, validatedProps);
+  const key = uniqueConstraintKey(constraint, nodeKind.schema, validatedProps);
   if (key === undefined) {
     const node = await executeNodeCreate(
       ctx,
@@ -8224,7 +8245,7 @@ export async function executeNodeFindByConstraint<G extends GraphDef>(
   });
 
   const constraint = resolveConstraint(ctx.graph, kind, constraintName);
-  const key = uniqueConstraintKey(constraint, validatedProps);
+  const key = uniqueConstraintKey(constraint, nodeKind.schema, validatedProps);
   if (key === undefined) return undefined;
 
   const kindsToCheck = uniquenessProbeKinds(
@@ -8279,7 +8300,11 @@ function validateAndComputeKeys(
       kind,
       operation: "create",
     });
-    const key = uniqueConstraintKey(constraint, validatedProps);
+    const key = uniqueConstraintKey(
+      constraint,
+      nodeKind.schema,
+      validatedProps,
+    );
     validated.push({ validatedProps, key });
   }
 

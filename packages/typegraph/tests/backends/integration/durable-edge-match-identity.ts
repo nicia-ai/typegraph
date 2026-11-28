@@ -3,6 +3,9 @@ import { z } from "zod";
 
 import { defineEdge, defineGraph, defineNode } from "../../../src";
 import { EdgeMatchIdentityConflictError } from "../../../src/errors-entry";
+import { FORMAT_VERSION, importGraph } from "../../../src/interchange";
+import { requireDefined } from "../../../src/utils/presence";
+import { expectObservation } from "../../helpers/known-defect";
 import { type IntegrationTestContext } from "./test-context";
 
 const Person = defineNode("Person", {
@@ -12,6 +15,36 @@ const Person = defineNode("Person", {
 const knows = defineEdge("knows", {
   schema: z.object({ label: z.string(), note: z.string().optional() }),
 });
+
+/** An identity field whose validated value differs from its input. */
+const tagged = defineEdge("tagged", {
+  schema: z.object({ label: z.string().toLowerCase() }),
+});
+
+function normalizingIdentityGraph(id: string) {
+  return defineGraph({
+    id,
+    nodes: { Person: { type: Person } },
+    edges: {
+      tagged: {
+        type: tagged,
+        from: [Person],
+        to: [Person],
+        matchIdentity: { name: "tagged-label", fields: ["label"] },
+      },
+    },
+  });
+}
+
+/** Whether a write was refused, by error name, or completed. */
+async function writeOutcome(write: () => Promise<unknown>): Promise<string> {
+  try {
+    await write();
+    return "written";
+  } catch (error) {
+    return error instanceof Error ? error.name : String(error);
+  }
+}
 
 function durableIdentityGraph(
   id: string,
@@ -219,6 +252,80 @@ export function registerDurableEdgeMatchIdentityIntegrationTests(
           ],
         }),
       ).resolves.toEqual([]);
+    });
+
+    it("an edge imported under onUnknownProperty allow keys its identity from the text it writes", async () => {
+      const store = await context.createStore(
+        normalizingIdentityGraph("durable_identity_import_allow"),
+      );
+      const from = await store.nodes.Person.create(
+        { name: "From" },
+        { id: "from" },
+      );
+      const to = await store.nodes.Person.create({ name: "To" }, { id: "to" });
+      // The unknown key routes the row through "allow"'s verbatim write.
+      const imported = await importGraph(
+        store,
+        {
+          formatVersion: FORMAT_VERSION,
+          exportedAt: new Date().toISOString(),
+          source: { type: "external", description: "identity under allow" },
+          nodes: [],
+          edges: [
+            {
+              id: "imported",
+              kind: "tagged",
+              from: { kind: "Person", id: "from" },
+              to: { kind: "Person", id: "to" },
+              properties: { label: "REF", extra: 1 },
+            },
+          ],
+        },
+        { onConflict: "error", onUnknownProperty: "allow" },
+      );
+      expect(imported.errors).toEqual([]);
+
+      // The row is written verbatim and its identity keyed from that text,
+      // `"REF"`; a create validates `"REF"` to `"ref"` and keys that, so it is
+      // admitted as a second edge with the same value. The same on main.
+      const duplicate = await writeOutcome(() =>
+        store.edges.tagged.create(from, to, { label: "REF" }),
+      );
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: duplicate,
+        correct: "EdgeMatchIdentityConflictError",
+        defects: [
+          {
+            label: "verbatim edge identity keyed from its text",
+            on: {},
+            today: "written",
+          },
+        ],
+      });
+      const found = await store.edges.tagged.find();
+      const edges = found.filter((edge) => edge.id === "imported");
+      expect(edges.map((edge) => [edge.id, edge.label])).toEqual([
+        ["imported", "REF"],
+      ]);
+
+      // The row keeps the document's text, which the schema's parse rewrites:
+      // an update re-validates the stored props and reads that as a change
+      // of an identity field. The same on main; not addressed here.
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: await writeOutcome(() =>
+          store.edges.tagged.update(requireDefined(edges[0]).id, {}),
+        ),
+        correct: "written",
+        defects: [
+          {
+            label: "verbatim identity value rewritten by update",
+            on: {},
+            today: "ValidationError",
+          },
+        ],
+      });
     });
   });
 }

@@ -48,6 +48,7 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "deleteFulltextBatch",
   "deleteNode",
   "deleteUnique",
+  "releaseUniquesByOwner",
   "hardDeleteUniquesByNodeIds",
   "deleteVectorSlotContribution",
   "dialect",

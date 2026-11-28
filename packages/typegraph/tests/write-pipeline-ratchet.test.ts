@@ -135,8 +135,11 @@ const UNFENCED_TARGET_ESCAPE_INVENTORY = [
  * edge-endpoint / delete pairing and writes no row.
  * Node `bulkHardDelete` (#460) adds the entity write `hardDeleteNodesBatch`
  * and the read `findEdgesConnectedToNodes` (141→143).
+ * `releaseUniquesByOwner` (143→144) is the sidecar write every lifecycle
+ * release of a node's uniqueness claims goes through: by owner, never by a
+ * recomputed key.
  */
-const MEMBER_COUNT = 143;
+const MEMBER_COUNT = 144;
 
 type Violation = Readonly<{ file: string; member: string; line: number }>;
 

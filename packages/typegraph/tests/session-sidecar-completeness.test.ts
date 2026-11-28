@@ -172,6 +172,7 @@ const WATCHED_MEMBERS = [
   "insertUnique",
   "insertUniqueBatch",
   "deleteUnique",
+  "releaseUniquesByOwner",
   "hardDeleteUniquesByNodeIds",
   "hardDeleteUniquesByConcreteKind",
   "claimEdgeCardinality",
@@ -548,8 +549,8 @@ const CASES: Record<keyof WriteSession, Case> = {
           {
             existing: liveRow(row),
             schema,
-            // A CHANGED unique key: the uniqueness transition is a diff, so an
-            // update that keeps every key reserves and releases nothing.
+            // A CHANGED unique key: the new key is reserved and the owner's
+            // other claims are released by owner.
             validatedProps: {
               ...documentProps("g"),
               title: "revised",
@@ -561,8 +562,8 @@ const CASES: Record<keyof WriteSession, Case> = {
         );
     },
     sidecars: [
-      "deleteUnique",
       "insertUnique",
+      "releaseUniquesByOwner",
       "upsertFulltext",
       "upsertEmbedding",
     ],
@@ -583,7 +584,7 @@ const CASES: Record<keyof WriteSession, Case> = {
     // The edge cascade is the sidecar family that lives one module away.
     sidecars: [
       "deleteEdgesBatch",
-      "deleteUnique",
+      "releaseUniquesByOwner",
       "deleteFulltext",
       "deleteEmbedding",
     ],
