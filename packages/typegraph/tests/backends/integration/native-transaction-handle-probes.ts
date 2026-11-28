@@ -20,7 +20,10 @@
  * savepoint object has no link to the enclosing one, and its sessions share
  * a state of their own (`src/backend/native-transaction-handle.ts`).
  *
- * Two transactions open at once on one pool never share a state.
+ * Two transactions open at once on one pool never share a state, and two
+ * wrappers the serialized-resource audit identifies as one connection share
+ * a state only inside one transaction: naming the connection is not proof of
+ * the transaction (`resolveConnectionIdentity`).
  */
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -32,6 +35,7 @@ import {
 } from "../../../src";
 import { backendDerivationRoot } from "../../../src/backend/derive-backend";
 import { createPostgresBackend } from "../../../src/backend/drizzle/postgres";
+import { sharesSerializedTransactionResource } from "../../../src/backend/transaction-resource";
 import type { AdapterBackend } from "../../../src/backend/types";
 import type { NativeTransactionState } from "../../../src/store/native-transaction-state";
 import {
@@ -294,6 +298,65 @@ export function registerNativeTransactionHandleProbeTests(
         secondTransaction: [false, false],
         shared: namesEnded,
       });
+    });
+  });
+
+  describe("native transaction state across two wrappers of one connection", () => {
+    it("is shared by the two wrappers inside one transaction and never across two transactions", async () => {
+      const serialized = await context.createSerializedBackend();
+      try {
+        const first = serialized.backend;
+        const second = await serialized.createWrapper();
+        // The audit identifies the two factory wrappers as one connection.
+        expect(sharesSerializedTransactionResource(first, second)).toBe(true);
+        const [firstStore] = await createAdapterStoreWithSchema(
+          probeGraph,
+          first,
+        );
+        const [secondStore] = await createAdapterStoreWithSchema(
+          probeGraph,
+          second,
+        );
+        // Each wrapper opens a transaction in turn on the one connection,
+        // and the OTHER wrapper's store joins it and writes in it.
+        const observe = (
+          opener: AdapterBackend<unknown>,
+          joiner: typeof firstStore,
+          label: string,
+        ): Promise<
+          Readonly<{
+            opener: NativeTransactionState;
+            joined: NativeTransactionState;
+          }>
+        > =>
+          opener.transactionWithNative(async (target, native) => {
+            const openerState = openTransactionSession(target).native;
+            const joined = joiner.withTransaction(native);
+            await joined.nodes.ProbeItem.create({ label });
+            return { opener: openerState, joined: stateOf(joined) };
+          });
+        const inFirst = await observe(first, secondStore, "first");
+        const inSecond = await observe(second, firstStore, "second");
+        const inFirstAgain = await observe(first, secondStore, "third");
+
+        // One transaction: both wrappers' sessions share its state.
+        expect(inFirst.joined).toBe(inFirst.opener);
+        expect(inSecond.joined).toBe(inSecond.opener);
+        expect(inFirstAgain.joined).toBe(inFirstAgain.opener);
+        // One connection, three transactions: three states.
+        expect(
+          new Set([inFirst.opener, inSecond.opener, inFirstAgain.opener]).size,
+        ).toBe(3);
+        // Every write committed with the transaction that framed it.
+        const written = await firstStore.nodes.ProbeItem.find();
+        expect(written.map((item) => item.label).toSorted()).toEqual([
+          "first",
+          "second",
+          "third",
+        ]);
+      } finally {
+        await serialized.close();
+      }
     });
   });
 

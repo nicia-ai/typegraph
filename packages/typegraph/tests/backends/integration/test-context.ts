@@ -34,6 +34,13 @@ export type InspectableHistoryStore<G extends GraphDef> = HistoryStore<G> &
  */
 export type SerializedBackendHandle = Readonly<{
   backend: AdapterBackend<unknown>;
+  /**
+   * Builds ANOTHER backend through the lane's own factory over the same
+   * connection `backend` runs on, with the same tables and options: a second
+   * wrapper the serialized-resource audit must identify as sharing it, not a
+   * derivation of `backend`. Closed by `close`.
+   */
+  createWrapper: () => Promise<AdapterBackend<unknown>>;
   close: () => Promise<void>;
 }>;
 

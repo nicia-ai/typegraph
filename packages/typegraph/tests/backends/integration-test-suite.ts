@@ -72,6 +72,7 @@ type BackendFactoryResult<TNativeTransaction> = Readonly<{
   createSerializedBackend: (overrides?: SerializedBackendOverrides) => Promise<
     Readonly<{
       backend: AdapterBackend<TNativeTransaction>;
+      createWrapper: () => Promise<AdapterBackend<TNativeTransaction>>;
       close: () => Promise<void>;
     }>
   >;
@@ -191,6 +192,8 @@ export function createIntegrationTestSuite<
         // the shared suite is written against every lane at once.
         return {
           backend: handle.backend as AdapterBackend<unknown>,
+          createWrapper: async () =>
+            (await handle.createWrapper()) as AdapterBackend<unknown>,
           close: handle.close,
         };
       },
