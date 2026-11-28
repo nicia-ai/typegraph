@@ -97,12 +97,12 @@ async function builderIds(store: NoteStore, k: number) {
     .whereNode("n", (n) => n.$fulltext.matches("climate", k))
     .select((row) => ({ id: row.n.id }))
     .execute();
-  return rows.map((row) => row.id);
+  return rows.map((row) => String(row.id));
 }
 
 async function facadeIds(store: NoteStore, limit: number) {
   return store.search.fulltext("Note", { query: "climate", limit }).then(
-    (hits) => hits.map((hit) => hit.node.id),
+    (hits) => hits.map((hit) => String(hit.node.id)),
     (error: unknown) =>
       error instanceof TypeError ? `TypeError: ${error.message}` : error,
   );
@@ -152,7 +152,7 @@ describe("an unscored full-text match", () => {
     });
     expectObservation({
       lane: { dialect: "postgres" },
-      observed: hits.map((hit) => hit.node.id),
+      observed: hits.map((hit) => String(hit.node.id)),
       correct: ["s"],
       defects: [{ label: DEFECT, on: { dialect: ["postgres"] }, today: ["u"] }],
     });
