@@ -418,6 +418,68 @@ function adapterRacingTheSetProbe<TNative>(
 }
 
 // ============================================================
+// A trigger that suppresses one row of the keyed write
+// ============================================================
+
+const SbrSuppressed = defineNode("SbrSuppressed", {
+  schema: z.object({ status: z.string() }),
+});
+
+const suppressedGraph = defineGraph({
+  id: "statement_before_refusal_suppressed",
+  nodes: { SbrSuppressed: { type: SbrSuppressed } },
+  edges: {},
+});
+
+/** The row the trigger below suppresses. */
+const SUPPRESSED_ID = "suppressed";
+
+/**
+ * Installs a `BEFORE UPDATE` trigger that silently skips any UPDATE of the
+ * node {@link SUPPRESSED_ID} in {@link suppressedGraph} — `RAISE(IGNORE)` on
+ * SQLite, `RETURN NULL` on PostgreSQL — and lets every other row through.
+ * Returns the teardown.
+ */
+async function installRowSuppressingTrigger(
+  backend: Pick<GraphBackend, "dialect" | "executeDdl" | "tableNames">,
+): Promise<() => Promise<void>> {
+  const executeDdl = requireDefined(backend.executeDdl);
+  const nodesTable = `"${requireDefined(backend.tableNames).nodes}"`;
+  const graphLiteral = `'${suppressedGraph.id}'`;
+  const idLiteral = `'${SUPPRESSED_ID}'`;
+  if (backend.dialect === "postgres") {
+    await executeDdl(
+      `CREATE FUNCTION tg_suppress_fn() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN
+         IF OLD.id = ${idLiteral} THEN
+           RETURN NULL;
+         END IF;
+         RETURN NEW;
+       END $$`,
+    );
+    await executeDdl(
+      `CREATE TRIGGER tg_suppress BEFORE UPDATE ON ${nodesTable}
+       FOR EACH ROW WHEN (OLD.graph_id = ${graphLiteral})
+       EXECUTE FUNCTION tg_suppress_fn()`,
+    );
+    return async () => {
+      await executeDdl(`DROP TRIGGER tg_suppress ON ${nodesTable}`);
+      await executeDdl(`DROP FUNCTION tg_suppress_fn()`);
+    };
+  }
+  await executeDdl(
+    `CREATE TRIGGER tg_suppress BEFORE UPDATE ON ${nodesTable}
+     WHEN OLD.graph_id = ${graphLiteral} AND OLD.id = ${idLiteral}
+     BEGIN
+       SELECT RAISE(IGNORE);
+     END`,
+  );
+  return async () => {
+    await executeDdl(`DROP TRIGGER tg_suppress`);
+  };
+}
+
+// ============================================================
 // Row 4: windowed bulk identity assertions
 // ============================================================
 
@@ -1036,6 +1098,67 @@ export function registerStatementBeforeRefusalIntegrationTests(
         oldClaimOwner: renamed.id,
         newClaimOwner: undefined,
       });
+    });
+    // A trigger that suppresses a row the keyed write counted cuts the write
+    // short after the other rows of the set changed: the count runs before
+    // the UPDATE, and nothing in the statement can undo rows it already
+    // wrote. The Store refuses the short result, but a caller that catches
+    // the refusal and commits keeps the rows that changed, with their
+    // sidecars not rebuilt. Owned by a separate design (the engine-ended
+    // short-write class); pinned here at what it commits today.
+    it("a set update whose keyed write a trigger cuts short commits no change", async () => {
+      const store = await context.createStore(suppressedGraph);
+      await store.nodes.SbrSuppressed.create(
+        { status: "draft" },
+        { id: SUPPRESSED_ID },
+      );
+      await store.nodes.SbrSuppressed.create(
+        { status: "draft" },
+        { id: "written" },
+      );
+      const dropTrigger = await installRowSuppressingTrigger(store.backend);
+      try {
+        const thrown = await store.transaction(async (tx) =>
+          settle(
+            tx.nodes.SbrSuppressed.updateWhere({
+              patch: { status: "published" },
+              where: (candidate) => candidate.status.eq("draft"),
+            }),
+          ),
+        );
+        const stored = await store.nodes.SbrSuppressed.find();
+        expectObservation({
+          lane,
+          observed: {
+            refused: thrown !== "resolved",
+            rows: stored
+              .map((row) => [row.id, row.status, row.meta.version])
+              .toSorted(),
+          },
+          correct: {
+            refused: true,
+            rows: [
+              [SUPPRESSED_ID, "draft", 1],
+              ["written", "draft", 1],
+            ],
+          },
+          defects: [
+            {
+              label: "set-update short write after rows changed",
+              on: EVERY_DRIVER,
+              today: {
+                refused: true,
+                rows: [
+                  [SUPPRESSED_ID, "draft", 1],
+                  ["written", "published", 2],
+                ],
+              },
+            },
+          ],
+        });
+      } finally {
+        await dropTrigger();
+      }
     });
   });
 }

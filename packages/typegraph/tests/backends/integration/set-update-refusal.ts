@@ -33,6 +33,9 @@ import {
 } from "../../../src/backend/types";
 import { computeUniqueKey } from "../../../src/constraints";
 import { DatabaseOperationError } from "../../../src/errors";
+import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledStatementSql } from "../../../src/query/sql-intent";
 import { buildKindRegistry } from "../../../src/registry";
 import { uniquenessClaimAxis } from "../../../src/store/claims/axis";
 import { requireDefined } from "../../../src/utils/presence";
@@ -148,9 +151,12 @@ type Replacement = Readonly<{
 }>;
 
 /**
- * The replacements, each at version 1 like the original and each still
- * matching the selection: one with other properties, and one identical in
- * every property but stored under another validity window.
+ * The replacements, each at version 1 like the original, created at the same
+ * instant, and each still matching the selection: one with other properties
+ * under the same validity window, and one identical in every property but
+ * stored under another validity window. Each differs from the original in
+ * exactly one part of the row token, so each case fails if the token stops
+ * naming that part.
  */
 const REPLACEMENTS: readonly Replacement[] = [
   {
@@ -167,7 +173,9 @@ const REPLACEMENTS: readonly Replacement[] = [
 /**
  * `backend`, whose transactions delete the row `id` and re-create it under the
  * same id as `replacement` describes, immediately before their set update's
- * keyed write — after its dry-run has read and validated the original.
+ * keyed write — after its dry-run has read and validated the original. The
+ * replacement keeps the original's creation time, and its validity window
+ * unless `replacement` states another.
  */
 function backendRecreatingBeforeSetWrite(
   backend: GraphBackend,
@@ -178,6 +186,9 @@ function backendRecreatingBeforeSetWrite(
     const updateNodeSet = requireDefined(target.updateNodeSet);
     return deriveBackend(target, {
       updateNodeSet: async (params) => {
+        const original = requireDefined(
+          await target.getNode(params.graphId, params.kind, id),
+        );
         await target.hardDeleteNode({
           graphId: params.graphId,
           kind: params.kind,
@@ -188,10 +199,27 @@ function backendRecreatingBeforeSetWrite(
           kind: params.kind,
           id,
           props: replacement.props,
-          ...(replacement.validFrom === undefined ?
-            {}
-          : { validFrom: replacement.validFrom }),
+          validFrom: replacement.validFrom ?? requireDefined(original.valid_from),
         });
+        const nodesTable = createSqlSchema(target.tableNames).nodesTable;
+        await requireDefined(target.executeStatement)(
+          asCompiledStatementSql(sql`
+            UPDATE ${nodesTable} SET created_at = ${original.created_at}
+            WHERE graph_id = ${params.graphId} AND kind = ${params.kind}
+              AND id = ${id}
+          `),
+        );
+        const replaced = requireDefined(
+          await target.getNode(params.graphId, params.kind, id),
+        );
+        // The replacement differs from the original only where the case says.
+        expect([replaced.version, replaced.created_at]).toEqual([
+          original.version,
+          original.created_at,
+        ]);
+        expect(replaced.valid_from === original.valid_from).toBe(
+          replacement.validFrom === undefined,
+        );
         return updateNodeSet(params);
       },
     });

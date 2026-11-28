@@ -24,6 +24,7 @@ import {
 } from "../../../src/query/sql-intent";
 import { buildKindRegistry } from "../../../src/registry";
 import { uniquenessClaimAxis } from "../../../src/store/claims/axis";
+import { createRecordedBackend } from "../../../src/store/recorded-capture";
 import { requireDefined } from "../../../src/utils/presence";
 import { createGate } from "../../concurrency-utils";
 import type { InspectableStore, IntegrationTestContext } from "./test-context";
@@ -456,8 +457,13 @@ export function registerSetUpdateConcurrencyTests(
     // first too: taken only at the write, it would follow the dry-run's row
     // lock, and a writer that holds the graph lock while it updates the same
     // row would deadlock against it.
+    //
+    // The dry-run and the write are called on the recorded transaction port
+    // directly, not through the Store: the Store's managed write frame takes
+    // the graph lock before it calls either, which would hide whether the
+    // port's own dry-run takes it.
     it.runIf(context.serverLaneConcurrency)(
-      "updateWhere() on a history store takes the graph write lock before its dry-run locks the row",
+      "the recorded transaction port's set-update dry-run takes the graph write lock before it locks the row",
       async () => {
         const store = await context.createHistoryStore(raceGraph);
         const document = await store.nodes.RaceDocument.create({
@@ -480,9 +486,31 @@ export function registerSetUpdateConcurrencyTests(
           });
         });
         await holding.opened;
-        const updating = store.nodes.RaceDocument.updateWhere({
-          patch: { status: "published" },
-          where: (candidate) => candidate.status.eq("draft"),
+        const recorded = createRecordedBackend(context.getBackend());
+        const nodesTable = createSqlSchema(recorded.tableNames).nodesTable;
+        const patch = { status: "published" };
+        const updating = recorded.transaction(async (tx) => {
+          const preview = await requireDefined(tx.previewNodeSetUpdate)({
+            operation: "updateWhere",
+            graphId: store.graphId,
+            kind: "RaceDocument",
+            patch,
+            candidateIds: asCompiledSelectSql(sql`
+              SELECT id AS document_id FROM ${nodesTable}
+              WHERE graph_id = ${store.graphId} AND kind = 'RaceDocument'
+                AND props->>'status' = 'draft'
+            `),
+            candidateIdColumn: "document_id",
+          });
+          return requireDefined(tx.updateNodeSet)({
+            graphId: store.graphId,
+            kind: "RaceDocument",
+            patch,
+            rows: preview.rows.map((row) => ({
+              id: row.id,
+              rowToken: row.rowToken,
+            })),
+          });
         });
         try {
           await vi.waitFor(
