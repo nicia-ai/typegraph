@@ -65,6 +65,7 @@ import {
   ConfigurationError,
   SchemaFenceTimeoutError,
   StaleVersionError,
+  TransactionCallRefusedError,
 } from "../../errors";
 import {
   adjacencyIndexAdoptionDdl,
@@ -3545,7 +3546,13 @@ export function createIterativeScanProbe(): IterativeScanProbe {
           const supported = major > 0 || (major === 0 && minor >= 8);
           if (!supported) warnUnavailable(row.v);
           return supported;
-        } catch {
+        } catch (error) {
+          // A refused probe read nothing: refuse its caller and probe again
+          // on the next search, rather than settle on "unsupported".
+          if (error instanceof TransactionCallRefusedError) {
+            probe = undefined;
+            throw error;
+          }
           return false;
         }
       })();
