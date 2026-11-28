@@ -223,6 +223,10 @@ function cachedMemberView(
     const cached = decorated.get(property);
     if (cached !== undefined && cached.source === value) return cached.value;
     const presented = view(property, value);
+    // A member the view leaves as it is (a read, a value) keeps no entry: it
+    // is the same object on every read anyway, and a Store's projection reads
+    // every member once.
+    if (presented === value) return value;
     if (property === "commands") {
       carrySameSessionCommandPortMetadata(value, presented);
     }
