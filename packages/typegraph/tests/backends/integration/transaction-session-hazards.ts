@@ -37,6 +37,7 @@ import { z } from "zod";
 
 import {
   asNodeId,
+  createAdapterStore,
   createAdapterStoreWithSchema,
   createStoreWithSchema,
   defineGraph,
@@ -48,7 +49,10 @@ import {
   projectBackendWithout,
 } from "../../../src/backend/derive-backend";
 import { GRAPH_BACKEND_PROJECTION_KEYS } from "../../../src/backend/graph-backend-keys";
-import { createPostgresBackend } from "../../../src/backend/postgres";
+import {
+  createPostgresBackend,
+  createPostgresTransactionBackend,
+} from "../../../src/backend/postgres";
 import type {
   AdapterBackend,
   GraphBackend,
@@ -79,6 +83,7 @@ import {
   expectObservation,
   type KnownDefect,
 } from "../../helpers/known-defect";
+import { rejectionOf, writeOutcome } from "./read-only-transaction-writes";
 import type {
   IntegrationLaneDriver,
   IntegrationTestContext,
@@ -1224,6 +1229,71 @@ export function registerTransactionSessionHazardTests(
         return ids(() => setup.nodes.HzItem.find());
       }
 
+      /**
+       * A read-write `store.transaction()` writes `rw-1`; a read-only
+       * `store.transaction()` then opens beside it on the same caller's
+       * transaction, and once it has begun (or settled, should opening it
+       * wait or be refused) the read-write unit runs `afterOverlap`. Both
+       * units are savepoints of the one native transaction. Returns how
+       * each unit settled and the rows the caller's transaction committed.
+       */
+      async function overlapUnits(
+        afterOverlap: (tx: OverlapUnitTransaction) => Promise<void>,
+      ): Promise<
+        Readonly<{
+          readWrite: string;
+          readOnly: Status;
+          items: readonly string[];
+        }>
+      > {
+        const graph = buildGraph();
+        const backend = context.getBackend();
+        const [setup] = await createAdapterStoreWithSchema(graph, backend);
+        await setup.nodes.HzItem.create({ label: "taken" }, { id: "taken" });
+        let readWrite = "";
+        let readOnly: Status = "rejected";
+        await backend.transactionWithNative(async (_target, native) => {
+          const store = createAdapterStore(
+            graph,
+            createPostgresTransactionBackend(native as never),
+          );
+          const wrote = createGate();
+          // Opened once the read-only unit's callback runs, or once the
+          // unit settles without running it.
+          const readOnlyReached = createGate();
+          const readWriteSettled = createGate();
+          const readWriteUnit = rejectionOf(
+            store.transaction(async (tx) => {
+              await tx.nodes.HzItem.create({ label: "rw-1" }, { id: "rw-1" });
+              wrote.open();
+              await readOnlyReached.opened;
+              await afterOverlap(tx);
+            }),
+          );
+          await wrote.opened;
+          const readOnlySettled = statusOf(
+            store.transaction(
+              async (tx) => {
+                await tx.nodes.HzItem.find();
+                readOnlyReached.open();
+                await readWriteSettled.opened;
+              },
+              { accessMode: "read_only" },
+            ),
+          ).finally(() => {
+            readOnlyReached.open();
+          });
+          readWrite = writeOutcome(await readWriteUnit);
+          readWriteSettled.open();
+          readOnly = await readOnlySettled;
+        });
+        return {
+          readWrite,
+          readOnly,
+          items: await ids(() => setup.nodes.HzItem.find()),
+        };
+      }
+
       // SQLite has no factory for a backend over a caller's transaction.
       describe.runIf(POSTGRES_DRIVERS.includes(context.driver))(
         "a Store over createPostgresTransactionBackend",
@@ -1308,6 +1378,100 @@ export function registerTransactionSessionHazardTests(
                   today: {
                     outcomes: ["rejected", "fulfilled"],
                     items: ["taken"],
+                  },
+                },
+              ],
+            );
+          });
+
+          // Drizzle names a savepoint by its depth (`sp1`) on PGlite and
+          // node-postgres, so the read-only unit opens a savepoint of the same
+          // name as the read-write unit's, and the read-write unit's
+          // rollback goes to the read-only one, opened after `rw-1`.
+          // postgres-js names each savepoint itself, and its rollback covers
+          // the unit. Sibling units on one native transaction belong to the
+          // session change that follows this one, which refuses to open a
+          // second unit while the first one's savepoint is open; the marker
+          // on both cases below flips with it. Either way the read-only unit
+          // settles is correct.
+          const ON_DEPTH_NAMED_SAVEPOINTS: DefectScope = {
+            driver: ["pglite", "node-postgres"],
+          };
+
+          it("commits all of a read-write unit that a read-only unit overlapped, or none of it", async () => {
+            const observed = await overlapUnits(async (tx) => {
+              await tx.nodes.HzItem.create({ label: "rw-2" }, { id: "rw-2" });
+            });
+            // Today the read-only unit's scope refuses `rw-2`, so the
+            // read-write unit rejects; on PGlite and node-postgres `rw-1`
+            // still commits with the caller's transaction. Main has no scope,
+            // runs `rw-2` and commits both, so the scope induces this failure;
+            // the partial commit is main's, as the next case shows.
+            expectOnLane(
+              context,
+              acceptedOr(observed, [
+                {
+                  readWrite: "fulfilled",
+                  readOnly: "rejected",
+                  items: ["rw-1", "rw-2", "taken"],
+                },
+                {
+                  readWrite: "fulfilled",
+                  readOnly: "fulfilled",
+                  items: ["rw-1", "rw-2", "taken"],
+                },
+                {
+                  readWrite: "refused as read-only",
+                  readOnly: "fulfilled",
+                  items: ["taken"],
+                },
+              ]),
+              ACCEPTED,
+              [
+                {
+                  label: "rework-957-fix7-defect-overlapping-units",
+                  on: ON_DEPTH_NAMED_SAVEPOINTS,
+                  today: {
+                    readWrite: "refused as read-only",
+                    readOnly: "fulfilled",
+                    items: ["rw-1", "taken"],
+                  },
+                },
+              ],
+            );
+          });
+
+          it("commits nothing of a read-write unit that a read-only unit overlapped and that failed", async () => {
+            const observed = await overlapUnits(async () => {
+              await Promise.resolve();
+              throw new Error("the read-write unit fails");
+            });
+            // The control: when the read-write unit fails on its own, main
+            // keeps `rw-1` on PGlite and node-postgres the same way, and so
+            // does this change.
+            expectOnLane(
+              context,
+              acceptedOr(observed, [
+                {
+                  readWrite: "rejected: the read-write unit fails",
+                  readOnly: "rejected",
+                  items: ["taken"],
+                },
+                {
+                  readWrite: "rejected: the read-write unit fails",
+                  readOnly: "fulfilled",
+                  items: ["taken"],
+                },
+              ]),
+              ACCEPTED,
+              [
+                {
+                  label: "rework-957-fix7-defect-overlapping-units",
+                  on: ON_DEPTH_NAMED_SAVEPOINTS,
+                  today: {
+                    readWrite: "rejected: the read-write unit fails",
+                    readOnly: "fulfilled",
+                    items: ["rw-1", "taken"],
                   },
                 },
               ],
@@ -1693,6 +1857,18 @@ export function registerTransactionSessionHazardTests(
     });
   });
 }
+
+/** A read-write unit's transaction, as the overlapping-unit cases write through it. */
+type OverlapUnitTransaction = Readonly<{
+  nodes: Readonly<{
+    HzItem: Readonly<{
+      create: (
+        props: { label: string },
+        options: { id: string },
+      ) => Promise<unknown>;
+    }>;
+  }>;
+}>;
 
 /** A Store over a caller's transaction, as these cases call it. */
 type ItemCreatorWithTransaction = Readonly<{
