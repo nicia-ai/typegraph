@@ -1,7 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
-import { defineGraph, defineNode, type Node } from "../../../src";
+import {
+  createStore,
+  defineGraph,
+  defineNode,
+  type Node,
+  UniquenessError,
+} from "../../../src";
+import {
+  deriveBackend,
+  projectGraphBackend,
+} from "../../../src/backend/derive-backend";
+import { type TransactionBackend } from "../../../src/backend/types";
+import { computeUniqueKey } from "../../../src/constraints";
 import type { NodeAccessor } from "../../../src/query/builder/types";
 import { createSqlSchema } from "../../../src/query/compiler/schema";
 import { sql } from "../../../src/query/sql-fragment";
@@ -10,6 +22,8 @@ import {
   asCompiledSelectSql,
   asCompiledStatementSql,
 } from "../../../src/query/sql-intent";
+import { buildKindRegistry } from "../../../src/registry";
+import { uniquenessClaimAxis } from "../../../src/store/claims/axis";
 import { requireDefined } from "../../../src/utils/presence";
 import { createGate } from "../../concurrency-utils";
 import type { InspectableStore, IntegrationTestContext } from "./test-context";
@@ -25,6 +39,77 @@ const raceGraph = defineGraph({
 });
 
 type RaceStore = InspectableStore<typeof raceGraph>;
+
+const RACE_HANDLE_UNIQUE = {
+  name: "set_update_concurrency_handle",
+  fields: ["handle"],
+  scope: "kind",
+  collation: "binary",
+} as const;
+
+const RaceHandle = defineNode("RaceHandle", {
+  schema: z.object({ handle: z.string() }),
+});
+
+const raceUniqueGraph = defineGraph({
+  id: "set_update_concurrency_unique",
+  nodes: { RaceHandle: { type: RaceHandle, unique: [RACE_HANDLE_UNIQUE] } },
+  edges: {},
+});
+
+const raceUniqueRegistry = buildKindRegistry(raceUniqueGraph);
+
+/** The node id holding the live claim of `handle`. */
+async function handleClaimOwner(
+  store: InspectableStore<typeof raceUniqueGraph>,
+  handle: string,
+): Promise<string | undefined> {
+  const row = await store.backend.checkUnique({
+    graphId: raceUniqueGraph.id,
+    nodeKind: uniquenessClaimAxis(
+      "RaceHandle",
+      RACE_HANDLE_UNIQUE.scope,
+      raceUniqueRegistry,
+    ),
+    constraintName: RACE_HANDLE_UNIQUE.name,
+    key: computeUniqueKey(
+      { handle },
+      RACE_HANDLE_UNIQUE.fields,
+      RACE_HANDLE_UNIQUE.collation,
+    ),
+    includeDeleted: false,
+  });
+  return row?.node_id;
+}
+
+/**
+ * `store`'s backend, whose transaction targets run `afterProbe` once, the
+ * first time a batched uniqueness probe returns — after the set update has
+ * found its new key free and before it reserves it.
+ */
+function backendPausingAfterProbe(
+  store: InspectableStore<typeof raceUniqueGraph>,
+  afterProbe: () => Promise<void>,
+) {
+  function pausing(target: TransactionBackend): TransactionBackend {
+    let paused = false;
+    const checkUniqueBatch = requireDefined(target.checkUniqueBatch);
+    return deriveBackend(target, {
+      checkUniqueBatch: async (params) => {
+        const read = await checkUniqueBatch(params);
+        if (!paused) {
+          paused = true;
+          await afterProbe();
+        }
+        return read;
+      },
+    });
+  }
+  return deriveBackend(projectGraphBackend(store.backend), {
+    transaction: (run, options) =>
+      store.backend.transaction((target) => run(pausing(target)), options),
+  });
+}
 
 type RacePredicate = (
   document: NodeAccessor<typeof RaceDocument>,
@@ -195,6 +280,59 @@ export function registerSetUpdateConcurrencyTests(
   context: IntegrationTestContext,
 ): void {
   describe("set updates against a concurrent writer on another PostgreSQL session", () => {
+    // Another session creates a node holding the set update's new key and
+    // commits, after the set update's probe found that key free and before it
+    // reserves it. The reservation gates the row write, so the set update is
+    // refused there, with nothing written: a caller that catches the refusal
+    // and commits keeps the row, its claim and the competitor's claim as they
+    // were.
+    it.runIf(context.serverLaneConcurrency)(
+      "updateWhere() refused by a key another session claims after its probe commits no change",
+      async () => {
+        const store = await context.createStore(raceUniqueGraph);
+        const renamed = await store.nodes.RaceHandle.create({
+          handle: "before",
+        });
+        let competitorId: string | undefined;
+        const racedStore = createStore(
+          raceUniqueGraph,
+          backendPausingAfterProbe(store, async () => {
+            const competitor = await store.nodes.RaceHandle.create({
+              handle: "after",
+            });
+            competitorId = competitor.id;
+          }),
+        );
+
+        const thrown = await racedStore.transaction(async (tx) =>
+          tx.nodes.RaceHandle.updateWhere({
+            patch: { handle: "after" },
+            where: (candidate) => candidate.id.eq(renamed.id),
+          }).then(
+            () => "resolved",
+            (error: unknown) => error,
+          ),
+        );
+        const stored = requireDefined(
+          await store.nodes.RaceHandle.getById(renamed.id),
+        );
+
+        expect({
+          refused: thrown instanceof UniquenessError,
+          handle: stored.handle,
+          version: stored.meta.version,
+          oldClaimOwner: await handleClaimOwner(store, "before"),
+          newClaimOwner: await handleClaimOwner(store, "after"),
+        }).toEqual({
+          refused: true,
+          handle: "before",
+          version: renamed.meta.version,
+          oldClaimOwner: renamed.id,
+          newClaimOwner: requireDefined(competitorId),
+        });
+      },
+    );
+
     it.runIf(context.serverLaneConcurrency).each(RACE_CASES)(
       "updateWhere() does not write a row whose committed change falsified $name after its snapshot",
       async ({ where }) => {

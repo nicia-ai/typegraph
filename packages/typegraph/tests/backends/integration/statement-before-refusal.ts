@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import {
+  createAdapterStoreWithSchema,
   createStore,
   defineEdge,
   defineGraph,
@@ -32,6 +33,7 @@ import {
   projectGraphBackend,
 } from "../../../src/backend/derive-backend";
 import {
+  type AdapterBackend,
   type BackendCapabilities,
   type TransactionBackend,
 } from "../../../src/backend/types";
@@ -274,6 +276,142 @@ function backendWithoutBatchedClaimDelete(backend: GraphBackend): GraphBackend {
               "hardDeleteUniquesByNodeIds",
             ]) as TransactionBackend,
           ),
+        options,
+      ),
+  });
+}
+
+// ============================================================
+// Row 8: a set update's new key claimed between probe and reservation
+// ============================================================
+
+/** Unique on the pair, so one patch moves each member onto its own key. */
+const SBR_RACED_UNIQUE = {
+  name: "sbr_raced_member_email_region",
+  fields: ["email", "region"],
+  scope: "kind",
+  collation: "binary",
+} as const;
+
+const SbrRacedMember = defineNode("SbrRacedMember", {
+  schema: z.object({
+    email: z.string(),
+    region: z.string(),
+    bio: searchable({ language: "english" }),
+  }),
+});
+
+const racedUniqueGraph = defineGraph({
+  id: "statement_before_refusal_raced_unique",
+  nodes: {
+    SbrRacedMember: { type: SbrRacedMember, unique: [SBR_RACED_UNIQUE] },
+  },
+  edges: {},
+});
+
+const racedUniqueRegistry = buildKindRegistry(racedUniqueGraph);
+
+/** The claim row `(email, region)` keys under the raced constraint. */
+function racedClaimTarget(email: string, region: string) {
+  return {
+    graphId: racedUniqueGraph.id,
+    nodeKind: uniquenessClaimAxis(
+      "SbrRacedMember",
+      SBR_RACED_UNIQUE.scope,
+      racedUniqueRegistry,
+    ),
+    constraintName: SBR_RACED_UNIQUE.name,
+    key: computeUniqueKey(
+      { email, region },
+      SBR_RACED_UNIQUE.fields,
+      SBR_RACED_UNIQUE.collation,
+    ),
+  } as const;
+}
+
+/** The node id holding the live claim of `(email, region)`. */
+async function racedClaimOwner(
+  backend: Pick<GraphBackend, "checkUnique">,
+  email: string,
+  region: string,
+): Promise<string | undefined> {
+  const row = await backend.checkUnique({
+    ...racedClaimTarget(email, region),
+    includeDeleted: false,
+  });
+  return row?.node_id;
+}
+
+const RACED_OLD_EMAIL = "old@raced.example";
+const RACED_NEW_EMAIL = "new@raced.example";
+const RACED_COMPETITOR_ID = "raced-competitor";
+
+/**
+ * `target`, which — the first time a batched uniqueness probe returns — writes
+ * a competing node holding `(RACED_NEW_EMAIL, region)` and its claim: another
+ * writer reserving one of the set's new keys after the set update's probe
+ * found it free. The probe answers what it read before the competitor landed.
+ */
+function racingTheSetProbe(
+  target: TransactionBackend,
+  region: string,
+): TransactionBackend {
+  let raced = false;
+  const checkUniqueBatch = requireDefined(target.checkUniqueBatch);
+  return deriveBackend(target, {
+    checkUniqueBatch: async (params) => {
+      const read = await checkUniqueBatch(params);
+      if (!raced) {
+        raced = true;
+        await target.insertNode({
+          graphId: racedUniqueGraph.id,
+          kind: "SbrRacedMember",
+          id: RACED_COMPETITOR_ID,
+          props: { email: RACED_NEW_EMAIL, region, bio: "competitor" },
+        });
+        await target.insertUnique({
+          ...racedClaimTarget(RACED_NEW_EMAIL, region),
+          nodeId: RACED_COMPETITOR_ID,
+          concreteKind: "SbrRacedMember",
+        });
+      }
+      return read;
+    },
+  });
+}
+
+/** `backend`, whose transaction targets are {@link racingTheSetProbe}'s. */
+function backendRacingTheSetProbe(
+  backend: GraphBackend,
+  region: string,
+): GraphBackend {
+  return deriveBackend(projectGraphBackend(backend), {
+    transaction: (run, options) =>
+      backend.transaction(
+        (target) => run(racingTheSetProbe(target, region)),
+        options,
+      ),
+  });
+}
+
+/**
+ * The adapter backend `backend`, whose transaction targets — on both the
+ * plain and the native-handle entry — are {@link racingTheSetProbe}'s: what a
+ * history store is built over.
+ */
+function adapterRacingTheSetProbe<TNative>(
+  backend: AdapterBackend<TNative>,
+  region: string,
+): AdapterBackend<TNative> {
+  return deriveBackend(backend, {
+    transaction: (run, options) =>
+      backend.transaction(
+        (target) => run(racingTheSetProbe(target, region)),
+        options,
+      ),
+    transactionWithNative: (run, options) =>
+      backend.transactionWithNative(
+        (target, native) => run(racingTheSetProbe(target, region), native),
         options,
       ),
   });
@@ -699,59 +837,168 @@ export function registerStatementBeforeRefusalIntegrationTests(
         ],
       });
     });
-    it("a set update whose new key another writer claims between the uniqueness probe and the re-claim commits no change", async () => {
-      const store = await context.createStore(uniqueGraph);
-      const renamed = await store.nodes.SbrMember.create(
-        { email: SBR_OLD_EMAIL },
-        { id: "renamed" },
-      );
-      const racedStore = createStore(
-        uniqueGraph,
-        backendRacingTheProbe(store.backend),
-      );
+    // Row 8. The probe finds both new keys free; a competing writer then
+    // reserves one of them. The set update reserves its new keys before it
+    // writes a row, so the conflict is raised by that reservation, with no row
+    // written, and the reservation it did take for the other member is given
+    // back.
+    describe.for(["updateWhere", "compareAndSet"] as const)(
+      "%s: a new key another writer reserves after the set update's probe",
+      (verb) => {
+        it("commits no row, claim, sidecar or receipt entry", async (ctx) => {
+          const store = await context.createStore(racedUniqueGraph);
+          if (store.backend.capabilities.fulltext?.supported !== true) {
+            ctx.skip();
+          }
+          const east = await store.nodes.SbrRacedMember.create(
+            { email: RACED_OLD_EMAIL, region: "east", bio: "giraffe" },
+            { id: "east" },
+          );
+          const west = await store.nodes.SbrRacedMember.create(
+            { email: RACED_OLD_EMAIL, region: "west", bio: "giraffe" },
+            { id: "west" },
+          );
+          const racedStore = createStore(
+            racedUniqueGraph,
+            backendRacingTheSetProbe(store.backend, "west"),
+          );
 
-      const thrown = await racedStore.transaction(async (tx) =>
-        settle(
-          tx.nodes.SbrMember.updateWhere({
-            patch: { email: SBR_EMAIL },
-            where: (candidate) => candidate.id.eq(renamed.id),
-          }),
-        ),
-      );
+          const outcome = await racedStore.transactionWithReceipt(async (tx) =>
+            settle(
+              verb === "updateWhere" ?
+                tx.nodes.SbrRacedMember.updateWhere({
+                  patch: { email: RACED_NEW_EMAIL, bio: "zebra" },
+                  where: (candidate) => candidate.email.eq(RACED_OLD_EMAIL),
+                })
+              : tx.nodes.SbrRacedMember.compareAndSet(west.id, {
+                  expected: { email: RACED_OLD_EMAIL },
+                  patch: { email: RACED_NEW_EMAIL, bio: "zebra" },
+                }),
+            ),
+          );
 
-      const stored = requireDefined(
-        await store.nodes.SbrMember.getById(renamed.id),
-      );
-      expectObservation({
-        lane,
-        observed: {
-          refusal: refusalOf(thrown),
-          email: stored.email,
-          oldClaimOwner: await emailClaimOwner(store.backend, SBR_OLD_EMAIL),
-          newClaimOwner: await emailClaimOwner(store.backend, SBR_EMAIL),
-        },
-        correct: {
-          refusal: "UniquenessError:UNIQUENESS_VIOLATION",
-          email: SBR_OLD_EMAIL,
-          oldClaimOwner: renamed.id,
-          newClaimOwner: COMPETITOR_ID,
-        },
-        defects: [
-          {
-            label: "audit:set-update-refusal-8",
-            on: EVERY_DRIVER,
-            today: {
-              refusal: "UniquenessError:UNIQUENESS_VIOLATION",
-              email: SBR_EMAIL,
-              oldClaimOwner: undefined,
-              newClaimOwner: COMPETITOR_ID,
+          async function hits(query: string): Promise<readonly string[]> {
+            const results = await store.search.fulltext("SbrRacedMember", {
+              query,
+              limit: 10,
+            });
+            return results.map((hit) => hit.node.id).toSorted();
+          }
+          const storedEast = requireDefined(
+            await store.nodes.SbrRacedMember.getById(east.id),
+          );
+          const storedWest = requireDefined(
+            await store.nodes.SbrRacedMember.getById(west.id),
+          );
+          expect({
+            refusal: refusalOf(outcome.result),
+            receiptTotal: outcome.receipt.writes.total,
+            rows: [
+              [storedEast.email, storedEast.bio, storedEast.meta.version],
+              [storedWest.email, storedWest.bio, storedWest.meta.version],
+            ],
+            claims: {
+              eastOld: await racedClaimOwner(
+                store.backend,
+                RACED_OLD_EMAIL,
+                "east",
+              ),
+              westOld: await racedClaimOwner(
+                store.backend,
+                RACED_OLD_EMAIL,
+                "west",
+              ),
+              eastNew: await racedClaimOwner(
+                store.backend,
+                RACED_NEW_EMAIL,
+                "east",
+              ),
+              westNew: await racedClaimOwner(
+                store.backend,
+                RACED_NEW_EMAIL,
+                "west",
+              ),
             },
-          },
-        ],
-      });
-    });
+            oldTermHits: await hits("giraffe"),
+            newTermHits: await hits("zebra"),
+          }).toEqual({
+            refusal: "UniquenessError:UNIQUENESS_VIOLATION",
+            receiptTotal: 0,
+            rows: [
+              [RACED_OLD_EMAIL, "giraffe", east.meta.version],
+              [RACED_OLD_EMAIL, "giraffe", west.meta.version],
+            ],
+            claims: {
+              eastOld: east.id,
+              westOld: west.id,
+              eastNew: undefined,
+              westNew: RACED_COMPETITOR_ID,
+            },
+            oldTermHits: [east.id, west.id],
+            newTermHits: [],
+          });
+        });
 
-    it("a set update on a transaction without the batched claim delete commits no change when it refuses", async () => {
+        it("leaves the recorded history of a history store unchanged", async () => {
+          const store = await context.createHistoryStore(racedUniqueGraph);
+          const west = await store.nodes.SbrRacedMember.create(
+            { email: RACED_OLD_EMAIL, region: "west", bio: "giraffe" },
+            { id: "west" },
+          );
+          const [racedStore] = await createAdapterStoreWithSchema(
+            racedUniqueGraph,
+            adapterRacingTheSetProbe(context.getBackend(), "west"),
+            { history: true },
+          );
+          const beforeRefusal = requireDefined(await store.recordedNow());
+
+          const thrown = await racedStore.transaction(async (tx) =>
+            settle(
+              verb === "updateWhere" ?
+                tx.nodes.SbrRacedMember.updateWhere({
+                  patch: { email: RACED_NEW_EMAIL },
+                  where: (candidate) => candidate.id.eq(west.id),
+                })
+              : tx.nodes.SbrRacedMember.compareAndSet(west.id, {
+                  expected: { email: RACED_OLD_EMAIL },
+                  patch: { email: RACED_NEW_EMAIL },
+                }),
+            ),
+          );
+
+          const afterCommit = requireDefined(await store.recordedNow());
+          const recorded = requireDefined(
+            await store
+              .asOfRecorded(afterCommit)
+              .nodes.SbrRacedMember.getById(west.id),
+          );
+          // The competitor's raw insert records nothing either: it bypasses
+          // the capture overlay, so the recorded clock may advance only if the
+          // refused update recorded something.
+          expect({
+            refusal: refusalOf(thrown),
+            recordedAdvanced: afterCommit !== beforeRefusal,
+            recorded: [recorded.email, recorded.meta.version],
+            westOld: await racedClaimOwner(
+              store.backend,
+              RACED_OLD_EMAIL,
+              "west",
+            ),
+          }).toEqual({
+            refusal: "UniquenessError:UNIQUENESS_VIOLATION",
+            recordedAdvanced: false,
+            recorded: [RACED_OLD_EMAIL, west.meta.version],
+            westOld: west.id,
+          });
+        });
+      },
+    );
+
+    // Row 9. The transaction handle implements less than the root its
+    // uniqueness verdict was resolved from. Every claim member the set update
+    // calls is bound off that handle before the dry-run, so the refusal comes
+    // with nothing written.
+    it("a set update on a transaction without the batched claim delete refuses before it writes", async () => {
       const store = await context.createStore(uniqueGraph);
       const renamed = await store.nodes.SbrMember.create(
         { email: SBR_OLD_EMAIL },
@@ -762,7 +1009,7 @@ export function registerStatementBeforeRefusalIntegrationTests(
         backendWithoutBatchedClaimDelete(store.backend),
       );
 
-      const thrown = await narrowedStore.transaction(async (tx) =>
+      const outcome = await narrowedStore.transactionWithReceipt(async (tx) =>
         settle(
           tx.nodes.SbrMember.updateWhere({
             patch: { email: SBR_EMAIL },
@@ -774,32 +1021,20 @@ export function registerStatementBeforeRefusalIntegrationTests(
       const stored = requireDefined(
         await store.nodes.SbrMember.getById(renamed.id),
       );
-      expectObservation({
-        lane,
-        observed: {
-          refused: thrown !== "resolved",
-          email: stored.email,
-          oldClaimOwner: await emailClaimOwner(store.backend, SBR_OLD_EMAIL),
-          newClaimOwner: await emailClaimOwner(store.backend, SBR_EMAIL),
-        },
-        correct: {
-          refused: true,
-          email: SBR_OLD_EMAIL,
-          oldClaimOwner: renamed.id,
-          newClaimOwner: undefined,
-        },
-        defects: [
-          {
-            label: "audit:set-update-refusal-9",
-            on: EVERY_DRIVER,
-            today: {
-              refused: true,
-              email: SBR_EMAIL,
-              oldClaimOwner: renamed.id,
-              newClaimOwner: undefined,
-            },
-          },
-        ],
+      expect({
+        refusal: refusalOf(outcome.result),
+        receiptTotal: outcome.receipt.writes.total,
+        email: stored.email,
+        version: stored.meta.version,
+        oldClaimOwner: await emailClaimOwner(store.backend, SBR_OLD_EMAIL),
+        newClaimOwner: await emailClaimOwner(store.backend, SBR_EMAIL),
+      }).toEqual({
+        refusal: "ConfigurationError:SET_UPDATE_UNIQUENESS_UNSUPPORTED",
+        receiptTotal: 0,
+        email: SBR_OLD_EMAIL,
+        version: renamed.meta.version,
+        oldClaimOwner: renamed.id,
+        newClaimOwner: undefined,
       });
     });
   });

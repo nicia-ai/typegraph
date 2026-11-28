@@ -35,6 +35,7 @@ import {
 } from "./axis";
 import {
   alreadyAppliedRowWrite,
+  claimRowIdentity,
   isUniquenessClaimEntry,
   type NodeClaimContext,
   nodeClaimEntries,
@@ -347,15 +348,24 @@ function requireBatchProbe(
  * permits atomic swaps and handoffs while still refusing every owner outside the
  * set. The probe is batch-only by contract: a caller that needs this set
  * semantic must not quietly degrade to sequential checks.
+ *
+ * Returns the claim rows ({@link claimRowIdentity}) the probe found a member of
+ * the set holding live — the proposed keys the set already owns, its own or
+ * handed over by another member. Every other proposed key was free or
+ * tombstoned when probed, which is what a caller that reserves the set's new
+ * keys before its row write needs to know: those are the keys a writer outside
+ * the set can still take, and the ones the set holds cannot be reserved before
+ * their holder gives them up.
  */
 export async function validateResolvedNodeClaims(
   ctx: UniquenessContext,
   upserts: readonly ResolvedNodeUpsert[],
   releases: readonly ResolvedNodeRelease[] = [],
-): Promise<void> {
+): Promise<ReadonlySet<string>> {
   const checkUniqueBatch = requireBatchProbe(ctx);
   const claims = proposedClaims(ctx, upserts);
-  if (claims.length === 0) return;
+  const heldBySet = new Set<string>();
+  if (claims.length === 0) return heldBySet;
 
   const affectedOwners = new Set(
     [...upserts, ...releases].map((reference) =>
@@ -378,6 +388,13 @@ export async function validateResolvedNodeClaims(
           }),
         )
       ) {
+        heldBySet.add(
+          claimRowIdentity(
+            existing.node_kind,
+            existing.constraint_name,
+            existing.key,
+          ),
+        );
         continue;
       }
       const claim = group.claimsByKey.get(existing.key);
@@ -394,6 +411,7 @@ export async function validateResolvedNodeClaims(
       });
     }
   }
+  return heldBySet;
 }
 
 /**

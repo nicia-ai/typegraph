@@ -17,7 +17,6 @@
  */
 import { type z } from "zod";
 
-import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import { UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
 import { resolveBackendFulltext } from "../../backend/capabilities/fulltext";
 import {
@@ -55,6 +54,7 @@ import { claimSupport } from "../claims/backing";
 import { purgeEdgeClaims } from "../claims/edge-claims";
 import {
   alreadyAppliedRowWrite,
+  bindNodeSetClaimMembers,
   createUniquenessContext,
   deleteUniquenessEntries,
   hardDeleteClaimsByNodeIds,
@@ -65,6 +65,7 @@ import {
   type UniquenessUpdatePlan,
   withNodeClaimTransition,
   withNodeCreateClaimsBatch,
+  withNodeSetClaimTransition,
 } from "../claims/node-claims";
 import {
   resolvedNodeUniqueSidecarBatchIsReachable,
@@ -1237,22 +1238,15 @@ export async function applyNodeSetUpdate(
       { code: "SET_UPDATE_VECTOR_UNSUPPORTED", kind },
     );
   }
-  // The same port re-check the claim rebuild below relies on, made before
-  // anything is read: the re-claim (`withNodeCreateClaimsBatch`) reaches
-  // `insertUniqueBatch` only through the shared, fallback-dispositioned
-  // `issueClaimsBatched` (`../claims/node-claims.ts`), which silently degrades
-  // to per-row inserts when the PORT lacks the member — the right answer for a
-  // plain create, but not for this REFUSE operation. The later call binds off
-  // the same `backend`/verdict pair checked here, so its internal fallback
-  // branch can never fire for this call.
-  if (
-    uniqueConstraints.length > 0 &&
-    bindExtraIfReachable(
-      backend,
-      ctx.uniqueSidecarBatch.extras.insertUniqueBatch,
-      UNIQUE_SIDECAR_BATCH.id,
-    ) === undefined
-  ) {
+  // Every batched claim member the transition below calls, bound off the
+  // PORT before anything is read. The verdict above was resolved from the root;
+  // a transaction handle can implement less, and a member found missing only
+  // after the row write would refuse with that write applied.
+  const claimMembers =
+    uniqueConstraints.length > 0 ?
+      bindNodeSetClaimMembers(uniquenessContext(ctx, backend))
+    : undefined;
+  if (uniqueConstraints.length > 0 && claimMembers === undefined) {
     throw new ConfigurationError(
       "The transaction backend lacks batched uniqueness operations",
       { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
@@ -1321,55 +1315,52 @@ export async function applyNodeSetUpdate(
     props: item.props,
     constraints: item.uniqueConstraints,
   }));
-  if (uniqueConstraints.length > 0) {
-    // The RESOLVED-SET verdict, not a row-at-a-time one: the statement rewrites
-    // every candidate at once, so a swap or a handoff of one key between two
-    // rows it touches is legal in the final state and refused by every
-    // intermediate one. One owner of that verdict, shared with the graph merge.
-    // It reads only the claim relation, which the row write below does not
-    // change, so deciding it before the write decides it on the same state.
-    await validateResolvedNodeClaims(
-      createUniquenessContext(
-        ctx.graphId,
-        ctx.registry,
-        backend,
-        ctx.uniqueSidecarBatch,
-      ),
-      claimItems,
-      [],
-    );
-  }
-
-  const result = await members.updateNodeSet({
-    graphId: ctx.graphId,
-    kind,
-    patch,
-    unsetProperties: args.unsetProperties,
-    rows: preview.rows.map((row) => ({ id: row.id, rowToken: row.rowToken })),
-  });
-  assertNodeSetUpdateWroteValidatedRows(kind, preview.rows, result);
-
-  if (uniqueConstraints.length > 0) {
-    await hardDeleteClaimsByNodeIds(
-      uniquenessContext(ctx, backend),
+  async function writeValidatedRows(): Promise<UpdateNodeSetResult> {
+    const result = await members.updateNodeSet({
+      graphId: ctx.graphId,
       kind,
-      result.rows.map((row) => row.id),
-    );
+      patch,
+      unsetProperties: args.unsetProperties,
+      rows: preview.rows.map((row) => ({ id: row.id, rowToken: row.rowToken })),
+    });
+    assertNodeSetUpdateWroteValidatedRows(kind, preview.rows, result);
+    return result;
   }
-  // The same claim seam every create-shaped writer uses, with an ALREADY-APPLIED
-  // row write as its gate: the rows landed above and the old claims were
-  // hard-deleted, so what is left is a re-claim and there is no row write left
-  // for a claim to precede. Inverting it would mean reserving keys the update has
-  // not written. What covers this site on a backend that cannot fence is stated
-  // per kind shape: a kind whose scope spans siblings declares
-  // `fencesConstraintProbe` at the entry point and is refused before this body
-  // runs; a kind-scoped one is not refused, before or after — its
-  // delete-then-rebuild window is unchanged in shape and extent here.
-  await withNodeCreateClaimsBatch(
-    ctx,
+
+  if (claimMembers === undefined) {
+    const result = await writeValidatedRows();
+    await applyNodeInsertSyncFansBatch(ctx, sidecarItems, backend);
+    return { affectedCount: result.affectedCount };
+  }
+  // The RESOLVED-SET verdict, not a row-at-a-time one: the statement rewrites
+  // every candidate at once, so a swap or a handoff of one key between two
+  // rows it touches is legal in the final state and refused by every
+  // intermediate one. One owner of that verdict, shared with the graph merge.
+  // What it returns — the new keys a member already holds — is what the
+  // transition needs to tell the keys it must reserve from the ones it cannot.
+  const heldBySet = await validateResolvedNodeClaims(
+    createUniquenessContext(
+      ctx.graphId,
+      ctx.registry,
+      backend,
+      ctx.uniqueSidecarBatch,
+    ),
     claimItems,
+    [],
+  );
+  // Reserve, write, release: the reservation of every key a writer outside the
+  // set can still take gates the row write, so a writer that took one after the
+  // probe above is refused with no row written (see
+  // `withNodeSetClaimTransition`). What covers this site on a backend that
+  // cannot fence is stated per kind shape: a kind whose scope spans siblings
+  // declares `fencesConstraintProbe` at the entry point and is refused before
+  // this body runs; a kind-scoped one is not refused, and a writer racing its
+  // reservation is refused by the reservation itself.
+  const result = await withNodeSetClaimTransition(
+    ctx,
     backend,
-    alreadyAppliedRowWrite,
+    { kind, items: claimItems, heldBySet, members: claimMembers },
+    writeValidatedRows,
   );
   await applyNodeInsertSyncFansBatch(ctx, sidecarItems, backend);
   return { affectedCount: result.affectedCount };
