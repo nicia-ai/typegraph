@@ -16,6 +16,7 @@ export { registerCapabilityPortBindingIntegrationTests } from "./capability-port
 export { registerCapabilityRefusalIntegrationTests } from "./capability-refusals";
 export { registerCaptureFlushOperationRoutingIntegrationTests } from "./capture-flush-operation-routing";
 export { registerClaimCompensationIntegrationTests } from "./claim-compensation";
+export { registerClaimKeyOwnerIntegrationTests } from "./claim-key-owner";
 export { registerClaimLookupPreferenceIntegrationTests } from "./claim-lookup-preference";
 export { registerClaimOwnerIdentityIntegrationTests } from "./claim-owner-identity";
 export { registerClearIntegrationTests } from "./clear";

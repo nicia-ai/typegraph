@@ -1138,6 +1138,44 @@ function registerOwnerClaimReleaseCases(
       ).toBe("UniquenessError");
     });
 
+    // The documented legacy state: one node holds a date claim under its raw
+    // text, and a second node, admitted beside it, the canonical claim. A
+    // rename of the first leaves its key where it was, so the scalar update
+    // issues no claim statement. The same rename through `bulkUpsertById()`
+    // takes the set-based path, whose final validation re-checks every claim
+    // of the row and meets the second node's. Pinned, not repaired here.
+    it("a key-preserving rename of a node holding a legacy raw-form claim succeeds as an update and through bulkUpsertById", async () => {
+      const { graphId, store, backend } = await createGraphStore(context, port);
+      await store.nodes.OcrEvent.create({ name: "row", at: A }, { id: "row" });
+      await plantClaim(backend, graphId, "OcrEvent", "row", "OcrEvent_at", {
+        taken: keyOf("at", A),
+        planted: A.toISOString(),
+      });
+      await store.nodes.OcrEvent.create({ name: "dup", at: A }, { id: "dup" });
+
+      const scalar = await outcome(() =>
+        store.nodes.OcrEvent.update("row" as EventId, { name: "renamed" }),
+      );
+      const bulk = await outcome(() =>
+        store.nodes.OcrEvent.bulkUpsertById([
+          { id: "row", props: { name: "renamed again", at: A } },
+        ]),
+      );
+
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: { scalar, bulk },
+        correct: { scalar: "written", bulk: "written" },
+        defects: [
+          {
+            label: "bulk update re-checks a key-preserving legacy claim",
+            on: {},
+            today: { scalar: "written", bulk: "UniquenessError" },
+          },
+        ],
+      });
+    });
+
     it("a record-valued unique property round-tripped through PostgreSQL does not fence a create in its original key order", async () => {
       const source = await context.createStore(buildGraph(nextGraphId()));
       await source.nodes.OcrTagged.create(
