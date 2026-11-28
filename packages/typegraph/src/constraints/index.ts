@@ -37,6 +37,7 @@ import {
 } from "../errors";
 import { type KindRegistry } from "../registry/kind-registry";
 import { compareCodePoints } from "../utils/compare";
+import { storedJsonText } from "../utils/date";
 import { hasOwnKey, readOwnProperty } from "../utils/object";
 import { isPresent } from "../utils/presence";
 
@@ -74,7 +75,7 @@ export function computeUniqueKey(
       typeof value === "string" ? value
       : typeof value === "number" || typeof value === "boolean" ?
         value.toString()
-      : JSON.stringify(value);
+      : storedJsonText(value);
     return uniqueCollationFoldsCase(collation) ?
         stringValue.toLowerCase()
       : stringValue;

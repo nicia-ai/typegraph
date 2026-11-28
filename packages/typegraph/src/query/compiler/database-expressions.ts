@@ -1,9 +1,15 @@
 import { ConfigurationError, UnsupportedPredicateError } from "../../errors";
+import { dateInstantText } from "../../utils/date";
 import {
   assertPortableCountDistinctValueType,
   assertPortableScalarValueType,
 } from "../aggregate-value-types";
-import { type AggregateExpr, type FieldRef, type QueryAst } from "../ast";
+import {
+  type AggregateExpr,
+  type FieldRef,
+  type QueryAst,
+  type ValueType,
+} from "../ast";
 import { dateTypedComparisonSubqueries } from "../compared-operands";
 import { type DialectAdapter } from "../dialect/types";
 import {
@@ -18,6 +24,7 @@ import {
   resolveCollectFilter,
   resolveCollectOrder,
   resolveCollectRecordFields,
+  yieldsStoredDate,
 } from "../expressions";
 import { compileOrderTerm } from "../order";
 import { sql, type SqlFragment } from "../sql-fragment";
@@ -74,7 +81,7 @@ function compileLiteral(
   dialect: DialectAdapter,
 ): SqlFragment {
   if (value === undefined) return sql.raw("NULL");
-  if (value instanceof Date) return sql`${value.toISOString()}`;
+  if (value instanceof Date) return sql`${dateInstantText(value)}`;
   if (typeof value === "object") return sql`${JSON.stringify(value)}`;
   if (typeof value === "boolean") return dialect.booleanLiteral(value);
   if (typeof value === "number") {
@@ -141,6 +148,31 @@ function aggregateFunction(operator: AggregateOperator): SqlFragment {
       );
     }
   }
+}
+
+/**
+ * A value as it enters a collected JSON array: a date read from stored props as
+ * the canonical UTC text the dialect renders for JSON (`jsonDateText`),
+ * collected as the string it then is, so every backend emits the same bytes
+ * whatever its session time zone; a date the caller stated as the canonical
+ * text it is bound as, never cast (a valid `Date` may lie outside the engine's
+ * timestamp range); any other value as compiled.
+ */
+function collectedValue(
+  name: string,
+  value: SqlFragment,
+  expression: DatabaseExpression,
+  context: DatabaseExpressionCompilerContext,
+): Readonly<{ name: string; value: SqlFragment; valueType: ValueType }> {
+  if (yieldsStoredDate(expression))
+    return {
+      name,
+      value: context.dialect.jsonDateText(value),
+      valueType: "string",
+    };
+  return expression.valueType === "date" ?
+      { name, value, valueType: "string" }
+    : { name, value, valueType: expression.valueType };
 }
 
 function compileNode(
@@ -275,24 +307,30 @@ function compileNode(
       if (isCollectRecordOperand(operand)) {
         return context.dialect.orderedRecordJsonArray({
           fields: resolveCollectRecordFields(operand.fields).map(
-            ({ name, expression: value }) => {
-              return {
+            ({ name, expression: value }) =>
+              collectedValue(
                 name,
-                value: compileNode(value, context, aggregateDepth + 1),
-                valueType: value.valueType,
-              };
-            },
+                compileNode(value, context, aggregateDepth + 1),
+                value,
+                context,
+              ),
           ),
           filter: compiledFilter,
           orderBy: ordering,
         });
       }
       assertPortableScalarValueType(operand.valueType, "COLLECT");
+      const { value, valueType } = collectedValue(
+        "",
+        compileNode(operand, context, aggregateDepth + 1),
+        operand,
+        context,
+      );
       return context.dialect.orderedScalarJsonArray({
         filter: compiledFilter,
         orderBy: ordering,
-        value: compileNode(operand, context, aggregateDepth + 1),
-        valueType: operand.valueType,
+        value,
+        valueType,
       });
     }
     case "aggregate": {

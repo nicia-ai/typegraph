@@ -841,7 +841,7 @@ export const compareAndSetAbsent: unique symbol;
 
 // @public
 export type CompareAndSetExpected<Props> = Readonly<{
-    [Property in keyof Props]?: Extract<Exclude<Props[Property], undefined>, JsonScalar> | CompareAndSetAbsent;
+    [Property in keyof Props]?: Extract<Exclude<Props[Property], undefined>, JsonScalar | Date> | CompareAndSetAbsent;
 }>;
 
 // @public (undocumented)
@@ -2411,6 +2411,7 @@ class ExecutableAggregateQuery<G extends GraphDef, Aliases extends AggregateAlia
             executionTarget: object;
         };
         outputNames: string[];
+        dateOutputNames: readonly string[];
         orderBy: {
             column: string;
             direction: SortDirection;
@@ -2462,6 +2463,7 @@ class ExecutableProjectionQuery<Fields extends DatabaseProjection, Context, Resu
             executionTarget: object;
         };
         outputNames: string[];
+        dateOutputNames: readonly string[];
         orderBy: {
             column: string;
             direction: SortDirection;
@@ -2589,6 +2591,7 @@ class ExecutableRelationQuery<Fields extends RelationProjection, Result = Relati
             executionTarget: object;
         };
         outputNames: string[];
+        dateOutputNames: readonly string[];
         orderBy: {
             column: string;
             direction: SortDirection;
@@ -5353,6 +5356,7 @@ type OneStatementBatchableQuery<R = unknown> = Readonly<{
         }>;
         outputNames: readonly string[];
         hiddenOutputNames?: readonly string[];
+        dateOutputNames?: readonly string[];
         orderBy: readonly Readonly<{
             column: string;
             direction: "asc" | "desc";
@@ -5628,6 +5632,7 @@ type PreparedQueryConfig<R> = Readonly<{
     selectiveFields: readonly SelectiveField[] | undefined;
     selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
     schemaIntrospector: SchemaIntrospector;
+    registry?: KindRegistry;
 }>;
 
 // @public (undocumented)

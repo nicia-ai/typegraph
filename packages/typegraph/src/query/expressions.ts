@@ -1,4 +1,6 @@
 import { UnsupportedPredicateError } from "../errors";
+import { type StoredReadPlan } from "../store/stored-date-revival";
+import { dateTimeValue } from "../utils/date";
 import {
   assertPortableCountDistinctValueType,
   assertPortableScalarValueType,
@@ -9,6 +11,13 @@ import {
   comparedExpressionOperands,
   type ExpressionComparedSide,
 } from "./compared-operands";
+import {
+  dateReadOf,
+  type ExpressionDateRead,
+  NO_DATE_READ,
+  sharedDateRead,
+  withDateRead,
+} from "./expression-date-read";
 import { resolveNullOrdering } from "./order";
 import {
   arrayElementComparedSide,
@@ -229,6 +238,16 @@ export type DatabaseExpression<
   __scope?: Scope;
 }>;
 
+/**
+ * @internal Where a date in a query result comes from, when it is not stored
+ * property text: `"stated"`, a date the caller stated
+ * (`ExpressionDateRead.dateOrigin`), or `"engine"`, a result column the
+ * compiler cast to the engine's timestamp type (`resultDateOrigin`). It picks
+ * the decode leaf (`decodeExpressionDate`).
+ */
+export type DateOrigin =
+  NonNullable<ExpressionDateRead["dateOrigin"]> | "engine";
+
 export type NonNull<T> = Exclude<T, undefined>;
 export type LiteralResult<T> = T extends null ? undefined : T;
 export type ParameterValue<Value extends ValueType> =
@@ -262,8 +281,9 @@ function createExpression<T, Scope extends string>(
   elementValueType?: ValueType,
   elementFields?: Readonly<Record<string, ValueType>>,
   arrayElementType?: ValueType,
+  dateRead: ExpressionDateRead = NO_DATE_READ,
 ): DatabaseExpression<T, Scope> {
-  return {
+  const expression: DatabaseExpression<T, Scope> = {
     __type: "database_expression",
     node,
     nullable,
@@ -273,6 +293,37 @@ function createExpression<T, Scope extends string>(
     ...(elementValueType === undefined ? {} : { elementValueType }),
     ...(elementFields === undefined ? {} : { elementFields }),
   };
+  return withDateRead(expression, dateRead);
+}
+
+/**
+ * @internal The read plan a structured expression carries
+ * ({@link ExpressionDateRead.readPlan}).
+ */
+export function expressionReadPlan(
+  expression: DatabaseExpression,
+): StoredReadPlan | undefined {
+  return dateReadOf(expression).readPlan;
+}
+
+/** The date origin an expression carries ({@link ExpressionDateRead.dateOrigin}). */
+function expressionDateOrigin(
+  expression: DatabaseExpression,
+): ExpressionDateRead["dateOrigin"] {
+  return dateReadOf(expression).dateOrigin;
+}
+
+/** The date read of an expression's own scalar origin, without its read plan. */
+function originDateRead(expression: DatabaseExpression): ExpressionDateRead {
+  const dateOrigin = expressionDateOrigin(expression);
+  return dateOrigin === undefined ? NO_DATE_READ : { dateOrigin };
+}
+
+/** The date read of a value that is any one of `operands` ({@link sharedDateRead}). */
+function operandsDateRead(
+  operands: readonly DatabaseExpression[],
+): ExpressionDateRead {
+  return sharedDateRead(operands.map((operand) => dateReadOf(operand)));
 }
 
 function assertExpression(value: unknown): asserts value is DatabaseExpression {
@@ -412,9 +463,12 @@ export function normalizeDatabaseLiteral(
   contextName = "$literal",
 ): DatabaseLiteral {
   if (value instanceof Date) {
-    if (!Number.isFinite(value.getTime()))
+    // A plain `Date` of the instant the value holds, so no `getTime`,
+    // `toJSON` or `toISOString` of the caller's own decides what binds.
+    const time = dateTimeValue(value);
+    if (!Number.isFinite(time))
       throw new TypeError(`${contextName} must be a valid Date`);
-    return new Date(value);
+    return new Date(time);
   }
   if (value === undefined) return undefined;
   validateJsonLiteral(value, contextName, new WeakSet());
@@ -427,21 +481,25 @@ export function createFieldExpression<T, Scope extends string>(
   field: FieldRef<T>,
   scopeIdentity: symbol,
   nullable: false,
+  readPlan?: StoredReadPlan,
 ): DatabaseExpression<Exclude<T, undefined>, Scope>;
 export function createFieldExpression<T, Scope extends string>(
   field: FieldRef<T>,
   scopeIdentity: symbol,
   nullable: true,
+  readPlan?: StoredReadPlan,
 ): DatabaseExpression<Exclude<T, undefined> | undefined, Scope>;
 export function createFieldExpression<T, Scope extends string>(
   field: FieldRef<T>,
   scopeIdentity: symbol,
   nullable: boolean,
+  readPlan?: StoredReadPlan,
 ): DatabaseExpression<T | undefined, Scope>;
 export function createFieldExpression<T, Scope extends string>(
   field: FieldRef<T>,
   scopeIdentity: symbol,
   nullable: boolean,
+  readPlan?: StoredReadPlan,
 ): DatabaseExpression<T | undefined, Scope> {
   return createExpression(
     { field, kind: "field" },
@@ -451,6 +509,7 @@ export function createFieldExpression<T, Scope extends string>(
     undefined,
     undefined,
     field.elementType,
+    readPlan === undefined ? NO_DATE_READ : { readPlan },
   );
 }
 
@@ -508,6 +567,7 @@ export function createOuterReferenceExpression<T, Scope extends string>(
     expression.elementValueType,
     expression.elementFields,
     expression.arrayElementType,
+    dateReadOf(expression),
   );
 }
 
@@ -538,6 +598,7 @@ export function createScalarSubqueryExpression<T, Scope extends string>(
     projected.elementValueType,
     projected.elementFields,
     projected.arrayElementType,
+    dateReadOf(projected),
   );
 }
 
@@ -550,6 +611,12 @@ function literal<T extends DatabaseLiteral>(
     inferLiteralType(value),
     inferLiteralType(value) === "unknown",
     UNSCOPED_EXPRESSION,
+    undefined,
+    undefined,
+    undefined,
+    inferLiteralType(value) === "date" ?
+      { dateOrigin: "stated" }
+    : NO_DATE_READ,
   );
 }
 
@@ -565,6 +632,10 @@ function parameter<Value extends ValueType>(
     valueType,
     false,
     UNSCOPED_EXPRESSION,
+    undefined,
+    undefined,
+    undefined,
+    valueType === "date" ? { dateOrigin: "stated" } : NO_DATE_READ,
   );
 }
 
@@ -909,7 +980,28 @@ function collect<Scope extends string>(
     scopeIdentity,
     scalar ? operand.valueType : "object",
     recordFields,
+    undefined,
+    scalar ? originDateRead(operand) : collectedRecordDateRead(recordEntries),
   );
+}
+
+/** The fields of a collected record whose dates the caller stated. */
+function collectedRecordDateRead(
+  entries: readonly Readonly<{
+    name: string;
+    expression: DatabaseExpression;
+  }>[],
+): ExpressionDateRead {
+  const stated = entries.filter(
+    ({ expression }) => expressionDateOrigin(expression) === "stated",
+  );
+  return stated.length === 0 ?
+      NO_DATE_READ
+    : {
+        elementDateOrigins: Object.fromEntries(
+          stated.map(({ name }) => [name, "stated"] as const),
+        ),
+      };
 }
 
 function numericAggregate<Scope extends string>(
@@ -936,6 +1028,10 @@ function extrema<T extends OrderedComparable, Scope extends string>(
     operand.valueType,
     true,
     resolveScope([operand]),
+    undefined,
+    undefined,
+    undefined,
+    originDateRead(operand),
   );
 }
 
@@ -959,6 +1055,7 @@ function coalesce<T, Scope extends string>(
     first.elementValueType,
     first.elementFields,
     first.arrayElementType,
+    operandsDateRead(operands),
   );
 }
 
@@ -987,6 +1084,7 @@ function when<
     then.elementValueType,
     then.elementFields,
     then.arrayElementType,
+    operandsDateRead([then, otherwise]),
   );
 }
 
@@ -1117,3 +1215,20 @@ export const expr = {
   toNumber,
   when,
 } as const;
+
+/**
+ * @internal Whether `expression` yields a date the compiler reads from stored
+ * props — a date-typed expression whose dates the caller did not state. Such a
+ * date is cast by the dialect (`DialectAdapter.jsonExtractDate`), so where the
+ * compiler builds it into JSON it emits the dialect's canonical date text
+ * (`DialectAdapter.jsonDateText`); a stated date binds as its canonical text
+ * and is never cast.
+ */
+export function yieldsStoredDate(
+  expression: Readonly<{ valueType: ValueType }>,
+): boolean {
+  return (
+    expression.valueType === "date" &&
+    dateReadOf(expression).dateOrigin !== "stated"
+  );
+}

@@ -21,6 +21,7 @@ import type {
   ResolveConfig,
   SimilarityStrategy,
 } from "../../src/graph-merge/types";
+import { passStoredProps } from "../../src/store/stored-date-revival";
 import { requireDefined } from "../../src/utils/presence";
 import { backendMatrix, fakeEmbeddings } from "./test-utils";
 
@@ -71,7 +72,7 @@ async function makeHarness(backend: GraphBackend): Promise<
       store.nodes.Patient.create(
         birthDate === undefined ? { name } : { name, birthDate },
       ),
-    ctx: { backend },
+    ctx: { backend, propsReader: passStoredProps },
   };
 }
 
@@ -98,7 +99,12 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
     // shares no block with the 1974 cohort, so it must never be compared.
     const annaOther = await harness.create("Anna Rivera", "1990-01-01");
 
-    const blocks = blockNodes([anna1974, ana1974, annaOther], blockByBirthDate);
+    const blocks = blockNodes(
+      [anna1974, ana1974, annaOther],
+      blockByBirthDate,
+      [],
+      passStoredProps,
+    );
     const config: ResolveConfig = {
       ...blockByBirthDate,
       similarity: fulltextName,
@@ -146,13 +152,13 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
     };
 
     const forward = generateCandidates(
-      blockNodes(nodes, blockByBirthDate),
+      blockNodes(nodes, blockByBirthDate, [], passStoredProps),
       config,
       harness.ctx,
       "error",
     );
     const reversed = generateCandidates(
-      blockNodes([...nodes].reverse(), blockByBirthDate),
+      blockNodes([...nodes].reverse(), blockByBirthDate, [], passStoredProps),
       config,
       harness.ctx,
       "error",
@@ -166,6 +172,8 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
           requireDefined(nodes[1]),
         ],
         blockByBirthDate,
+        [],
+        passStoredProps,
       ),
       config,
       harness.ctx,
@@ -205,7 +213,12 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
 
     const anna = await harness.create("Anna Rivera", "1974-03-09");
     const ana = await harness.create("Ana Rivera", "1974-03-09");
-    const blocks = blockNodes([anna, ana], blockByBirthDate);
+    const blocks = blockNodes(
+      [anna, ana],
+      blockByBirthDate,
+      [],
+      passStoredProps,
+    );
 
     const baseConfig: Omit<ResolveConfig, "threshold"> = {
       ...blockByBirthDate,
@@ -265,7 +278,7 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
     const a = await harness.create("Anna Rivera", "1974-03-09");
     const b = await harness.create("Ana Rivera", "1974-03-09");
     const c = await harness.create("Annah Rivera", "1974-03-09");
-    const blocks = blockNodes([a, b, c], blockByBirthDate);
+    const blocks = blockNodes([a, b, c], blockByBirthDate, [], passStoredProps);
     const config: ResolveConfig = {
       ...blockByBirthDate,
       similarity: fulltextName,
@@ -291,7 +304,12 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
     const anna = await harness.create("Anna Rivera");
     const bob = await harness.create("Bob Lee");
     const carol = await harness.create("Carol King");
-    const blocks = blockNodes([ana, anna, bob, carol], blockByBirthDate);
+    const blocks = blockNodes(
+      [ana, anna, bob, carol],
+      blockByBirthDate,
+      [],
+      passStoredProps,
+    );
     const baseConfig: ResolveConfig = {
       ...blockByBirthDate,
       similarity: fulltextName,
@@ -336,7 +354,7 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
     const a = await harness.create("Anna Rivera", "1974-03-09");
     const b = await harness.create("Ana Rivera", "1974-03-09");
     const c = await harness.create("Annah Rivera", "1974-03-09");
-    const blocks = blockNodes([a, b, c], blockByBirthDate);
+    const blocks = blockNodes([a, b, c], blockByBirthDate, [], passStoredProps);
     const config: ResolveConfig = {
       ...blockByBirthDate,
       similarity: fulltextName,
@@ -371,7 +389,7 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
     // Two nodes => exactly 1 pair; a ceiling of 1 must NOT trip.
     const a = await harness.create("Anna Rivera", "1974-03-09");
     const b = await harness.create("Ana Rivera", "1974-03-09");
-    const blocks = blockNodes([a, b], blockByBirthDate);
+    const blocks = blockNodes([a, b], blockByBirthDate, [], passStoredProps);
     const config: ResolveConfig = {
       ...blockByBirthDate,
       similarity: fulltextName,
@@ -393,7 +411,7 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
 
     const a = await harness.create("Anna Rivera", "1974-03-09");
     const b = await harness.create("Ana Rivera", "1974-03-09");
-    const blocks = blockNodes([a, b], blockByBirthDate);
+    const blocks = blockNodes([a, b], blockByBirthDate, [], passStoredProps);
     const vectorConfig: ResolveConfig = {
       ...blockByBirthDate,
       similarity: { kind: "vector", field: "name" },
@@ -420,7 +438,7 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
 
     const a = await harness.create("Anna Rivera", "1974-03-09");
     const b = await harness.create("Ana Rivera", "1974-03-09");
-    const blocks = blockNodes([a, b], blockByBirthDate);
+    const blocks = blockNodes([a, b], blockByBirthDate, [], passStoredProps);
     const vectorConfig: ResolveConfig = {
       ...blockByBirthDate,
       similarity: { kind: "vector", field: "name" },
@@ -428,6 +446,7 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
     };
     const ctx: SimilarityContext = {
       backend: fixture.backend,
+      propsReader: passStoredProps,
       embeddings: await fakeEmbeddings(["Anna Rivera", "Ana Rivera"]),
     };
 
@@ -453,7 +472,7 @@ describe.each(backendMatrix())("generateCandidates on $name", (entry) => {
       const a = await harness.create("Anna Rivera", "1974-03-09");
       const b = await harness.create("Ana Rivera", "1974-03-09");
       const result = generateCandidates(
-        blockNodes([a, b], blockByBirthDate),
+        blockNodes([a, b], blockByBirthDate, [], passStoredProps),
         {
           ...blockByBirthDate,
           similarity: { kind: "custom", score: () => nonFiniteScore },

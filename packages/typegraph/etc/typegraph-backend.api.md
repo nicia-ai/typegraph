@@ -1937,9 +1937,11 @@ export interface DialectAdapter {
     readonly jsonArrayContainsAny: (this: void, column: SqlFragment, values: readonly unknown[]) => SqlFragment;
     readonly jsonArrayContainsExpression?: (this: void, column: SqlFragment, value: SqlFragment, valueType: ValueType) => SqlFragment;
     readonly jsonArrayLength: (this: void, column: SqlFragment) => SqlFragment;
+    readonly jsonDateText: (this: void, value: SqlFragment) => SqlFragment;
     readonly jsonExtract: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonExtractBoolean: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonExtractDate: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
+    readonly jsonExtractDateOrigin: "engine" | undefined;
     readonly jsonExtractDouble: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonExtractNumber: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;
     readonly jsonExtractText: (this: void, column: SqlFragment, pointer: JsonPointer) => SqlFragment;

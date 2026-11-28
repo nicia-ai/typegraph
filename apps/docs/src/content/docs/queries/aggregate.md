@@ -136,7 +136,8 @@ Aggregate results follow JavaScript value conventions. `count()` and
 `sum()`, `avg()`, `min()`, and `max()` return `undefined` when SQL produces
 `NULL`, such as an aggregate over an empty input. Minimum and maximum preserve
 the schema field's scalar type, so string results remain strings and date
-results are decoded as `Date` values. Minimum and maximum support string, number,
+results are decoded as `Date` values, by the rule every date read follows
+([Date properties](/core-concepts#date-properties)). Minimum and maximum support string, number,
 and date fields; schema-known boolean and structured operands are refused.
 Sum and average require numeric fields.
 

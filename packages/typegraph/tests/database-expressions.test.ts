@@ -147,6 +147,7 @@ describe("database expressions", () => {
       decodeExpressionValue(
         '[{"publishedAt":"2024-01-01T00:00:00.000Z","value":"original"}]',
         collection,
+        "sqlite",
       ),
     ).toEqual([{ publishedAt, value: "original" }]);
   });
@@ -174,7 +175,7 @@ describe("database expressions", () => {
     );
 
     expect(tags.elementValueType).toBeUndefined();
-    expect(decodeExpressionValue('["first",null]', tags)).toEqual([
+    expect(decodeExpressionValue('["first",null]', tags, "sqlite")).toEqual([
       "first",
       // eslint-disable-next-line unicorn/no-null -- ordinary JSON null must remain JSON null.
       null,

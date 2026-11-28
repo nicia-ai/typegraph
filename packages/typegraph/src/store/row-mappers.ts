@@ -13,6 +13,7 @@ import {
   RESERVED_EDGE_KEYS,
   RESERVED_NODE_KEYS,
 } from "./reserved-keys";
+import { type StoredPropsReader } from "./stored-date-revival";
 import { type Edge, type EdgeMeta, type Node, type NodeMeta } from "./types";
 
 /**
@@ -41,9 +42,14 @@ function nullToUndefined<T>(value: T | null | undefined): T | undefined {
  * Props are spread at top level, metadata goes under `meta`.
  * Reserved keys (id, kind, meta) in props are filtered out to prevent collisions.
  * Null values from database are normalized to undefined.
+ *
+ * `reader` decodes the props a read returns for the row's kind — every
+ * position whose schema output is a `Date` reads as one — and is required so
+ * that no read path can return a kind's stored text by omission. Resolve it
+ * from the store's registry with `storedPropsReaders(registry).node`.
  */
-export function rowToNode(row: NodeRow): Node {
-  const rawProps = rowPropsToObject(row.props);
+export function rowToNode(row: NodeRow, reader: StoredPropsReader): Node {
+  const rawProps = reader(row.kind, rowPropsToObject(row.props));
   const props = filterReservedKeys(rawProps, RESERVED_NODE_KEYS);
   return {
     kind: row.kind,
@@ -80,9 +86,12 @@ export function rowToNodeMeta(
  * Props are spread at top level, metadata goes under `meta`.
  * Reserved keys in props are filtered out to prevent collisions.
  * Null values from database are normalized to undefined.
+ *
+ * `reader` decodes the props for the row's kind, as for {@link rowToNode}:
+ * `storedPropsReaders(registry).edge`.
  */
-export function rowToEdge(row: EdgeRow): Edge {
-  const rawProps = rowPropsToObject(row.props);
+export function rowToEdge(row: EdgeRow, reader: StoredPropsReader): Edge {
+  const rawProps = reader(row.kind, rowPropsToObject(row.props));
   const props = filterReservedKeys(rawProps, RESERVED_EDGE_KEYS);
   return {
     id: row.id,

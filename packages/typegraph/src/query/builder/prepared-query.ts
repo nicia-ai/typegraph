@@ -26,6 +26,12 @@
  */
 import { type GraphBackend } from "../../backend/types";
 import { ConfigurationError, UnsupportedPredicateError } from "../../errors";
+import { type KindRegistry } from "../../registry/kind-registry";
+import {
+  passStoredProps,
+  type StoredPropsReaders,
+  storedPropsReaders,
+} from "../../store/stored-date-revival";
 import { readOwnProperty } from "../../utils/object";
 import {
   type BetweenPredicate,
@@ -520,6 +526,12 @@ export type PreparedQueryConfig<R> = Readonly<{
   selectiveFields: readonly SelectiveField[] | undefined;
   selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
   schemaIntrospector: SchemaIntrospector;
+  /**
+   * The kinds whose stored props a row decodes (`storedPropsReaders`). Every
+   * query the store prepares states it; a config built without one reads
+   * props exactly as stored, as before reads decoded dates.
+   */
+  registry?: KindRegistry;
 }>;
 
 /**
@@ -560,6 +572,9 @@ export class PreparedQuery<R> {
   readonly #selectiveFields: readonly SelectiveField[] | undefined;
   readonly #selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
   readonly #schemaIntrospector: SchemaIntrospector;
+  readonly #propsReaders: StoredPropsReaders;
+  /** Whether rows read props as stored: the config states no registry. */
+  readonly #readsStoredProps: boolean;
   readonly #parameterMetadata: ParameterMetadata;
   #selectiveExecutionDisabled = false;
   /**
@@ -586,6 +601,11 @@ export class PreparedQuery<R> {
     this.#selectiveFields = config.selectiveFields;
     this.#selectFn = config.selectFn;
     this.#schemaIntrospector = config.schemaIntrospector;
+    this.#readsStoredProps = config.registry === undefined;
+    this.#propsReaders =
+      config.registry === undefined ?
+        { node: passStoredProps, edge: passStoredProps }
+      : storedPropsReaders(config.registry);
     this.#parameterMetadata = collectParameterMetadata(this.#ast);
     assertDistinctParameterRoles(this.#parameterMetadata);
   }
@@ -641,6 +661,9 @@ export class PreparedQuery<R> {
           this.#selectiveFields,
           this.#schemaIntrospector,
           this.#selectFn,
+          this.#readsStoredProps ?
+            { kind: "stored" }
+          : { kind: "decoded", dialect: this.#dialect },
         );
       } catch (error) {
         if (error instanceof MissingSelectiveFieldError) {
@@ -676,6 +699,7 @@ export class PreparedQuery<R> {
       rows,
       this.#state.startAlias,
       this.#state.traversals,
+      this.#propsReaders,
       this.#selectFn,
     );
   }

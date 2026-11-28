@@ -16,6 +16,7 @@ import {
 import { rowPropsToJsonText, rowPropsToObject } from "../../src/backend/types";
 import { DatabaseOperationError } from "../../src/errors";
 import { rowToNode } from "../../src/store/row-mappers";
+import { passStoredProps } from "../../src/store/stored-date-revival";
 
 const TIMESTAMP = "2026-07-03T00:00:00.000Z";
 
@@ -127,28 +128,34 @@ describe("RowProps mapping", () => {
     });
 
     it("rowToNode produces identical nodes from string and object props", () => {
-      const fromObject = rowToNode({
-        kind: "Person",
-        id: "person-1",
-        props: objectProps,
-        version: 1,
-        valid_from: TIMESTAMP,
-        valid_to: undefined,
-        created_at: TIMESTAMP,
-        updated_at: TIMESTAMP,
-        deleted_at: undefined,
-      });
-      const fromString = rowToNode({
-        kind: "Person",
-        id: "person-1",
-        props: JSON.stringify(objectProps),
-        version: 1,
-        valid_from: TIMESTAMP,
-        valid_to: undefined,
-        created_at: TIMESTAMP,
-        updated_at: TIMESTAMP,
-        deleted_at: undefined,
-      });
+      const fromObject = rowToNode(
+        {
+          kind: "Person",
+          id: "person-1",
+          props: objectProps,
+          version: 1,
+          valid_from: TIMESTAMP,
+          valid_to: undefined,
+          created_at: TIMESTAMP,
+          updated_at: TIMESTAMP,
+          deleted_at: undefined,
+        },
+        passStoredProps,
+      );
+      const fromString = rowToNode(
+        {
+          kind: "Person",
+          id: "person-1",
+          props: JSON.stringify(objectProps),
+          version: 1,
+          valid_from: TIMESTAMP,
+          valid_to: undefined,
+          created_at: TIMESTAMP,
+          updated_at: TIMESTAMP,
+          deleted_at: undefined,
+        },
+        passStoredProps,
+      );
       expect(fromObject).toEqual(fromString);
       expect(fromObject["name"]).toBe("Alice");
     });

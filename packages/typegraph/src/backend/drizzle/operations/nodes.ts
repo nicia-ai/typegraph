@@ -8,7 +8,10 @@ import {
   sql as portableSql,
   type SqlFragment,
 } from "../../../query/sql-fragment";
-import { resolveStampedValidityLowerBound } from "../../../utils/date";
+import {
+  resolveStampedValidityLowerBound,
+  storedJsonText,
+} from "../../../utils/date";
 import type {
   AtomicNodeBatchEntry,
   AtomicNodeBatchResultMode,
@@ -58,7 +61,7 @@ function atomicNodeCreatePostimage(
     graphId: params.graphId,
     kind: params.kind,
     id: params.id,
-    propsJson: JSON.stringify(params.props),
+    propsJson: storedJsonText(params.props),
     version: INITIAL_NODE_VERSION,
     // The temporal inventory requires the owner and its input on one line.
     // prettier-ignore
@@ -77,7 +80,7 @@ function atomicNodeUpdatePostimage(
     graphId: entry.graphId,
     kind: entry.kind,
     id: entry.id,
-    propsJson: JSON.stringify(entry.props),
+    propsJson: storedJsonText(entry.props),
     version: entry.expectedVersion + NODE_VERSION_INCREMENT,
     updatedAt: timestamp,
   } as const;
@@ -107,7 +110,7 @@ export function buildInsertNode(
   timestamp: string,
 ): SQL {
   const { nodes } = tables;
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
   const columns = nodeColumnList(nodes);
 
   return sql`
@@ -134,7 +137,7 @@ export function buildInsertNodeIfAbsent(
   timestamp: string,
 ): SQL {
   const { nodes } = tables;
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
   const columns = nodeColumnList(nodes);
   const conflictColumns = sql.join(
     [nodes.graphId, nodes.kind, nodes.id].map((column) =>
@@ -168,7 +171,7 @@ export function buildInsertNodeIfAbsentWithSchemaFence(
   schemaLockClause: SQL,
 ): SQL {
   const { nodes, schemaVersions } = tables;
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
   const columns = nodeColumnList(nodes);
   const conflictColumns = sql.join(
     [nodes.graphId, nodes.kind, nodes.id].map((column) =>
@@ -206,7 +209,7 @@ export function buildInsertNodeWithSchemaFence(
   schemaLockClause: SQL,
 ): SQL {
   const { nodes, schemaVersions } = tables;
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
   const columns = nodeColumnList(nodes);
 
   return sql`
@@ -236,7 +239,7 @@ export function buildInsertNodeNoReturn(
   timestamp: string,
 ): SQL {
   const { nodes } = tables;
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
   const columns = nodeColumnList(nodes);
 
   return sql`
@@ -260,7 +263,7 @@ export function buildInsertNodesBatch(
   const { nodes } = tables;
   const columns = nodeColumnList(nodes);
   const values = params.map((nodeParams) => {
-    const propsJson = JSON.stringify(nodeParams.props);
+    const propsJson = storedJsonText(nodeParams.props);
     return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(resolveStampedValidityLowerBound(nodeParams.validFrom, nodeParams.validTo, timestamp))}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
   });
 
@@ -281,7 +284,7 @@ export function buildInsertNodesBatchReturning(
   const { nodes } = tables;
   const columns = nodeColumnList(nodes);
   const values = params.map((nodeParams) => {
-    const propsJson = JSON.stringify(nodeParams.props);
+    const propsJson = storedJsonText(nodeParams.props);
     return sql`(${nodeParams.graphId}, ${nodeParams.kind}, ${nodeParams.id}, ${propsJson}, 1, ${sqlNull(resolveStampedValidityLowerBound(nodeParams.validFrom, nodeParams.validTo, timestamp))}, ${sqlNull(nodeParams.validTo)}, ${timestamp}, ${timestamp})`;
   });
 
@@ -332,7 +335,7 @@ export function buildInsertNodesBatchWithSchemaFence(
     sql`, `,
   );
   const values = params.map((nodeParams) => {
-    const propsJson = JSON.stringify(nodeParams.props);
+    const propsJson = storedJsonText(nodeParams.props);
     return sql`
       (
             ${castBoundValueForColumn(nodes.graphId, nodeParams.graphId)},
@@ -664,7 +667,7 @@ export function buildUpdateNode(
   timestamp: string,
 ): SQL {
   const { nodes } = tables;
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
 
   const setParts: SQL[] = [
     sql`${quotedColumn(nodes.props)} = ${propsJson}`,
@@ -826,7 +829,7 @@ export function buildResolvedNodeUpdateBatch(
   const expectedColumns = sql.join([id, props, expectedVersion], sql`, `);
   const expectedRows = entries.map(
     (entry) =>
-      sql`(${castBoundValueForColumn(tables.nodes.id, entry.id)}, ${castBoundValueForColumn(tables.nodes.props, JSON.stringify(entry.props))}, ${castBoundValueForColumn(tables.nodes.version, entry.expectedVersion)})`,
+      sql`(${castBoundValueForColumn(tables.nodes.id, entry.id)}, ${castBoundValueForColumn(tables.nodes.props, storedJsonText(entry.props))}, ${castBoundValueForColumn(tables.nodes.version, entry.expectedVersion)})`,
   );
   return sql`
     WITH ${expected} (${expectedColumns}) AS (

@@ -1040,7 +1040,7 @@ export function registerDatePredicateIntegrationTests(
 
       // Nothing stored holds a date outside the range: every stamp written
       // (the nodes of the edge cases) holds only the storable instant, read
-      // back as its stored text.
+      // back as its `Date`.
       const stored = await storedStamps(store);
       for (const node of stored.nodes) {
         expect({
@@ -1048,9 +1048,9 @@ export function registerDatePredicateIntegrationTests(
           history: node.history,
           nested: node.nested,
         }).toEqual({
-          at: MIDNIGHT,
-          history: [MIDNIGHT],
-          nested: { at: MIDNIGHT },
+          at: new Date(MIDNIGHT),
+          history: [new Date(MIDNIGHT)],
+          nested: { at: new Date(MIDNIGHT) },
         });
       }
       expect(stored.edges.map((edge) => edge.id)).toEqual([
@@ -1713,6 +1713,47 @@ export function registerDatePredicateIntegrationTests(
         ],
         bound: [{ bound: yearZero }],
       });
+    });
+
+    it("keeps a stated date's origin through composition and relations, and a stored date's through a composition with one", async () => {
+      // A stated date decodes as the Date stated wherever it travels: a
+      // coalesce or conditional of only stated dates, and a relation column.
+      // A composition that may yield the stored date decodes as stored text.
+      const store = context.getStore();
+      const yearZero = REFUSED_DATES.yearZero;
+      const rows = await queryDocuments(store)
+        .whereNode("d", (d) => d.title.eq("midnight"))
+        .project((ctx) => ({
+          coalesced: expr.coalesce(
+            expr.literal(yearZero),
+            expr.literal(yearZero),
+          ),
+          conditional: expr.when(
+            expr.eq(ctx.d.title, expr.literal("midnight")),
+            expr.literal(yearZero),
+            expr.literal(new Date(MIDYEAR)),
+          ),
+          // PostgreSQL types the fallback as the field's timestamptz, which
+          // cannot hold year 0000, so the fallback here is a portable date.
+          stored: expr.coalesce(
+            ctx.d.publishedAt,
+            expr.literal(new Date(MIDYEAR)),
+          ),
+        }))
+        .asRelation()
+        .project((columns) => ({
+          coalesced: columns.coalesced,
+          conditional: columns.conditional,
+          stored: columns.stored,
+        }))
+        .execute();
+      expect(rows).toEqual([
+        {
+          coalesced: yearZero,
+          conditional: yearZero,
+          stored: new Date(MIDNIGHT),
+        },
+      ]);
     });
 
     it.each(["packed", "fallback"] as const)(

@@ -42,6 +42,7 @@ import {
   UNBLOCKED_BUCKET_KEY,
   uniqueConstraintNameForBucket,
 } from "./blocking";
+import { storedFormNode } from "./callback-node";
 import { CandidateSourceError } from "./errors";
 import { entityRef, type MatchSource } from "./evidence";
 import {
@@ -56,13 +57,14 @@ import {
 import type { CandidateEdge, CandidatePair } from "./scoring";
 import { FORCED_MATCH_SCORE } from "./scoring";
 import { fieldText } from "./similarity";
-import type {
-  GraphDef,
-  JsonValue,
-  Node,
-  NodeId,
-  NodeType,
-  UniqueIntrospection,
+import {
+  type GraphDef,
+  type JsonValue,
+  type Node,
+  type NodeId,
+  type NodeType,
+  storedFormOfReadProps,
+  type UniqueIntrospection,
 } from "./typegraph-internal";
 import type { ResolveConfig } from "./types";
 import { UnionFind } from "./union-find";
@@ -213,7 +215,9 @@ function nodeProps(node: Node<NodeType>): Record<string, JsonValue> {
       props[key] = value as JsonValue;
     }
   }
-  return props;
+  // A committed node arrives as a read returns it, a date property decoded to a
+  // `Date`; a base member's props are the stored form the merge compares.
+  return storedFormOfReadProps(props) as Record<string, JsonValue>;
 }
 
 /**
@@ -824,7 +828,7 @@ export const baseKeySource: CandidateSource = {
           continue;
         }
         pairs.push(
-          orderEndpoints(stagedNode, base, [
+          orderEndpoints(stagedNode, storedFormNode(base), [
             { kind: "baseIndex", sourceId: "baseKey", indexName: blockIndex },
           ]),
         );

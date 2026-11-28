@@ -111,9 +111,84 @@ parse.
 #### Date properties
 
 Properties are stored as JSON, so a `z.date()` property's `Date` is stored as
-its canonical ISO-8601 text (`2024-01-01T00:00:00.000Z`), and a read returns
-that text, not a `Date`, even though the property is typed `Date`. Convert it
-with `new Date(value)` where you need a `Date`.
+its canonical ISO-8601 text (`2024-01-01T00:00:00.000Z`). Every read turns
+that text back into a `Date` wherever the property's schema output is a
+`Date`: a `z.date()`, a `z.coerce.date()`, or a pipe that ends in one
+(`z.string().pipe(z.coerce.date())`), inside `.optional()`, `.nullable()`,
+`.default()` and similar wrappers, a nested `z.object()`, a `z.array()` or a
+`z.record()`. That covers collection reads and the nodes and edges a write
+returns, query rows and selected fields, `.project()` and aggregates,
+`first()`, `paginate()` and `stream()`, traversals, `subgraph()`,
+`neighbors()`, search hits, `asOf()` and `asOfRecorded()` views, reads inside
+a transaction, and the nodes a [graph merge](/graph-merge) hands to `block()`
+and a `custom` similarity `score()`.
+
+The stored form does not change. `JSON.stringify` of a read, an export
+document, a pagination cursor and a graph-merge plan hold the same text as
+before. A read runs no part of the schema: it applies no parse, transform or
+refinement. So these still read as stored:
+
+- A `z.string()` or `z.iso.datetime()`, whose output is a string.
+- A union with a date member (`z.union([z.date(), z.string()])`), a tuple, a
+  `z.lazy()` (even `z.lazy(() => z.date())`), the values an object's
+  `.catchall(z.date())` admits, and a `.transform()`, even one that returns a
+  `Date`. Declare `z.string().pipe(z.coerce.date())` rather than
+  `z.string().transform((text) => new Date(text))` when you want a `Date`.
+- A position a union's branches do not all type as a date. A union of
+  structured branches (`z.union([z.array(z.object({ at: z.date() })),
+  z.array(z.object({ at: z.string() }))])`) decodes only the positions every
+  branch types as a date, whichever branch comes first.
+- A position reached again through a recursive schema. In a getter-recursive
+  object (`get children() { return z.array(Tree) }`) the root's date
+  properties read as `Date`s, and everything under `children` reads as
+  stored.
+- A position one branch of a union types through an object and another
+  through a record (`z.object({ at: z.date() })` and
+  `z.record(z.enum(["at"]), z.date())`), in the union's schema and in a
+  `unionAll()` of projections of the two. The shared position reads as
+  stored text.
+- A selected field of an alias over several kinds (`from(["Event", "Log"],
+  "e")`) when the kinds disagree on whether the field is a date, for example
+  one declares `at` as a `z.date()` and another through a `.transform()`.
+  `select()` reads that field as stored text for every row. Selecting the
+  whole alias decodes each row for its own kind.
+- Stored text that is not the canonical form the store writes (years 0001 to
+  9999, UTC, milliseconds), for example text an older schema or raw SQL
+  wrote. A read returns it exactly as stored and never an `Invalid Date`, and
+  `validateStore()` reports it. On PostgreSQL, a selected field, a
+  `.project()` scalar, `$scalar()`, `min`/`max`, a `groupBy()` date key and
+  the elements of `expr.collect()` extract the date with a `timestamptz` cast,
+  so there text the engine can cast comes back as the `Date` the cast reads
+  (see the [parity matrix](/backend-setup#sqlite--postgresql-parity)).
+
+A date you state in a query rather than store, an `expr.literal()` or
+`expr.param()` date, comes back from `.project()`, `$scalar()`, a relation
+column or `expr.collect()` as the `Date` you stated, including one outside the
+years 0001 to 9999. So does a `coalesce()` or `when()` whose every branch is
+such a date. A composition that may yield a stored date is decoded as stored
+text. A `coalesce()` or `when()` of structured properties, and a
+`union()`, `unionAll()`, `intersect()` or `except()` of two relations,
+decode a column's date positions only where every branch or operand types
+them as dates, so a row from one operand is never decoded under the other's
+schema. Every date a query returns is the same value on SQLite and PostgreSQL
+whatever the PostgreSQL session `TimeZone` is: `expr.collect()` elements and
+the date columns of a `batchOnce()` payload are emitted as canonical UTC text
+on both, and a scalar date column PostgreSQL casts to `timestamptz` decodes
+as the instant the engine returns, whether the driver hands back a `Date` or
+offset-bearing text (postgres-js), including an offset to the second, which
+PostgreSQL renders for an instant before a zone adopted standard time
+(`+00:09:21` in `Europe/Paris` before 1891). Legacy stored text PostgreSQL
+casts to a BC date has no canonical text, so `expr.collect()` and
+`batchOnce()` return it on PostgreSQL as its era-bearing UTC text
+(`0001-06-01T00:00:00.000Z BC`), never as a `Date` of a CE instant.
+A late instant that PostgreSQL renders with a five-digit year in a session
+zone east of UTC (`9999-12-31T23:59:59.999Z` is `10000-01-01 13:59:59.999+14`
+in `Pacific/Kiritimati`) reads as that text in a scalar projection, while
+`batchOnce()` returns it as a `Date`. A `unionAll()` (or another set
+operation) of a relation projecting an `expr.literal()` date and one
+projecting a stored date property runs on SQLite, but PostgreSQL rejects it,
+as it did before reads decoded dates, because the two operands are `text` and
+`timestamptz`.
 
 A write that parses stored properties again first turns that stored text back
 into a `Date`, so an update that does not touch a date property leaves it as
@@ -125,11 +200,49 @@ violation. Text is turned back into a `Date` only where the schema accepts
 nothing but a `Date` — a `z.date()`, possibly inside `.optional()`,
 `.nullable()`, `.default()`, `.catch()` and similar wrappers, a nested
 `z.object()` or a `z.array()` — and only when it is exactly the text the store
-writes. A date under a union, a record, a tuple, a `.transform()` or an
-`.overwrite()` is parsed as stored. A value you pass yourself is never converted: state a date
-property as a `Date`. The `getOrCreate…` forms parse the properties you state
-as a create first, so a property you omit that declares a `.default()` or
-`.catch()` takes that value rather than the stored one.
+writes. A date under a union, a record, a tuple, a `.transform()`, or an
+`.overwrite()` on the date itself or on an object or array holding it, is
+parsed as stored. An `.overwrite()` on a wrapper around the date
+(`z.date().optional().overwrite(…)`) runs on the revived `Date`, so one that
+changes its input changes the stored date on every update of another property,
+and on an import or merge of the row; this is a known limitation of
+re-validating the whole row. A value you pass
+yourself is never converted: state a date property as a `Date`.
+The `getOrCreate…` forms parse the properties you state as a create first, so a
+property you omit that declares a `.default()` or `.catch()` takes that value
+rather than the stored one.
+
+Every write stores a `Date` you state the same way: as the ISO text of the
+instant it holds, read from the `Date` itself, never from a `toJSON()` or
+`toISOString()` the object carries (an own property or a subclass), so a
+`Date` cannot be stored, matched or compared as an instant other than its
+own. This holds for every node and edge write on the built-in backends, a
+uniqueness constraint, an endpoint match, `importGraph()` and
+`trustedImportGraph()` of an in-memory document, a `compareAndSet()`
+expectation, an index lookup, and a predicate or parameter compared with a
+date. `updateWhere()` and `compareAndSet()` accept a `Date` in their `patch`,
+at any depth of a nested object or array, and store the same text `create()`
+and `update()` store. They refuse a `Date` at a position where parsing the
+row again would not turn that text back into a `Date`, such as under a union,
+a record or `z.any()`, with a `ValidationError`, since the row would then hold
+a string where you wrote a `Date`. A `compareAndSet()` `expected` value may be a
+`Date`; it matches when the stored text is that `Date`'s ISO text. It is a
+comparison, not a write, so it is not parsed through the property's schema: a
+transform or `.overwrite()` there does not change the instant it compares.
+`importGraph()` reads the stored text an export wrote back as a `Date` by the
+same rule as the updates above
+([Date properties in interchange](/interchange#date-properties)), and so does
+a [graph merge](/graph-merge), whose plans carry each row's properties in their
+stored form: `applyMergePlan()`, `merge()`, candidate write sets and mutation
+plans all apply a dated write.
+
+Reads and these writes still disagree about two shapes. A `z.record()` of
+dates reads back as `Date`s, and a `z.date().transform(…)` reads back as the
+transform's output, but a write that parses the stored row again turns neither
+back into its input: an `update()` of another property of such a kind, and a
+graph-merge `branch()` of a store holding one, fail with a validation error.
+Keep such a property on a kind you do not update, or declare a nested
+`z.object()` or a pipe (`z.string().pipe(z.coerce.date())`) instead.
 
 ### Node Operations
 

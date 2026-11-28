@@ -135,6 +135,16 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
     keyedBy: "callback-context",
     reason: "The evolved callback's original Store: per binding/view.",
   },
+  "store/stored-date-revival.ts#readPlanCache": {
+    keyedBy: "other",
+    reason:
+      "A read plan per field typing (`FieldTypeInfo`), compiled once from schema evidence; it holds no transaction or session state.",
+  },
+  "store/stored-date-revival.ts#registryReaders": {
+    keyedBy: "other",
+    reason:
+      "The props readers of a kind registry, compiled once from its schemas; they hold no transaction or session state.",
+  },
   "store/runtime-port.ts#storeRuntimeTokens": {
     keyedBy: "other",
     reason:

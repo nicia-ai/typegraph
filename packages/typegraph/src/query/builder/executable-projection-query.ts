@@ -7,20 +7,36 @@ import {
   type StatementBackend,
   type StoreTransactionBackend,
 } from "../../store/operation-scope";
+import { decodeStoredValue } from "../../store/stored-date-revival";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
 import type { QueryAst, SortDirection, ValueType } from "../ast";
 import { compileNameCheckedQuery } from "../compiler";
+import { resultDateOrigin } from "../compiler/typed-json-extract";
+import { type SqlDialect } from "../dialect/types";
 import { executeSchemaCheckedRead } from "../execution/schema-checked-read";
-import type { DatabaseExpression } from "../expressions";
+import { decodeExpressionDate } from "../execution/value-decoder";
+import {
+  dateReadOf,
+  elementDateOriginOf,
+  type ExpressionDateRead,
+} from "../expression-date-read";
+import {
+  type DatabaseExpression,
+  type DateOrigin,
+  expressionReadPlan,
+} from "../expressions";
 import { compileOrderTerm, resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
 import { asCompiledSelectSql, type CompiledSelectSql } from "../sql-intent";
 import { buildRowQueryAst } from "./ast-builder";
-import { buildCompileOptions } from "./compile-options";
+import { buildCompileOptions, compileDialect } from "./compile-options";
 import { assertExpressionScope, getExpressionScope } from "./expression-scope";
 import type { ExpressionProjectionEntries } from "./expression-subqueries";
 import { getQueryBuilderInternalContext } from "./internal-context";
-import { oneStatementBatchSelectionOrder } from "./one-statement-batch";
+import {
+  oneStatementBatchSelectionOrder,
+  storedDateOutputNames,
+} from "./one-statement-batch";
 import {
   bindQueryParameters,
   collectParameterMetadata,
@@ -285,6 +301,12 @@ export class ExecutableProjectionQuery<
         executionTarget: backendDerivationRoot(backend),
       },
       outputNames: envelope.projection.fields.map((field) => field.outputName),
+      dateOutputNames: storedDateOutputNames(
+        Object.entries(this.#fields).map(([outputName, expression]) => ({
+          ...expression,
+          outputName,
+        })),
+      ),
       orderBy,
       mapRows: (rows: readonly Record<string, unknown>[]) =>
         rows.map((row) => this.#decodeRow(row)),
@@ -527,7 +549,11 @@ export class ExecutableProjectionQuery<
     const decoded = Object.fromEntries(
       Object.entries(this.#fields).map(([key, expression]) => [
         key,
-        decodeExpressionValue(row[key], expression),
+        decodeExpressionValue(
+          row[key],
+          expression,
+          compileDialect(this.#config),
+        ),
       ]),
     ) as ProjectionResult<Fields>;
     return this.#mapRow(decoded);
@@ -539,9 +565,16 @@ export class ExecutableProjectionQuery<
   }
 }
 
+/**
+ * A projected column as a read returns it. A scalar date column decodes by the
+ * origin the compiler gives it for `dialect` (`resultDateOrigin`); a collected
+ * element or record field, which the compiler built into JSON, by the
+ * expression's own origin.
+ */
 export function decodeExpressionValue(
   value: unknown,
   expression: DatabaseExpression,
+  dialect: SqlDialect,
 ): unknown {
   if (value === null || value === undefined) return undefined;
   switch (expression.valueType) {
@@ -549,24 +582,39 @@ export function decodeExpressionValue(
     case "date":
     case "number":
     case "string": {
-      return decodeScalarExpressionValue(value, expression.valueType);
+      return decodeScalarExpressionValue(
+        value,
+        expression.valueType,
+        resultDateOrigin(dateReadOf(expression).dateOrigin, dialect),
+      );
     }
     case "object":
     case "embedding": {
-      return typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+      return decodeStoredValue(
+        expressionReadPlan(expression),
+        typeof value === "string" ? (JSON.parse(value) as unknown) : value,
+      );
     }
     case "array": {
       const parsed =
         typeof value === "string" ? (JSON.parse(value) as unknown) : value;
       if (!Array.isArray(parsed) || expression.elementValueType === undefined)
-        return parsed;
+        return decodeStoredValue(expressionReadPlan(expression), parsed);
       const elementValueType = expression.elementValueType;
       const elementFields = expression.elementFields;
       return parsed.map((element) => {
         if (element === null || element === undefined) return;
         return elementFields === undefined ?
-            decodeScalarExpressionValue(element, elementValueType)
-          : decodeRecordExpressionValue(element, elementFields);
+            decodeScalarExpressionValue(
+              element,
+              elementValueType,
+              dateReadOf(expression).dateOrigin,
+            )
+          : decodeRecordExpressionValue(
+              element,
+              elementFields,
+              dateReadOf(expression),
+            );
       });
     }
     case "unknown": {
@@ -579,6 +627,7 @@ export function decodeExpressionValue(
 function decodeRecordExpressionValue(
   value: unknown,
   fields: Readonly<Record<string, ValueType>>,
+  dateRead: ExpressionDateRead,
 ): Readonly<Record<string, unknown>> {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw new ConfigurationError(
@@ -592,7 +641,11 @@ function decodeRecordExpressionValue(
         key,
         field === null || field === undefined ?
           undefined
-        : decodeScalarExpressionValue(field, valueType),
+        : decodeScalarExpressionValue(
+            field,
+            valueType,
+            elementDateOriginOf(dateRead, key),
+          ),
       ];
     }),
   );
@@ -601,6 +654,7 @@ function decodeRecordExpressionValue(
 function decodeScalarExpressionValue(
   value: unknown,
   valueType: ValueType,
+  dateOrigin: DateOrigin | undefined,
 ): unknown {
   switch (valueType) {
     case "boolean": {
@@ -610,12 +664,7 @@ function decodeScalarExpressionValue(
       return Number(value);
     }
     case "date": {
-      return (
-        value instanceof Date ? value
-        : typeof value === "string" || typeof value === "number" ?
-          new Date(value)
-        : value
-      );
+      return decodeExpressionDate(value, dateOrigin);
     }
     case "string": {
       return value;

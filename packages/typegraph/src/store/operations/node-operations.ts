@@ -121,6 +121,7 @@ import {
 } from "../../errors";
 import {
   unrecognizedOptionKeyIssues,
+  unstorableDateIssue,
   validateNodeProps,
 } from "../../errors/validation";
 import { type IdentityFoldPlan } from "../../identity/service";
@@ -152,9 +153,11 @@ import { compareCodePoints, compareStrings } from "../../utils/compare";
 import {
   assertOrderedValidityWindow,
   assertWritableValidityWindow,
+  dateInstantText,
   nowIso,
   preservesImmutableLowerBound,
   resolveStampedValidityLowerBound,
+  storedJsonText,
   validateOptionalCanonicalIsoDate,
   validateStatedValidityLowerBound,
 } from "../../utils/date";
@@ -229,7 +232,12 @@ import {
   unsupportedResolvedMutationSet,
 } from "../resolved-mutation-set";
 import { type NodeRow, rowToEdge, rowToNode } from "../row-mappers";
-import { reviveStoredDateProps } from "../stored-date-revival";
+import {
+  encodeStoredDatesFor,
+  reviveStoredDateProps,
+  type StoredPropsReader,
+  storedPropsReaders,
+} from "../stored-date-revival";
 import {
   type BulkOperationHookContext,
   compareAndSetAbsent,
@@ -1299,7 +1307,7 @@ export function createNodeBatchValidationSeams(
       graph_id: params.graphId,
       kind: params.kind,
       id: params.id,
-      props: JSON.stringify(params.props),
+      props: storedJsonText(params.props),
       version: 1,
       // The simulated cached row only needs a NodeRow-shaped valid_from
       // (string | undefined, never null) for existence/uniqueness checks,
@@ -1912,15 +1920,20 @@ async function performNodeUpdate<G extends GraphDef>(
     options,
     resolvedExisting,
   );
-  return writePreparedNodeUpdate(session, prepared);
+  return writePreparedNodeUpdate(
+    session,
+    prepared,
+    storedPropsReaders(ctx.registry).node,
+  );
 }
 
 /** The WRITE half of {@link performNodeUpdate}: one prepared update's statement. */
 async function writePreparedNodeUpdate(
   session: NodeWriteSession,
   { work, fences }: NodeUpdatePrepared,
+  reader: StoredPropsReader,
 ): Promise<Node> {
-  return rowToNode(await session.reviseNode(work, fences));
+  return rowToNode(await session.reviseNode(work, fences), reader);
 }
 
 /** The READ half of {@link performNodeUpdate}; see {@link NodeUpdatePrepared}. */
@@ -2406,7 +2419,11 @@ async function writeNodeUpdateSet<G extends GraphDef>(
         nodes.push(
           await writeNodeRowMovingWindowEnd(ctx, target, entry.input, () =>
             preparedAgainstStoredRow ?
-              writePreparedNodeUpdate(session, update)
+              writePreparedNodeUpdate(
+                session,
+                update,
+                storedPropsReaders(ctx.registry).node,
+              )
             : performNodeUpdate(
                 ctx,
                 entry.input,
@@ -2842,7 +2859,7 @@ export async function executeNodeReplacementBatch<G extends GraphDef>(
   memoizeLeasedSchemaFence(ctx, entry);
   return appliedResolvedMutationSet(
     restoreAtomicNodeBatchRows(ctx.graphId, preparedCreates, returnedRows).map(
-      (row) => rowToNode(row),
+      (row) => rowToNode(row, storedPropsReaders(ctx.registry).node),
     ),
   );
 }
@@ -3979,6 +3996,7 @@ async function readHeldEdge(
   target: WriteTarget,
   graphId: string,
   id: string,
+  reader: StoredPropsReader,
 ): Promise<Edge> {
   const row = await target.getEdge(graphId, id);
   return rowToEdge(
@@ -3986,6 +4004,7 @@ async function readHeldEdge(
       row,
       `composition edge "${id}" was written but not readable`,
     ),
+    reader,
   );
 }
 
@@ -4335,7 +4354,10 @@ async function writeCompositionAttachmentMoves<G extends GraphDef>(
           edge:
             decided.incumbent === undefined ?
               undefined
-            : rowToEdge(decided.incumbent.edge),
+            : rowToEdge(
+                decided.incumbent.edge,
+                storedPropsReaders(ctx.registry).edge,
+              ),
         }
       : {
           wrote: true,
@@ -4343,6 +4365,7 @@ async function writeCompositionAttachmentMoves<G extends GraphDef>(
             target,
             ctx.graphId,
             replacement.insertParams.id,
+            storedPropsReaders(ctx.registry).edge,
           ),
         },
     );
@@ -4714,7 +4737,10 @@ async function writeOwedExistingGetOrCreateLeg<G extends GraphDef>(
       ),
       entry,
     );
-    return { node: rowToNode(existing), action: "found" };
+    return {
+      node: rowToNode(existing, storedPropsReaders(ctx.registry).node),
+      action: "found",
+    };
   }
   const node = await executeNodeUpsertUpdate(
     ctx,
@@ -4759,7 +4785,10 @@ async function applyExistingGetOrCreateLeg<G extends GraphDef>(
       leg.request,
     );
   }
-  return { node: rowToNode(existing), action: "found" };
+  return {
+    node: rowToNode(existing, storedPropsReaders(ctx.registry).node),
+    action: "found",
+  };
 }
 
 /**
@@ -5641,7 +5670,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       );
       await foldCreated("restore");
       await attachCompositionEdge();
-      return shouldReturnRow ? rowToNode(resurrected) : undefined;
+      return shouldReturnRow ?
+          rowToNode(resurrected, storedPropsReaders(ctx.registry).node)
+        : undefined;
     }
 
     if (fuseSchemaFenceInFirstWrite) {
@@ -5659,7 +5690,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
         : await session.createNodeWithSchemaFence(work, schemaFence);
       if (inserted !== undefined) {
         memoizeLeasedSchemaFence(ctx, frame);
-        return shouldReturnRow ? rowToNode(inserted) : undefined;
+        return shouldReturnRow ?
+            rowToNode(inserted, storedPropsReaders(ctx.registry).node)
+          : undefined;
       }
 
       // The fused statement's empty result is intentionally ambiguous. Its
@@ -5710,7 +5743,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
           ),
         ),
       );
-      return rowToNode(row);
+      return rowToNode(row, storedPropsReaders(ctx.registry).node);
     }
 
     if (prepared.insertIfAbsent) {
@@ -5721,7 +5754,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       if (inserted !== undefined) {
         await foldCreated("fold");
         await attachCompositionEdge();
-        return shouldReturnRow ? rowToNode(inserted) : undefined;
+        return shouldReturnRow ?
+            rowToNode(inserted, storedPropsReaders(ctx.registry).node)
+          : undefined;
       }
 
       // `ON CONFLICT DO NOTHING` leaves PostgreSQL's transaction usable. A
@@ -5766,7 +5801,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       );
       await foldCreated("restore");
       await attachCompositionEdge();
-      return shouldReturnRow ? rowToNode(resurrected) : undefined;
+      return shouldReturnRow ?
+          rowToNode(resurrected, storedPropsReaders(ctx.registry).node)
+        : undefined;
     }
 
     // The existence probe above is not the last word: on an engine that does
@@ -5801,7 +5838,7 @@ async function executeNodeCreateInternal<G extends GraphDef>(
     await attachCompositionEdge();
 
     if (row === undefined) return;
-    return rowToNode(row);
+    return rowToNode(row, storedPropsReaders(ctx.registry).node);
   };
 
   if (autocommitSingleStatement) {
@@ -6085,7 +6122,7 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
         ctx.graphId,
         preparedCreates,
         returnedRows,
-      ).map((row) => rowToNode(row));
+      ).map((row) => rowToNode(row, storedPropsReaders(ctx.registry).node));
     }
   }
 
@@ -6175,7 +6212,9 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
         preparedCompositionEdges,
       );
 
-      return rows.map((row) => rowToNode(row));
+      return rows.map((row) =>
+        rowToNode(row, storedPropsReaders(ctx.registry).node),
+      );
     },
     { didWrite: writeResultAlwaysChanges },
   );
@@ -6408,6 +6447,68 @@ function validateNodePropertySubset(
   );
 }
 
+/**
+ * A set update's validated patch or expectation value, encoded as the JSON the
+ * backend receives (`encodeStoredDatesFor`). A `Date` its property's schema
+ * would not read back as a `Date` is refused: the after-image would hold a
+ * string where the caller stated a `Date`, and the uniqueness claim rebuilt
+ * from it would not match the one a create takes for that `Date`.
+ */
+function encodeSetUpdateValue(
+  schema: z.ZodObject<z.ZodRawShape>,
+  kind: string,
+  property: string,
+  value: unknown,
+): unknown {
+  // Encoded as a one-property props object, so the kind schema states the
+  // property's position and the reported path starts at the property.
+  const encoding = encodeStoredDatesFor(schema, { [property]: value }, "");
+  if (encoding.kind === "encoded") {
+    return (encoding.value as Record<string, unknown>)[property];
+  }
+  throw new ValidationError(
+    `Set update property "${property}" holds a Date at ${encoding.path} that its schema does not read back as a Date`,
+    {
+      entityType: "node",
+      kind,
+      operation: "update",
+      issues: [
+        {
+          path: encoding.path,
+          message:
+            "A set update stores a Date as its ISO text, which only a position whose schema accepts nothing but a Date reads back as a Date",
+        },
+      ],
+    },
+  );
+}
+
+/**
+ * The stored text a `compareAndSet()` expectation's `Date` compares as: the
+ * instant the caller stated, encoded by the encoder every write uses
+ * (`encodeSetUpdateValue`). Only its type is validated: it must be a
+ * storable `Date` (`unstorableDateIssue`, the decision every write makes)
+ * at a position the store reads back as a `Date`. A schema's transforms and
+ * `.overwrite()` checks decide what a WRITE stores; applying one here would
+ * compare a different instant than the caller stated, so an expectation of
+ * noon matched a row holding the midnight a normalizing schema writes.
+ */
+function expectedDateText(
+  schema: z.ZodObject<z.ZodRawShape>,
+  kind: string,
+  property: string,
+  value: Date,
+): JsonScalar {
+  const unstorable = unstorableDateIssue({ [property]: value });
+  if (unstorable !== undefined) {
+    throw new ValidationError(
+      `compareAndSet() expected property "${property}": ${unstorable.path}: ${unstorable.message}`,
+      { entityType: "node", kind, operation: "update", issues: [unstorable] },
+    );
+  }
+  return encodeSetUpdateValue(schema, kind, property, value) as JsonScalar;
+}
+
 function normalizeCompareAndSetExpectations(
   schema: z.ZodObject<z.ZodRawShape>,
   kind: string,
@@ -6448,9 +6549,20 @@ function normalizeCompareAndSetExpectations(
       expected[property] = { kind: "absent" };
       continue;
     }
+    // A `Date` is the one object an expectation may state. It names an
+    // instant to compare, not a value to write, so it is not parsed through
+    // the property's schema: a transform or `.overwrite()` there would turn
+    // it into a different instant than the caller stated.
+    if (value instanceof Date) {
+      expected[property] = {
+        kind: "value",
+        value: expectedDateText(schema, kind, property, value),
+      };
+      continue;
+    }
     if (value === undefined || (typeof value === "object" && value !== null)) {
       throw new ValidationError(
-        `compareAndSet() expected property "${property}" must be a JSON scalar or compareAndSetAbsent`,
+        `compareAndSet() expected property "${property}" must be a JSON scalar, a Date, or compareAndSetAbsent`,
         {
           entityType: "node",
           kind,
@@ -6459,7 +6571,7 @@ function normalizeCompareAndSetExpectations(
             {
               path: property,
               message:
-                "Expected a string, number, boolean, null, or compareAndSetAbsent",
+                "Expected a string, number, boolean, null, Date, or compareAndSetAbsent",
             },
           ],
         },
@@ -6468,13 +6580,19 @@ function normalizeCompareAndSetExpectations(
     scalarExpectedInput[property] = value;
   }
 
+  if (Object.keys(scalarExpectedInput).length === 0) return expected;
   const parsedExpected = validateNodePropertySubset(
     schema,
     scalarExpectedInput,
     { kind, operation: "update" },
   );
   for (const property of Object.keys(scalarExpectedInput)) {
-    const value = parsedExpected[property];
+    const value = encodeSetUpdateValue(
+      schema,
+      kind,
+      property,
+      parsedExpected[property],
+    );
     if (value === undefined || (typeof value === "object" && value !== null)) {
       throw new ValidationError(
         `compareAndSet() expected property "${property}" did not resolve to a JSON scalar`,
@@ -6577,8 +6695,11 @@ export async function executeNodeSetUpdate<G extends GraphDef>(
       unsetProperties.push(property);
       continue;
     }
-    assertJsonValue(value, property, `Node "${kind}" ${operation} patch`);
-    patch[property] = value as JsonValue;
+    // The backend receives JSON, so a validated `Date` is encoded here as the
+    // text every other write stores for it; anything else non-JSON is refused.
+    const encoded = encodeSetUpdateValue(schema, kind, property, value);
+    assertJsonValue(encoded, property, `Node "${kind}" ${operation} patch`);
+    patch[property] = encoded as JsonValue;
   }
   if (Object.keys(patch).length === 0 && unsetProperties.length === 0) {
     throw new ValidationError(
@@ -6931,12 +7052,15 @@ export async function executeNodeResolvedMutationSet<G extends GraphDef>(
     ctx.graphId,
     preparedCreates,
     result.created,
-  ).map((row) => rowToNode(row));
+  ).map((row) => rowToNode(row, storedPropsReaders(ctx.registry).node));
   const updatedById = new Map(result.updated.map((row) => [row.id, row]));
   return appliedResolvedMutationSet({
     created,
     updated: updates.map((entry) =>
-      rowToNode(requireDefined(updatedById.get(entry.input.id))),
+      rowToNode(
+        requireDefined(updatedById.get(entry.input.id)),
+        storedPropsReaders(ctx.registry).node,
+      ),
     ),
   });
 }
@@ -7056,7 +7180,10 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
           if (rows !== undefined) {
             const byId = new Map(rows.map((row) => [row.id, row]));
             return entries.map((entry) =>
-              rowToNode(requireDefined(byId.get(entry.input.id))),
+              rowToNode(
+                requireDefined(byId.get(entry.input.id)),
+                storedPropsReaders(ctx.registry).node,
+              ),
             );
           }
           batchMissed = true;
@@ -7148,7 +7275,10 @@ async function executeAtomicNodeResolvedUpdates<G extends GraphDef>(
       memoizeLeasedSchemaFence(ctx, entry);
       const returned = new Map(rows.map((row) => [row.id, row]));
       return entries.map((entry) =>
-        rowToNode(requireDefined(returned.get(entry.input.id))),
+        rowToNode(
+          requireDefined(returned.get(entry.input.id)),
+          storedPropsReaders(ctx.registry).node,
+        ),
       );
     }
     if (rows.length > 0) {
@@ -8252,7 +8382,7 @@ export async function executeNodeFindByConstraint<G extends GraphDef>(
   if (existingRow === undefined || existingRow.deleted_at !== undefined)
     return undefined;
 
-  return rowToNode(existingRow);
+  return rowToNode(existingRow, storedPropsReaders(ctx.registry).node);
 }
 
 // ============================================================
@@ -8363,7 +8493,10 @@ export async function executeNodeBulkFindByConstraint<G extends GraphDef>(
       continue;
     }
 
-    results[index] = rowToNode(existingRow);
+    results[index] = rowToNode(
+      existingRow,
+      storedPropsReaders(ctx.registry).node,
+    );
   }
 
   return results;
@@ -8492,7 +8625,7 @@ type ProbeScalar = string | number | boolean | Date;
  * string normalize identically — and produce identical predicates).
  */
 function normalizeProbeScalar(value: ProbeScalar): string | number | boolean {
-  return value instanceof Date ? value.toISOString() : value;
+  return value instanceof Date ? dateInstantText(value) : value;
 }
 
 const PROBE_NULL_TAG = 0;
@@ -8693,6 +8826,7 @@ export async function executeNodeBulkFindByIndex<G extends GraphDef>(
     ctx.graphId,
     kind,
     matches.map((match) => match.id),
+    storedPropsReaders(ctx.registry).node,
   );
 
   const results: Node[][] = Array.from({ length: items.length }, () => []);
@@ -8738,6 +8872,7 @@ async function hydrateNodesById(
   graphId: string,
   kind: string,
   ids: readonly string[],
+  reader: StoredPropsReader,
 ): Promise<Map<string, Node>> {
   const rowsById = await getNodeRowsByIds(
     backend,
@@ -8749,7 +8884,7 @@ async function hydrateNodesById(
   const nodesById = new Map<string, Node>();
   for (const [id, row] of rowsById) {
     if (row.deleted_at !== undefined) continue;
-    nodesById.set(id, rowToNode(row));
+    nodesById.set(id, rowToNode(row, reader));
   }
   return nodesById;
 }
@@ -8935,7 +9070,7 @@ export async function executeNodeBulkGetOrCreateByConstraint<
     }
     for (const match of held) {
       results[match.index] = {
-        node: rowToNode(match.existing),
+        node: rowToNode(match.existing, storedPropsReaders(ctx.registry).node),
         action: "found",
       };
     }

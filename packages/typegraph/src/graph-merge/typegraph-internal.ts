@@ -170,6 +170,11 @@ export {
 export type { Store } from "../store/store";
 export { createStore, createStoreWithSchema } from "../store/store";
 export {
+  storedFormOfReadProps,
+  type StoredPropsReader,
+  storedPropsReaders,
+} from "../store/stored-date-revival";
+export {
   type Edge,
   type Node,
   type StoreOptions,

@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { ValidationError } from "../src/errors";
 import {
   canonicalizeDatabaseTimestamp,
+  canonicalizeEngineTimestamp,
   decodeDate,
   encodeDate,
   isCanonicalIsoDate,
@@ -39,6 +40,23 @@ describe("date utilities", () => {
       expect(canonicalizeDatabaseTimestamp("2026-06-25 12:00:00-0230")).toBe(
         "2026-06-25T14:30:00.000Z",
       );
+    });
+
+    it("normalizes an offset to the second, as PostgreSQL renders local mean time", () => {
+      // `1880-06-01T00:00:00.001Z` under `TimeZone = 'Europe/Paris'`.
+      expect(
+        canonicalizeDatabaseTimestamp("1880-06-01 00:09:21.001+00:09:21"),
+      ).toBe("1880-06-01T00:00:00.001Z");
+      expect(canonicalizeEngineTimestamp("1880-06-01 00:09:21+00:09:21")).toBe(
+        "1880-06-01T00:00:00.000Z",
+      );
+      // `1880-06-01T12:00:00Z` under `TimeZone = 'America/New_York'`.
+      expect(
+        canonicalizeDatabaseTimestamp("1880-06-01 07:03:58-04:56:02"),
+      ).toBe("1880-06-01T12:00:00.000Z");
+      expect(
+        canonicalizeDatabaseTimestamp("2026-06-25 12:00:00+05:61"),
+      ).toBeUndefined();
     });
 
     it("rejects unsupported and unrepresentable values", () => {

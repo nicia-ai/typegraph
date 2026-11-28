@@ -1,9 +1,11 @@
 import { backendDerivationRoot } from "../../backend/derive-backend";
 import { ConfigurationError } from "../../errors";
 import type { StatementBackend } from "../../store/operation-scope";
-import type { QueryAst } from "../ast";
+import type { QueryAst, ValueType } from "../ast";
 import { selectionOrderColumn } from "../compiler";
 import { getDialect } from "../dialect";
+import { type DialectAdapter } from "../dialect/types";
+import { yieldsStoredDate } from "../expressions";
 import { compileOrderTerm } from "../order";
 import {
   PORTABLE_COMPOUND_SELECT_TERMS_LIMIT,
@@ -72,6 +74,61 @@ function buildOrdinalOrder(
     return compileOrderTerm(column, order.direction, order.nulls);
   });
   return sql`ORDER BY ${sql.join(terms, sql`, `)}`;
+}
+
+/**
+ * The output columns of a batched read that hold a date read from storage —
+ * every date-typed column but one whose dates the caller stated
+ * (`ExpressionDateRead.dateOrigin` `"stated"`, a literal or parameter, which binds as its text
+ * and is never cast). On PostgreSQL such a column is a `timestamptz`, which
+ * JSON would render in the session time zone, so the batch carries it as the
+ * dialect's canonical date text (`DialectAdapter.jsonDateText`) and the read
+ * decodes it exactly as the same read run alone.
+ */
+export function storedDateOutputNames(
+  columns: readonly Readonly<{ outputName: string; valueType: ValueType }>[],
+): readonly string[] {
+  return columns
+    .filter((column) => yieldsStoredDate(column))
+    .map((column) => column.outputName);
+}
+
+/**
+ * The columns of a batched read's numbered rows: its source's own, or — when
+ * it holds a stored date — its payload columns listed one by one, each date as
+ * the dialect's JSON date text.
+ */
+function batchRowColumns(
+  dialect: DialectAdapter,
+  sourceName: string,
+  item: Readonly<{
+    outputNames: readonly string[];
+    hiddenOutputNames?: readonly string[];
+    dateOutputNames?: readonly string[];
+    payloadPartitionColumn?: string;
+  }>,
+): SqlFragment {
+  const source = sql.identifier(sourceName);
+  const dates = new Set(item.dateOutputNames);
+  if (dates.size === 0) return sql`${source}.*`;
+  const names = [
+    ...new Set([
+      ...item.outputNames,
+      ...(item.hiddenOutputNames ?? []),
+      ...(item.payloadPartitionColumn === undefined ?
+        []
+      : [item.payloadPartitionColumn]),
+    ]),
+  ];
+  return sql.join(
+    names.map((name) => {
+      const column = sql`${source}.${sql.identifier(name)}`;
+      return dates.has(name) ?
+          sql`${dialect.jsonDateText(column)} AS ${sql.identifier(name)}`
+        : column;
+    }),
+    sql`, `,
+  );
 }
 
 type BatchEnvelopeRow = Readonly<{
@@ -215,7 +272,7 @@ export async function executeOneStatementBatch<
     const ordinalOrder = buildOrdinalOrder(sourceName, item.orderBy);
     ctes.push(
       sql`${sql.identifier(sourceName)} AS (${item.query})`,
-      sql`${sql.identifier(rowsName)} AS (SELECT ${sql.identifier(sourceName)}.*, ROW_NUMBER() OVER (${ordinalOrder}) AS ${sql.identifier(ORDER_COLUMN)} FROM ${sql.identifier(sourceName)})`,
+      sql`${sql.identifier(rowsName)} AS (SELECT ${batchRowColumns(dialect, sourceName, item)}, ROW_NUMBER() OVER (${ordinalOrder}) AS ${sql.identifier(ORDER_COLUMN)} FROM ${sql.identifier(sourceName)})`,
     );
     if (item.payloadPartitionColumn !== undefined) {
       const payloads = dialect.partitionedRowsJsonArrays(

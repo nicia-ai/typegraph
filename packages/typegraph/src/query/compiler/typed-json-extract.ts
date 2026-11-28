@@ -1,5 +1,8 @@
 import { type SelectiveField } from "../ast";
-import { type DialectAdapter } from "../dialect/types";
+import { getDialect } from "../dialect";
+import { type DialectAdapter, type SqlDialect } from "../dialect/types";
+import { type ExpressionDateRead } from "../expression-date-read";
+import { type DateOrigin } from "../expressions";
 import { type JsonPointer, jsonPointer } from "../json-pointer";
 import { type SqlFragment } from "../sql-fragment";
 
@@ -70,4 +73,25 @@ export function compileSelectivePropsExtraction(
     pointer: jsonPointer([field.field]),
     valueType: field.valueType,
   });
+}
+
+/**
+ * The origin of a top-level scalar date column the compiler emits for
+ * `dialect`, given the origin of the expression it compiles: a date the caller
+ * stated stays `"stated"`; any other date is read from stored props by
+ * {@link DialectAdapter.jsonExtractDate}, so it carries what that extraction
+ * yields (`DialectAdapter.jsonExtractDateOrigin`) — `"engine"` where it casts
+ * to the engine's timestamp type, through a composition, aggregate, derived
+ * relation or subquery alike, and `undefined` (stored text) where it does not.
+ * The one place a result column's date origin is decided; every terminal
+ * decodes the column with what this returns (`decodeExpressionDate`). A date
+ * the compiler collects into JSON (an `expr.collect` element or record field)
+ * or a nested date position is JSON text, not a result column, and is not
+ * typed here.
+ */
+export function resultDateOrigin(
+  expressionOrigin: ExpressionDateRead["dateOrigin"],
+  dialect: SqlDialect,
+): DateOrigin | undefined {
+  return expressionOrigin ?? getDialect(dialect).jsonExtractDateOrigin;
 }

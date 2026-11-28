@@ -49,10 +49,14 @@ import {
   type EdgeKindMembership,
   recordedIntervalColumns,
 } from "../query/compiler/temporal";
-import { compileTypedJsonExtract } from "../query/compiler/typed-json-extract";
+import {
+  compileTypedJsonExtract,
+  resultDateOrigin,
+} from "../query/compiler/typed-json-extract";
 import { quoteIdentifier } from "../query/compiler/utils";
 import type { DialectAdapter } from "../query/dialect/types";
 import { decodeSelectedValue } from "../query/execution/value-decoder";
+import { type DateOrigin } from "../query/expressions";
 import { jsonPointer } from "../query/json-pointer";
 import {
   createSchemaIntrospector,
@@ -96,6 +100,11 @@ import {
   rowToNode,
   rowToNodeMeta,
 } from "./row-mappers";
+import {
+  type StoredPropsReader,
+  type StoredPropsReaders,
+  storedPropsReaders,
+} from "./stored-date-revival";
 import type {
   Edge,
   EdgeMeta,
@@ -698,6 +707,11 @@ type KindProjectionPlan = Readonly<{
 type ProjectionPlan = Readonly<{
   fullKinds: readonly string[];
   projectedKinds: ReadonlyMap<string, KindProjectionPlan>;
+  /**
+   * The origin of a projected property column that is itself a date: the
+   * column is read through `jsonExtractDate` (`resultDateOrigin`).
+   */
+  dateOrigin: DateOrigin | undefined;
 }>;
 
 type SubgraphExecutionParams<
@@ -808,11 +822,13 @@ function buildSubgraphPlan<
     options.project?.nodes,
     (kind, field) => introspector.getFieldTypeInfo(kind, field),
     "node",
+    resultDateOrigin(undefined, params.dialect.name),
   );
   const edgeProjectionPlan = buildEdgeProjectionPlan(
     params.graph,
     options.edges,
     options.project?.edges,
+    resultDateOrigin(undefined, params.dialect.name),
   );
   const reachableCte = buildSubgraphReachableCte(ctx, baseSchema, surface);
   const compositionEdgeKinds = resolveSubgraphCompositionEdgeKinds(params, ctx);
@@ -845,6 +861,7 @@ function buildSubgraphPlan<
         params.graph,
         compositionOnlyEdgeKinds,
         options.project?.edges,
+        edgeProjectionPlan.dateOrigin,
       ),
     ),
   };
@@ -861,6 +878,8 @@ function extendProjectionPlan(
       ...base.projectedKinds,
       ...extension.projectedKinds,
     ]),
+    // Both plans type the columns of one statement.
+    dateOrigin: base.dateOrigin,
   };
 }
 
@@ -874,6 +893,7 @@ function buildEdgeProjectionPlan<G extends GraphDef>(
   edgeKinds: readonly string[],
   projection:
     Readonly<Record<string, readonly string[] | undefined>> | undefined,
+  dateOrigin: DateOrigin | undefined,
 ): ProjectionPlan {
   const introspector = getSubgraphSchemaIntrospector(graph);
   return buildProjectionPlan(
@@ -881,6 +901,7 @@ function buildEdgeProjectionPlan<G extends GraphDef>(
     projection,
     (kind, field) => introspector.getEdgeFieldTypeInfo(kind, field),
     "edge",
+    dateOrigin,
   );
 }
 
@@ -1060,6 +1081,7 @@ export async function executeSubgraph<
     }
   }
 
+  const readers = storedPropsReaders(params.registry);
   const [nodeRows, edgeRows] = await Promise.all([
     fetchSubgraphNodes(readContext, membership, nodeProjectionPlan),
     fetchSubgraphEdges(readContext, membership, edgeProjectionPlan),
@@ -1067,8 +1089,12 @@ export async function executeSubgraph<
 
   return assembleSubgraphResult<G, NK, SubgraphResultEdgeKinds<G, EK, C>, P>(
     ctx.root,
-    nodeRows.map((row) => mapSubgraphNodeRow(row, nodeProjectionPlan)),
-    edgeRows.map((row) => mapSubgraphEdgeRow(row, edgeProjectionPlan)),
+    nodeRows.map((row) =>
+      mapSubgraphNodeRow(row, nodeProjectionPlan, readers.node),
+    ),
+    edgeRows.map((row) =>
+      mapSubgraphEdgeRow(row, edgeProjectionPlan, readers.edge),
+    ),
   );
 }
 
@@ -1224,7 +1250,13 @@ export function createSubgraphRead<
       NK,
       SubgraphResultEdgeKinds<G, EK, C>,
       P
-    >(ctx.root, rows as readonly OneStatementSubgraphRow[], nodePlan, edgePlan);
+    >(
+      ctx.root,
+      rows as readonly OneStatementSubgraphRow[],
+      nodePlan,
+      edgePlan,
+      storedPropsReaders(params.registry),
+    );
   }
   return {
     execute: async () =>
@@ -1500,6 +1532,7 @@ function buildProjectionPlan(
     Readonly<Record<string, readonly string[] | undefined>> | undefined,
   resolveFieldType: FieldTypeResolver,
   entityPrefix: KindEntity,
+  dateOrigin: DateOrigin | undefined,
 ): ProjectionPlan {
   const projectedKinds = new Map<string, KindProjectionPlan>();
   const fullKinds: string[] = [];
@@ -1525,7 +1558,7 @@ function buildProjectionPlan(
     );
   }
 
-  return { fullKinds, projectedKinds };
+  return { fullKinds, projectedKinds, dateOrigin };
 }
 
 function buildKindProjectionPlan(
@@ -1944,15 +1977,16 @@ function mapOneStatementSubgraphRows<
   rows: readonly OneStatementSubgraphRow[],
   nodePlan: ProjectionPlan,
   edgePlan: ProjectionPlan,
+  readers: StoredPropsReaders,
 ): SubgraphResult<G, NK, EK, P> {
   const nodes: Node[] = [];
   const edges: Edge[] = [];
   for (const row of rows) {
     if (row.typegraph_entity === "node") {
-      nodes.push(mapSubgraphNodeRow(row, nodePlan));
+      nodes.push(mapSubgraphNodeRow(row, nodePlan, readers.node));
       continue;
     }
-    edges.push(mapSubgraphEdgeRow(row, edgePlan));
+    edges.push(mapSubgraphEdgeRow(row, edgePlan, readers.edge));
   }
   return assembleSubgraphResult<G, NK, EK, P>(root, nodes, edges);
 }
@@ -2400,11 +2434,13 @@ function applyProjectedFields(
   target: Record<string, unknown>,
   row: Readonly<Record<string, unknown>>,
   kindPlan: KindProjectionPlan,
+  dateOrigin: DateOrigin | undefined,
 ): void {
   for (const fieldPlan of kindPlan.propertyFields) {
     target[fieldPlan.field] = decodeSelectedValue(
       row[fieldPlan.outputName],
       fieldPlan.typeInfo,
+      dateOrigin,
     );
   }
 }
@@ -2431,14 +2467,18 @@ function normalizeSubgraphRowTimestamps<
 function mapSubgraphNodeRow(
   row: SubgraphNodeFetchRow,
   projectionPlan: ProjectionPlan,
+  reader: StoredPropsReader,
 ): Node {
   const kindPlan = projectionPlan.projectedKinds.get(row.kind);
   if (kindPlan === undefined) {
     const normalizedRow = normalizeSubgraphRowTimestamps(row);
-    return rowToNode({
-      ...normalizedRow,
-      props: normalizeProps(normalizedRow.props),
-    });
+    return rowToNode(
+      {
+        ...normalizedRow,
+        props: normalizeProps(normalizedRow.props),
+      },
+      reader,
+    );
   }
 
   const projectedNode: Record<string, unknown> = {
@@ -2450,21 +2490,25 @@ function mapSubgraphNodeRow(
     projectedNode["meta"] = rowToNodeMeta(normalizeSubgraphRowTimestamps(row));
   }
 
-  applyProjectedFields(projectedNode, row, kindPlan);
+  applyProjectedFields(projectedNode, row, kindPlan, projectionPlan.dateOrigin);
   return projectedNode as Node;
 }
 
 function mapSubgraphEdgeRow(
   row: SubgraphEdgeFetchRow,
   projectionPlan: ProjectionPlan,
+  reader: StoredPropsReader,
 ): Edge {
   const kindPlan = projectionPlan.projectedKinds.get(row.kind);
   if (kindPlan === undefined) {
     const normalizedRow = normalizeSubgraphRowTimestamps(row);
-    return rowToEdge({
-      ...normalizedRow,
-      props: normalizeProps(normalizedRow.props),
-    });
+    return rowToEdge(
+      {
+        ...normalizedRow,
+        props: normalizeProps(normalizedRow.props),
+      },
+      reader,
+    );
   }
 
   const projectedEdge: Record<string, unknown> = {
@@ -2480,6 +2524,6 @@ function mapSubgraphEdgeRow(
     projectedEdge["meta"] = rowToEdgeMeta(normalizeSubgraphRowTimestamps(row));
   }
 
-  applyProjectedFields(projectedEdge, row, kindPlan);
+  applyProjectedFields(projectedEdge, row, kindPlan, projectionPlan.dateOrigin);
   return projectedEdge as Edge;
 }

@@ -1431,6 +1431,7 @@ export class ExecutableAggregateQuery<G extends GraphDef, Aliases extends Aggreg
             executionTarget: object;
         };
         outputNames: string[];
+        dateOutputNames: readonly string[];
         orderBy: {
             column: string;
             direction: SortDirection;
@@ -1485,6 +1486,7 @@ export class ExecutableProjectionQuery<Fields extends DatabaseProjection, Contex
             executionTarget: object;
         };
         outputNames: string[];
+        dateOutputNames: readonly string[];
         orderBy: {
             column: string;
             direction: SortDirection;
@@ -1612,6 +1614,7 @@ export class ExecutableRelationQuery<Fields extends RelationProjection, Result =
             executionTarget: object;
         };
         outputNames: string[];
+        dateOutputNames: readonly string[];
         orderBy: {
             column: string;
             direction: SortDirection;
@@ -3439,6 +3442,7 @@ export type OneStatementBatchableQuery<R = unknown> = Readonly<{
         }>;
         outputNames: readonly string[];
         hiddenOutputNames?: readonly string[];
+        dateOutputNames?: readonly string[];
         orderBy: readonly Readonly<{
             column: string;
             direction: "asc" | "desc";
@@ -3602,6 +3606,7 @@ export type PreparedQueryConfig<R> = Readonly<{
     selectiveFields: readonly SelectiveField[] | undefined;
     selectFn: (context: SelectContext<AliasMap, EdgeAliasMap>) => R;
     schemaIntrospector: SchemaIntrospector;
+    registry?: KindRegistry;
 }>;
 
 // @public (undocumented)

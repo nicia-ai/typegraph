@@ -9,6 +9,7 @@ import type { EdgeMatchIdentityStorage } from "../backend/types";
 import { isPortableEdgeMatchIdentityValue } from "../core/edge-match-identity-value";
 import type { EdgeMatchIdentity } from "../core/types";
 import { ConfigurationError, ValidationError } from "../errors";
+import { storedJsonText } from "../utils/date";
 import { createDataKeyedBag, readOwnProperty } from "../utils/object";
 import { encodeTupleKey } from "../utils/tuple-key";
 
@@ -60,8 +61,7 @@ export function normalizePersistedEdgeMatchProps(
   props: Readonly<Record<string, unknown>>,
 ): Record<string, unknown> {
   try {
-    // eslint-disable-next-line unicorn/prefer-structured-clone -- intentionally applies JSON persistence semantics
-    return JSON.parse(JSON.stringify(props)) as Record<string, unknown>;
+    return JSON.parse(storedJsonText(props)) as Record<string, unknown>;
   } catch (error) {
     throw new ValidationError(
       "Edge properties used for endpoint matching must be persistable JSON.",
@@ -83,8 +83,7 @@ export function normalizePersistedEdgeMatchProps(
 /** Canonical representation of one persisted JSON value. */
 export function canonicalPersistedJsonValue(value: unknown): string {
   if (value === undefined) return ABSENT_PERSISTED_JSON_VALUE;
-  // eslint-disable-next-line unicorn/prefer-structured-clone -- intentionally applies JSON persistence semantics
-  return canonicalizeJsonValue(JSON.parse(JSON.stringify(value)));
+  return canonicalizeJsonValue(JSON.parse(storedJsonText(value)));
 }
 
 function canonicalizeJsonValue(value: unknown): string {

@@ -51,6 +51,7 @@ import {
 } from "./recorded-anchor-origin";
 import { recordedBindParamBudget } from "./recorded-capture/relations";
 import { rowToEdge, rowToNode } from "./row-mappers";
+import { type StoredPropsReaders } from "./stored-date-revival";
 import {
   type Edge,
   type Node,
@@ -73,6 +74,8 @@ type RecordedReadServiceParams = Readonly<{
   ) => Promise<GraphAllocationOwnerRead>;
   mapRecordedNodeRow: (row: Record<string, unknown>) => NodeRow;
   mapRecordedEdgeRow: (row: Record<string, unknown>) => EdgeRow;
+  /** How a read decodes each kind's stored props. */
+  propsReaders: StoredPropsReaders;
 }>;
 
 type RecordedGetByIdsParams<T extends Readonly<{ id: string }>> = Readonly<{
@@ -431,6 +434,7 @@ export function createRecordedReadService(
     recordedReadBinding,
     mapRecordedNodeRow,
     mapRecordedEdgeRow,
+    propsReaders,
   } = params;
 
   async function revisionOrigin(
@@ -598,7 +602,8 @@ export function createRecordedReadService(
       kind,
       ids,
       coordinate,
-      toEntity: (row) => rowToNode(mapRecordedNodeRow(row)) as Node<N>,
+      toEntity: (row) =>
+        rowToNode(mapRecordedNodeRow(row), propsReaders.node) as Node<N>,
     });
   }
 
@@ -618,7 +623,8 @@ export function createRecordedReadService(
       kind,
       ids,
       coordinate,
-      toEntity: (row) => rowToEdge(mapRecordedEdgeRow(row)) as Edge<E>,
+      toEntity: (row) =>
+        rowToEdge(mapRecordedEdgeRow(row), propsReaders.edge) as Edge<E>,
     });
   }
 
@@ -638,7 +644,8 @@ export function createRecordedReadService(
       kind,
       coordinate,
       options,
-      toEntity: (row) => rowToNode(mapRecordedNodeRow(row)) as Node<N>,
+      toEntity: (row) =>
+        rowToNode(mapRecordedNodeRow(row), propsReaders.node) as Node<N>,
     });
   }
 
@@ -658,7 +665,8 @@ export function createRecordedReadService(
       kind,
       coordinate,
       options,
-      toEntity: (row) => rowToEdge(mapRecordedEdgeRow(row)) as Edge<E>,
+      toEntity: (row) =>
+        rowToEdge(mapRecordedEdgeRow(row), propsReaders.edge) as Edge<E>,
     });
   }
 
@@ -673,7 +681,7 @@ export function createRecordedReadService(
         coordinate,
         edgeKinds,
         options,
-        toEdge: (row) => rowToEdge(mapRecordedEdgeRow(row)),
+        toEdge: (row) => rowToEdge(mapRecordedEdgeRow(row), propsReaders.edge),
       }),
     backendForCoordinate(
       coordinate: ReadCoordinate,

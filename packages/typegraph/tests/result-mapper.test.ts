@@ -15,7 +15,10 @@ import {
   mapResults,
   transformPathColumns,
 } from "../src/query/execution/result-mapper";
+import { passStoredProps } from "../src/store/stored-date-revival";
 import { requireDefined } from "../src/utils/presence";
+
+const PASS_READERS = { node: passStoredProps, edge: passStoredProps };
 
 describe("transformPathColumns", () => {
   const baseState: QueryBuilderState = {
@@ -386,21 +389,21 @@ describe("buildSelectableNode", () => {
 
   describe("basic field mapping", () => {
     it("extracts id and kind from prefixed columns", () => {
-      const node = buildSelectableNode(baseRow, "p");
+      const node = buildSelectableNode(baseRow, "p", passStoredProps);
 
       expect(node.id).toBe("node-123");
       expect(node.kind).toBe("Person");
     });
 
     it("parses JSON props and spreads them at top level", () => {
-      const node = buildSelectableNode(baseRow, "p");
+      const node = buildSelectableNode(baseRow, "p", passStoredProps);
 
       expect(node["name"]).toBe("Alice");
       expect(node["age"]).toBe(30);
     });
 
     it("builds meta object from metadata columns", () => {
-      const node = buildSelectableNode(baseRow, "p");
+      const node = buildSelectableNode(baseRow, "p", passStoredProps);
 
       expect(node.meta).toEqual({
         version: 1,
@@ -415,13 +418,13 @@ describe("buildSelectableNode", () => {
 
   describe("null to undefined normalization", () => {
     it("converts null validFrom to undefined", () => {
-      const node = buildSelectableNode(baseRow, "p");
+      const node = buildSelectableNode(baseRow, "p", passStoredProps);
 
       expect(node.meta.validFrom).toBeUndefined();
     });
 
     it("converts null deletedAt to undefined", () => {
-      const node = buildSelectableNode(baseRow, "p");
+      const node = buildSelectableNode(baseRow, "p", passStoredProps);
 
       expect(node.meta.deletedAt).toBeUndefined();
     });
@@ -433,7 +436,7 @@ describe("buildSelectableNode", () => {
         p_deleted_at: "2024-06-01T00:00:00.000Z",
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", passStoredProps);
 
       expect(node.meta.validFrom).toBe("2024-01-01T00:00:00.000Z");
       expect(node.meta.deletedAt).toBe("2024-06-01T00:00:00.000Z");
@@ -450,7 +453,7 @@ describe("buildSelectableNode", () => {
         p_deleted_at: postgresJsTimestamp,
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", passStoredProps);
 
       expect(node.meta).toEqual({
         version: 1,
@@ -470,7 +473,7 @@ describe("buildSelectableNode", () => {
         p_props: JSON.stringify({ id: "fake-id", name: "Alice" }),
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", passStoredProps);
 
       expect(node.id).toBe("node-123"); // System field, not from props
       expect(node["name"]).toBe("Alice");
@@ -482,7 +485,7 @@ describe("buildSelectableNode", () => {
         p_props: JSON.stringify({ kind: "FakeKind", name: "Alice" }),
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", passStoredProps);
 
       expect(node.kind).toBe("Person"); // System field, not from props
     });
@@ -493,7 +496,7 @@ describe("buildSelectableNode", () => {
         p_props: JSON.stringify({ meta: { fake: true }, name: "Alice" }),
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", passStoredProps);
 
       expect(node.meta.version).toBe(1); // System meta, not from props
       expect((node.meta as Record<string, unknown>)["fake"]).toBeUndefined();
@@ -507,7 +510,7 @@ describe("buildSelectableNode", () => {
         p_props: { name: "Alice", age: 30 }, // Already an object
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", passStoredProps);
 
       expect(node["name"]).toBe("Alice");
       expect(node["age"]).toBe(30);
@@ -519,7 +522,7 @@ describe("buildSelectableNode", () => {
         p_props: undefined,
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", passStoredProps);
 
       expect(node.id).toBe("node-123");
       expect(node.kind).toBe("Person");
@@ -531,7 +534,7 @@ describe("buildSelectableNode", () => {
         p_props: JSON.stringify({}),
       };
 
-      const node = buildSelectableNode(row, "p");
+      const node = buildSelectableNode(row, "p", passStoredProps);
 
       expect(node.id).toBe("node-123");
     });
@@ -553,7 +556,7 @@ describe("buildSelectContext", () => {
 
   describe("start node only (no traversals)", () => {
     it("builds context with just the start node", () => {
-      const context = buildSelectContext(startRow, "p", []);
+      const context = buildSelectContext(startRow, "p", [], PASS_READERS);
 
       expect(context["p"]).toBeDefined();
       expect(requireDefined(context["p"]).id).toBe("person-1");
@@ -601,7 +604,12 @@ describe("buildSelectContext", () => {
     ];
 
     it("includes traversed nodes in context", () => {
-      const context = buildSelectContext(traversalRow, "p", traversals);
+      const context = buildSelectContext(
+        traversalRow,
+        "p",
+        traversals,
+        PASS_READERS,
+      );
 
       expect(context["friend"]).toBeDefined();
       expect(requireDefined(context["friend"]).id).toBe("person-2");
@@ -609,7 +617,12 @@ describe("buildSelectContext", () => {
     });
 
     it("includes edges in context", () => {
-      const context = buildSelectContext(traversalRow, "p", traversals);
+      const context = buildSelectContext(
+        traversalRow,
+        "p",
+        traversals,
+        PASS_READERS,
+      );
 
       expect(context["e"]).toBeDefined();
       expect(requireDefined(context["e"]).id).toBe("edge-1");
@@ -629,7 +642,7 @@ describe("buildSelectContext", () => {
         e_deleted_at: postgresJsTimestamp,
       };
 
-      const context = buildSelectContext(row, "p", traversals);
+      const context = buildSelectContext(row, "p", traversals, PASS_READERS);
 
       expect(requireDefined(context["e"]).meta).toEqual({
         validFrom: "2026-08-09T11:52:09.617Z",
@@ -685,6 +698,7 @@ describe("buildSelectContext", () => {
         nullTraversalRow,
         "p",
         optionalTraversals,
+        PASS_READERS,
       );
 
       expect(context["friend"]).toBeUndefined();
@@ -695,6 +709,7 @@ describe("buildSelectContext", () => {
         nullTraversalRow,
         "p",
         optionalTraversals,
+        PASS_READERS,
       );
 
       expect(context["e"]).toBeUndefined();
@@ -729,7 +744,7 @@ describe("mapResults", () => {
   ];
 
   it("applies select function to each row", () => {
-    const results = mapResults(rows, "p", [], (ctx) => ({
+    const results = mapResults(rows, "p", [], PASS_READERS, (ctx) => ({
       id: requireDefined(ctx["p"]).id,
       name: requireDefined(ctx["p"])["name"],
     }));
@@ -745,6 +760,7 @@ describe("mapResults", () => {
       [],
       "p",
       [],
+      PASS_READERS,
       (ctx) => requireDefined(ctx["p"]).id,
     );
 
@@ -756,6 +772,7 @@ describe("mapResults", () => {
       rows,
       "p",
       [],
+      PASS_READERS,
       (ctx) => requireDefined(ctx["p"])["name"],
     );
 

@@ -60,6 +60,7 @@ import { renderPostgres, type SqlFragment } from "../src/query/sql-fragment";
 import { buildKindRegistry } from "../src/registry";
 import { recordedAnchorOwner } from "../src/store/recorded-anchor-origin";
 import { createRecordedReadService } from "../src/store/recorded-read-service";
+import { passStoredProps } from "../src/store/stored-date-revival";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend, disableTransactions } from "./test-utils";
 
@@ -231,6 +232,7 @@ describe("RECORDED_POINT_READ_FIXED_BIND_PARAMS (src/store/recorded-read-service
       revisionOriginSession: fixedRevisionOriginSession,
       mapRecordedNodeRow: (row) => row as never,
       mapRecordedEdgeRow: (row) => row as never,
+      propsReaders: { node: passStoredProps, edge: passStoredProps },
     });
 
     await service.nodeGetByIds(
@@ -299,6 +301,7 @@ describe("RECORDED_POINT_READ_FIXED_BIND_PARAMS (src/store/recorded-read-service
         revisionOriginSession: fixedRevisionOriginSession,
         mapRecordedNodeRow: (row) => row as never,
         mapRecordedEdgeRow: (row) => row as never,
+        propsReaders: { node: passStoredProps, edge: passStoredProps },
       });
 
       // More ids than one chunk fits at this ceiling, so the loop's own

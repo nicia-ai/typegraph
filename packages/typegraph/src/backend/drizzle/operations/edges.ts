@@ -5,6 +5,7 @@ import { compareCodePoints } from "../../../utils/compare";
 import {
   resolveStampedValidityLowerBound,
   resolveStatedValidityLowerBound,
+  storedJsonText,
 } from "../../../utils/date";
 import { requireDefined } from "../../../utils/presence";
 import type {
@@ -79,7 +80,7 @@ function atomicEdgeCreatePostimage(
     fromId: params.fromId,
     toKind: params.toKind,
     toId: params.toId,
-    propsJson: JSON.stringify(params.props),
+    propsJson: storedJsonText(params.props),
     matchIdentityName: params.matchIdentity?.name,
     matchIdentityKey: params.matchIdentity?.key,
     // The temporal inventory requires the owner and its input on one line.
@@ -104,7 +105,7 @@ function atomicEdgeUpdatePostimage(
     fromId: existing.from_id,
     toKind: existing.to_kind,
     toId: existing.to_id,
-    propsJson: JSON.stringify(entry.props),
+    propsJson: storedJsonText(entry.props),
     matchIdentityName: existing.match_identity_name,
     matchIdentityKey: existing.match_identity_key,
     storedLowerBound: existing.valid_from,
@@ -196,7 +197,7 @@ function buildMatchKeyPredicate(
       if (value === undefined) {
         return sql`NOT (${propsColumn} ? ${field})`;
       }
-      return sql`(${propsColumn} -> ${field}) = ${JSON.stringify(value)}::jsonb`;
+      return sql`(${propsColumn} -> ${field}) = ${storedJsonText(value)}::jsonb`;
     }),
     sql` AND `,
   );
@@ -217,7 +218,7 @@ export function buildInsertEdge(
   timestamp: string,
 ): SQL {
   const { edges } = tables;
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
   const columns = edgeColumnList(edges);
 
   return sql`
@@ -251,7 +252,7 @@ export function buildInsertEdgeIfEndpointsLive(
   endpointLock: RowLockClause,
 ): SQL {
   const { edges, nodes } = tables;
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
   const columns = edgeColumnList(edges);
   const nodeTable = quotedTableName(getTableName(nodes));
 
@@ -291,7 +292,7 @@ export function buildConvergeEdgeCreate(
 ): SQL {
   const { edges, nodes } = tables;
   const { params, match, timestamp } = input;
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
   const columns = edgeColumnList(edges);
   const edgeTable = quotedTableName(getTableName(edges));
   const nodeTable = quotedTableName(getTableName(nodes));
@@ -456,7 +457,7 @@ export function buildAtomicConvergeEdges(
                 ${castBoundValueForColumn(edges.fromId, params.fromId)},
                 ${castBoundValueForColumn(edges.toKind, params.toKind)},
                 ${castBoundValueForColumn(edges.toId, params.toId)},
-                ${castBoundValueForColumn(edges.props, JSON.stringify(params.props))},
+                ${castBoundValueForColumn(edges.props, storedJsonText(params.props))},
                 ${castBoundValueForColumn(edges.matchIdentityName, match.identity.name)},
                 ${castBoundValueForColumn(edges.matchIdentityKey, match.identity.key)},
                 ${castBoundValueForColumn(edges.validFrom, sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp)))},
@@ -631,7 +632,7 @@ export function buildInsertEdgeIfEndpointsLiveWithSchemaFence(
   endpointLock: RowLockClause,
 ): SQL {
   const { edges, nodes, schemaVersions } = tables;
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
   const columns = edgeColumnList(edges);
   const nodeTable = quotedTableName(getTableName(nodes));
 
@@ -677,7 +678,7 @@ export function buildInsertEdgeNoReturn(
 }
 
 function edgeInsertValue(params: InsertEdgeParams, timestamp: string): SQL {
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
   return sql`(${params.graphId}, ${params.id}, ${params.kind}, ${params.fromKind}, ${params.fromId}, ${params.toKind}, ${params.toId}, ${propsJson}, ${sqlNull(params.matchIdentity?.name)}, ${sqlNull(params.matchIdentity?.key)}, ${sqlNull(resolveStampedValidityLowerBound(params.validFrom, params.validTo, timestamp))}, ${sqlNull(params.validTo)}, ${timestamp}, ${timestamp})`;
 }
 
@@ -1042,7 +1043,7 @@ export function buildUpdateEdge(
   timestamp: string,
 ): SQL {
   const { edges } = tables;
-  const propsJson = JSON.stringify(params.props);
+  const propsJson = storedJsonText(params.props);
 
   const setParts: SQL[] = [
     sql`${quotedColumn(edges.props)} = ${propsJson}`,

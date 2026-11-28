@@ -32,6 +32,13 @@ import {
   type SqlNameUsage,
 } from "../compiler/sql-name-registry";
 import { getDialect } from "../dialect";
+import { type SqlDialect } from "../dialect/types";
+import {
+  dateReadOf,
+  NO_DATE_READ,
+  sharedDateRead,
+  withDateRead,
+} from "../expression-date-read";
 import {
   createFieldExpression,
   type DatabaseExpression,
@@ -40,12 +47,13 @@ import {
 import { resolveNullOrdering } from "../order";
 import { sql } from "../sql-fragment";
 import { asCompiledSelectSql } from "../sql-intent";
-import { buildCompileOptions } from "./compile-options";
+import { buildCompileOptions, compileDialect } from "./compile-options";
 import { decodeExpressionValue } from "./executable-projection-query";
 import {
   assertExpressionScope,
   isDatabaseExpression,
 } from "./expression-scope";
+import { storedDateOutputNames } from "./one-statement-batch";
 import {
   type PreparedBindings,
   type PreparedParameterDeclaration,
@@ -169,19 +177,22 @@ function buildContext<Fields extends RelationProjection>(
   return Object.fromEntries(
     columns.map((column) => [
       column.outputName,
-      {
-        ...createFieldExpression(
-          outputField(column.outputName, column.valueType),
-          scopeIdentity,
-          column.nullable,
-        ),
-        ...(column.elementValueType === undefined ?
-          {}
-        : { elementValueType: column.elementValueType }),
-        ...(column.elementFields === undefined ?
-          {}
-        : { elementFields: column.elementFields }),
-      },
+      withDateRead(
+        {
+          ...createFieldExpression(
+            outputField(column.outputName, column.valueType),
+            scopeIdentity,
+            column.nullable,
+          ),
+          ...(column.elementValueType === undefined ?
+            {}
+          : { elementValueType: column.elementValueType }),
+          ...(column.elementFields === undefined ?
+            {}
+          : { elementFields: column.elementFields }),
+        },
+        dateReadOf(column),
+      ),
     ]),
   ) as RelationColumnContext<Fields>;
 }
@@ -194,17 +205,20 @@ function relationColumns(
   }> = {},
 ): readonly RelationColumn[] {
   return Object.entries(fields).map(([outputName, expression]) => {
-    const base = {
-      outputName,
-      valueType: expression.valueType,
-      ...(expression.elementValueType === undefined ?
-        {}
-      : { elementValueType: expression.elementValueType }),
-      ...(expression.elementFields === undefined ?
-        {}
-      : { elementFields: expression.elementFields }),
-      nullable: expression.nullable,
-    };
+    const base = withDateRead(
+      {
+        outputName,
+        valueType: expression.valueType,
+        ...(expression.elementValueType === undefined ?
+          {}
+        : { elementValueType: expression.elementValueType }),
+        ...(expression.elementFields === undefined ?
+          {}
+        : { elementFields: expression.elementFields }),
+        nullable: expression.nullable,
+      },
+      dateReadOf(expression),
+    );
     if (
       expression.node.kind !== "field" ||
       expression.node.field.path.length !== 1
@@ -496,8 +510,56 @@ function mergedSetColumns(
       (column, index) =>
         column.identity?.component === right[index]?.identity?.component,
     );
-  if (preservesIdentity) return left;
-  return left.map(({ identity: _identity, ...column }) => column);
+  return left.map((column, index) => {
+    const { identity: _identity, ...withoutIdentity } = column;
+    const kept = preservesIdentity ? column : withoutIdentity;
+    const other = right[index];
+    return other === undefined ? kept : (
+        withDateRead(
+          kept,
+          sharedDateRead([dateReadOf(column), dateReadOf(other)]),
+        )
+      );
+  });
+}
+
+/**
+ * The rows of a set operation, as a read returns them: the left operand's own
+ * decoder, as before reads decoded dates, except for each column the left
+ * operand carries date facts for. Those are decoded by the facts both
+ * operands share ({@link mergedSetColumns}), so a row the other operand
+ * produced is not decoded under the left's typing. A column the left carries
+ * no date facts for shares none either, so it keeps exactly the value the
+ * left decoder gives it — a legacy aggregate's driver text included.
+ */
+function setOperationRowDecoder<Result>(
+  leftColumns: readonly RelationColumn[],
+  leftDecodeRow: (row: Record<string, unknown>) => Result,
+  columns: readonly RelationColumn[],
+  dialect: SqlDialect,
+): (row: Record<string, unknown>) => Result {
+  const reconciled = columns.filter(
+    (_column, index) =>
+      dateReadOf(requireDefined(leftColumns[index])) !== NO_DATE_READ,
+  );
+  if (reconciled.length === 0) return leftDecodeRow;
+  const context = buildContext<RelationProjection>(
+    reconciled,
+    relationScope(),
+  ) as Readonly<Record<string, DatabaseExpression>>;
+  return (row) => ({
+    ...leftDecodeRow(row),
+    ...Object.fromEntries(
+      reconciled.map((column) => [
+        column.outputName,
+        decodeExpressionValue(
+          row[column.outputName],
+          requireDefined(context[column.outputName]),
+          dialect,
+        ),
+      ]),
+    ),
+  });
 }
 
 /** {@link executeRelationOn}'s work, as the relation class hands it out. */
@@ -704,7 +766,11 @@ export class ExecutableRelationQuery<
         Object.fromEntries(
           entries.map(([outputName, expression]) => [
             outputName,
-            decodeExpressionValue(row[outputName], expression),
+            decodeExpressionValue(
+              row[outputName],
+              expression,
+              compileDialect(this.#definition.config),
+            ),
           ]),
         ) as RelationProjectionResult<NextFields>,
     });
@@ -920,6 +986,12 @@ export class ExecutableRelationQuery<
     return createExecutableRelation({
       ...this.#definition,
       columns,
+      decodeRow: setOperationRowDecoder<Result>(
+        this.#definition.columns,
+        this.#definition.decodeRow,
+        columns,
+        compileDialect(this.#definition.config),
+      ),
       ast: {
         kind: "set",
         operator,
@@ -1262,6 +1334,7 @@ export class ExecutableRelationQuery<
         executionTarget: backendDerivationRoot(backend),
       },
       outputNames: this.#definition.columns.map((column) => column.outputName),
+      dateOutputNames: storedDateOutputNames(this.#definition.columns),
       orderBy: this.#state.orderBy.map((order, index) => ({
         column: relationOrderColumnName(index),
         direction: order.direction,

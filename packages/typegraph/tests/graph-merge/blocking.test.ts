@@ -14,6 +14,7 @@ import {
   UNBLOCKED_BUCKET_KEY,
 } from "../../src/graph-merge/blocking";
 import type { ResolveConfig } from "../../src/graph-merge/types";
+import { passStoredProps } from "../../src/store/stored-date-revival";
 import { requireDefined } from "../../src/utils/presence";
 import { createSqliteMergeBackend } from "./test-utils";
 
@@ -129,7 +130,12 @@ describe("blockNodes grouping by block()", () => {
         birthDate: "1990-01-01",
       });
 
-      const buckets = blockNodes([alice, anna, bob], blockByBirthDate);
+      const buckets = blockNodes(
+        [alice, anna, bob],
+        blockByBirthDate,
+        [],
+        passStoredProps,
+      );
 
       // Two birthDate buckets; the 1974 cohort holds both Alice and Anna.
       expect(keyOrder(buckets)).toHaveLength(2);
@@ -161,7 +167,12 @@ describe("blockNodes grouping by block()", () => {
         birthDate: "2000-12-31",
       });
 
-      const buckets = blockNodes([noKeyA, noKeyB, dated], blockByBirthDate);
+      const buckets = blockNodes(
+        [noKeyA, noKeyB, dated],
+        blockByBirthDate,
+        [],
+        passStoredProps,
+      );
 
       expect(buckets.has(UNBLOCKED_BUCKET_KEY)).toBe(true);
       expect(
@@ -208,6 +219,7 @@ describe("blockNodes unique-constraint short-circuit", () => {
         [shareMrnA, shareMrnB, distinctMrn],
         noBlock,
         harness.uniqueConstraints,
+        passStoredProps,
       );
 
       // shareMrnA and shareMrnB co-bucket on MRN-100; distinctMrn is separate.
@@ -254,9 +266,12 @@ describe("blockNodes unique-constraint short-circuit", () => {
       typeof Patient
     >;
 
-    const buckets = blockNodes([absent, presentX, presentX2], noBlock, [
-      constraint,
-    ]);
+    const buckets = blockNodes(
+      [absent, presentX, presentX2],
+      noBlock,
+      [constraint],
+      passStoredProps,
+    );
 
     // The absent-field node has NO unique signature — it must fall to the
     // unblocked bucket, not co-bucket on the inherited function.
@@ -295,6 +310,7 @@ describe("blockNodes unique-constraint short-circuit", () => {
         [sameDate1, sameDate2],
         blockByBirthDate,
         harness.uniqueConstraints,
+        passStoredProps,
       );
 
       // The birthDate block bucket co-buckets BOTH (so candidate-gen compares them).
@@ -338,6 +354,7 @@ describe("blockNodes unique-constraint short-circuit", () => {
         [dupA, dupB],
         blockByBirthDate,
         harness.uniqueConstraints,
+        passStoredProps,
       );
 
       // Despite different birthDate buckets, they co-bucket on the shared mrn, so
@@ -404,7 +421,12 @@ describe("blockNodes caseInsensitive collation (F6)", () => {
         mrn: "mrn-100",
       });
 
-      const buckets = blockNodes([upper, lower], {}, constraints);
+      const buckets = blockNodes(
+        [upper, lower],
+        {},
+        constraints,
+        passStoredProps,
+      );
 
       expect(keyOrder(buckets)).toHaveLength(1);
       const [, members] = requireDefined([...buckets.entries()][0]);
@@ -474,7 +496,12 @@ describe("blockNodes unique key matches enforcement (#1)", () => {
         ref: "1",
       });
 
-      const buckets = blockNodes([numeric, stringy], {}, storeA.constraints);
+      const buckets = blockNodes(
+        [numeric, stringy],
+        {},
+        storeA.constraints,
+        passStoredProps,
+      );
 
       const unique = uniqueBucketKeys(buckets);
       expect(unique).toHaveLength(1);
@@ -506,7 +533,12 @@ describe("blockNodes unique key matches enforcement (#1)", () => {
         ref: null,
       });
 
-      const buckets = blockNodes([nullA, nullB], {}, storeA.constraints);
+      const buckets = blockNodes(
+        [nullA, nullB],
+        {},
+        storeA.constraints,
+        passStoredProps,
+      );
 
       expect(uniqueBucketKeys(buckets)).toEqual([]);
       expect(
@@ -538,11 +570,18 @@ describe("blockNodes deterministic ordering", () => {
         );
       }
 
-      const forward = blockNodes(nodes, blockByBirthDate);
-      const reversed = blockNodes([...nodes].reverse(), blockByBirthDate);
+      const forward = blockNodes(nodes, blockByBirthDate, [], passStoredProps);
+      const reversed = blockNodes(
+        [...nodes].reverse(),
+        blockByBirthDate,
+        [],
+        passStoredProps,
+      );
       const rotated = blockNodes(
         [...nodes.slice(3), ...nodes.slice(0, 3)],
         blockByBirthDate,
+        [],
+        passStoredProps,
       );
 
       // Identical key iteration order (lexicographically sorted).

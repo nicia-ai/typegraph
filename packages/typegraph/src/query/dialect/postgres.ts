@@ -31,6 +31,21 @@ const SCALAR_SQL_TYPES: Readonly<
   string: "text",
 };
 
+/**
+ * A date as canonical UTC ISO-8601 text with millisecond precision, the form
+ * `Date#toJSON()` and the store write, whatever the session `TimeZone`:
+ * PostgreSQL's own `timestamptz` text rendering (inside JSON included) is in
+ * the session zone and drops zero milliseconds.
+ *
+ * An instant before year 1 — legacy stored text the cast reads as a BC date —
+ * has no canonical text: the canonical pattern would drop the era and name a
+ * CE instant. It keeps its era (`0001-06-01T00:00:00.000Z BC`), text no read
+ * decodes as a date.
+ */
+function utcDateText(value: SqlFragment): SqlFragment {
+  return sql`to_char(CAST(${value} AS timestamptz) AT TIME ZONE 'UTC', CASE WHEN CAST(${value} AS timestamptz) < TIMESTAMPTZ '0001-01-01 00:00:00+00' THEN 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z" BC' ELSE 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"' END)`;
+}
+
 /** Gives expression membership a concrete PostgreSQL JSON scalar type. */
 function postgresJsonScalar(
   value: SqlFragment,
@@ -43,7 +58,7 @@ function postgresJsonScalar(
     case "date": {
       // Date arrays are serialized with Date#toJSON(), whose UTC millisecond
       // form differs from PostgreSQL's ordinary timestamptz text rendering.
-      return sql`to_char(CAST(${value} AS timestamptz) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
+      return utcDateText(value);
     }
     case "number": {
       return sql`CAST(${value} AS numeric)`;
@@ -157,6 +172,10 @@ function postgresElementCast(elementType: ValueType | undefined): SqlFragment {
 export const postgresDialect: BuiltinDialectAdapter = {
   dateValue(value) {
     return sql`CAST(${value} AS ${sql.raw(SCALAR_SQL_TYPES.date)})`;
+  },
+
+  jsonDateText(value) {
+    return utcDateText(value);
   },
 
   safeNumericConversion(expression) {
@@ -297,6 +316,8 @@ export const postgresDialect: BuiltinDialectAdapter = {
     const path = toPostgresPath(pointer);
     return sql`(${column} #>> ${path})::timestamptz`;
   },
+
+  jsonExtractDateOrigin: "engine",
 
   // ============================================================
   // JSON Array Operations

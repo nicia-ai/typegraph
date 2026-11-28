@@ -96,7 +96,10 @@ import {
   asCompiledRowsSql,
   type CompiledRowsSql,
 } from "../../query/sql-intent";
-import { resolveStampedValidityLowerBound } from "../../utils/date";
+import {
+  resolveStampedValidityLowerBound,
+  storedJsonText,
+} from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import {
   isInsufficientResourcesError,
@@ -4403,7 +4406,7 @@ function createPostgresOperationBackend(
           const inputRows = sql.join(
             params.entries.map(
               (entry, index) =>
-                sql`(${params.schemaFence.graphId}, ${entry.kind}, ${entry.id}, ${JSON.stringify(entry.props)}, ${JSON.stringify(entry.updateProps)}, ${index})`,
+                sql`(${params.schemaFence.graphId}, ${entry.kind}, ${entry.id}, ${storedJsonText(entry.props)}, ${storedJsonText(entry.updateProps)}, ${index})`,
             ),
             sql`, `,
           );

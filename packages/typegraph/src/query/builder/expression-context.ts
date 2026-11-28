@@ -2,6 +2,7 @@ import type { z } from "zod";
 
 import type { GraphDef } from "../../core/define-graph";
 import { ConfigurationError } from "../../errors";
+import { storedReadPlan } from "../../store/stored-date-revival";
 import { isInteropProbeKey } from "../../utils/object";
 import type { FieldRef } from "../ast";
 import { createFieldExpression, type DatabaseExpression } from "../expressions";
@@ -183,6 +184,9 @@ export function createExpressionAliasContext<
         reference,
         scope,
         nullable || info.nullable === true,
+        info.valueType === "array" || info.valueType === "object" ?
+          storedReadPlan(info)
+        : undefined,
       ),
     );
     if (info.valueType !== "object") return expression;

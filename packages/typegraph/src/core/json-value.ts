@@ -1,9 +1,9 @@
 /**
  * Runtime validation for JSON-serializable values.
  *
- * Used at definition-time boundaries (e.g., `defineNode`/`defineEdge` annotations)
- * to reject values that would silently break `JSON.stringify` round-trips or
- * throw at hash time. Catches accidental violations from untyped JS callers
+ * Used wherever a value must be JSON (kind and graph annotations, a set
+ * update's encoded patch, durable operation documents) to reject values that
+ * would silently break `JSON.stringify` round-trips or throw at hash time. Catches accidental violations from untyped JS callers
  * and `as any` escape hatches that bypass the `JsonValue` type.
  */
 import { ConfigurationError } from "../errors";
@@ -156,11 +156,11 @@ function describeNonPlain(value: unknown): string {
 
 function throwInvalid(path: string, kind: string, ownerKind: string): never {
   throw new ConfigurationError(
-    `${ownerKind} ${path} contains a non-JSON value (${kind}). Annotations must be JSON-serializable.`,
+    `${ownerKind} ${path} contains a non-JSON value (${kind}). Only strings, finite numbers, booleans, null, arrays, and plain objects are JSON-serializable.`,
     { path, valueKind: kind },
     {
       suggestion:
-        "Use only strings, numbers, booleans, null, arrays, and plain objects in annotations.",
+        "Use only strings, finite numbers, booleans, null, arrays, and plain objects.",
     },
   );
 }

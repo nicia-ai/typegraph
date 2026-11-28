@@ -1,5 +1,6 @@
 import { readOwnProperty } from "../utils/object";
 import { requireDefined } from "../utils/presence";
+import { callbackNode } from "./callback-node";
 /**
  * Pluggable, symmetric candidate-pair similarity scoring (design §8, T6).
  *
@@ -48,6 +49,7 @@ import type {
   JsonValue,
   Node,
   NodeType,
+  StoredPropsReader,
 } from "./typegraph-internal";
 import type { SimilarityStrategy } from "./types";
 
@@ -64,6 +66,11 @@ import type { SimilarityStrategy } from "./types";
 export type SimilarityContext = Readonly<{
   backend: GraphBackend;
   embeddings?: ReadonlyMap<string, Float32Array>;
+  /**
+   * How a read decodes the target's stored node props: a `custom` scorer and a
+   * kind's `block()` receive each node decoded by it (`callbackNode`).
+   */
+  propsReader: StoredPropsReader;
 }>;
 
 /** Lower bound of the similarity codomain. */
@@ -459,7 +466,10 @@ function scorePrepared<K extends NodeType>(
       // NaN to zero or Infinity to a perfect match.
       let raw: number;
       try {
-        raw = strategy.score(left.node, right.node);
+        raw = strategy.score(
+          callbackNode(left.node, ctx.propsReader),
+          callbackNode(right.node, ctx.propsReader),
+        );
       } catch (error) {
         return err(
           new MatchEvidenceError("Custom similarity scorer failed.", {

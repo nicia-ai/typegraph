@@ -524,6 +524,10 @@ import {
   type StoreViewCoordinate,
 } from "./store-view";
 import {
+  type StoredPropsReaders,
+  storedPropsReaders,
+} from "./stored-date-revival";
+import {
   createSubgraphRead,
   executeSessionSubgraph,
   executeSubgraph,
@@ -1711,6 +1715,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       this.#baseBackend,
     );
     this.#schema = resolvedSchema;
+    this.#registry = buildKindRegistry(graph);
+    bindCompileTimeAliasTyping(this.#registry, stripGraphExtension(graph));
     const rowMapperConfig = rowMapperConfigFor(this.#backend);
     this.#recordedReads = createRecordedReadService({
       graphId: graph.id,
@@ -1720,9 +1726,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         this.#readRecordedReadOwner(target, execution),
       mapRecordedNodeRow: createNodeRowMapper(rowMapperConfig),
       mapRecordedEdgeRow: createEdgeRowMapper(rowMapperConfig),
+      propsReaders: storedPropsReaders(this.#registry),
     });
-    this.#registry = buildKindRegistry(graph);
-    bindCompileTimeAliasTyping(this.#registry, stripGraphExtension(graph));
     this.#hooks = options?.hooks ?? {};
     this.#defaultTraversalExpansion =
       options?.queryDefaults?.traversalExpansion ?? "inverse";
@@ -1963,6 +1968,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   /** The kind registry for ontology lookups */
   get registry(): KindRegistry {
     return this.#registry;
+  }
+
+  /** How a read decodes each kind's stored props (`stored-date-revival.ts`). */
+  get #propsReaders(): StoredPropsReaders {
+    return storedPropsReaders(this.#registry);
   }
 
   /**
@@ -3109,7 +3119,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #buildNodeOperations(ctx: NodeOperationContext<G>): NodeOperations {
     return {
       defaultTemporalMode: this.#graph.defaults.temporalMode,
-      rowToNode: (row) => rowToNode(row),
+      rowToNode: (row) => rowToNode(row, this.#propsReaders.node),
       maybeRefreshStatisticsAfterBulk: (rowCount) =>
         this.#maybeRefreshStatisticsAfterBulk(rowCount),
       executeCreate: (input, entry) => executeNodeCreate(ctx, input, entry),
@@ -3234,7 +3244,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
   #buildEdgeOperations(ctx: EdgeOperationContext<G>): EdgeOperations {
     return {
       defaultTemporalMode: this.#graph.defaults.temporalMode,
-      rowToEdge: (row) => rowToEdge(row),
+      rowToEdge: (row) => rowToEdge(row, this.#propsReaders.edge),
       maybeRefreshStatisticsAfterBulk: (rowCount) =>
         this.#maybeRefreshStatisticsAfterBulk(rowCount),
       executeCreate: (input, entry) => executeEdgeCreate(ctx, input, entry),
@@ -4186,7 +4196,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
     const edgesBySource = new Map<string, GraphEdgeForKinds<G, K>[]>();
     for (const row of rows) {
-      const edge = rowToEdge(row) as GraphEdgeForKinds<G, K>;
+      const edge = rowToEdge(row, this.#propsReaders.edge) as GraphEdgeForKinds<
+        G,
+        K
+      >;
       const key =
         side === "from" ?
           `${edge.fromKind}\0${edge.fromId}`
@@ -5600,8 +5613,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       );
     }
     for (const row of rows) receiptRecorder?.recordNode(row.kind, 1);
+    const reader = this.#propsReaders.node;
     return rows.map((row) =>
-      rowToNode(row),
+      rowToNode(row, reader),
     ) as unknown as HeterogeneousNodeUpsertResult<G, Entries>;
   }
 
@@ -6015,7 +6029,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               if (!includeTombstoned && row.deleted_at !== undefined) continue;
               loadedByReference.set(
                 refKey({ kind, id: row.id }),
-                rowToNode(row) as IdentityNode<G>,
+                rowToNode(row, this.#propsReaders.node) as IdentityNode<G>,
               );
             }
           }),

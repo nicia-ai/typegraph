@@ -38,6 +38,11 @@ export { registerCrossBackendConsistencyTests } from "./cross-backend";
 export { registerDatabaseExpressionQueryIntegrationTests } from "./database-expression-queries";
 export { registerDateIndexExpressionIntegrationTests } from "./date-index-expressions";
 export { registerDatePredicateIntegrationTests } from "./date-predicates";
+export { registerDatePropertyMergeIntegrationTests } from "./date-property-merges";
+export { registerDatePropertyReadIntegrationTests } from "./date-property-reads";
+export { registerDatePropertyWriteIntegrationTests } from "./date-property-writes";
+export { registerDateReadPositionIntegrationTests } from "./date-read-positions";
+export { registerDateSessionZoneIntegrationTests } from "./date-session-zone";
 export { registerDurableEdgeMatchIdentityIntegrationTests } from "./durable-edge-match-identity";
 export { registerEdgeAcyclicityIntegrationTests } from "./edge-acyclicity";
 export { registerEdgeBulkHardDeleteIntegrationTests } from "./edge-bulk-hard-delete";
@@ -74,6 +79,7 @@ export { registerIdentityOperationRoutingIntegrationTests } from "./identity-ope
 export { registerIdentityRefusalBeforeEntryIntegrationTests } from "./identity-refusal-before-entry";
 export { registerIdentityReplayIntegrationTests } from "./identity-replay";
 export { registerIdentitySeparationIntegrationTests } from "./identity-separation";
+export { registerImportClaimKeyDefectIntegrationTests } from "./import-claim-key-defects";
 export { registerImportCompositionMoveIntegrationTests } from "./import-composition-moves";
 export { registerImportDuplicateEdgeOrderIntegrationTests } from "./import-duplicate-edge-order";
 export { registerImportRequiredPartPurgeIntegrationTests } from "./import-required-part-purge";
@@ -143,6 +149,7 @@ export { registerSqlIdentifierIdentityIntegrationTests } from "./sql-identifier-
 export { registerStoreAnalysisIntegrationTests } from "./store-analysis";
 export { registerStoreOperationIntegrationTests } from "./store-operation";
 export { registerStoreViewIntegrationTests } from "./store-view";
+export { registerStoredDateOverwriteMatrixIntegrationTests } from "./stored-date-overwrite-matrix";
 export { registerStoredDateRevalidationIntegrationTests } from "./stored-date-revalidation";
 export { registerSubgraphIntegrationTests } from "./subgraph";
 export { registerSubgraphSharedIdIntegrationTests } from "./subgraph-shared-ids";

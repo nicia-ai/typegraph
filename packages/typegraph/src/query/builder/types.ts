@@ -110,6 +110,11 @@ export type OneStatementBatchableQuery<R = unknown> = Readonly<{
     outputNames: readonly string[];
     /** Internal columns carried through the batch envelope for result mapping. */
     hiddenOutputNames?: readonly string[];
+    /**
+     * Output columns holding a stored date (`storedDateOutputNames`), carried
+     * into the JSON payload as the dialect's canonical date text.
+     */
+    dateOutputNames?: readonly string[];
     orderBy: readonly Readonly<{
       column: string;
       direction: "asc" | "desc";

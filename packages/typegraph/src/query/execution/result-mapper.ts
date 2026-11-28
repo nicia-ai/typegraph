@@ -9,6 +9,10 @@ import {
 } from "../../backend/row-mappers";
 import { type NodeType } from "../../core/types";
 import { ConfigurationError } from "../../errors";
+import {
+  type StoredPropsReader,
+  type StoredPropsReaders,
+} from "../../store/stored-date-revival";
 import { normalizePath } from "../../utils";
 import { createDataKeyedBag } from "../../utils/object";
 import { stripKindQualifiedPathTokens } from "../../utils/path";
@@ -221,6 +225,25 @@ function propsExcludingReserved(
 }
 
 /**
+ * An alias's props column, parsed when the driver returned JSON text and
+ * decoded for the row's kind by `reader` — the same decision `rowToNode` makes
+ * for a store read, so a query row and a collection read of one node agree.
+ */
+function readSelectableProps(
+  row: Record<string, unknown>,
+  alias: string,
+  kind: string,
+  reader: StoredPropsReader,
+): Record<string, unknown> {
+  const propsRaw: unknown = row[`${alias}_props`];
+  const parsed: Record<string, unknown> =
+    typeof propsRaw === "string" ?
+      (JSON.parse(propsRaw) as Record<string, unknown>)
+    : ((propsRaw as Record<string, unknown> | undefined) ?? {});
+  return reader(kind, parsed);
+}
+
+/**
  * Builds a SelectableNode from row data for a given alias.
  *
  * Props are spread at top level, metadata goes under `meta`.
@@ -230,14 +253,11 @@ function propsExcludingReserved(
 export function buildSelectableNode(
   row: Record<string, unknown>,
   alias: string,
+  reader: StoredPropsReader,
 ): SelectableNode<NodeType> {
   const id = row[`${alias}_id`] as string;
   const kind = row[`${alias}_kind`] as string;
-  const propsRaw: unknown = row[`${alias}_props`];
-  const rawProps: Record<string, unknown> =
-    typeof propsRaw === "string" ?
-      (JSON.parse(propsRaw) as Record<string, unknown>)
-    : ((propsRaw as Record<string, unknown> | undefined) ?? {});
+  const rawProps = readSelectableProps(row, alias, kind, reader);
 
   // Metadata columns - these are now always projected in CTEs
   // Normalize null → undefined for optional fields
@@ -287,12 +307,13 @@ export function buildSelectableNode(
 function buildSelectableNodeOrUndefined(
   row: Record<string, unknown>,
   alias: string,
+  reader: StoredPropsReader,
 ): SelectableNode<NodeType> | undefined {
   const id = row[`${alias}_id`] as string | null | undefined;
   if (id === null || id === undefined) {
     return undefined;
   }
-  return buildSelectableNode(row, alias);
+  return buildSelectableNode(row, alias, reader);
 }
 
 /**
@@ -306,6 +327,7 @@ function buildSelectableNodeOrUndefined(
 function buildSelectableEdge(
   row: Record<string, unknown>,
   alias: string,
+  reader: StoredPropsReader,
 ): SelectableEdge | undefined {
   const id = row[`${alias}_id`] as string | null | undefined;
 
@@ -318,11 +340,7 @@ function buildSelectableEdge(
   const fromId = row[`${alias}_from_id`] as string;
   const toId = row[`${alias}_to_id`] as string;
 
-  const propsRaw: unknown = row[`${alias}_props`];
-  const rawProps: Record<string, unknown> =
-    typeof propsRaw === "string" ?
-      (JSON.parse(propsRaw) as Record<string, unknown>)
-    : ((propsRaw as Record<string, unknown> | undefined) ?? {});
+  const rawProps = readSelectableProps(row, alias, kind, reader);
 
   // Metadata columns - these are always projected in traversal CTEs
   // Normalize null → undefined for optional fields
@@ -378,6 +396,7 @@ export function buildSelectContext<
   row: Record<string, unknown>,
   startAlias: string,
   traversals: readonly Traversal[],
+  readers: StoredPropsReaders,
 ): SelectContext<Aliases, EdgeAliases, RecursiveAliases> {
   // Data-keyed: alias names chosen by the caller's query, which the kind-name
   // pattern admits `__proto__` for. (The computed-key literal this replaced was
@@ -391,7 +410,7 @@ export function buildSelectContext<
     | undefined
   >();
   // Build the start node as initial context entry
-  context[startAlias] = buildSelectableNode(row, startAlias);
+  context[startAlias] = buildSelectableNode(row, startAlias, readers.node);
 
   // Build traversal nodes and edges
   for (const traversal of traversals) {
@@ -401,11 +420,11 @@ export function buildSelectContext<
     // Add node
     context[nodeAlias] =
       traversal.optional ?
-        buildSelectableNodeOrUndefined(row, nodeAlias)
-      : buildSelectableNode(row, nodeAlias);
+        buildSelectableNodeOrUndefined(row, nodeAlias, readers.node)
+      : buildSelectableNode(row, nodeAlias, readers.node);
 
     // Add edge (may be undefined for optional traversals)
-    context[edgeAlias] = buildSelectableEdge(row, edgeAlias);
+    context[edgeAlias] = buildSelectableEdge(row, edgeAlias, readers.edge);
 
     // Add recursive depth/path values
     const vl = traversal.variableLength;
@@ -449,6 +468,7 @@ export function mapResults<
   rows: readonly Record<string, unknown>[],
   startAlias: string,
   traversals: readonly Traversal[],
+  readers: StoredPropsReaders,
   selectFunction: (context: SelectContext<Aliases, EdgeAliases, RA>) => R,
 ): readonly R[] {
   return rows.map((row) => {
@@ -456,6 +476,7 @@ export function mapResults<
       row,
       startAlias,
       traversals,
+      readers,
     );
     return selectFunction(context);
   });

@@ -19,6 +19,7 @@ import {
   type StatementBackend,
   type StoreTransactionBackend,
 } from "../../store/operation-scope";
+import { storedPropsReaders } from "../../store/stored-date-revival";
 import { compareStrings } from "../../utils/compare";
 import { requireDefined } from "../../utils/presence";
 import { withRecordedRelationsPrecondition } from "../../utils/sql-errors";
@@ -36,6 +37,7 @@ import {
   compileNameCheckedQuery,
   type CompileQueryOptions,
 } from "../compiler/index";
+import { resultDateOrigin } from "../compiler/typed-json-extract";
 import {
   buildCursorFromRow,
   buildCursorFromValues,
@@ -537,6 +539,7 @@ export class ExecutableQuery<
           // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Type erasure needed for PreparedQuery which uses AliasMap
           selectFn: this.#selectFn as (context: SelectContext<any, any>) => R,
           schemaIntrospector: this.#config.schemaIntrospector,
+          registry: this.#config.registry,
         },
         queryOperationSourceOf(this.#config),
       ),
@@ -699,6 +702,7 @@ export class ExecutableQuery<
       rows,
       this.#state.startAlias,
       this.#state.traversals,
+      storedPropsReaders(this.#config.registry),
       this.#selectFn,
     );
   }
@@ -728,6 +732,7 @@ export class ExecutableQuery<
       rows,
       this.#state.startAlias,
       this.#state.traversals,
+      storedPropsReaders(this.#config.registry),
       this.#selectFn,
     )[0];
   }
@@ -776,6 +781,7 @@ export class ExecutableQuery<
       rows,
       this.#state.startAlias,
       this.#state.traversals,
+      storedPropsReaders(this.#config.registry),
       this.#selectFn,
     );
   }
@@ -860,6 +866,7 @@ export class ExecutableQuery<
         rows,
         this.#state.startAlias,
         this.#state.traversals,
+        storedPropsReaders(this.#config.registry),
         this.#selectFn,
       );
     }
@@ -886,6 +893,7 @@ export class ExecutableQuery<
       rows,
       this.#state.startAlias,
       this.#state.traversals,
+      storedPropsReaders(this.#config.registry),
       this.#selectFn,
     );
   }
@@ -1087,6 +1095,7 @@ export class ExecutableQuery<
           transformPathColumns(rows, this.#state, this.#dialect()),
           this.#state.startAlias,
           this.#state.traversals,
+          storedPropsReaders(this.#config.registry),
           this.#selectFn,
         ),
     };
@@ -1128,6 +1137,7 @@ export class ExecutableQuery<
         selectiveFields,
         this.#config.schemaIntrospector,
         this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
+        { kind: "decoded", dialect: this.#dialect() },
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
@@ -1328,6 +1338,7 @@ export class ExecutableQuery<
         selectiveFields,
         this.#config.schemaIntrospector,
         this.#selectFn as (context: SelectContext<Aliases, EdgeAliases>) => R,
+        { kind: "decoded", dialect: this.#dialect() },
       );
     } catch (error) {
       if (error instanceof MissingSelectiveFieldError) {
@@ -1513,7 +1524,11 @@ export class ExecutableQuery<
           )
         : undefined;
 
-      const decoded = decodeSelectedValue(row[outputName], typeInfo);
+      const decoded = decodeSelectedValue(
+        row[outputName],
+        typeInfo,
+        resultDateOrigin(undefined, this.#dialect()),
+      );
 
       if (segments.length === 1) {
         aliasObject[topField] = decoded;
@@ -1750,6 +1765,7 @@ export class ExecutableQuery<
       orderedRows,
       this.#state.startAlias,
       this.#state.traversals,
+      storedPropsReaders(this.#config.registry),
       this.#selectFn,
     );
 
@@ -1767,6 +1783,7 @@ export class ExecutableQuery<
           row,
           this.#state.startAlias,
           this.#state.traversals,
+          storedPropsReaders(this.#config.registry),
         ),
     );
   }
