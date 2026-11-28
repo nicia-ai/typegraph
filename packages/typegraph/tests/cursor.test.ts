@@ -143,7 +143,7 @@ describe("Cursor Decoding", () => {
   it("throws ValidationError for a column that is not a string", () => {
     // An object whose conversion to text throws reached a refusal's message
     // as a TypeError.
-    for (const column of [{ toString: false }, 1, null]) {
+    for (const column of [{ toString: false }, 1, true]) {
       const forged = btoa(
         JSON.stringify({ v: 1, d: "f", vals: [1], cols: [column] }),
       );

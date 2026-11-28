@@ -172,7 +172,7 @@ export function decodeCursor(cursor: string): CursorData {
       v: raw["v"],
       d: raw["d"],
       vals: raw["vals"] as readonly unknown[],
-      cols: raw["cols"] as readonly string[],
+      cols: raw["cols"],
       ...(search === undefined ? {} : { s: search }),
     };
   } catch (error) {
