@@ -41,44 +41,14 @@
 import { type z } from "zod";
 
 import { objectSchemaShape } from "../core/kind-schema";
+import {
+  hasOverwriteCheck,
+  unwrapTransparentWrappers,
+} from "../core/schema-wrappers";
 import { isPortableTimestamp } from "../utils/date";
 import { isPlainObject } from "../utils/object";
 
-/** The schema wrappers whose input is their inner schema's input. */
-const TRANSPARENT_WRAPPER_TYPES: ReadonlySet<string> = new Set([
-  "optional",
-  "nullable",
-  "default",
-  "prefault",
-  "catch",
-  "readonly",
-  "nonoptional",
-]);
-
-type SchemaDef = Readonly<{
-  innerType?: z.ZodType;
-  element?: z.ZodType;
-  checks?: readonly Readonly<{
-    _zod: Readonly<{ def: Readonly<{ check: string }> }>;
-  }>[];
-}>;
-
-/**
- * Whether a schema carries an `.overwrite()` check: one that replaces the
- * value on every parse, so parsing a revived stored value again would rewrite
- * the untouched property instead of keeping it.
- */
-function hasOverwriteCheck(schema: z.ZodType): boolean {
-  const checks = (schema.def as SchemaDef).checks ?? [];
-  return checks.some((check) => check._zod.def.check === "overwrite");
-}
-
-function unwrapTransparentWrappers(schema: z.ZodType): z.ZodType {
-  const inner = (schema.def as SchemaDef).innerType;
-  return TRANSPARENT_WRAPPER_TYPES.has(schema.type) && inner !== undefined ?
-      unwrapTransparentWrappers(inner)
-    : schema;
-}
+type SchemaDef = Readonly<{ element?: z.ZodType }>;
 
 function reviveObject(
   shape: Readonly<Record<string, z.ZodType>>,

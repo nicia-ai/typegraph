@@ -2817,6 +2817,17 @@ export type GraphBackend = Readonly<{
   ) => Promise<void>;
   deleteUnique: (this: void, params: DeleteUniqueParams) => Promise<void>;
   /**
+   * Releases (soft-deletes) the live uniqueness claims ONE node holds, by
+   * owner rather than by key: THE lifecycle release. Soft delete, an update's
+   * key change, a resurrection and every batch writer give claims back through
+   * it, so a claim is released whatever key form it was taken under — no
+   * caller recomputes the key an earlier write claimed.
+   */
+  releaseUniquesByOwner: (
+    this: void,
+    params: ReleaseUniquesByOwnerParams,
+  ) => Promise<void>;
+  /**
    * Permanently removes every uniqueness sidecar owned by the specified
    * concrete nodes. Optional capability used by set-based updates before they
    * rebuild reservations from the returned node after-images.
@@ -4128,6 +4139,7 @@ export type UniqueConstraintBackend = Pick<
   | "insertUnique"
   | "insertUniqueBatch"
   | "deleteUnique"
+  | "releaseUniquesByOwner"
   | "hardDeleteUniquesByNodeIds"
   | "hardDeleteUniquesByConcreteKind"
   | "checkUnique"
@@ -4558,14 +4570,17 @@ export type InsertUniqueParams = Readonly<{
  * `(concreteKind, nodeId)`, because a node id is unique only within its kind.
  * The two shapes differ only in whether the claim AXIS participates:
  *
- *  - **Lifecycle release** (`nodeKind` absent) — "give up every claim this node
- *    holds for this constraint and key, whatever axis it sits on". Soft delete,
- *    an update's key-change release and the resurrect diff use it, so a claim
- *    written under an older axis is still released by newer code.
+ *  - `nodeKind` absent — "give up this node's claim for this constraint and
+ *    key, whatever axis it sits on".
  *  - **Compensating release** (`nodeKind` present) — "undo exactly the row I
  *    just claimed, at the axis I claimed it on". A failed write's rollback uses
  *    it, so it touches neither a row that predates the write nor one another
- *    node holds.
+ *    node holds. This is the only release the store issues by key.
+ *
+ * A lifecycle release — soft delete, an update's or a resurrection's release
+ * of the keys it moved off — names the owner's claims without a key, through
+ * `releaseUniquesByOwner` ({@link ReleaseUniquesByOwnerParams}), so it never
+ * depends on recomputing the key an earlier write claimed.
  */
 export type DeleteUniqueParams = Readonly<{
   graphId: string;
@@ -4580,6 +4595,48 @@ export type DeleteUniqueParams = Readonly<{
   concreteKind: string;
   /** The claim owner's node id (`uniques.node_id`). */
   nodeId: string;
+}>;
+
+/** One claim a {@link ReleaseUniquesByOwnerParams | release by owner} keeps. */
+export type KeptUniqueClaim = Readonly<{
+  constraintName: string;
+  key: string;
+}>;
+
+/**
+ * Parameters for releasing the live claims one node holds.
+ *
+ * The owner pair `(concreteKind, nodeId)` names whose claims are released, at
+ * every axis they sit on, under the constraints `constraintNames` lists
+ * (uniqueness constraint names and `disjointWith` claim names alike; an empty
+ * list releases nothing). `keep` names claims the owner keeps: the keys a
+ * write has just claimed for itself. No key outside `keep` is consulted, so a
+ * claim is released whatever form its key was written in.
+ */
+export type ReleaseUniquesByOwnerParams = Readonly<{
+  graphId: string;
+  /** The claim owner's concrete kind (`uniques.concrete_kind`). */
+  concreteKind: string;
+  /** The claim owner's node id (`uniques.node_id`). */
+  nodeId: string;
+  /** The constraints whose claims are released. */
+  constraintNames: readonly string[];
+  /** Claims the owner keeps, matched by constraint name and key. */
+  keep: readonly KeptUniqueClaim[];
+}>;
+
+/**
+ * Parameters for listing the live claim keys one owner holds under one
+ * constraint, at every axis: what an owner release reads when the claims it
+ * keeps under that constraint do not fit one statement's bind budget.
+ */
+export type OwnerClaimKeysParams = Readonly<{
+  graphId: string;
+  /** The claim owner's concrete kind (`uniques.concrete_kind`). */
+  concreteKind: string;
+  /** The claim owner's node id (`uniques.node_id`). */
+  nodeId: string;
+  constraintName: string;
 }>;
 
 /** Parameters for permanently clearing uniqueness sidecars by node identity. */

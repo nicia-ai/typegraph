@@ -2781,6 +2781,7 @@ export type GraphBackend = Readonly<{
     insertUnique: (this: void, params: InsertUniqueParams) => Promise<void>;
     insertUniqueBatch?: (this: void, entries: readonly InsertUniqueParams[]) => Promise<void>;
     deleteUnique: (this: void, params: DeleteUniqueParams) => Promise<void>;
+    releaseUniquesByOwner: (this: void, params: ReleaseUniquesByOwnerParams) => Promise<void>;
     hardDeleteUniquesByNodeIds?: (this: void, params: HardDeleteUniquesByNodeIdsParams) => Promise<void>;
     hardDeleteUniquesByConcreteKind?: (this: void, params: HardDeleteUniquesByConcreteKindParams) => Promise<void>;
     checkUnique: (this: void, params: CheckUniqueParams) => Promise<UniqueRow | undefined>;
@@ -3326,6 +3327,12 @@ export type JsonValue = JsonScalar | readonly JsonValue[] | Readonly<{
 }>;
 
 // @public
+export type KeptUniqueClaim = Readonly<{
+    constraintName: string;
+    key: string;
+}>;
+
+// @public
 export type KindAnnotations = Readonly<Record<string, JsonValue>>;
 
 // @public
@@ -3589,6 +3596,14 @@ export type OptionalKeys<T> = {
 }[keyof T];
 
 // @public
+export type OwnerClaimKeysParams = Readonly<{
+    graphId: string;
+    concreteKind: string;
+    nodeId: string;
+    constraintName: string;
+}>;
+
+// @public
 export type PartialBundleBinding<M extends OptionalGraphBackendMember> = Readonly<Partial<Pick<GraphBackend, M>>> & Readonly<{
     [BUNDLE_BINDING]: true;
 }>;
@@ -3796,6 +3811,15 @@ export type RelationalIndexMethod = "btree" | "gin" | "trigram";
 export type ReleaseIndexMaterializationClaimParams = Readonly<{
     indexName: string;
     token: string;
+}>;
+
+// @public
+export type ReleaseUniquesByOwnerParams = Readonly<{
+    graphId: string;
+    concreteKind: string;
+    nodeId: string;
+    constraintNames: readonly string[];
+    keep: readonly KeptUniqueClaim[];
 }>;
 
 // @public (undocumented)
@@ -5078,7 +5102,7 @@ export const UNIQUE_SIDECAR_BATCH: {
 };
 
 // @public (undocumented)
-export type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "hardDeleteUniquesByNodeIds" | "hardDeleteUniquesByConcreteKind" | "checkUnique" | "checkUniqueBatch">;
+export type UniqueConstraintBackend = Pick<GraphBackend, "insertUnique" | "insertUniqueBatch" | "deleteUnique" | "releaseUniquesByOwner" | "hardDeleteUniquesByNodeIds" | "hardDeleteUniquesByConcreteKind" | "checkUnique" | "checkUniqueBatch">;
 
 // @public
 export type UniquenessScope = "kind" | "kindWithSubClasses";

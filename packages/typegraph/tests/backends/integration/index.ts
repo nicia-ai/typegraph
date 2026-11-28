@@ -16,6 +16,7 @@ export { registerCapabilityPortBindingIntegrationTests } from "./capability-port
 export { registerCapabilityRefusalIntegrationTests } from "./capability-refusals";
 export { registerCaptureFlushOperationRoutingIntegrationTests } from "./capture-flush-operation-routing";
 export { registerClaimCompensationIntegrationTests } from "./claim-compensation";
+export { registerClaimKeyOwnerIntegrationTests } from "./claim-key-owner";
 export { registerClaimLookupPreferenceIntegrationTests } from "./claim-lookup-preference";
 export { registerClaimOwnerIdentityIntegrationTests } from "./claim-owner-identity";
 export { registerClearIntegrationTests } from "./clear";
@@ -99,6 +100,7 @@ export { registerOntologyEquivalenceIntegrationTests } from "./ontology-equivale
 export { registerOntologyTighteningIntegrationTests } from "./ontology-tightening";
 export { registerOntologyTypedSubsumptionIntegrationTests } from "./ontology-typed-subsumption";
 export { registerOrderingIntegrationTests } from "./ordering";
+export { registerOwnerClaimReleaseIntegrationTests } from "./owner-claim-release";
 export { registerPaginationIntegrationTests } from "./pagination";
 export { registerKeysetPaginationPropertyTests } from "./pagination-keyset-property";
 export { registerPaginationSystemColumnIntegrationTests } from "./pagination-system-columns";
@@ -144,6 +146,7 @@ export { registerStoreAnalysisIntegrationTests } from "./store-analysis";
 export { registerStoreOperationIntegrationTests } from "./store-operation";
 export { registerStoreViewIntegrationTests } from "./store-view";
 export { registerStoredDateRevalidationIntegrationTests } from "./stored-date-revalidation";
+export { registerStoredValueClaimIntegrationTests } from "./stored-value-claims";
 export { registerSubgraphIntegrationTests } from "./subgraph";
 export { registerSubgraphSharedIdIntegrationTests } from "./subgraph-shared-ids";
 export { registerTemporalIntegrationTests } from "./temporal";

@@ -151,6 +151,7 @@ import type {
   InsertEdgeParams,
   InsertNodeParams,
   InsertUniqueParams,
+  KeptUniqueClaim,
   ManagedEdgeCreatePlan,
   ManagedNodeCreatePlan,
   MisassignedEdgeEndpointRow,
@@ -160,6 +161,7 @@ import type {
   PopulatedSchemaKind,
   PurgeEdgeClaimsParams,
   ReadConstraintFenceViolationsParams,
+  ReleaseUniquesByOwnerParams,
   ResolvedNodeUpdateBatchParams,
   SchemaGraphWriteFenceParams,
   SchemaKindEmptinessProbe,
@@ -280,6 +282,65 @@ function chunkByWeight<T>(
   }
   if (current.length > 0) chunks.push(current);
   return chunks;
+}
+
+/**
+ * The binds an owner release spends besides its constraints: the graph id,
+ * the owner pair and the release timestamp.
+ */
+const OWNER_CLAIM_RELEASE_FIXED_PARAM_COUNT = 4;
+
+/** One constraint of an owner release, with the claims kept under it. */
+type OwnerClaimReleaseConstraint = Readonly<{
+  name: string;
+  keep: readonly KeptUniqueClaim[];
+}>;
+
+/**
+ * How one owner release is issued under a bind budget.
+ *
+ * `statements` split the release by constraint: each names a set of
+ * constraints and carries exactly the kept claims of those constraints, so a
+ * claim a write keeps under one constraint is never released by the statement
+ * that names another. A constraint costs one bind for its name and two per
+ * claim it keeps.
+ *
+ * A constraint whose kept claims alone exceed the budget cannot travel in one
+ * `NOT IN` list, and splitting that list would let the statement carrying
+ * one part release the keys another part keeps. Such a constraint is
+ * `readFirst`: the release reads the owner's live keys under it and gives
+ * back, key by key, exactly those outside its COMPLETE kept set — so every
+ * statement is decided against every kept key, and no statement can release
+ * a key the release keeps. An empty constraint list releases nothing and
+ * issues no statement.
+ */
+function planOwnerClaimRelease(
+  params: ReleaseUniquesByOwnerParams,
+  maxBindParameters: number,
+): Readonly<{
+  statements: readonly ReleaseUniquesByOwnerParams[];
+  readFirst: readonly OwnerClaimReleaseConstraint[];
+}> {
+  const budget = maxBindParameters - OWNER_CLAIM_RELEASE_FIXED_PARAM_COUNT;
+  const weightOf = (constraint: OwnerClaimReleaseConstraint): number =>
+    1 + 2 * constraint.keep.length;
+  const constraints = [...new Set(params.constraintNames)].map((name) => ({
+    name,
+    keep: params.keep.filter((kept) => kept.constraintName === name),
+  }));
+  const statements = chunkByWeight(
+    constraints.filter((constraint) => weightOf(constraint) <= budget),
+    budget,
+    weightOf,
+  ).map((chunk) => ({
+    ...params,
+    constraintNames: chunk.map((constraint) => constraint.name),
+    keep: chunk.flatMap((constraint) => constraint.keep),
+  }));
+  return {
+    statements,
+    readFirst: constraints.filter((constraint) => weightOf(constraint) > budget),
+  };
 }
 
 function chunkAtomicNodeEntriesByClaimWork(
@@ -659,6 +720,7 @@ export type CommonOperationBackend = Pick<
   | "deleteEdgesBatch"
   | "deleteNode"
   | "deleteUnique"
+  | "releaseUniquesByOwner"
   | "edgeExistsBetween"
   | "executeTemporaryStatement"
   | "findEdgesByKind"
@@ -5982,6 +6044,46 @@ export function createCommonOperationBackend(
       const timestamp = nowIso();
       const query = operationStrategy.buildDeleteUnique(params, timestamp);
       await execution.execRun(query);
+    },
+
+    async releaseUniquesByOwner(
+      params: ReleaseUniquesByOwnerParams,
+    ): Promise<void> {
+      const timestamp = nowIso();
+      const plan = planOwnerClaimRelease(params, maxBindParameters);
+      for (const statement of plan.statements) {
+        await execution.execRun(
+          operationStrategy.buildReleaseUniquesByOwner(statement, timestamp),
+        );
+      }
+      // Read on the release's own target, inside the write's transaction: the
+      // owner's claims under a constraint are written only by writes to that
+      // node, and this write holds it.
+      for (const constraint of plan.readFirst) {
+        const owner = {
+          graphId: params.graphId,
+          concreteKind: params.concreteKind,
+          nodeId: params.nodeId,
+        };
+        const held = await execution.execAll<Readonly<{ key: string }>>(
+          operationStrategy.buildOwnerClaimKeys({
+            ...owner,
+            constraintName: constraint.name,
+          }),
+        );
+        const kept = new Set(constraint.keep.map((claim) => claim.key));
+        const released = new Set(
+          held.map((row) => row.key).filter((key) => !kept.has(key)),
+        );
+        for (const key of released) {
+          await execution.execRun(
+            operationStrategy.buildDeleteUnique(
+              { ...owner, constraintName: constraint.name, key },
+              timestamp,
+            ),
+          );
+        }
+      }
     },
 
     async hardDeleteUniquesByNodeIds(

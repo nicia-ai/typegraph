@@ -264,6 +264,182 @@
     "issue": "#945"
   },
   {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "buildReleaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`buildReleaseUniquesByOwner` builds the one statement behind the bundled backends' required `releaseUniquesByOwner` (#1011). A hand-assembled operation strategy must supply it, as it supplies `buildDeleteUnique`; the bundled strategy builders provide it.",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "buildOwnerClaimKeys",
+    "kind": "required-member-added",
+    "reason": "`buildOwnerClaimKeys` builds the read behind the bundled backends' required `releaseUniquesByOwner` (#1011) for a constraint whose kept claims alone exceed one statement's bind budget: the release reads the owner's live keys under it and gives back those outside its complete kept list, because splitting that list across statements would let one statement release a key another keeps. A hand-assembled operation strategy must supply it beside `buildReleaseUniquesByOwner`; the bundled strategy builders provide it.",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-query.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphBackend",
+    "member": "releaseUniquesByOwner",
+    "kind": "required-member-added",
+    "reason": "`releaseUniquesByOwner` is a required member of the custom-backend contract (#1011). A uniqueness claim is released by its owner `(concreteKind, nodeId)` rather than by a key recomputed from the stored row, which keyed a date or a reordered `jsonb` object differently from the claim the write took and left the old value reserved. No existing member can address an owner's claims without their keys, so there is no portable fallback; backends built by the bundled factories implement it, and a hand-written backend must add it (see the upgrade note and the backend-authoring guide).",
+    "issue": "#1011"
+  },
+  {
     "entrypoint": "typegraph-backend.api.md",
     "declaration": "DialectAdapter",
     "member": "setTransactionWorkingMemory",

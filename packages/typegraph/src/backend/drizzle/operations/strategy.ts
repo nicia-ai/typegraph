@@ -55,8 +55,10 @@ import type {
   InsertSchemaParams,
   InsertUniqueParams,
   ManagedNodeCreatePlan,
+  OwnerClaimKeysParams,
   PurgeEdgeClaimsParams,
   RecordContributionMaterializationParams,
+  ReleaseUniquesByOwnerParams,
   ResolvedNodeUpdateBatchParams,
   SchemaGraphWriteFenceParams,
   SchemaWriteFenceParams,
@@ -206,6 +208,8 @@ import {
   buildHardDeleteUniquesByNodeIds,
   buildInsertUnique,
   buildInsertUniqueBatch,
+  buildOwnerClaimKeys,
+  buildReleaseUniquesByOwner,
 } from "./uniques";
 
 /**
@@ -613,6 +617,11 @@ export type CommonOperationStrategy = Readonly<{
   buildInsertUnique: (params: InsertUniqueParams) => SQL;
   buildInsertUniqueBatch: (entries: readonly InsertUniqueParams[]) => SQL;
   buildDeleteUnique: (params: DeleteUniqueParams, timestamp: string) => SQL;
+  buildReleaseUniquesByOwner: (
+    params: ReleaseUniquesByOwnerParams,
+    timestamp: string,
+  ) => SQL;
+  buildOwnerClaimKeys: (params: OwnerClaimKeysParams) => SQL;
   buildHardDeleteUniquesByNode: (
     graphId: string,
     concreteKind: string,
@@ -844,6 +853,8 @@ const COMMON_TABLE_OPERATION_BUILDERS = {
   buildFindEdgesByHeterogeneousEndpointSet,
   buildCountEdgesByKind,
   buildDeleteUnique,
+  buildReleaseUniquesByOwner,
+  buildOwnerClaimKeys,
   buildHardDeleteUniquesByNode,
   buildHardDeleteUniquesByNodeIds,
   buildCheckUnique,
