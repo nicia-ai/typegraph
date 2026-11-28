@@ -796,6 +796,15 @@ a unit on the other runs, and the unit's rollback can undo its completed, succes
 Await every call on one context before starting a call on another. See issue #909 in the TypeGraph
 repository.
 
+A Store over a backend built on the application's own transaction (`createPostgresTransactionBackend(tx)`)
+takes a savepoint on that transaction for each write, and refuses a TypeGraph call that would overlap one
+(see [Overlapping calls in one transaction](/schemas-stores#overlapping-calls-in-one-transaction)). The
+application's own statements on `tx` are not TypeGraph calls and are not refused. One issued while a
+TypeGraph call's savepoint is open runs inside it: if that call fails, its savepoint rolls back and takes
+the application's statement with it, although the statement itself succeeded. Run application statements
+between TypeGraph calls, not beside them. A backend built over a TypeGraph savepoint's own handle (code
+running inside the call that opened it) is the call's own work and is not refused.
+
 ## Graph Analytics Limits
 
 TypeGraph ships focused algorithms on `store.algorithms.*` — shortest path

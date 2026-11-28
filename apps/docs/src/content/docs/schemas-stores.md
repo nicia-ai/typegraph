@@ -2436,6 +2436,14 @@ await store.transaction(async (tx) => {
 });
 ```
 
+A Store whose backend is built over the application's own transaction (`createPostgresTransactionBackend(tx)`,
+or `createSqliteBackend(tx)` over a Drizzle SQLite transaction whose driver frames transactions through
+Drizzle, such as libSQL's) takes a savepoint on that transaction for every write and every
+`store.transaction()`. Each such call is a unit of the application's transaction: a call on the same Store,
+or on another backend over the same transaction handle, started while one is open is refused before it
+issues any statement (`details.reason: "savepoint-open"`), a read included. Await each call on such a
+Store before starting the next.
+
 The refusal covers calls on one transaction context. Two contexts over one native transaction (for
 example a history Store and a plain Store adopting the same `sql` transaction) are not checked against
 each other; see

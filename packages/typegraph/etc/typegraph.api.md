@@ -5621,12 +5621,13 @@ type MisassignedEdgeEndpointRow = Readonly<{
 // @public
 export function narrower<B extends NodeType, N extends NodeType>(broaderConcept: B, narrowerConcept: N): TypedOntologyRelation<typeof META_EDGE_NARROWER, B, N>;
 
-// @public (undocumented)
+// @public
 const NATIVE_TRANSACTION_STATE: unique symbol;
 
 // @public
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
+    engineSavepointLevels: object[];
 }>;
 
 // @public

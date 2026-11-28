@@ -2474,7 +2474,10 @@ job to await every graph write before committing.
 Thrown when a call inside a transaction would overlap another call's TypeGraph savepoint unit on the same
 transaction context. Node and edge `bulkHardDelete` and `applyMergePlanInTransaction` hold such a unit;
 its rollback undoes every statement issued on the transaction since it opened, so an overlapping call
-could otherwise report success for a write that was then removed.
+could otherwise report success for a write that was then removed. On a Store whose backend is built over
+the application's own transaction (`createPostgresTransactionBackend(tx)`), every write and every
+`store.transaction()` holds such a unit: a call on that transaction handle started while one is open is
+refused with `"savepoint-open"`, a read included.
 
 `details.reason` says which side was refused:
 

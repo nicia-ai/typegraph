@@ -4684,12 +4684,13 @@ type MisassignedEdgeEndpointRow = Readonly<{
     toId: string;
 }>;
 
-// @public (undocumented)
+// @public
 const NATIVE_TRANSACTION_STATE: unique symbol;
 
 // @public
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
+    engineSavepointLevels: object[];
 }>;
 
 // @public
