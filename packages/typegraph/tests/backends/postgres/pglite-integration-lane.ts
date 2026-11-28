@@ -80,17 +80,23 @@ export function registerPgliteIntegrationLane(
       // backend's write-fence target and derived `unitOfWork` are resolved —
       // for a test that needs this shared engine to declare a non-default
       // write fence.
-      createSerializedBackend: (overrides) =>
-        Promise.resolve({
-          backend: engine.makeBackend(
+      createSerializedBackend: (overrides) => {
+        const makeSerializedBackend = () =>
+          engine.makeBackend(
             overrides?.capabilities,
             overrides?.schemaProvisioning,
             overrides?.tableNames === undefined ?
               undefined
             : createPostgresTables(overrides.tableNames),
-          ),
+          );
+        return Promise.resolve({
+          backend: makeSerializedBackend(),
+          // The factory again over the same PGlite instance: a second
+          // wrapper, not a derivation of `backend`.
+          createWrapper: () => Promise.resolve(makeSerializedBackend()),
           close: () => Promise.resolve(),
-        }),
+        });
+      },
     }),
     {
       slice: params.slice,

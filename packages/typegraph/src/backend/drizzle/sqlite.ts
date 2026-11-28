@@ -187,6 +187,9 @@ import {
   SQLITE_ROW_MAPPER_CONFIG,
 } from "../row-mappers";
 import {
+  captureSerializedResourceDeclaration,
+  type ConnectionIdentity,
+  resolveConnectionIdentity,
   resolveDeclaredBackendResource,
   type SerializedResourceDeclaration,
 } from "../transaction-resource";
@@ -832,6 +835,12 @@ type CreateSqliteTransactionBackendOptions = Readonly<{
    * that is already open.
    */
   nativeTransaction?: object | undefined;
+  /**
+   * The root backend's own `serializedResource` declaration, so the native
+   * transaction record names the connection the audit names
+   * (`resolveConnectionIdentity`).
+   */
+  serializedResource: SerializedResourceDeclaration | undefined;
 }>;
 
 function createSqliteOperationBackend(
@@ -1339,9 +1348,12 @@ export function buildSqliteEngineProfile(
   // work that could fail after wrappers already observed an unmarked backend.
   // A `serializedResource` declaration that contradicts detection is refused
   // here too, before any object a caller could hold has been built.
+  const serializedResource = captureSerializedResourceDeclaration(
+    options.serializedResource,
+  );
   const resourceAudit = resolveDeclaredBackendResource(
     getSerializedSqliteConnection(db),
-    options.serializedResource,
+    serializedResource,
   );
   const tables = options.tables ?? defaultTables;
   // `fulltext: false` disables fulltext entirely — mirroring `vector`
@@ -1963,7 +1975,7 @@ export function buildSqliteEngineProfile(
       return runWithSerializedQueue(serializedQueue, () =>
         storage.transaction(() => {
           const nativeTransaction = createNativeTransactionToken(
-            sqliteConnectionProbe(db),
+            sqliteConnectionProbe(db, serializedResource),
           );
           return publishConnectionNativeTransaction(nativeTransaction, () =>
             run(nativeTransaction),
@@ -2073,10 +2085,11 @@ export function buildSqliteEngineProfile(
           // Write-lock is held here, so the schema-write-capable
           // InternalOperationBackend is used intentionally (see its type).
           const nativeTransaction = createNativeTransactionToken(
-            sqliteConnectionProbe(db),
+            sqliteConnectionProbe(db, serializedResource),
           );
           const txBackend = createTransactionBackend({
             capabilities,
+            serializedResource,
             db,
             executionAdapter,
             operationStrategy,
@@ -2122,6 +2135,7 @@ export function buildSqliteEngineProfile(
         return runDoSqliteStorageTransaction(async (nativeTransaction) => {
           const txBackend = createTransactionBackend({
             capabilities,
+            serializedResource,
             db,
             operationStrategy,
             profileHints: { isSync },
@@ -2148,9 +2162,10 @@ export function buildSqliteEngineProfile(
         async () =>
           db.transaction(
             async (tx) => {
-              recordSqliteEngineSavepoint(db, tx);
+              recordSqliteEngineSavepoint(db, tx, serializedResource);
               const txBackend = createTransactionBackend({
                 capabilities,
+                serializedResource,
                 db: tx,
                 operationStrategy,
                 profileHints: { isSync },
@@ -2186,6 +2201,7 @@ export function buildSqliteEngineProfile(
     ): TransactionBackend {
       const txBackend = createTransactionBackend({
         capabilities,
+        serializedResource,
         db: tx,
         operationStrategy,
         profileHints: { isSync },
@@ -2211,6 +2227,7 @@ export function buildSqliteEngineProfile(
     ): InternalOperationBackend {
       return createTransactionBackend({
         capabilities,
+        serializedResource,
         db: tx,
         operationStrategy,
         profileHints: { isSync },
@@ -2272,10 +2289,11 @@ export function buildSqliteEngineProfile(
               // libsql clients abandons the client's connection — fatal for
               // `:memory:`) must be avoided.
               const nativeTransaction = createNativeTransactionToken(
-                sqliteConnectionProbe(db),
+                sqliteConnectionProbe(db, serializedResource),
               );
               const txBackend = createTransactionBackend({
                 capabilities,
+                serializedResource,
                 db,
                 executionAdapter,
                 operationStrategy,
@@ -2347,7 +2365,7 @@ export function buildSqliteEngineProfile(
             async () =>
               db.transaction(
                 async (tx) => {
-                  recordSqliteEngineSavepoint(db, tx);
+                  recordSqliteEngineSavepoint(db, tx, serializedResource);
                   return fn(
                     markSchemaFencedInsertEligibleUnderFence(
                       bindTransactionBackend(tx, isFirstParty),
@@ -2759,16 +2777,27 @@ function sqliteHandleClient(db: AnySqliteDatabase): unknown {
 
 /**
  * The connection a SQLite handle runs on, as the native transaction record
- * names it: the driver client or Durable Object storage the
- * serialized-resource audit identifies for the handle's client (every
- * Drizzle wrapper and transaction object over one client shares it), or the
- * handle itself when the audit recognizes none.
+ * names it: the one answer `resolveConnectionIdentity` gives the
+ * serialized-resource audit too — the driver client or Durable Object
+ * storage detected for the handle's client (every Drizzle wrapper and
+ * transaction object over one client shares it), else the resource the
+ * backend's `{ mode: "shared" }` declaration names; `undefined` when neither
+ * identifies one.
+ *
+ * Exported for the connection-identity agreement tests only; production code
+ * reaches it through the native-transaction record.
+ *
+ * @internal
  */
-function nativeTransactionConnection(db: AnySqliteDatabase): object {
-  return (
+export function sqliteConnectionIdentity(
+  db: AnySqliteDatabase,
+  serializedResource: SerializedResourceDeclaration | undefined,
+): ConnectionIdentity | undefined {
+  return resolveConnectionIdentity(
     getSerializedSqliteConnection({
       $client: sqliteHandleClient(db),
-    } as unknown as AnySqliteDatabase) ?? db
+    } as unknown as AnySqliteDatabase),
+    serializedResource,
   );
 }
 
@@ -2797,23 +2826,29 @@ function pinnedLibsqlTransaction(db: AnySqliteDatabase): object | undefined {
  *   sql.js, Durable Object storage), which runs on whatever transaction the
  *   connection has, a later one included: the connection, proof 4 or none.
  */
-function sqliteNativeHandle(db: AnySqliteDatabase): NativeHandle {
+function sqliteNativeHandle(
+  db: AnySqliteDatabase,
+  serializedResource: SerializedResourceDeclaration | undefined,
+): NativeHandle {
   const pinned = pinnedLibsqlTransaction(db);
-  return pinned === undefined ?
-      {
-        kind: "connection",
-        handle: db,
-        connection: nativeTransactionConnection(db),
-      }
-    : {
-        kind: "pinned",
-        handle: db,
-        pinned,
+  if (pinned === undefined) {
+    const identity = sqliteConnectionIdentity(db, serializedResource);
+    return {
+      kind: "connection",
+      handle: db,
+      connection: identity?.connection ?? db,
+      detected: identity?.source === "detected",
+    };
+  }
+  return {
+    kind: "pinned",
+    handle: db,
+    pinned,
         // A libSQL transaction handle reports `closed` once its transaction
         // has ended, committed, rolled back or ended by the engine, and
         // refuses every statement from then on.
-        isOpen: () => !(pinned as Readonly<{ closed: boolean }>).closed,
-      };
+    isOpen: () => !(pinned as Readonly<{ closed: boolean }>).closed,
+  };
 }
 
 /**
@@ -2839,6 +2874,7 @@ function readSqliteInTransaction(client: object): boolean {
  */
 function sqliteConnectionProbe(
   db: AnySqliteDatabase,
+  serializedResource: SerializedResourceDeclaration | undefined,
 ): ConnectionTransactionProbe | undefined {
   const client = (db as Readonly<{ $client?: unknown }>).$client;
   if (
@@ -2849,8 +2885,12 @@ function sqliteConnectionProbe(
     return undefined;
   }
   const driverClient = client as object;
+  // The connection the record publishes the token on: the one the audit
+  // names, detected on this very client.
+  const identity = sqliteConnectionIdentity(db, serializedResource);
+  if (identity?.source !== "detected") return undefined;
   return {
-    connection: nativeTransactionConnection(db),
+    connection: identity.connection,
     isTransactionOpen: () => readSqliteInTransaction(driverClient),
   };
 }
@@ -2862,9 +2902,10 @@ function sqliteConnectionProbe(
 function recordSqliteEngineSavepoint(
   db: AnySqliteDatabase,
   tx: AnySqliteDatabase,
+  serializedResource: SerializedResourceDeclaration | undefined,
 ): void {
   if (isSqliteTransactionHandle(db)) {
-    recordEngineSavepoint(tx, sqliteNativeHandle(db));
+    recordEngineSavepoint(tx, sqliteNativeHandle(db, serializedResource));
   }
 }
 
@@ -2878,7 +2919,10 @@ function recordSqliteNativeTransaction(
   options: CreateSqliteTransactionBackendOptions,
 ): void {
   if (options.nativeTransaction === undefined) {
-    recordNativeTransactionHandle(txBackend, sqliteNativeHandle(options.db));
+    recordNativeTransactionHandle(
+      txBackend,
+      sqliteNativeHandle(options.db, options.serializedResource),
+    );
   } else {
     recordOpenedNativeTransaction(txBackend, options.nativeTransaction);
   }

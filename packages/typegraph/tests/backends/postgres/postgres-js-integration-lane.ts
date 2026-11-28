@@ -75,17 +75,29 @@ export function registerPostgresJsIntegrationLane(
             // declaring a non-default write fence.
             createSerializedBackend: (overrides) => {
               const serializedSql = postgres(databaseUrl, { max: 1 });
+              const serializedOptions = {
+                ...(overrides?.capabilities === undefined ?
+                  {}
+                : { capabilities: overrides.capabilities }),
+                schemaProvisioning: overrides?.schemaProvisioning ?? "dml-only",
+                ...(overrides?.tableNames === undefined ?
+                  {}
+                : { tables: createPostgresTables(overrides.tableNames) }),
+              } as const;
               return Promise.resolve({
-                backend: createPostgresBackend(drizzle(serializedSql), {
-                  ...(overrides?.capabilities === undefined ?
-                    {}
-                  : { capabilities: overrides.capabilities }),
-                  schemaProvisioning:
-                    overrides?.schemaProvisioning ?? "dml-only",
-                  ...(overrides?.tableNames === undefined ?
-                    {}
-                  : { tables: createPostgresTables(overrides.tableNames) }),
-                }),
+                backend: createPostgresBackend(
+                  drizzle(serializedSql),
+                  serializedOptions,
+                ),
+                // The factory again over the same one-connection client: a
+                // second wrapper, not a derivation of `backend`.
+                createWrapper: () =>
+                  Promise.resolve(
+                    createPostgresBackend(
+                      drizzle(serializedSql),
+                      serializedOptions,
+                    ),
+                  ),
                 close: () => serializedSql.end(),
               });
             },
