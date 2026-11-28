@@ -142,6 +142,14 @@ export function decodeCursor(cursor: string): CursorData {
       });
     }
 
+    // A column is the id `buildColumnId` wrote; anything else (an object
+    // whose conversion to text throws, say) was not issued by a terminal.
+    if (!raw["cols"].every((column: unknown) => typeof column === "string")) {
+      throw new ValidationError("Invalid cursor structure", {
+        issues: [{ path: "cursor", message: "Cursor columns must be strings" }],
+      });
+    }
+
     if (raw["vals"].length !== raw["cols"].length) {
       throw new ValidationError("Cursor column count mismatch", {
         issues: [

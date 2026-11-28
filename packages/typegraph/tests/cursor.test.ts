@@ -139,6 +139,17 @@ describe("Cursor Decoding", () => {
     expect(() => decodeCursor(mismatchedCounts)).toThrow(ValidationError);
     expect(() => decodeCursor(mismatchedCounts)).toThrow(/mismatch/i);
   });
+
+  it("throws ValidationError for a column that is not a string", () => {
+    // An object whose conversion to text throws reached a refusal's message
+    // as a TypeError.
+    for (const column of [{ toString: false }, 1, null]) {
+      const forged = btoa(
+        JSON.stringify({ v: 1, d: "f", vals: [1], cols: [column] }),
+      );
+      expect(() => decodeCursor(forged)).toThrow(ValidationError);
+    }
+  });
 });
 
 describe("buildColumnId", () => {
