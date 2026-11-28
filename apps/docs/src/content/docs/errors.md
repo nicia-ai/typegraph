@@ -2480,8 +2480,11 @@ could otherwise report success for a write that was then removed.
 
 | `reason` | Refused call | When |
 | --- | --- | --- |
-| `"savepoint-open"` | any call, a stream page read included | another call's unit is open on the context. Refused before the call issues any statement. |
-| `"siblings-in-flight"` | `bulkHardDelete`, adopted merge apply | other calls are still running on the context. Refused before the call's first statement. |
+| `"savepoint-open"` | any call, read or write (each stream page is its own call) | another call's unit is open on the context. Refused before the call issues any statement. |
+| `"siblings-in-flight"` | `bulkHardDelete`, adopted merge apply | other calls, reads included, are still running on the context. Refused before the call's first statement. |
+
+A refused call that returns a promise rejects it; the refusal is never thrown synchronously.
+`applyMergePlanInTransaction` throws this error itself, not wrapped in a `MergeError`.
 
 ```typescript
 await store.transaction(async (tx) => {

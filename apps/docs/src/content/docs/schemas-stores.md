@@ -2409,14 +2409,31 @@ savepoint rolled back. TypeGraph refuses the overlap instead, with
 [`TransactionCallRefusedError`](/errors#transactioncallrefusederror):
 
 - a call started while another call's savepoint unit is open on the same transaction context is refused
-  before it issues any statement (`details.reason: "savepoint-open"`). This includes a stream page read,
-  and a write that a hook starts through a captured `tx` while an adopted merge apply runs;
+  before it issues any statement (`details.reason: "savepoint-open"`). This includes a write that a hook
+  starts through a captured `tx` while an adopted merge apply runs;
 - a `bulkHardDelete` or adopted merge apply started while other calls are still running on the same
   transaction context is refused before its first statement (`details.reason: "siblings-in-flight"`).
 
+A read is a call like any other, and the rule has no exemption for it. Every member a transaction
+context offers is a call: collection reads (`getById`, `find`, `count`, …), query terminals
+(`execute`, `first`, `count`, `paginate`, …), `describe()`, `validateStore()`, `batchOnce()`,
+`neighbors()`, `subgraph()`, the identity facade's reads, `assertUnchangedSince()` and the read members
+of `tx.backend`. A read started while another call's unit is open is refused before its first statement,
+and a read is running from its call until its promise settles, so a unit that tries to open beside it is
+refused. A refused read rejects its promise; no member that returns a promise throws its refusal
+synchronously.
+
+A stream is a call page by page: each page it fetches is its own call, running only while that page's
+statement does. A unit may therefore open between two pages, and the stream's next page is then refused
+while the unit is open; advance the stream once the unit's call has settled.
+
+A write is running until everything it records has been recorded, its count in the transaction receipt
+(and in every enclosing `tx.measure()` scope) included, so a unit's rollback never removes the count of
+a row written before the unit opened.
+
 The overlap is refused, not queued: a queued call would wait forever when the unit's own work awaits it.
-The writes an adopted merge apply composes run as part of that call and are not refused. Calls awaited
-one after another are unaffected.
+The writes and reads an adopted merge apply composes run as part of that call and are not refused. Calls
+awaited one after another are unaffected.
 
 Await each of these calls before starting other work on the same transaction:
 
