@@ -2061,7 +2061,9 @@ tables that removal never finds.
   connection's `search_path`, exactly as its other statements resolve.
 
 The connection must still be able to *resolve* the allocation's tables, so its
-`search_path` must include the schema, typically `public`. A per-role `"$user"`
+`search_path` must include the schema, typically `public`. Attesting a
+connection checks this: one whose path resolves the allocation's tables in no
+schema, or in another, is refused with a `BranchError` naming the schema. A per-role `"$user"`
 schema ahead of it is fine.
 
 The ledger an allocation is recorded in is the one in the allocation's own
@@ -2079,16 +2081,17 @@ abort, reopen, destroy and operations) uses the ledger the allocation was
 recorded in, whatever `control`'s `search_path` resolves by then, including
 on a manager built afresh from the stored descriptor. A version 1 locator,
 written by an earlier release, records no schema; it is still read and
-managed, and resolves the ledger through `control`'s current schema at the
-time of the call, so use it with `control`'s current schema being the one the
-allocation was made in. A version 2 locator without `ledgerSchema`, or a
+managed, and uses the ledger `control`'s `search_path` resolves at the time
+of the call (the first schema on the path that holds a ledger, or `control`'s
+current schema when none does), so use it with a path that reaches the schema
+the allocation was made in, with no other ledger ahead of it. A version 2 locator without `ledgerSchema`, or a
 version 1 locator with one, is refused with a `BranchError`. Reopening still
 needs a connection whose `search_path` resolves the allocation's tables, as
 above.
 
 `listUnsealedAllocations` and `abortAllocation` read the ledger their
-`ledgerSchema` option names, or the one in `control`'s current schema at the
-time of the call without it. Each listed allocation carries the
+`ledgerSchema` option names, or the one `control`'s `search_path` resolves
+at the time of the call without it. Each listed allocation carries the
 `ledgerSchema` it was listed from, to pass back to `abortAllocation`.
 
 #### `makeBackend` for branches, candidate planning, and evolution previews

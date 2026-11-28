@@ -202,8 +202,8 @@ const ALLOCATION_COLUMNS = sql.raw(
  * removal) carries it. A durable locator records it, and
  * `listUnsealedAllocations` and `abortAllocation` accept it. A call that is
  * given no ledger schema (a version 1 locator, or a recovery call without the
- * option) uses the ledger in `control`'s current schema, observed once, for
- * every statement it issues; {@link resolveLedger} is the one owner of that
+ * option) uses the ledger `control`'s `search_path` resolves, observed once,
+ * for every statement it issues; {@link resolveLedger} is the one owner of that
  * decision.
  */
 type LedgerRelation = Readonly<{
@@ -232,9 +232,10 @@ function ledgerIn(schema: string): LedgerRelation {
  * and the `operations` members) uses that ledger, whatever `control`'s
  * `search_path` resolves by then, so a manager built afresh from the stored
  * descriptor alone still finds it. A version 1 locator, written by an earlier
- * release, names none; it is still read and managed, and resolves the ledger
- * through `control`'s current schema at the time of the call, as that release
- * did. A version 2 locator without a schema name, or a version 1 locator with
+ * release, names none; it is still read and managed, and uses the ledger
+ * `control`'s `search_path` resolves at the time of the call (the first schema
+ * on the path that holds a ledger, or `control`'s current schema when none
+ * does), as that release's unqualified ledger statements did. A version 2 locator without a schema name, or a version 1 locator with
  * one, is refused with a `BranchError`.
  */
 export type PostgresWorkingCopyLocator = Readonly<{
@@ -255,8 +256,9 @@ export type PostgresUnsealedAllocation = Readonly<{
 /** Names the working-copy ledger a recovery call reads. */
 export type PostgresWorkingCopyLedgerOptions = Readonly<{
   /**
-   * The schema holding the ledger. Absent, the ledger in `control`'s current
-   * schema at the time of the call.
+   * The schema holding the ledger. Absent, the ledger `control`'s
+   * `search_path` resolves at the time of the call: the first schema on the
+   * path that holds a ledger, or `control`'s current schema when none does.
    */
   ledgerSchema?: string;
 }>;
@@ -284,7 +286,8 @@ export type PostgresWorkingCopyLedgerOptions = Readonly<{
  * by locator finds the same ledger after such a change too (see
  * {@link PostgresWorkingCopyLocator}). `listUnsealedAllocations` and
  * `abortAllocation` read the ledger in the schema their `ledgerSchema` option
- * names, or in `control`'s current schema at the time of the call without it;
+ * names, or the one `control`'s `search_path` resolves at the time of the call
+ * without it;
  * each listed allocation carries the schema it was listed from. Provisioning, the connected
  * backend's DDL, the allocation's vector storage and removal all name that
  * schema explicitly, so a pooled connection's own `search_path` never decides
@@ -373,8 +376,8 @@ export type PostgresWorkingCopyManager<G extends GraphDef> = Readonly<{
   durable: DurableWorkingCopyStrategy<G, PostgresWorkingCopyLocator>;
   /**
    * Bounded, ordered inventory of unsealed allocations, including live ones,
-   * in the ledger `ledgerSchema` names (by default the one in `control`'s
-   * current schema).
+   * in the ledger `ledgerSchema` names (by default the one `control`'s
+   * `search_path` resolves).
    */
   listUnsealedAllocations: (
     options?: Readonly<{ after?: string; limit?: number }> &
@@ -387,7 +390,7 @@ export type PostgresWorkingCopyManager<G extends GraphDef> = Readonly<{
    * Refuses with a `BranchError`, keeping the row, only while relations
    * carrying the allocation's reserved prefixes exist in another schema; the
    * error names the schemas found. Reads the ledger `ledgerSchema` names (by
-   * default the one in `control`'s current schema); pass the `ledgerSchema`
+   * default the one `control`'s `search_path` resolves); pass the `ledgerSchema`
    * `listUnsealedAllocations` reported.
    */
   abortAllocation: (
@@ -1004,19 +1007,54 @@ function readAllocation(
   ).then((found) => found[0]);
 }
 
+/** Where a connection must resolve an allocation's tables by their bare names. */
+type AllocationResolution = Readonly<{
+  /** The schema the allocation's tables live in. */
+  schema: string;
+  /** One of the allocation's tables, by its bare name. */
+  table: string;
+}>;
+
+/**
+ * Attests that `session` reaches the allocation: the ledger row it reads holds
+ * `ownershipToken`. A connection the allocation's store runs on must also
+ * resolve the allocation's tables, which its backend names without a schema,
+ * in the allocation's own schema; `resolves` names one such table, and the
+ * same statement reports the schema the session's `search_path` resolves it
+ * to. The ledger is addressed by its schema, so this check, not the ledger
+ * read, refuses a connection whose path does not lead to the allocation.
+ */
 async function assertAllocationSession(
   session: QuerySession,
   ledger: LedgerRelation,
   allocationId: string,
   ownershipToken: string,
+  resolves?: AllocationResolution,
 ): Promise<void> {
-  const observed = await rows<Readonly<{ ownership_token: string }>>(
+  const observed = await rows<
+    Readonly<{ ownership_token: string; resolved_schema: string | null }>
+  >(
     session,
-    sql`SELECT ownership_token FROM ${ledger.name} WHERE allocation_id = ${allocationId}`,
+    resolves === undefined ?
+      sql`SELECT ownership_token, NULL::text AS resolved_schema FROM ${ledger.name} WHERE allocation_id = ${allocationId}`
+    : sql`SELECT ownership_token, (SELECT n.nspname::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass(${quoteDdlIdentifier(resolves.table)})) AS resolved_schema FROM ${ledger.name} WHERE allocation_id = ${allocationId}`,
   );
-  if (observed[0]?.ownership_token !== ownershipToken) {
+  const row = observed[0];
+  if (row?.ownership_token !== ownershipToken) {
     throw new BranchError(
       "Working-copy connection is not bound to the allocation database.",
+    );
+  }
+  if (resolves !== undefined && row.resolved_schema !== resolves.schema) {
+    throw new BranchError(
+      `Working-copy connection does not resolve the allocation's tables in its schema "${resolves.schema}"${row.resolved_schema === null ? "" : `; its search_path resolves them in "${row.resolved_schema}"`}. Its search_path must include "${resolves.schema}".`,
+      {
+        details: {
+          allocationId,
+          schema: resolves.schema,
+          resolvedSchema: row.resolved_schema ?? undefined,
+        },
+      },
     );
   }
 }
@@ -1186,8 +1224,9 @@ async function observeAllocationSession(
  * The one owner of which ledger a call that holds no allocation handle uses. A
  * named schema is the ledger's and is used as given, whatever `control`'s
  * `search_path` resolves; without one (a version 1 locator, a recovery call
- * without `ledgerSchema`) the ledger is the one in `control`'s current schema,
- * as every release before the locator recorded it resolved it.
+ * without `ledgerSchema`) the ledger is the one `control`'s `search_path`
+ * resolves, as every release before the locator recorded it resolved it
+ * (see {@link observeControlLedger}).
  */
 async function resolveLedger(
   control: QuerySession,
@@ -1215,13 +1254,22 @@ async function locatorLedger(
 }
 
 /**
- * The ledger in `control`'s current schema, observed on `control`'s own
- * session.
+ * The ledger `control`'s `search_path` resolves at the time of the call, the
+ * one every release before the locator recorded its schema addressed by the
+ * ledger's bare name: the first schema on the path that holds a ledger, or,
+ * when none does, `control`'s current schema, where the ledger is then
+ * created. Observed on `control`'s own session in one statement.
  */
 async function observeControlLedger(
   control: QuerySession,
 ): Promise<LedgerRelation> {
-  const { schema } = await observeSessionFacts(control);
+  const observed = await rows<
+    Readonly<{ schema: string | null; ledger_schema: string | null }>
+  >(
+    control,
+    sql`SELECT current_schema() AS schema, (SELECT n.nspname::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass(${quoteDdlIdentifier(LEDGER)})) AS ledger_schema`,
+  );
+  const schema = observed[0]?.ledger_schema ?? observed[0]?.schema ?? "";
   if (schema === "") {
     throw new BranchError(
       "The control backend has no schema holding the working-copy ledger: its search_path names no existing schema.",
@@ -1559,9 +1607,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
    * itself observed. Returns the private ownership token that every connection
    * to the allocation must attest, and the role `control` provisioned it as.
    */
-  async function provisionAllocation(
-    provision: AllocationProvision,
-  ): Promise<
+  async function provisionAllocation(provision: AllocationProvision): Promise<
     Readonly<{
       ownershipToken: string;
       controlRole: string;
@@ -1748,6 +1794,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         ledger,
         allocationId,
         ownershipToken,
+        { schema, table: names.nodes },
       );
       await sourceBackend.transaction(async (sourceTransaction) => {
         // The clone opened this transaction on the source: its session opens
@@ -1890,15 +1937,17 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
    */
   async function assertAttachedSession(
     backend: GraphBackend,
-    ledger: LedgerRelation,
-    row: SealedRow,
+    sealed: SealedAllocation,
   ): Promise<void> {
+    const { row, ledger } = sealed;
     try {
       await assertAllocationSession(
         backend,
         ledger,
         row.allocation_id,
         row.ownership_token,
+        // A row written before its schema was recorded lives beside its ledger.
+        { schema: sealed.schema ?? ledger.schema, table: sealed.names.nodes },
       );
     } catch (error) {
       const current = await readAllocation(control, ledger, row.allocation_id);
@@ -1920,7 +1969,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
     graph: G,
     sealed: SealedAllocation,
   ): Promise<Readonly<{ store: Store<G>; backend: GraphBackend }>> {
-    const { row, ledger, names, schema, indexNames, vectorStrategy } = sealed;
+    const { row, names, schema, indexNames, vectorStrategy } = sealed;
     const backend =
       vectorStrategy === undefined ?
         await connect(names)
@@ -1936,7 +1985,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
           "Working-copy connection did not bind its allocation-scoped vector strategy.",
         );
       }
-      await assertAttachedSession(backend, ledger, row);
+      await assertAttachedSession(backend, sealed);
       await adoptAllocationBaseSchema(backend, row.allocation_id);
       const store = createStore(
         graph,
@@ -2065,7 +2114,11 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         descriptor.allocationId,
       ),
     reopen: async (graph, descriptor, descriptorVersion) => {
-      const ledger = await locatorLedger(control, descriptor, descriptorVersion);
+      const ledger = await locatorLedger(
+        control,
+        descriptor,
+        descriptorVersion,
+      );
       await ensureLedger(ledger);
       const sealed = await resolveSealedAllocation(
         graph,
@@ -2161,6 +2214,7 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         ledger,
         allocationId,
         ownershipToken,
+        { schema: controlFacts.schema, table: names.nodes },
       );
       // Schema-mutable on purpose: no fixed-schema guard or marker.
       const disposableBackend = wrapWithManagedClose(

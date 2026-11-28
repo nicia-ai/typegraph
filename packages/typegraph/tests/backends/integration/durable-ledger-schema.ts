@@ -16,6 +16,8 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
 import { createStoreWithSchema, defineGraph, defineNode } from "../../../src";
+import { createPostgresTables } from "../../../src/backend/drizzle/schema/postgres";
+import { createPostgresWorkingCopyManager } from "../../../src/backend/postgres/working-copy";
 import type {
   GraphBackend,
   TransactionBackend,
@@ -224,16 +226,22 @@ export function registerDurableLedgerSchemaIntegrationTests(
       expect(observed.after).toEqual(observed.before);
     });
 
-    it("is used by a manager built afresh from the stored descriptor alone", async (ctx) => {
+    it("is used by a manager built afresh from the stored descriptor alone, past another ledger on the path", async (ctx) => {
       const root = requirePostgres(context, ctx);
-      const future = uniqueSchema("restart");
+      const ahead = uniqueSchema("ahead");
       const observed = await inCallerTransaction(
         root,
         async (caller, overCaller) => {
           const base = await currentSchema(caller);
-          await setPath(caller, `${future}, ${base}`);
+          await setPath(caller, `${ahead}, ${base}`);
           const durable = await sealedDurableBranch(caller, overCaller);
-          await run(caller, sql.raw(`CREATE SCHEMA "${future}"`));
+          // The schema leading the path comes to hold a working-copy ledger of
+          // its own, so a bare ledger name now resolves there.
+          await run(caller, sql.raw(`CREATE SCHEMA "${ahead}"`));
+          await managerOver(
+            durable.control,
+            overCaller,
+          ).listUnsealedAllocations({ ledgerSchema: ahead });
           // A new control backend and manager: nothing of the creating
           // manager survives but the descriptor.
           const restarted = managerOver<LedgerGraph>(
@@ -249,14 +257,16 @@ export function registerDurableLedgerSchemaIntegrationTests(
             durable.descriptor,
             restarted.durable,
           );
+          const liveAfterDestroy = await liveAllocations(
+            caller,
+            base,
+            durable.descriptor.store.allocationId,
+          );
+          await run(caller, sql.raw(`DROP SCHEMA "${ahead}" CASCADE`));
           return {
             reopened,
             destroyed: isOk(destroyed) ? undefined : destroyed.error,
-            liveAfterDestroy: await liveAllocations(
-              caller,
-              base,
-              durable.descriptor.store.allocationId,
-            ),
+            liveAfterDestroy,
             before: durable.before,
             after: await userRelations(caller),
           };
@@ -269,7 +279,7 @@ export function registerDurableLedgerSchemaIntegrationTests(
       expect(observed.after).toEqual(observed.before);
     });
 
-    it("resolves a version 1 descriptor, which records no schema, through control's current schema", async (ctx) => {
+    it("resolves a version 1 descriptor, which records no schema, through control's search_path", async (ctx) => {
       const root = requirePostgres(context, ctx);
       const future = uniqueSchema("legacy");
       const observed = await inCallerTransaction(
@@ -278,41 +288,47 @@ export function registerDurableLedgerSchemaIntegrationTests(
           const base = await currentSchema(caller);
           await setPath(caller, `${future}, ${base}`);
           const durable = await sealedDurableBranch(caller, overCaller);
+          const { allocationId } = durable.descriptor.store;
           // The shape the released format wrote: version 1, id only.
           const legacy: DurableBranchDescriptor<Locator> = {
             ...durable.descriptor,
             version: 1,
-            store: { allocationId: durable.descriptor.store.allocationId },
+            store: { allocationId },
           };
           const manager = managerOver<LedgerGraph>(durable.control, overCaller);
-          // While the path still resolves the allocation's schema, the
-          // legacy descriptor reopens and destroys as it always has.
-          const reopened = await reopenedNames(durable.graph, legacy, manager);
+          // An empty schema now leads the path. The bare ledger name still
+          // resolves to the allocation's ledger, as the released version's
+          // unqualified statements resolve it, so the legacy descriptor still
+          // reopens; no empty ledger is created ahead of it.
           await run(caller, sql.raw(`CREATE SCHEMA "${future}"`));
-          // Once it resolves another schema, the legacy descriptor looks in
-          // that schema's ledger, as the released version does, and the
-          // allocation is kept.
-          const misdirected = await destroyDurableBranch(
+          const reopened = await reopenedNames(durable.graph, legacy, manager);
+          const futureLedger = await run(
+            caller,
+            sql`SELECT to_regclass(${`"${future}".typegraph_working_copy_allocations`})::text AS ledger`,
+          );
+          // Once the path no longer reaches the allocation's schema, the
+          // legacy descriptor has no way to find its ledger: destroy reports
+          // the allocation missing and keeps it.
+          await setPath(caller, future);
+          const unreachable = await destroyDurableBranch(
             legacy,
             manager.durable,
           );
-          const liveAfterMisdirected = await liveAllocations(
+          const liveWhileUnreachable = await liveAllocations(
             caller,
             base,
-            durable.descriptor.store.allocationId,
+            allocationId,
           );
           await run(caller, sql.raw(`DROP SCHEMA "${future}" CASCADE`));
+          await setPath(caller, base);
           const destroyed = await destroyDurableBranch(legacy, manager.durable);
           return {
             reopened,
-            misdirected: isOk(misdirected) ? undefined : misdirected.error,
-            liveAfterMisdirected,
+            futureLedger: futureLedger[0]?.["ledger"],
+            unreachable: isOk(unreachable) ? undefined : unreachable.error,
+            liveWhileUnreachable,
             destroyed: isOk(destroyed) ? undefined : destroyed.error,
-            liveAfterDestroy: await liveAllocations(
-              caller,
-              base,
-              durable.descriptor.store.allocationId,
-            ),
+            liveAfterDestroy: await liveAllocations(caller, base, allocationId),
             before: durable.before,
             after: await userRelations(caller),
           };
@@ -320,9 +336,10 @@ export function registerDurableLedgerSchemaIntegrationTests(
       );
 
       expect(observed.reopened).toEqual(["copied"]);
-      expect(observed.misdirected).toBeInstanceOf(BranchError);
-      expect(String(observed.misdirected)).toContain("does not exist");
-      expect(observed.liveAfterMisdirected).toBe(1);
+      expect(observed.futureLedger).toBeNull();
+      expect(observed.unreachable).toBeInstanceOf(BranchError);
+      expect(String(observed.unreachable)).toContain("does not exist");
+      expect(observed.liveWhileUnreachable).toBe(1);
       expect(observed.destroyed).toBeUndefined();
       expect(observed.liveAfterDestroy).toBe(0);
       expect(observed.after).toEqual(observed.before);
@@ -395,7 +412,10 @@ export function registerDurableLedgerSchemaIntegrationTests(
           const before = await userRelations(caller);
           // An owner that crashed leaves its allocation unsealed and live.
           await manager.makeBackend();
+          // The allocation's schema leaves the path, so the default listing
+          // reads another ledger.
           await run(caller, sql.raw(`CREATE SCHEMA "${future}"`));
+          await setPath(caller, future);
           const restarted = managerOver(
             overCaller({ vector: false }),
             overCaller,
@@ -430,6 +450,51 @@ export function registerDurableLedgerSchemaIntegrationTests(
       expect(observed.listedSchemas).toEqual([observed.base]);
       expect(observed.aborted).toBeUndefined();
       expect(observed.live).toBe(0);
+      expect(observed.after).toEqual(observed.before);
+    });
+
+    // The ledger is addressed by its schema, so reading it proves nothing
+    // about where the connection resolves the allocation's tables, which its
+    // backend names without a schema. Attestation checks that separately.
+    it("refuses a connection whose search_path does not reach the allocation's schema, leaving nothing", async (ctx) => {
+      const root = requirePostgres(context, ctx);
+      const elsewhere = uniqueSchema("elsewhere");
+      const observed = await inCallerTransaction(
+        root,
+        async (caller, overCaller) => {
+          const base = await currentSchema(caller);
+          await run(caller, sql.raw(`CREATE SCHEMA "${elsewhere}"`));
+          const manager = createPostgresWorkingCopyManager({
+            control: overCaller({ vector: false }),
+            connect: async (names) => {
+              await setPath(caller, elsewhere);
+              return overCaller({
+                vector: false,
+                tables: createPostgresTables(names),
+              });
+            },
+          });
+          await manager.listUnsealedAllocations();
+          const before = await userRelations(caller);
+          const liveBefore = await liveAllocations(caller, base);
+          const failure = await failureOf(manager.makeBackend());
+          await setPath(caller, base);
+          return {
+            base,
+            failure,
+            liveBefore,
+            liveAfter: await liveAllocations(caller, base),
+            before,
+            after: await userRelations(caller),
+          };
+        },
+      );
+
+      expect(observed.failure).toBeInstanceOf(BranchError);
+      expect(String(observed.failure)).toContain(
+        `does not resolve the allocation's tables in its schema "${observed.base}"`,
+      );
+      expect(observed.liveAfter).toBe(observed.liveBefore);
       expect(observed.after).toEqual(observed.before);
     });
   });
