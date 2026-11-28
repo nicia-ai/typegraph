@@ -842,8 +842,20 @@ collides with the other:
   order than its schema was claimed in the literal's order and is now claimed
   in the schema's. A create of the same value is admitted beside such a
   claim until the holder's next write that moves the value or releases its
-  claims (an update to another value, a soft delete, a retraction). Move the
-  holder's value off and back with two updates to re-key it at once.
+  claims (an update to another value, a soft delete, a retraction). Where the
+  object can hold another value, move the holder's value off and back with two
+  updates to re-key it at once. Where the object holds only fixed literals, so
+  the default is the only value the field can take, no update moves the key:
+  restating the field leaves the old claim alone. Re-key it by soft-deleting
+  the holder and reviving it with `upsertById` under the same id in one
+  transaction; the revival claims the value as a create does, and refuses with
+  `UniquenessError`, rolling the delete back, while a duplicate admitted since
+  the upgrade holds it. The revival resets the row's validity window like any
+  resurrection. A holder with live edges cannot be repaired this way with its
+  edges as they are (`onDelete: "restrict"` refuses the delete, `"cascade"`
+  deletes the edges and `"disconnect"` soft-deletes them, and the revival
+  does not restore them); for a holder whose edges must stay, the one stale
+  claim stays until the row is deleted.
 - **Dates under a union whose branches disagree.** A date under
   `z.union([z.date(), z.string()])` is read from a stored row as its ISO text,
   while a create keys the `Date`. Such a value imported under

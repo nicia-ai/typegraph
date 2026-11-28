@@ -66,6 +66,19 @@ const CkoDefault = defineNode("CkoDefault", {
   }),
 });
 
+/**
+ * A default object of fixed literals, its literal stating `a` before `zeta`:
+ * the default is the only value the field can hold, so no update moves it.
+ */
+const CkoFixed = defineNode("CkoFixed", {
+  schema: z.object({
+    name: z.string(),
+    v: z
+      .object({ zeta: z.literal("z"), a: z.literal("a") })
+      .default({ a: "a", zeta: "z" }),
+  }),
+});
+
 const CkoSource = defineNode("CkoSource", {
   schema: z.object({
     label: z.string(),
@@ -80,7 +93,7 @@ const ckoDerives = defineEdge("ckoDerives");
 
 type ShapeKind = "CkoDate" | "CkoLazyDate" | "CkoNested" | "CkoDefault";
 
-function uniqueOn(kind: ShapeKind) {
+function uniqueOn(kind: ShapeKind | "CkoFixed") {
   return [
     {
       name: `${kind}_v`,
@@ -99,6 +112,7 @@ function buildGraph(id: string) {
       CkoLazyDate: { type: CkoLazyDate, unique: uniqueOn("CkoLazyDate") },
       CkoNested: { type: CkoNested, unique: uniqueOn("CkoNested") },
       CkoDefault: { type: CkoDefault, unique: uniqueOn("CkoDefault") },
+      CkoFixed: { type: CkoFixed, unique: uniqueOn("CkoFixed") },
       CkoSource: { type: CkoSource },
       CkoJustification: { type: CkoJustification },
     },
@@ -597,6 +611,90 @@ export function registerClaimKeyOwnerIntegrationTests(
       }
       await backAgain();
       expect(await claimState(store, shape)).toEqual(heldBy(shape, "row"));
+    });
+
+    // When the object holds only fixed literals, the holder cannot move its
+    // value off and back: the default is the only value the field holds, so
+    // an update restating it moves no key and leaves the legacy claim alone.
+    // The documented repair re-keys it without SQL: soft-delete the holder
+    // and revive it with `upsertById` in one transaction. The delete gives
+    // back every claim the holder held, by owner; the revival claims the
+    // shape-ordered key as a create does, and refuses, rolling the delete
+    // back with it, while a duplicate the legacy claim let in still holds it.
+    it("a fixed-literal default object's legacy claim is re-keyed by a soft delete and revival of its holder in one transaction", async () => {
+      const store = await createCkoStore(context, nextGraphId());
+      const collection = store.nodes.CkoFixed;
+      await collection.create({ name: "row" }, { id: "row" });
+      const shapeKey = `{"zeta":"z","a":"a"}`;
+      const literalKey = computeUniqueKey(
+        { v: { a: "a", zeta: "z" } },
+        ["v"],
+        "binary",
+      );
+      const claimRow = {
+        graphId: store.graphId,
+        nodeKind: "CkoFixed",
+        constraintName: "CkoFixed_v",
+        concreteKind: "CkoFixed",
+        nodeId: "row",
+      };
+      await store.backend.deleteUnique({ ...claimRow, key: shapeKey });
+      await store.backend.insertUnique({ ...claimRow, key: literalKey });
+      const rowId = "row" as NodeId<typeof CkoFixed>;
+      const claims = () =>
+        liveClaims(store.backend, store.graphId, "CkoFixed_v");
+
+      await collection.update(rowId, { v: { a: "a", zeta: "z" } });
+      expect(await claims()).toEqual([{ key: literalKey, node_id: "row" }]);
+
+      const repair = () =>
+        store.transaction(async (tx) => {
+          await tx.nodes.CkoFixed.delete(rowId);
+          await tx.nodes.CkoFixed.upsertById(rowId, { name: "row" });
+        });
+      const rowState = async () => {
+        const row = await collection.getById(rowId);
+        return { name: row?.name, claims: await claims() };
+      };
+      // The legacy claim lets a create of the value in beside it. The marker
+      // fails this case unless the create is admitted, so what follows is the
+      // repair with that duplicate present.
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: await outcome(() =>
+          collection.create({ name: "duplicate" }, { id: "duplicate" }),
+        ),
+        correct: "UniquenessError",
+        defects: [
+          {
+            label: "default object claimed in its literal order before upgrade",
+            on: {},
+            today: "written",
+          },
+        ],
+      });
+      expect(await outcome(repair)).toBe("UniquenessError");
+      expect(await rowState()).toEqual({
+        name: "row",
+        claims: [
+          { key: shapeKey, node_id: "duplicate" },
+          { key: literalKey, node_id: "row" },
+        ],
+      });
+      await collection.hardDelete("duplicate" as NodeId<typeof CkoFixed>);
+
+      await repair();
+
+      expect({
+        ...(await rowState()),
+        duplicate: await outcome(() =>
+          collection.create({ name: "duplicate" }, { id: "duplicate" }),
+        ),
+      }).toEqual({
+        name: "row",
+        claims: [{ key: shapeKey, node_id: "row" }],
+        duplicate: "UniquenessError",
+      });
     });
   });
 }
