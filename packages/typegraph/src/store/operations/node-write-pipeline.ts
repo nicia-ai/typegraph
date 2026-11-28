@@ -85,10 +85,7 @@ import {
 } from "../fulltext-sync";
 import type { OperationEntry, StatementBackend } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
-import {
-  reviveStoredDateProps,
-  storedNodeClaimProps,
-} from "../stored-date-revival";
+import { reviveStoredDateProps } from "../stored-date-revival";
 import { type NodeDeletePlan } from "../types";
 import { hardDeleteEdgeRows, softDeleteEdgeRows } from "./edge-write-pipeline";
 
@@ -675,7 +672,6 @@ function planNodeUpdateUniqueness(
     existing: NodeRow;
     validatedProps: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
-    schema: z.ZodType;
   }>,
   backend: Backend,
 ): Promise<UniquenessUpdatePlan> {
@@ -685,7 +681,6 @@ function planNodeUpdateUniqueness(
       args.existing,
       args.validatedProps,
       args.uniqueConstraints,
-      args.schema,
     ),
   );
 }
@@ -696,26 +691,22 @@ function planNodeUpdateUniqueness(
  * claims. Shared by the update itself and by a batch that judges several
  * updates before writing any of them, so the two cannot read a row
  * differently. `props` are the props the row is about to hold, which the
- * claim keys are derived from. A live row's stored props are read through
- * the stored-props key path ({@link storedNodeClaimProps}), so the transition
- * compares the key the row holds with the key it is about to hold (see
+ * claim keys are derived from. A live row carries its stored props as read
+ * back, so the transition compares the key the row holds with the key it is
+ * about to hold, both rendered by the key owner (see
  * {@link NodeClaimTransition}).
  */
 export function nodeClaimTransition(
   existing: NodeRow,
   props: Record<string, unknown>,
   constraints: readonly UniqueConstraint[],
-  schema: z.ZodType,
 ): NodeClaimTransition {
   const target = { kind: existing.kind, id: existing.id, props, constraints };
   if (existing.deleted_at !== undefined) return { ...target, restores: true };
   return {
     ...target,
     restores: false,
-    storedProps:
-      constraints.length === 0 ?
-        props
-      : storedNodeClaimProps(schema, parseRowProps(existing)),
+    storedProps: parseRowProps(existing),
   };
 }
 
@@ -744,14 +735,6 @@ export async function applyNodeUpdate(
   args: Readonly<{
     schema: z.ZodType;
     validatedProps: Record<string, unknown>;
-    /**
-     * The props the claims are keyed from, when the props written are not
-     * already in the form a write validates: an import under
-     * `onUnknownProperty: "allow"` persists the document's properties
-     * verbatim, and claims them through the stored-props key path
-     * ({@link storedNodeClaimProps}). Defaults to `validatedProps`.
-     */
-    claimProps?: Record<string, unknown>;
     uniqueConstraints: readonly UniqueConstraint[];
     validFrom?: string | null;
     validTo?: string;
@@ -770,9 +753,8 @@ export async function applyNodeUpdate(
     ctx,
     {
       existing: args.existing,
-      validatedProps: args.claimProps ?? args.validatedProps,
+      validatedProps: args.validatedProps,
       uniqueConstraints: args.uniqueConstraints,
-      schema: args.schema,
     },
     backend,
   );
@@ -877,13 +859,10 @@ export async function applyResolvedNodeUpdateBatch(
         { operation: "updateResolvedNodesBatch", rowId: row.id },
       );
     }
-    // The claims are keyed from the entry's VALIDATED props, which the check
-    // above proves the stored row holds; the stored text would key a date or a
-    // reordered JSONB object differently from the create that claimed it.
     return {
       kind: row.kind,
       id: row.id,
-      props: { ...entry.props },
+      props,
       constraints: args.uniqueConstraints,
       uniqueConstraints: args.uniqueConstraints,
       schema: args.schema,
@@ -1007,9 +986,8 @@ export async function applyNodeHardDelete(
  * Used by provenance to reinstate a fact whose currency is restored. Returns
  * the reopened row.
  *
- * The claims are keyed from the value the row stores, through the
- * stored-props key path ({@link storedNodeClaimProps}): its date text revived,
- * as a create of the same date claims it, and nothing re-parsed.
+ * The claims are keyed from the value the row stores, by the key owner, which
+ * keys its date text as a create of the same date does; nothing is re-parsed.
  *
  * @throws {UniquenessError} when a unique key the node held was taken by
  *   another node while it was tombstoned.
@@ -1025,7 +1003,6 @@ export async function applyNodeResurrect(
 ): Promise<NodeRow> {
   const { kind, id } = args.existing;
   const props = parseRowProps(args.existing);
-  const claimProps = storedNodeClaimProps(args.schema, props);
   // One unit, exactly as `applyNodeUpdate`, and for the same reason: the
   // resurrecting UPDATE carries `deleted_at IS NOT NULL`, so a peer that revived
   // this tombstone first makes it match zero rows — and the reservations that
@@ -1035,7 +1012,7 @@ export async function applyNodeResurrect(
     kind,
     id,
     restores: true,
-    props: claimProps,
+    props,
     constraints: args.uniqueConstraints,
   });
   const row = await withNodeClaimTransition(

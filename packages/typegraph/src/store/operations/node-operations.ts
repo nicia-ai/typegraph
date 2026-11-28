@@ -177,6 +177,7 @@ import {
   isUniquenessClaimEntry,
   nodeClaimEntries,
   type NodeClaimItem,
+  nodeClaimKeySchema,
   type NodeClaimTransition,
   type NodeCreateClaimPlan,
   planNodeCreateClaims,
@@ -233,10 +234,7 @@ import {
   unsupportedResolvedMutationSet,
 } from "../resolved-mutation-set";
 import { type NodeRow, rowToEdge, rowToNode } from "../row-mappers";
-import {
-  reviveStoredDateProps,
-  storedNodeClaimProps,
-} from "../stored-date-revival";
+import { reviveStoredDateProps } from "../stored-date-revival";
 import {
   type BulkOperationHookContext,
   compareAndSetAbsent,
@@ -1406,8 +1404,13 @@ export function createNodeBatchValidationSeams(
       ),
     );
 
+    const schema =
+      constraints.length === 0 ? undefined : nodeClaimKeySchema(registry, kind);
     for (const constraint of constraints) {
-      if (!uniqueConstraintKeyMoves(constraint, storedProps, newProps)) {
+      if (
+        schema === undefined ||
+        !uniqueConstraintKeyMoves(constraint, schema, storedProps, newProps)
+      ) {
         continue;
       }
       const newEntry = newEntries.get(constraint.name);
@@ -2048,7 +2051,6 @@ async function prepareNodeUpdate<G extends GraphDef>(
     existing,
     validatedProps,
     shared.uniqueConstraints,
-    nodeKind.schema,
   );
   const validToAfter =
     resurrectionInstant === undefined ?
@@ -3534,8 +3536,8 @@ function ownerClaimConstraint<G extends GraphDef>(
  * written away because databases already carry such rows.
  *
  * The node's key is derived from the value it stores, through its OWN kind's
- * stored-props key path ({@link storedNodeClaimProps}): its stored date text
- * revived, never a re-parse, which would key a value the row does not hold.
+ * schema by the key owner, never a re-parse, which would key a value the row
+ * does not hold.
  */
 function claimedNodeRow<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
@@ -3554,13 +3556,12 @@ function claimedNodeRow<G extends GraphDef>(
     candidate.axis,
   );
   if (ownerConstraint === undefined) return undefined;
-  const heldProps = storedNodeClaimProps(
+  const heldKey = uniqueConstraintKey(
+    ownerConstraint,
     getNodeRegistration(ctx.graph, node.kind).type.schema,
     rowPropsToObject(node.props),
   );
-  return uniqueConstraintKey(ownerConstraint, heldProps) === key ? node : (
-      undefined
-    );
+  return heldKey === key ? node : undefined;
 }
 
 /**
@@ -4970,12 +4971,7 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
           const { registration, validatedProps: nextProps } =
             resolveNodeUpdateProps(ctx, current, validatedProps);
           transitions.push(
-            nodeClaimTransition(
-              current,
-              nextProps,
-              registration.unique ?? [],
-              registration.type.schema,
-            ),
+            nodeClaimTransition(current, nextProps, registration.unique ?? []),
           );
         }
       }
@@ -7061,18 +7057,13 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
               ctx.uniqueSidecarBatch,
             ),
           );
-        // The row's keys are read from the value it stores, through the
-        // stored-props key path its claims were keyed from.
         const preservesClaimKeys = resolvedEntries.every((entry) => {
           const existing = requireDefined(resolvedRows.get(entry.id));
           return resolvedNodeUpdatePreservesClaimKeys(
             ctx.registry,
             entry.kind,
             entry.id,
-            storedNodeClaimProps(
-              registration.type.schema,
-              rowPropsToObject(existing.props),
-            ),
+            rowPropsToObject(existing.props),
             entry.props,
             registration.unique ?? [],
           );
@@ -8163,7 +8154,7 @@ export async function executeNodeGetOrCreateByConstraint<G extends GraphDef>(
 
   const constraint = resolveConstraint(ctx.graph, kind, constraintName);
 
-  const key = uniqueConstraintKey(constraint, validatedProps);
+  const key = uniqueConstraintKey(constraint, nodeKind.schema, validatedProps);
   if (key === undefined) {
     const node = await executeNodeCreate(
       ctx,
@@ -8254,7 +8245,7 @@ export async function executeNodeFindByConstraint<G extends GraphDef>(
   });
 
   const constraint = resolveConstraint(ctx.graph, kind, constraintName);
-  const key = uniqueConstraintKey(constraint, validatedProps);
+  const key = uniqueConstraintKey(constraint, nodeKind.schema, validatedProps);
   if (key === undefined) return undefined;
 
   const kindsToCheck = uniquenessProbeKinds(
@@ -8309,7 +8300,11 @@ function validateAndComputeKeys(
       kind,
       operation: "create",
     });
-    const key = uniqueConstraintKey(constraint, validatedProps);
+    const key = uniqueConstraintKey(
+      constraint,
+      nodeKind.schema,
+      validatedProps,
+    );
     validated.push({ validatedProps, key });
   }
 

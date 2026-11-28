@@ -388,6 +388,15 @@ async function outcome(write: () => Promise<unknown>): Promise<string> {
   }
 }
 
+/** A call's result, or the name of the error it threw. */
+async function outcomeOf<T>(call: () => Promise<T>): Promise<T | string> {
+  try {
+    return await call();
+  } catch (error) {
+    return error instanceof Error ? error.name : String(error);
+  }
+}
+
 /** Replaces a node's claim with the one an earlier writer left in its place. */
 async function plantClaim(
   backend: GraphBackend,
@@ -766,13 +775,13 @@ function registerOwnerClaimReleaseCases(
       });
     });
 
-    // A piped date's input is text and its output a `Date`, and stored-date
-    // revival does not reach through a pipe. The get-or-create update and
-    // resurrection legs hand the matched row the props the lookup validated,
-    // which the update re-validates as input, as on main; and the tombstone a
-    // resurrection looks for keys its stored text, which no create of the date
-    // claims. Pinned, not repaired here.
-    it("getOrCreateByConstraint does not resurrect a soft-deleted row holding a piped date", async () => {
+    // A piped date's input is text and its output a `Date`. The key owner
+    // follows the pipe to its output, so a tombstone's stored text keys as
+    // the `Date` a create claimed and the lookup finds it. The get-or-create
+    // update and resurrection legs then hand the matched row the props the
+    // lookup validated, which the update re-validates as input and refuses, as
+    // on main. Pinned, not repaired here.
+    it("getOrCreateByConstraint finds a soft-deleted row holding a piped date and refuses to resurrect it", async () => {
       const { store } = await createGraphStore(context, port);
       await store.nodes.OcrPipedEvent.create(
         { name: "row", at: A.toISOString() },
@@ -782,23 +791,25 @@ function registerOwnerClaimReleaseCases(
         "row" as NodeId<typeof OcrPipedEvent>,
       );
 
-      const result = await store.nodes.OcrPipedEvent.getOrCreateByConstraint(
-        "OcrPipedEvent_at",
-        { name: "again", at: A.toISOString() },
+      const result = await outcomeOf(() =>
+        store.nodes.OcrPipedEvent.getOrCreateByConstraint("OcrPipedEvent_at", {
+          name: "again",
+          at: A.toISOString(),
+        }),
       );
 
       expectObservation({
         lane: { driver: context.driver },
-        observed: {
-          action: result.action,
-          revivedRow: result.node.id === "row",
-        },
+        observed:
+          typeof result === "string" ? result : (
+            { action: result.action, revivedRow: result.node.id === "row" }
+          ),
         correct: { action: "resurrected", revivedRow: true },
         defects: [
           {
-            label: "piped date tombstone keyed from stored text",
+            label: "get-or-create update re-validates validated props",
             on: {},
-            today: { action: "created", revivedRow: false },
+            today: "ValidationError",
           },
         ],
       });
@@ -859,11 +870,11 @@ function registerOwnerClaimReleaseCases(
       });
     });
 
-    // An import under "allow" writes the document's value verbatim and keys
-    // its claim from that value through the stored-props key path, which
-    // revives a stored `z.date()` but not text under a pipe: the claim is the
-    // text's, not the `Date`'s a create claims. The same on main.
-    it("an import under onUnknownProperty allow keys a piped date from the text it writes", async () => {
+    // An import under "allow" writes the document's value verbatim, and the
+    // key owner reads the text under a pipe whose output is a date as that
+    // date: the claim is the one a create of the `Date` claims. Main keyed
+    // the text and admitted the duplicate.
+    it("an import under onUnknownProperty allow keys a piped date as a create of the date does", async () => {
       const { graphId, store, backend } = await createGraphStore(context, port);
       const imported = await importGraph(
         store,
@@ -882,35 +893,19 @@ function registerOwnerClaimReleaseCases(
       );
       expect(imported.errors).toEqual([]);
 
-      expectObservation({
-        lane: { driver: context.driver },
-        observed: {
-          claims: await liveClaims(backend, graphId, "OcrPipedEvent_at"),
-          duplicate: await outcome(() =>
-            store.nodes.OcrPipedEvent.create({
-              name: "dup",
-              at: A.toISOString(),
-            }),
-          ),
-        },
-        correct: {
-          claims: [
-            claim("OcrPipedEvent_at", keyOf("at", A).toLowerCase(), "row"),
-          ],
-          duplicate: "UniquenessError",
-        },
-        defects: [
-          {
-            label: "verbatim piped date keyed from its text",
-            on: {},
-            today: {
-              claims: [
-                claim("OcrPipedEvent_at", A.toISOString().toLowerCase(), "row"),
-              ],
-              duplicate: "written",
-            },
-          },
+      expect({
+        claims: await liveClaims(backend, graphId, "OcrPipedEvent_at"),
+        duplicate: await outcome(() =>
+          store.nodes.OcrPipedEvent.create({
+            name: "dup",
+            at: A.toISOString(),
+          }),
+        ),
+      }).toEqual({
+        claims: [
+          claim("OcrPipedEvent_at", keyOf("at", A).toLowerCase(), "row"),
         ],
+        duplicate: "UniquenessError",
       });
     });
 
@@ -938,10 +933,10 @@ function registerOwnerClaimReleaseCases(
       );
       expect(imported.errors).toEqual([]);
 
-      // The new claim is keyed from the written text (see above); the old
-      // one is released by owner whatever form it was in.
+      // The new claim is keyed as a create of the date (see above); the old
+      // one is released by owner.
       expect(await liveClaims(backend, graphId, "OcrPipedEvent_at")).toEqual([
-        claim("OcrPipedEvent_at", B.toISOString().toLowerCase(), "row"),
+        claim("OcrPipedEvent_at", keyOf("at", B).toLowerCase(), "row"),
       ]);
       await store.nodes.OcrPipedEvent.create({
         name: "taker",
@@ -951,8 +946,8 @@ function registerOwnerClaimReleaseCases(
     });
 
     // An import under "allow" keys the object value it writes verbatim, which
-    // a PostgreSQL export hands back in JSONB's key order. The stored-props
-    // key path puts it back in the shape's order, so it collides with a create
+    // a PostgreSQL export hands back in JSONB's key order. The key owner
+    // puts it back in the shape's order, so it collides with a create
     // of the same value (PR #1005's "import claim key: JSONB key order", which
     // main still has).
     it("an object-valued unique property imported under allow collides with a create of the same value", async () => {

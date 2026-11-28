@@ -17,7 +17,10 @@ const UNIQUE_KEY_SEPARATOR = "\u001E";
 
 /** Marker for undefined/null field values in unique keys. */
 const UNIQUE_KEY_NULL_MARKER = "\u001F"; // ASCII Unit Separator
+import { type z } from "zod";
+
 import { getEdgeEndpointPairs, isEdgeTargetMap } from "../core/edge-endpoints";
+import { objectSchemaShape } from "../core/kind-schema";
 import {
   type Collation,
   type EdgeRegistration,
@@ -39,16 +42,23 @@ import { type KindRegistry } from "../registry/kind-registry";
 import { compareCodePoints } from "../utils/compare";
 import { hasOwnKey, readOwnProperty } from "../utils/object";
 import { isPresent } from "../utils/presence";
+import { claimKeyValue, uniqueKeyValueText } from "./claim-key";
 
 // ============================================================
 // Uniqueness Validation
 // ============================================================
 
 /**
- * Computes the unique key for a node's uniqueness constraint.
+ * Renders a unique key from field values EXACTLY as given: the values joined
+ * by the key separator, each as {@link uniqueKeyValueText} renders it,
+ * optionally folded for case-insensitive comparison.
  *
- * The key is built by concatenating the specified field values,
- * optionally normalized for case-insensitive comparison.
+ * This is the rendering primitive, not the key owner: a value is keyed as
+ * given here, so a `Date` and its stored ISO text render differently. Every
+ * key the library derives goes through {@link uniqueFieldsKey} (or
+ * {@link uniqueConstraintKey}), which first puts each value in its canonical
+ * claim-key rendering. It stays exported so a test can name the key a raw
+ * value renders to — a claim an earlier release wrote, for instance.
  *
  * Field values are read by declared OWN key ({@link readOwnProperty}): a
  * constraint may name a field that a props bag does not carry (an absent
@@ -64,22 +74,72 @@ export function computeUniqueKey(
   fields: readonly string[],
   collation: Collation,
 ): string {
-  const values = fields.map((field) => {
-    const value = readOwnProperty(props, field);
-    if (value === undefined || value === null) {
-      return UNIQUE_KEY_NULL_MARKER;
-    }
-    // Convert to string, handling primitives safely
-    const stringValue =
-      typeof value === "string" ? value
-      : typeof value === "number" || typeof value === "boolean" ?
-        value.toString()
-      : JSON.stringify(value);
-    return uniqueCollationFoldsCase(collation) ?
-        stringValue.toLowerCase()
-      : stringValue;
-  });
-  return values.join(UNIQUE_KEY_SEPARATOR);
+  return renderUniqueKey(
+    fields.map((field) => readOwnProperty(props, field)),
+    collation,
+  );
+}
+
+function renderUniqueKey(
+  values: readonly unknown[],
+  collation: Collation,
+): string {
+  return values
+    .map((value) => {
+      if (value === undefined || value === null) {
+        return UNIQUE_KEY_NULL_MARKER;
+      }
+      const text = uniqueKeyValueText(value);
+      return uniqueCollationFoldsCase(collation) ? text.toLowerCase() : text;
+    })
+    .join(UNIQUE_KEY_SEPARATOR);
+}
+
+/**
+ * THE key a set of unique fields takes for a node of a kind whose props
+ * schema is `schema`: each field's value, read by own key, put in its
+ * canonical claim-key rendering ({@link claimKeyValue}) through the field's
+ * declared schema, then rendered.
+ *
+ * The rendering is the owner's, never a caller's, so the props may be a
+ * write's parse output or a row as read back from storage — the two give the
+ * same key for the same stored value:
+ *
+ *  - **a date** at a date-typed position (a `z.date()` reached through the
+ *    wrappers, `z.lazy()`, a pipe whose output is a date, a union whose other
+ *    branches are `null` / `undefined`, a nested object property or an array
+ *    element): a `Date` and its stored ISO text key identically. At a
+ *    top-level field that is the JSON-quoted ISO text
+ *    (`"\"2024-01-02T03:04:05.000Z\""`), the bytes a create has always
+ *    claimed; nested, it is the ISO text inside the enclosing value's JSON.
+ *  - **an object** at a `z.object()` position keys with its declared keys in
+ *    the shape's order, its undeclared keys after, whatever order the props
+ *    carry them in (a `.default()` or `.catch()` literal, the caller's
+ *    input order, PostgreSQL's `jsonb` order).
+ *
+ * A field the schema does not declare, or a position the walk does not reach
+ * (see `./claim-key`), keys as given.
+ */
+export function uniqueFieldsKey(
+  schema: z.ZodType,
+  props: Record<string, unknown>,
+  fields: readonly string[],
+  collation: Collation,
+): string {
+  const shape = objectSchemaShape(schema);
+  return renderUniqueKey(
+    fields.map((field) => {
+      const value = readOwnProperty(props, field);
+      const fieldSchema =
+        shape !== undefined && Object.hasOwn(shape, field) ?
+          shape[field]
+        : undefined;
+      return fieldSchema === undefined || value === undefined ?
+          value
+        : claimKeyValue(fieldSchema, value);
+    }),
+    collation,
+  );
 }
 
 /**
@@ -132,13 +192,18 @@ export function checkWherePredicate(
  * lookups derive both the key they probe and whether a released claim's node
  * still holds that key from it, so a lookup can never recognize a key the
  * writer would not have claimed.
+ *
+ * `schema` is the props schema of the kind the props belong to, and the key
+ * is {@link uniqueFieldsKey}: the props may be a parse output or a stored row,
+ * and no caller decides which rendering a key is derived from.
  */
 export function uniqueConstraintKey(
   constraint: UniqueConstraint,
+  schema: z.ZodType,
   props: Record<string, unknown>,
 ): string | undefined {
   return checkWherePredicate(constraint, props) ?
-      computeUniqueKey(props, constraint.fields, constraint.collation)
+      uniqueFieldsKey(schema, props, constraint.fields, constraint.collation)
     : undefined;
 }
 
@@ -156,12 +221,13 @@ export function uniqueConstraintKey(
  */
 export function uniqueConstraintKeyMoves(
   constraint: UniqueConstraint,
+  schema: z.ZodType,
   before: Record<string, unknown>,
   after: Record<string, unknown>,
 ): boolean {
   return (
-    uniqueConstraintKey(constraint, before) !==
-    uniqueConstraintKey(constraint, after)
+    uniqueConstraintKey(constraint, schema, before) !==
+    uniqueConstraintKey(constraint, schema, after)
   );
 }
 

@@ -13,6 +13,8 @@
  * maintains disjointness reservations too, by reading one list rather than by
  * being edited twice.
  */
+import { type z } from "zod";
+
 import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import { UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
 import {
@@ -34,6 +36,7 @@ import { type UniqueConstraint } from "../../core/types";
 import {
   type ConfigurationError,
   DisjointError,
+  KindNotFoundError,
   UniquenessError,
 } from "../../errors";
 import { type KindRegistry } from "../../registry/kind-registry";
@@ -147,11 +150,27 @@ export type NodeClaimEntry = Readonly<{
  */
 function claimKeyFor(
   refusal: ClaimRefusal,
+  schema: z.ZodType,
   id: string,
   props: Record<string, unknown>,
 ): string | undefined {
   if (refusal.kind === "disjointness") return id;
-  return uniqueConstraintKey(refusal.constraint, props);
+  return uniqueConstraintKey(refusal.constraint, schema, props);
+}
+
+/**
+ * The props schema a node of `kind` keys its claims through: the registered
+ * kind's own, so the key owner (`uniqueConstraintKey`) reads each unique
+ * field through the schema that declares it. A kind the registry does not
+ * know has no claims to key, and is refused rather than keyed as given.
+ */
+export function nodeClaimKeySchema(
+  registry: KindRegistry,
+  kind: string,
+): z.ZodType {
+  const nodeType = registry.nodeKinds.get(kind);
+  if (nodeType === undefined) throw new KindNotFoundError(kind, "node");
+  return nodeType.schema;
 }
 
 /**
@@ -181,23 +200,24 @@ export function nodeClaimEntries(
   constraints: readonly UniqueConstraint[],
   operation: NodeClaimOperation,
 ): readonly NodeClaimEntry[] {
-  return nodeClaimSites(registry, kind, constraints, operation).flatMap(
-    (site) => {
-      const key = claimKeyFor(site.refusal, id, props);
-      return key === undefined ?
-          []
-        : [
-            {
-              axis: site.axis,
-              constraintName: site.constraintName,
-              key,
-              placement: site.placement,
-              refusalReason: site.refusalReason,
-              refusal: site.refusal,
-            },
-          ];
-    },
-  );
+  const sites = nodeClaimSites(registry, kind, constraints, operation);
+  if (sites.length === 0) return [];
+  const schema = nodeClaimKeySchema(registry, kind);
+  return sites.flatMap((site) => {
+    const key = claimKeyFor(site.refusal, schema, id, props);
+    return key === undefined ?
+        []
+      : [
+          {
+            axis: site.axis,
+            constraintName: site.constraintName,
+            key,
+            placement: site.placement,
+            refusalReason: site.refusalReason,
+            refusal: site.refusal,
+          },
+        ];
+  });
 }
 
 /** An entry whose family is disjointness — the one family that needs mapping. */
@@ -1095,8 +1115,9 @@ export type UniquenessUpdatePlan = Readonly<{
  * included, and every one of them is probed and claimed afresh.
  *
  * A live row (`restores: false`) owes its uniqueness claims alone, and
- * carries `storedProps`: its props as stored before the write, read through
- * the stored-props key path (`storedNodeClaimProps`). A constraint whose key
+ * carries `storedProps`: its props as stored before the write, as read back
+ * (the key owner renders a stored row and a parse output alike). A constraint
+ * whose key
  * — or whether it applies at all — is the same under `storedProps` and
  * `props` ({@link uniqueConstraintKeyMoves}) keeps its claim as it stands,
  * with no statement. The comparison is between keys, not between the fields a
@@ -1125,12 +1146,16 @@ export type NodeClaimTransition = Readonly<{
  * the props it stores and the props it is about to hold.
  */
 function transitionConstraints(
+  registry: KindRegistry,
   transition: NodeClaimTransition,
 ): readonly UniqueConstraint[] {
-  if (transition.restores) return transition.constraints;
+  if (transition.restores || transition.constraints.length === 0) {
+    return transition.constraints;
+  }
   const { storedProps, props } = transition;
+  const schema = nodeClaimKeySchema(registry, transition.kind);
   return transition.constraints.filter((constraint) =>
-    uniqueConstraintKeyMoves(constraint, storedProps, props),
+    uniqueConstraintKeyMoves(constraint, schema, storedProps, props),
   );
 }
 
@@ -1161,7 +1186,7 @@ export async function planNodeClaimTransition(
   transition: NodeClaimTransition,
 ): Promise<UniquenessUpdatePlan> {
   const { kind, id, props } = transition;
-  const constraints = transitionConstraints(transition);
+  const constraints = transitionConstraints(ctx.registry, transition);
   const claims: NodeClaimEntry[] = [];
   const keep: KeptUniqueClaim[] = [];
   for (const entry of nodeClaimEntries(

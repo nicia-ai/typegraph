@@ -21,7 +21,6 @@ import {
   assertEdgeIdentityMatches,
   edgeIdentityFromRow,
 } from "../store/operations/edge-identity";
-import { storedNodeClaimProps } from "../store/stored-date-revival";
 import { type ValidityEndMutation } from "../store/types";
 import { isInvertedValidityWindow, isPortableTimestamp } from "../utils/date";
 import { createDataKeyedBag } from "../utils/object";
@@ -742,9 +741,9 @@ function observationsAsCandidates(
 
 /**
  * The claim keys the mutated rows would hold, grouped for the probe. Each
- * row's keys are derived from the value it stores, through the stored-props
- * key path ({@link storedNodeClaimProps}), so a probed key is the key a
- * holder's claim was written under.
+ * row's keys are derived from the value it stores by the key owner, which
+ * renders a stored value as a create of the same value does, so a probed key
+ * is the key a holder's claim was written under.
  */
 function uniquenessProbes<G extends GraphDef>(
   target: Store<G>,
@@ -752,24 +751,17 @@ function uniquenessProbes<G extends GraphDef>(
 ) {
   return groupNodeUniquenessProbes(
     target.registry,
-    nodes.map((row) => {
-      const registration = target.graph.nodes[row.kind];
-      const constraints = registration?.unique ?? [];
-      const stored = { ...parseRowProps(row.props) };
-      return {
-        kind: row.kind,
-        entries: nodeClaimEntries(
-          target.registry,
-          row.kind,
-          row.id,
-          registration === undefined || constraints.length === 0 ?
-            stored
-          : storedNodeClaimProps(registration.type.schema, stored),
-          constraints,
-          "create",
-        ),
-      };
-    }),
+    nodes.map((row) => ({
+      kind: row.kind,
+      entries: nodeClaimEntries(
+        target.registry,
+        row.kind,
+        row.id,
+        parseRowProps(row.props),
+        target.graph.nodes[row.kind]?.unique ?? [],
+        "create",
+      ),
+    })),
   );
 }
 

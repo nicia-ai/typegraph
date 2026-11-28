@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 import { readOwnProperty } from "../utils/object";
 import { requireDefined } from "../utils/presence";
 /**
@@ -42,7 +44,7 @@ import { requireDefined } from "../utils/presence";
  */
 import { compareStrings } from "./node-key";
 import type { Node, NodeType, UniqueIntrospection } from "./typegraph-internal";
-import { computeUniqueKey } from "./typegraph-internal";
+import { uniqueFieldsKey } from "./typegraph-internal";
 import type { ResolveConfig } from "./types";
 
 /**
@@ -97,31 +99,37 @@ export function uniqueConstraintNameForBucket(key: string): string | undefined {
     );
 }
 
+/** A props schema declaring no field: every value keys as given. */
+const NO_DECLARED_FIELDS: z.ZodType = z.object({});
+
 /**
  * Builds the exact-match signature for one unique constraint from a node's
- * claim-key props (see {@link blockNodes}'s `uniqueKeyProps`), or `undefined`
- * when ANY of the constraint's fields is `null` /
+ * field values, or `undefined` when ANY of the constraint's fields is `null` /
  * `undefined` (a partial key cannot establish exact-match equality, and — since
  * the introspection snapshot does not expose a constraint's `where` predicate —
  * skipping absent values keeps a partial unique constraint from silently
  * over-merging two distinct rows that the database would treat as a non-match;
  * a genuine non-partial null collision still surfaces loudly at commit).
  *
- * The signature delegates to {@link computeUniqueKey} — the SAME key the store
- * enforces uniqueness with — so a blocking bucket co-buckets EXACTLY the values
- * the commit-time uniqueness check treats as equal. Hand-rolling a separate
- * canonical encoding here drifted from enforcement: it distinguished the number
- * `1` from the string `"1"` (which `computeUniqueKey` collapses, so the merge
- * aborted with a `UniquenessError`) and key-sorted object values (which
- * `computeUniqueKey` does not, so distinct rows were silently over-merged).
+ * The signature delegates to {@link uniqueFieldsKey} — the SAME key owner the
+ * store enforces uniqueness with, through the same kind schema — so a blocking
+ * bucket co-buckets EXACTLY the values the commit-time uniqueness check treats
+ * as equal, a staged node's stored date text and a `Date` included.
+ * Hand-rolling a separate canonical encoding here drifted from enforcement: it
+ * distinguished the number `1` from the string `"1"` (which the key collapses,
+ * so the merge aborted with a `UniquenessError`) and key-sorted object values
+ * (which the key orders by the schema's shape instead, so distinct rows were
+ * silently over-merged).
  */
 function constraintSignature(
-  props: Record<string, unknown>,
+  node: Node<NodeType>,
   constraint: UniqueIntrospection,
+  keySchema: z.ZodType,
 ): string | undefined {
+  const props = node as unknown as Record<string, unknown>;
   for (const field of constraint.fields) {
     // Own-key read: a constraint over a prototype-named field ("toString")
-    // must see an absent value as absent here, exactly as computeUniqueKey
+    // must see an absent value as absent here, exactly as uniqueFieldsKey
     // below does — a raw read would mint a signature for a value the
     // commit-time uniqueness check treats as missing.
     const value = readOwnProperty(props, field);
@@ -129,7 +137,8 @@ function constraintSignature(
       return undefined;
     }
   }
-  return `${constraint.name}${KEY_PART_SEPARATOR}${computeUniqueKey(
+  return `${constraint.name}${KEY_PART_SEPARATOR}${uniqueFieldsKey(
+    keySchema,
     props,
     constraint.fields,
     constraint.collation,
@@ -151,7 +160,7 @@ function bucketKeysFor(
   node: Node<NodeType>,
   block: ResolveConfig["block"],
   constraints: readonly UniqueIntrospection[],
-  uniqueKeyProps: Record<string, unknown> | undefined,
+  keySchema: z.ZodType,
 ): readonly string[] {
   const keys: string[] = [];
 
@@ -161,10 +170,7 @@ function bucketKeysFor(
   }
 
   for (const constraint of constraints) {
-    const signature =
-      uniqueKeyProps === undefined ? undefined : (
-        constraintSignature(uniqueKeyProps, constraint)
-      );
+    const signature = constraintSignature(node, constraint, keySchema);
     if (signature !== undefined) {
       keys.push(`${UNIQUE_KEY_PREFIX}${KEY_PART_SEPARATOR}${signature}`);
     }
@@ -185,10 +191,10 @@ function bucketKeysFor(
  * @param uniqueConstraints The kind's `unique` constraints from
  *   `store.introspect().kinds[k].unique`. Pass an empty array when blocking
  *   should rely on `block()` alone.
- * @param uniqueKeyProps The props the node at `index` in `newNodes` keys a
- *   uniqueness claim from — for a staged (stored) node, its props through
- *   the stored-props key path — or `undefined` for no unique-constraint
- *   bucket. Defaults to the node's own fields.
+ * @param keySchema The kind's props schema, through which the key owner reads
+ *   each unique field, exactly as the store keys the kind's claims. Omitted
+ *   only for nodes whose fields need no schema to key (the key then reads
+ *   every value as given).
  * @returns A map from bucket key → that bucket's nodes. Iteration order of the
  *   returned map is the lexicographic order of bucket keys, and each bucket's
  *   node list is sorted by `node.id`, so the result is a pure, order-independent
@@ -199,19 +205,16 @@ export function blockNodes<K extends NodeType>(
   newNodes: readonly Node<K>[],
   resolveConfig: Pick<ResolveConfig, "block">,
   uniqueConstraints: readonly UniqueIntrospection[] = [],
-  uniqueKeyProps: (
-    node: Node<K>,
-    index: number,
-  ) => Record<string, unknown> | undefined = (node) => node,
+  keySchema: z.ZodType = NO_DECLARED_FIELDS,
 ): Map<string, Node<K>[]> {
   const buckets = new Map<string, Node<K>[]>();
 
-  for (const [index, node] of newNodes.entries()) {
+  for (const node of newNodes) {
     for (const key of bucketKeysFor(
       node,
       resolveConfig.block,
       uniqueConstraints,
-      uniqueConstraints.length === 0 ? undefined : uniqueKeyProps(node, index),
+      keySchema,
     )) {
       const bucket = buckets.get(key);
       if (bucket === undefined) {

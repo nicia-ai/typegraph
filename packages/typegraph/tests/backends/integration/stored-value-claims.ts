@@ -60,7 +60,7 @@ const SvcLabelled = defineNode("SvcLabelled", {
     .overwrite((value) => ({ ...value, code: value.label.toLowerCase() })),
 });
 
-/** A date behind `z.lazy`, which stored-date revival cannot see through. */
+/** A date behind `z.lazy`, which the key owner follows. */
 const SvcLazyEvent = defineNode("SvcLazyEvent", {
   schema: z.object({ name: z.string(), at: z.lazy(() => z.date()) }),
 });
@@ -391,7 +391,7 @@ export function registerStoredValueClaimIntegrationTests(
       });
     });
 
-    it("getOrCreateByConstraint reads a tombstone holding a date under z.lazy without failing", async () => {
+    it("getOrCreateByConstraint resurrects a tombstone holding a date under z.lazy", async () => {
       const graphId = nextGraphId();
       const store = await context.createStore(buildGraph(graphId));
       const at = new Date("2024-01-01T00:00:00.000Z");
@@ -405,21 +405,13 @@ export function registerStoredValueClaimIntegrationTests(
         { name: "again", at },
       );
 
-      // Revival cannot see through `z.lazy`, so the tombstone's stored text
-      // keys differently from the `Date` a create claimed, and the lookup
-      // finds no node holding the released claim. (Main resurrects here only
-      // because its delete left the claim live.)
-      expectObservation({
-        lane: { driver: context.driver },
-        observed: result.action,
-        correct: "resurrected",
-        defects: [
-          {
-            label: "date under z.lazy keyed from stored text",
-            on: {},
-            today: "created",
-          },
-        ],
+      // The key owner follows `z.lazy`, so the tombstone's stored text keys
+      // as the `Date` a create claimed and the lookup finds the node holding
+      // the released claim. The previous revision keyed the text and created
+      // a second node.
+      expect({ action: result.action, id: result.node.id }).toEqual({
+        action: "resurrected",
+        id: "row",
       });
     });
 
@@ -458,20 +450,11 @@ export function registerStoredValueClaimIntegrationTests(
         const reopened = await outcome(() => provenance.unRetract(source));
 
         expect(reopened).toBe("written");
-        // A date under `z.lazy` keys from its stored text, which revival does
-        // not reach; the reopen does not fail on it, and claims that text.
-        expectObservation({
-          lane: { driver: context.driver, kind },
-          observed: await liveClaims(store.backend, graphId, constraintName),
-          correct: before,
-          defects: [
-            {
-              label: "date under z.lazy keyed from stored text",
-              on: { kind: ["SvcLazyEvent"] },
-              today: [{ key: "2024-01-01T00:00:00.000Z", node_id: "fact" }],
-            },
-          ],
-        });
+        // A date under `z.lazy` keys from its stored text as the `Date` a
+        // create claimed, so the reopen reclaims exactly the key it gave up.
+        expect(
+          await liveClaims(store.backend, graphId, constraintName),
+        ).toEqual(before);
       });
     }
 

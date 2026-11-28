@@ -6,9 +6,10 @@
  * text is refused by `z.date()` and the lookup fails before the merge, even
  * though the base node holds the same date. The commit-time stability check
  * (`collectBaseMatchKeys`) passes staged props to the same lookup. The same on
- * main; pinned here, not repaired: the lookup keys create input, and routing
- * staged rows through the stored-props key path needs a lookup that takes
- * stored props, which no collection member does today.
+ * main; pinned here, not repaired: the key owner keys stored props as it keys
+ * a parse output, but the lookup validates its items as create input first,
+ * and skipping that needs a lookup that takes stored props, which no
+ * collection member does today.
  */
 import type { GraphBackend, Node, NodeType } from "@nicia-ai/typegraph";
 import {

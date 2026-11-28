@@ -18,7 +18,6 @@ import { lockStoreWriteFence } from "../store/operations/write-fence-prelude";
 import { storeWritersTakeGraphWriteFence } from "../store/operations/write-transaction";
 import { recordedAnchorOwner } from "../store/recorded-anchor-origin";
 import { resolveEvolvedTransactionStore } from "../store/runtime-port";
-import { storedNodeClaimProps } from "../store/stored-date-revival";
 import type { TransactionContext } from "../store/types";
 import { groupBy } from "../utils/array";
 import { nowIso } from "../utils/date";
@@ -365,31 +364,6 @@ type AnyNodeId = NodeId<NodeType>;
  * off the node (`node.name`), so the props must be spread at the top level with
  * `kind`/`id` alongside — exactly the runtime shape `Node<NodeType>` carries.
  */
-/**
- * The props each staged node's unique-constraint signature is keyed from: its
- * staged (stored) props through the stored-props key path
- * ({@link storedNodeClaimProps}), the path a claim on a stored row is keyed
- * through — so a blocking bucket is keyed exactly as the claim the commit
- * takes.
- */
-function uniqueKeyPropsOf<G extends GraphDef>(
-  target: Store<G>,
-  kind: string,
-  items: readonly StagedNewNode[],
-): (
-  node: Node<NodeType>,
-  index: number,
-) => Record<string, unknown> | undefined {
-  const schema = target.graph.nodes[kind]?.type.schema;
-  const keyed = items.map((staged) =>
-    schema === undefined ? undefined : (
-      storedNodeClaimProps(schema, { ...staged.node.props })
-    ),
-  );
-  // `blockNodes` is handed `items` mapped one-to-one, in order.
-  return (_node, index) => keyed[index];
-}
-
 function asNode(staged: StagedNewNode): Node<NodeType> {
   return {
     kind: staged.node.kind,
@@ -826,7 +800,7 @@ async function generateAllCandidates<G extends GraphDef>(
           nodes,
           resolveConfig,
           uniqueConstraints,
-          uniqueKeyPropsOf(target, kind, items),
+          target.graph.nodes[kind]?.type.schema,
         );
         const keylessConfig = keylessConfigFor(resolveConfig);
         const scope: SourceScope = {

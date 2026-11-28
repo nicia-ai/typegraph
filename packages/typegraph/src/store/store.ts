@@ -523,7 +523,6 @@ import {
   StoreView,
   type StoreViewCoordinate,
 } from "./store-view";
-import { storedNodeClaimProps } from "./stored-date-revival";
 import {
   createSubgraphRead,
   executeSessionSubgraph,
@@ -2004,12 +2003,6 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * The resolved write set as the claim layer reads it: every upsert carrying
    * its kind's registered unique constraints, and the releases narrowed to the
    * kinds whose declarations produce a key another node could take.
-   *
-   * An upsert's after-image is the merge's reading of the rows it is built
-   * from — stored text, a date as its ISO string — so its claims are keyed
-   * through the stored-props key path ({@link storedNodeClaimProps}): the
-   * value the row stores, its date text revived as a create of the same date
-   * claims it.
    */
   #resolvedNodeClaimWrites(
     writes: Readonly<{
@@ -2024,20 +2017,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     upserts: readonly ResolvedNodeUpsert[];
     releases: readonly ResolvedNodeRelease[];
   }> {
-    const upserts = writes.upserts.map((upsert) => {
-      const registration = requireNodeRegistration(this.#graph, upsert.kind);
-      const constraints = registration.unique ?? [];
-      return {
-        ...upsert,
-        props:
-          constraints.length === 0 ?
-            upsert.props
-          : storedNodeClaimProps(registration.type.schema, {
-              ...upsert.props,
-            }),
-        constraints,
-      };
-    });
+    const upserts = writes.upserts.map((upsert) => ({
+      ...upsert,
+      constraints:
+        requireNodeRegistration(this.#graph, upsert.kind).unique ?? [],
+    }));
     // Which kinds a release is worth CLEARING for: the clear exists so the
     // set's upserts can take keys the set is giving back, and only a
     // uniqueness declaration produces a key another node could take.

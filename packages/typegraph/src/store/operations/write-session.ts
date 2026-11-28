@@ -343,8 +343,6 @@ function assertClaimFreeInsertIfAbsentWork(
 type NodeUpdateWork = Readonly<{
   schema: z.ZodType;
   validatedProps: Record<string, unknown>;
-  /** See `applyNodeUpdate`: the props the claims are keyed from. */
-  claimProps?: Record<string, unknown>;
   uniqueConstraints: readonly UniqueConstraint[];
   validFrom?: string | null;
   /**
