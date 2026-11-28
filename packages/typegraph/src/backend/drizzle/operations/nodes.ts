@@ -1112,6 +1112,16 @@ const SET_KEY_KIND = "tg_set_key_kind";
 const SET_KEY_ID = "tg_set_key_id";
 const SET_KEY_TOKEN = "tg_set_key_token";
 
+/**
+ * The column aliases of the keyed write's locked CTE. None names a nodes
+ * column, so the UPDATE that joins it reads every unqualified nodes column off
+ * its own target row.
+ */
+const SET_LOCKED_GRAPH_ID = "tg_set_locked_graph_id";
+const SET_LOCKED_KIND = "tg_set_locked_kind";
+const SET_LOCKED_ID = "tg_set_locked_id";
+const SET_LOCKED_TOKEN = "tg_set_locked_token";
+
 /** The column the dry-run projects each row's token under. */
 export const SET_ROW_TOKEN_COLUMN = "tg_set_row_token";
 
@@ -1151,6 +1161,28 @@ function setRowToken(
     column(nodes.validTo.name),
     column(nodes.createdAt.name),
   ])} AS TEXT)`;
+}
+
+/**
+ * Whether the stored row `relation` names (the statement's single target
+ * table when omitted) is the row `expectedToken` names — THE one spelling of
+ * the keyed write's token check, applied where its rows are counted and in the
+ * UPDATE's own predicate.
+ *
+ * The null-safe equality is one no engine hashes or merges on, so it stays a
+ * filter on the row the key matched and no token is computed for a row the key
+ * does not name.
+ */
+function setRowTokenMatches(
+  adapter: DialectAdapter,
+  nodes: Tables["nodes"],
+  relation: string | undefined,
+  expectedToken: SqlFragment,
+): SqlFragment {
+  return adapter.nullSafeEquals(
+    setRowToken(adapter, nodes, relation),
+    expectedToken,
+  );
 }
 
 /**
@@ -1376,21 +1408,30 @@ export function buildPreviewNodeSetUpdate(
  * rows it writes. The key CTE carries both: the id drives a keyed lookup of
  * each row, as in the dry-run, and the token, compared on the row that lookup
  * found, makes the match exact (see {@link setRowToken}). The token is
- * compared with the null-safe equality, which no engine hashes or merges on:
- * it stays a filter on the rows the key matched, so the planner joins on the
- * key alone and computes no token for a row the key does not name — even when,
- * on a table with no statistics, it hashes the whole table.
+ * compared with the null-safe equality ({@link setRowTokenMatches}): it stays a
+ * filter on the rows the key matched, so the planner joins on the key alone
+ * and computes no token for a row the key does not name — even when, on a
+ * table with no statistics, it hashes the whole table.
  *
  * All or nothing: the `tg_set_locked` CTE first locks every keyed row that
  * still carries its token (`rowLock`, as the dry-run did; a no-op when the
  * dry-run's locks are held), the UPDATE writes exactly those rows by key, and
- * only when their count equals the number of rows validated. Locking before counting is what makes the
- * count exact on PostgreSQL READ COMMITTED: an unlocked count could include a
- * row a concurrent writer is changing, which the UPDATE's own recheck would
- * then skip while writing the rest. When any row was changed, deleted or
- * re-created since the dry-run, the count is short, the statement writes no
- * row, and the caller reports the mismatch — a row the caller did not
- * validate is never written, and neither is part of a set it refused.
+ * only when their count equals the number of rows validated. Locking before
+ * counting is what makes the count exact on PostgreSQL READ COMMITTED: an
+ * unlocked count could include a row a concurrent writer is changing, which
+ * the UPDATE's own recheck would then skip while writing the rest. When any
+ * row was changed, deleted or re-created since the dry-run, the count is
+ * short, the statement writes no row, and the caller reports the mismatch.
+ *
+ * The token is ALSO part of the UPDATE's own predicate, compared on its
+ * target row, so it holds whatever lock plan supplied `rowLock`. A plan that
+ * takes no row lock here (`fence-row`, an empty clause) cannot keep a
+ * concurrent writer off a counted row; when that writer commits while the
+ * UPDATE waits on the row, PostgreSQL re-evaluates the UPDATE's predicate on
+ * the new row version, the token no longer matches, and that version is not
+ * written. A row the caller did not validate is never written. What such a
+ * plan cannot give is the count: it was taken before the re-evaluation, so the
+ * other rows of the set are written and the result is short.
  *
  * The `SET` clause is the dry-run's after-image expression
  * ({@link setPatchedProps}) over the same stored row, so the row written is
@@ -1424,39 +1465,51 @@ export function buildUpdateNodeSet(
     portableSql`${keyRows}.${portableSql.identifier("key")}`,
     portableSql`${keyRows}.${portableSql.identifier("value")}`,
   );
-  const tokenMatches = toDrizzleSql(
-    adapter.nullSafeEquals(
-      setRowToken(adapter, nodes, selected),
-      portableSql`${portableSql.identifier(relationNames[SET_KEYS])}.${portableSql.identifier(SET_KEY_TOKEN)}`,
-    ),
-    dialect,
-  );
+  const keyToken = portableSql`${portableSql.identifier(relationNames[SET_KEYS])}.${portableSql.identifier(SET_KEY_TOKEN)}`;
+  const lockedColumn = (name: string): SQL =>
+    sql`${locked}.${sql.identifier(name)}`;
   return sql`
     ${keysCte},
     ${locked} AS MATERIALIZED (
-      SELECT ${qualifiedColumn(selected, nodes.graphId)},
-             ${qualifiedColumn(selected, nodes.kind)},
-             ${qualifiedColumn(selected, nodes.id)}
+      SELECT ${qualifiedColumn(selected, nodes.graphId)} AS ${sql.identifier(SET_LOCKED_GRAPH_ID)},
+             ${qualifiedColumn(selected, nodes.kind)} AS ${sql.identifier(SET_LOCKED_KIND)},
+             ${qualifiedColumn(selected, nodes.id)} AS ${sql.identifier(SET_LOCKED_ID)},
+             ${key.token} AS ${sql.identifier(SET_LOCKED_TOKEN)}
       FROM ${key.keys}
       JOIN ${nodes} AS ${sql.identifier(selected)}
         ON ${qualifiedColumn(selected, nodes.graphId)} = ${key.graphId}
        AND ${qualifiedColumn(selected, nodes.kind)} = ${key.kind}
        AND ${qualifiedColumn(selected, nodes.id)} = ${key.id}
       WHERE ${qualifiedColumn(selected, nodes.deletedAt)} IS NULL
-        AND ${tokenMatches}
+        AND ${toDrizzleSql(setRowTokenMatches(adapter, nodes, selected, keyToken), dialect)}
       ${rowLock([selected])}
     )
     UPDATE ${nodes}
     SET ${quotedColumn(nodes.props)} = ${setPatchedProps(adapter, dialect, nodes, params)},
         ${quotedColumn(nodes.updatedAt)} = ${timestamp},
         ${quotedColumn(nodes.version)} = ${quotedColumn(nodes.version)} + ${sql.raw(String(NODE_VERSION_INCREMENT))}
+    FROM ${locked}
     WHERE ${nodes.deletedAt} IS NULL
-      AND (${nodes.graphId}, ${nodes.kind}, ${nodes.id}) IN (
-            SELECT ${quotedColumn(nodes.graphId)}, ${quotedColumn(nodes.kind)}, ${quotedColumn(nodes.id)}
-            FROM ${locked}
-          )
+      AND ${nodes.graphId} = ${lockedColumn(SET_LOCKED_GRAPH_ID)}
+      AND ${nodes.kind} = ${lockedColumn(SET_LOCKED_KIND)}
+      AND ${nodes.id} = ${lockedColumn(SET_LOCKED_ID)}
+      AND ${toDrizzleSql(setRowTokenMatches(adapter, nodes, undefined, portableSql`${portableSql.identifier(relationNames[SET_LOCKED])}.${portableSql.identifier(SET_LOCKED_TOKEN)}`), dialect)}
       AND (SELECT COUNT(*) FROM ${locked}) = ${params.rows.length}
-    RETURNING *
+    RETURNING ${sql.join(
+      [
+        nodes.graphId,
+        nodes.kind,
+        nodes.id,
+        nodes.props,
+        nodes.version,
+        nodes.validFrom,
+        nodes.validTo,
+        nodes.createdAt,
+        nodes.updatedAt,
+        nodes.deletedAt,
+      ].map((column) => quotedColumn(column)),
+      sql`, `,
+    )}
   `;
 }
 
