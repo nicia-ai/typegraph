@@ -1837,7 +1837,7 @@ describe.runIf(process.env["POSTGRES_URL"])(
               beforeFirstStatementMatching(
                 (statement) =>
                   statement.includes(LEDGER) &&
-                  statement.includes("SELECT ownership_token FROM"),
+                  statement.includes("AS resolved_schema FROM"),
                 async () => {
                   unwrap(
                     await destroyDurableBranch(
