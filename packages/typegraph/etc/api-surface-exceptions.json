@@ -281,6 +281,14 @@
   },
   {
     "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "buildCountNodeSetKeys",
+    "kind": "required-member-added",
+    "reason": "A keyed set write whose row keys exceed the backend bound-value budget splits across statements and counts and locks every part with this strategy member before writing any, so the split write stays all or nothing (#948).",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
     "declaration": "GraphBackend",
     "member": "compareAndSetNode",
     "kind": "member-removed",

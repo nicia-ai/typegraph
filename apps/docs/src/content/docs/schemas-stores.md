@@ -1174,8 +1174,30 @@ query too: under stale statistics, selecting one row by id can still read every
 un-analyzed row of the kind, so a loop of single-row updates over a freshly
 loaded kind slows as the kind grows until the table is analyzed (see
 [stale statistics](/backend-setup#stale-statistics-on-a-large-shared-table-postgresql)).
-The keyed write is one statement, so a backend's `updateNodeSet` called
-directly on an autocommit connection is as atomic as one inside a transaction.
+The keyed write compares each row's token in the `UPDATE`'s own predicate,
+whatever write fence the backend declares, so a row version the dry-run did not
+read is never written, even when the engine re-evaluates a waiting row after a
+concurrent commit.
+
+A uniqueness key the update moves a row onto is reserved before the keyed
+write, and the keys the rows give up are released after it, in the order a
+single-row `update()` uses. Another transaction that claims one of those keys
+after the uniqueness check therefore makes the reservation fail with
+`UniquenessError` before any row is written.
+
+The keyed write binds every row's key, which carries the row's stored
+properties, as one value. When that value would exceed the backend's
+`maxBoundValueBytes` capability (64 MiB unless the backend declares another),
+the write splits the rows across statements. Inside a transaction, which is
+where the store runs it, it counts and locks every part before writing the
+first, so it still writes all of the rows or none. A backend's
+`updateNodeSet` called directly on an autocommit connection runs one statement
+and is as atomic as one inside a transaction; when its keys need more than one
+statement it refuses with `ConfigurationError`
+(`SET_UPDATE_KEY_BUDGET_EXCEEDED`) before running any. A single row whose key
+alone exceeds the budget is refused the same way. See
+[a set update's keyed write can come back short](/limitations#a-set-updates-keyed-write-can-come-back-short)
+for the cases the count cannot cover.
 
 `updateWhere()` is current-state only and is intentionally unavailable on a
 `StoreView`. Use `all: true` for an intentional whole-kind update:

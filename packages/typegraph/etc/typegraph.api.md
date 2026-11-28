@@ -319,6 +319,7 @@ type BackendCapabilities = Readonly<{
     clearValidTo?: boolean;
     returning?: boolean;
     maxBindParameters?: number;
+    maxBoundValueBytes?: number;
     readonly constraintClaims?: boolean;
     readonly atomicNodeInsertClaims?: boolean;
     readonly durableEdgeMatchIdentity?: boolean;

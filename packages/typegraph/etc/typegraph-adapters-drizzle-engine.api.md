@@ -184,6 +184,7 @@ type BackendCapabilities = Readonly<{
     clearValidTo?: boolean;
     returning?: boolean;
     maxBindParameters?: number;
+    maxBoundValueBytes?: number;
     readonly constraintClaims?: boolean;
     readonly atomicNodeInsertClaims?: boolean;
     readonly durableEdgeMatchIdentity?: boolean;
@@ -438,6 +439,7 @@ type CommonOperationStrategy = Readonly<{
     buildReadAtomicNodeMutationPostimages: (graphId: string, kind: string, ids: readonly string[], schemaFence: SchemaWriteFenceParams) => SQL;
     buildPreviewNodeSetUpdate: (params: PreviewNodeSetUpdateParams, rowLock: RowLockClause) => SQL;
     buildUpdateNodeSet: (params: UpdateNodeSetParams, timestamp: string, rowLock: RowLockClause) => SQL;
+    buildCountNodeSetKeys: (params: Pick<UpdateNodeSetParams, "graphId" | "kind" | "rows">, rowLock: RowLockClause) => SQL;
     buildResolvedNodeUpdateBatch: (params: ResolvedNodeUpdateBatchParams, timestamp: string) => SQL;
     buildDeleteNode: (params: DeleteNodeParams, timestamp: string) => SQL;
     buildAtomicNodeDeleteBatchWithSchemaFence: (input: AtomicNodeDeleteBatchInput, timestamp: string, schemaLockClause: SQL) => SQL;

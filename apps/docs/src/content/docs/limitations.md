@@ -781,6 +781,25 @@ Let the refusal propagate so the transaction rolls back, or rethrow after
 handling it. See
 [Catching a bulk refusal inside a transaction](/performance/overview#catching-a-bulk-refusal-inside-a-transaction).
 
+### A set update's keyed write can come back short
+
+`updateWhere()` and `compareAndSet()` write their validated rows in one keyed
+statement that counts them before it writes them, and writes none when the count
+is short. Two things can still drop a counted row from that statement after the
+count passed:
+
+- A `BEFORE UPDATE` trigger on the nodes table that suppresses a row
+  (`RAISE(IGNORE)` on SQLite, `RETURN NULL` from a PostgreSQL row trigger).
+- On PostgreSQL with `writeFence.mechanism: "row"`, an ordinary update of a
+  counted row that commits while the keyed write waits on it. The write
+  re-evaluates its predicate on the new row version, does not write it (its
+  properties were never validated), and writes the other rows.
+
+The store then throws a `ConfigurationError` with the other rows already
+changed and their uniqueness, fulltext and vector entries not rebuilt. Called on
+the store, the update's own transaction rolls back. Inside
+`store.transaction(...)`, let the error propagate so the transaction rolls back.
+
 ## Overlapping Calls Inside One Transaction
 
 Node and edge `bulkHardDelete`, `importGraph` writing into a transaction other calls also use, and
