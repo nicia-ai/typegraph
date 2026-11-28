@@ -400,13 +400,9 @@ describe("the Store runtime port's statement targets", () => {
           label,
           entries: portOperationEntrySpy.mock.calls.length,
           ranInTheCallersOperation: ranIn === operation,
-          // The session the member ran in is the caller's, by identity. A
-          // bare transaction handle (the port's other accepted shape) runs in
-          // no session of the caller's.
+          // The session the member ran in is the caller's, by identity.
           ranInTheCallersSession:
-            ranIn !== undefined &&
-            !("dialect" in ranIn) &&
-            operationEntrySession(ranIn) === session,
+            ranIn !== undefined && operationEntrySession(ranIn) === session,
           openedSessions: openTransactionSessionSpy.mock.calls.length,
           targetEntries: enterTargetOperationSpy.mock.calls.length,
         });

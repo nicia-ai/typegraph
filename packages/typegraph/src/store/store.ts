@@ -379,7 +379,6 @@ import {
   type OperationBackend,
   type OperationEntry,
   operationEntryBackend,
-  type PortEntry,
   portOperationEntry,
   type StatementBackend,
   storeAdoptSchemaWriteTransaction,
@@ -1923,9 +1922,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ) => this.readIdentityAssertionPageAtTarget(target, mode, options),
       lockIdentityImportTarget: (target) =>
         this.lockIdentityImportTarget(target),
-      foldImportedIdentityNodes: (entry: PortEntry, references) =>
+      foldImportedIdentityNodes: (entry, references) =>
         this.foldImportedIdentityNodes(portOperationEntry(entry), references),
-      applyImportedNodeWindowEnd: (entry: PortEntry, input) => {
+      applyImportedNodeWindowEnd: (entry, input) => {
         const operation = portOperationEntry(entry);
         return applyIdentityWindowEnd(
           this.#identityWindowEndContext(),
@@ -1934,22 +1933,18 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           input,
         );
       },
-      detachDeletedImportedIdentityNode: (entry: PortEntry, reference) =>
+      detachDeletedImportedIdentityNode: (entry, reference) =>
         this.detachDeletedImportedIdentityNode(
           portOperationEntry(entry),
           reference,
         ),
-      importIdentityAssertionsAtTarget: (target: PortEntry, assertions, mode) =>
+      importIdentityAssertionsAtTarget: (target, assertions, mode) =>
         this.importIdentityAssertionsAtTarget(target, assertions, mode),
       readIdentityTransitionPageAtTarget: (target: OperationEntry, options) =>
         this.readIdentityTransitionPageAtTarget(target, options),
       identityTransitionRetentionAtTarget: (target: OperationEntry) =>
         this.identityTransitionRetentionAtTarget(target),
-      importIdentityTransitionsAtTarget: (
-        target: PortEntry,
-        transitions,
-        carriedCut,
-      ) =>
+      importIdentityTransitionsAtTarget: (target, transitions, carriedCut) =>
         this.importIdentityTransitionsAtTarget(target, transitions, carriedCut),
       applyIdentityMergeAtTarget: (
         target: OperationEntry,
@@ -2339,7 +2334,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Applies identity interchange rows inside an import transaction. */
   importIdentityAssertionsAtTarget(
-    transaction: PortEntry,
+    transaction: OperationEntry,
     assertions: readonly IdentityTransferAssertion[],
     mode: "state" | "archival",
   ): Promise<IdentityImportSummary> {
@@ -2435,7 +2430,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Restores archival identity transitions inside an import transaction. */
   importIdentityTransitionsAtTarget(
-    transaction: PortEntry,
+    transaction: OperationEntry,
     transitions: readonly IdentityTransitionTransfer[],
     carriedCut: IdentityTransitionCut | undefined,
   ): ReturnType<typeof importIdentityTransitionsIntoTarget> {

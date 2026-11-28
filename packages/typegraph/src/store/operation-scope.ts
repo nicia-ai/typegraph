@@ -645,41 +645,12 @@ export function decorateOperation<Engine extends TransactionBackend>(
  * exactly as a bare transaction handed across the port did. Read off the
  * value handed in; nothing is looked up.
  *
- * A bare transaction handle ({@link PortEntry}) is still accepted: the call
- * shape of a copy whose import members took the transaction itself. It is
- * read as such a foreign operation whose handle and holding are both that
- * transaction.
+ * Only a copy of the same port version reaches this: a copy whose members
+ * took the caller's transaction itself reads another port symbol and is
+ * refused before it gets here (`storeRuntime`).
  */
-export function portOperationEntry(entry: PortEntry): OperationEntry {
-  if (isRootBackend(entry)) return entry;
-  // Every backend states its dialect; an operation is not one.
-  if ("dialect" in entry) {
-    return foreignOperationEntry({ backend: entry, control: entry });
-  }
-  if (isOwnOperation(entry)) return entry;
-  return foreignOperationEntry(entry);
-}
-
-/**
- * What a Store runtime port member accepts as its caller's entry: an
- * {@link OperationEntry}, or a bare transaction handle. Another copy of
- * TypeGraph whose import members took the transaction itself under the same
- * port version still calls them that way, and
- * {@link portOperationEntry} normalises either shape.
- */
-export type PortEntry = OperationEntry | StoreTransactionBackend;
-
-/**
- * An operation another copy of TypeGraph minted, as this copy enters it: an
- * operation of the session its holding is a surface of, keeping its handle,
- * or its handle joined as a binding of its own.
- */
-function foreignOperationEntry(
-  entry: Readonly<{
-    backend: StoreTransactionBackend;
-    control: SessionCarryingSurface;
-  }>,
-): OperationEntry {
+export function portOperationEntry(entry: OperationEntry): OperationEntry {
+  if (isRootBackend(entry) || isOwnOperation(entry)) return entry;
   const session = surfaceSession(entry.control);
   if (session === undefined) return enterTargetOperation(entry.backend);
   /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
