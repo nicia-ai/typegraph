@@ -567,7 +567,9 @@ export function enterOperation(
   }
   const refusal = callRefusal(scope[SESSION_CALLS], parent?.[OPERATION_ROOT]);
   if (refusal !== undefined) throw new TransactionCallRefusedError(refusal);
-
+  // This module is the mint: an operation of a session is built here and
+  // nowhere else. Its root is set once the object exists, so a root call's
+  // root is the operation itself.
   const operation = {
     [OPERATION_SESSION]: scope,
     [OPERATION_ROOT]: undefined,
@@ -576,7 +578,6 @@ export function enterOperation(
     backend: scope[SESSION_TRANSACTION],
     control: scope[SESSION_CONTROL],
   } as unknown as MintedOperation;
-
   operation[OPERATION_ROOT] = parent?.[OPERATION_ROOT] ?? operation;
   return operation;
 }
@@ -871,7 +872,8 @@ function foreignOperationEntry(
 ): OperationEntry {
   const session = surfaceSession(entry.control);
   if (session === undefined) return enterTargetOperation(entry.backend);
-
+  // This module is the mint: an operation of a session is built here and
+  // nowhere else. A foreign operation is a root call of its own.
   const operation = {
     [OPERATION_SESSION]: session,
     [OPERATION_ROOT]: undefined,
@@ -880,7 +882,6 @@ function foreignOperationEntry(
     backend: entry.backend,
     control: session[SESSION_CONTROL],
   } as unknown as MintedOperation;
-
   operation[OPERATION_ROOT] = operation;
   return operation;
 }
