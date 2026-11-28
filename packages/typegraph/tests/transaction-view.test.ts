@@ -15,6 +15,7 @@ import { sql } from "drizzle-orm";
 import { drizzle as drizzleSqliteProxy } from "drizzle-orm/sqlite-proxy";
 import { describe, expect, it } from "vitest";
 
+import { admitHandleStatementDirectly } from "../src/backend/drizzle/execution/handle-statement";
 import type {
   AnySqliteDatabase,
   SqliteExecutionAdapter,
@@ -154,8 +155,17 @@ describe("openTransactionView", () => {
   });
 });
 
-/** Every statement member of the adapter, each called the way a backend calls it. */
+/** A statement that stays in flight until the named member's gate opens. */
+type HeldStatement = (member: string) => () => Promise<unknown>;
+
+/**
+ * Every statement member of the adapter, each called the way a backend calls
+ * it. `admitHandleStatement` is handed a held statement composed on the
+ * Drizzle handle, as `runHandleStatement` hands it one.
+ */
 const STATEMENT_MEMBER_CALLS = {
+  admitHandleStatement: (adapter, heldStatement) =>
+    adapter.admitHandleStatement(heldStatement("admitHandleStatement")),
   execute: (adapter) => adapter.execute(sql`SELECT 1`),
   executeAtomicBatch: (adapter) =>
     requireDefined(adapter.executeAtomicBatch)([COMPILED]),
@@ -171,7 +181,10 @@ const STATEMENT_MEMBER_CALLS = {
     requireDefined(adapter.runExclusive)(() => Promise.resolve()),
 } as const satisfies Record<
   string,
-  (adapter: SqliteExecutionAdapter) => Promise<unknown>
+  (
+    adapter: SqliteExecutionAdapter,
+    heldStatement: HeldStatement,
+  ) => Promise<unknown>
 >;
 
 type StatementMember = keyof typeof STATEMENT_MEMBER_CALLS;
@@ -187,11 +200,11 @@ const COMPILED = { sql: "SELECT 1", params: [] };
  * own gate opens, so a drain that forgets one member is caught on that member.
  */
 function heldAdapter() {
-  const gates = new Map(
+  const gates = new Map<string, ReturnType<typeof createGate>>(
     STATEMENT_MEMBERS.map((member) => [member, createGate()] as const),
   );
   const ran: string[] = [];
-  function held(member: StatementMember) {
+  function held(member: string) {
     return async () => {
       ran.push(member);
       await requireDefined(gates.get(member)).opened;
@@ -199,6 +212,8 @@ function heldAdapter() {
     };
   }
   const adapter = {
+    // A root adapter's member: the statement it is handed holds itself.
+    admitHandleStatement: admitHandleStatementDirectly,
     clearStatementCache: () => {
       ran.push("clearStatementCache");
     },
@@ -228,14 +243,14 @@ function heldAdapter() {
   function release(member: StatementMember): void {
     requireDefined(gates.get(member)).open();
   }
-  return { adapter, release, ran };
+  return { adapter, held, release, ran };
 }
 
 describe("createSqliteTransactionExecutionView", () => {
   it.each(STATEMENT_MEMBERS)(
     "waits for a held %s before it closes",
     async (member) => {
-      const { adapter, release, ran } = heldAdapter();
+      const { adapter, held, release, ran } = heldAdapter();
       const view = createSqliteTransactionExecutionView(
         adapter,
         createTransactionView(),
@@ -243,7 +258,7 @@ describe("createSqliteTransactionExecutionView", () => {
       // Every other member is in flight too, and released first: the drain
       // must still wait on this one alone.
       const inFlight = STATEMENT_MEMBERS.map((each) =>
-        STATEMENT_MEMBER_CALLS[each](view.adapter),
+        STATEMENT_MEMBER_CALLS[each](view.adapter, held),
       );
       expect(ran).toEqual(STATEMENT_MEMBERS);
       const drained = view.drainAndClose();
@@ -260,14 +275,14 @@ describe("createSqliteTransactionExecutionView", () => {
   it.each(STATEMENT_MEMBERS)(
     "refuses %s after it closes without running it",
     async (member) => {
-      const { adapter, ran } = heldAdapter();
+      const { adapter, held, ran } = heldAdapter();
       const view = createSqliteTransactionExecutionView(
         adapter,
         createTransactionView(),
       );
       await view.drainAndClose();
       await expect(
-        STATEMENT_MEMBER_CALLS[member](view.adapter),
+        STATEMENT_MEMBER_CALLS[member](view.adapter, held),
       ).rejects.toThrow(TransactionClosedError);
       expect(ran).toEqual([]);
     },

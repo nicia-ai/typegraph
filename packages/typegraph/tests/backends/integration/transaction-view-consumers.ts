@@ -119,6 +119,23 @@ function constructorsFor(
     : ["createSqliteBackend"];
 }
 
+/**
+ * A backend built over a transaction's native handle that opens a savepoint
+ * with `transaction()`: PostgreSQL's transaction constructor, and on libSQL
+ * the SQLite constructor under Drizzle's transaction mode, whose nested
+ * transaction is a savepoint.
+ */
+function savepointOpenerOver(
+  context: IntegrationTestContext,
+  native: unknown,
+): AdapterBackend<unknown> {
+  return isPostgresLane(context) ?
+      PUBLIC_CONSTRUCTORS.createPostgresTransactionBackend(native)
+    : (createSqliteBackend(native as never, {
+        executionProfile: { isSync: false, transactionMode: "drizzle" },
+      }) as AdapterBackend<unknown>);
+}
+
 /** A vector slot no schema declares, so only `createVectorIndex` provisions it. */
 function slotFor(backend: GraphBackend, graphId: string) {
   return {
@@ -516,18 +533,19 @@ export function registerTransactionViewConsumerTests(
   // backend adopted over the savepoint's handle admits through the enclosing
   // transaction's view and outlives the savepoint. Savepoint lifetime is not
   // tracked yet; main has no view at all and saves the late write too.
-  // PostgreSQL only: a backend built over a libSQL transaction handle cannot
-  // open a savepoint (its `BEGIN IMMEDIATE` fails inside the transaction),
-  // and better-sqlite3 hands the callback the root connection.
+  // PostgreSQL, and libSQL under Drizzle's transaction mode, whose nested
+  // transaction is a savepoint. Under the default SQL mode a backend built
+  // over a libSQL transaction handle cannot open a savepoint (its
+  // `BEGIN IMMEDIATE` fails inside the transaction), and better-sqlite3
+  // hands the callback the root connection.
   describe("a backend adopted over a savepoint's native handle (known defect)", () => {
     it("is refused once the savepoint rolls back, and its late write is not saved", async () => {
-      if (!isPostgresLane(context)) return;
+      if (!nativeIsTransactionHandle(context)) return;
       const backend = context.getBackend();
       const graphId = nextGraphId();
       let late = "not run";
       await backend.transactionWithNative(async (_tx, native) => {
-        const enclosing =
-          PUBLIC_CONSTRUCTORS.createPostgresTransactionBackend(native);
+        const enclosing = savepointOpenerOver(context, native);
         let adopted: TransactionBackend | undefined;
         const savepointOutcome = await outcomeOf(
           enclosing.transactionWithNative(
@@ -552,9 +570,193 @@ export function registerTransactionViewConsumerTests(
         correct: { late: "TransactionClosedError", nodes: [] },
         defects: [
           {
-            label: "savepoint adoption outlives its savepoint",
-            on: { driver: POSTGRES_DRIVERS },
+            label: "savepoint lifetime: an adoption outlives its savepoint",
+            on: { driver: [...POSTGRES_DRIVERS, "libsql"] },
             today: { late: "fulfilled", nodes: ["savepoint-late"] },
+          },
+        ],
+      });
+    });
+  });
+
+  // A constructor-built backend kept past its transaction's end refuses
+  // every statement, and refuses to open a savepoint the same way: on a
+  // pooled connection the savepoint would otherwise open inside whichever
+  // transaction borrowed the connection next.
+  describe("a constructor-built backend kept past its transaction's end", () => {
+    it("refuses to open a savepoint, after the end and inside the next transaction on the connection", async () => {
+      if (!nativeIsTransactionHandle(context)) return;
+      const backend = context.getBackend();
+      const graphId = nextGraphId();
+      let kept: GraphBackend | undefined;
+      await backend.transactionWithNative(async (_tx, native) => {
+        kept = savepointOpenerOver(context, native);
+        await kept.insertNode(node(graphId, "inside"));
+      });
+      const keptBackend = requireDefined(kept);
+      const afterEnd = await outcomeOf(
+        keptBackend.transaction(async (savepoint) => {
+          await savepoint.insertNode(node(graphId, "after-end"));
+        }),
+      );
+      let duringNext = "not run";
+      const next = await outcomeOf(
+        backend.transaction(async (tx) => {
+          await tx.insertNode(node(graphId, "next-owner"));
+          duringNext = await outcomeOf(
+            keptBackend.transaction(async (savepoint) => {
+              await savepoint.insertNode(node(graphId, "during-next"));
+            }),
+          );
+        }),
+      );
+      expect({
+        afterEnd,
+        duringNext,
+        next,
+        nodes: await nodeIds(backend, graphId),
+      }).toEqual({
+        afterEnd: "TransactionClosedError",
+        duringNext: "TransactionClosedError",
+        next: "fulfilled",
+        nodes: ["inside", "next-owner"],
+      });
+    });
+  });
+
+  // A node-postgres or postgres-js transaction object is its own identity,
+  // so a backend bound to it after its transaction ended finds the owner's
+  // closed view and is refused (main wrote in autocommit on the released
+  // connection). A libSQL or PGlite handle is identified only while the
+  // driver reports its transaction open (`identifyNativeTransaction`), so a
+  // bind after the end finds no owner and gets a fresh view nothing closes:
+  // its statements reach the driver, exactly as on main. Binding an ended
+  // handle is a late call, which the session lifecycle refuses at call entry.
+  // A schema-write adoption sends its probe on the handle before it binds.
+  describe("a backend bound to a transaction's native handle after the transaction ended (known defects)", () => {
+    it("is refused before its statement reaches the driver, and writes nothing", async () => {
+      if (!nativeIsTransactionHandle(context)) return;
+      const backend = context.getBackend();
+      const bindings: Readonly<
+        Record<string, (native: unknown) => Pick<GraphBackend, "insertNode">>
+      > = {
+        adoptTransaction: (native) => backend.adoptTransaction(native),
+        ...Object.fromEntries(
+          constructorsFor(context).map((name) => [
+            name,
+            (native: unknown) => PUBLIC_CONSTRUCTORS[name](native),
+          ]),
+        ),
+      };
+      const graphId = nextGraphId();
+      const late: Record<string, string> = {};
+      for (const [name, bind] of Object.entries(bindings)) {
+        let ended: unknown;
+        await backend.transactionWithNative(async (tx, native) => {
+          ended = native;
+          await tx.insertNode(node(graphId, `${name}-owner`));
+        });
+        late[name] = await outcomeOf(
+          Promise.resolve().then(() =>
+            bind(ended).insertNode(node(graphId, `${name}-late`)),
+          ),
+        );
+      }
+      const names = Object.keys(bindings);
+      const owners = names.map((name) => `${name}-owner`);
+      function each(outcome: string): Record<string, string> {
+        return Object.fromEntries(names.map((name) => [name, outcome]));
+      }
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: {
+          late,
+          nodes: await nodeIds(backend, graphId),
+        },
+        correct: {
+          late: each("TransactionClosedError"),
+          nodes: owners.toSorted(),
+        },
+        defects: [
+          {
+            label:
+              "session lifecycle: a backend bound to an ended handle reaches the driver",
+            on: { driver: ["libsql", "pglite"] },
+            today: {
+              late: each("untyped: Error: Failed query:"),
+              nodes: owners.toSorted(),
+            },
+          },
+        ],
+      });
+    });
+
+    it("refuses a schema-write adoption of the ended handle before its probe reaches the driver", async () => {
+      if (!isPostgresLane(context)) return;
+      const backend = context.getBackend();
+      const adoptSchemaWrite = backend.adoptSchemaWriteTransaction;
+      if (adoptSchemaWrite === undefined) return;
+      const graphId = nextGraphId();
+      let ended: unknown;
+      await backend.transactionWithNative(async (tx, native) => {
+        ended = native;
+        await tx.insertNode(node(graphId, "owner"));
+      });
+      const afterEnd = await outcomeOf(
+        adoptSchemaWrite(ended, graphId, { waitBudgetMs: 1000 }),
+      );
+      // The next transaction on the pool borrows the connection the ended
+      // handle named: an unrefused probe and the schema reads after it run
+      // inside that transaction.
+      let duringNext = "not run";
+      const next = await outcomeOf(
+        backend.transaction(async (tx) => {
+          await tx.insertNode(node(graphId, "next-owner"));
+          duringNext = await outcomeOf(
+            adoptSchemaWrite(ended, graphId, { waitBudgetMs: 1000 }),
+          );
+        }),
+      );
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: {
+          afterEnd,
+          duringNext,
+          next,
+          nodes: await nodeIds(backend, graphId),
+        },
+        correct: {
+          afterEnd: "TransactionClosedError",
+          duringNext: "TransactionClosedError",
+          next: "fulfilled",
+          nodes: ["next-owner", "owner"],
+        },
+        defects: [
+          {
+            // The probe `SAVEPOINT` runs before the adoption binds, and
+            // fails outside a transaction; inside the next borrower's
+            // transaction on node-postgres it succeeds there, and the bind
+            // after it is refused.
+            label:
+              "session lifecycle: a schema-write adoption of an ended handle reaches the driver",
+            on: { driver: ["node-postgres"] },
+            today: {
+              afterEnd: "ConfigurationError",
+              duringNext: "TransactionClosedError",
+              next: "fulfilled",
+              nodes: ["next-owner", "owner"],
+            },
+          },
+          {
+            label:
+              "session lifecycle: a schema-write adoption of an ended handle reaches the driver (refused by the driver)",
+            on: { driver: ["pglite", "postgres-js"] },
+            today: {
+              afterEnd: "ConfigurationError",
+              duringNext: "ConfigurationError",
+              next: "fulfilled",
+              nodes: ["next-owner", "owner"],
+            },
           },
         ],
       });
