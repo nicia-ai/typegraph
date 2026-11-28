@@ -861,6 +861,30 @@ requires Node 22 or later, where it can.
 
 ES module consumers and `moduleResolution: "bundler"` are unaffected.
 
+## Package Issues
+
+### "Cannot access this Store's runtime port"
+
+The full message is `TypeError: Cannot access this Store's runtime port. The
+Store may come from an incompatible TypeGraph version.` `importGraph` and
+`importGraphStream` report it as a `ConfigurationError` ("Interchange import
+received an unrecognized ingestion target") with that `TypeError` as its
+`cause`.
+
+**Cause:** Two versions of TypeGraph are loaded in one process, usually because
+a dependency pins its own `@nicia-ai/typegraph`, and a Store built by one is
+handed to a function from the other. Functions reach a Store through an
+internal runtime port whose version is part of its key. Copies of one release,
+such as its ES module and CommonJS builds, share the port. Copies whose port
+versions differ do not, so the function refuses the Store before it runs any
+statement. A release on port version 2 and a release before it refuse each
+other's Stores.
+
+**Solution:** Resolve every package to one TypeGraph version. Find the second
+copy with `npm ls @nicia-ai/typegraph` or `pnpm why @nicia-ai/typegraph`. Then
+align the version ranges, or deduplicate with `overrides` (npm),
+`pnpm.overrides` or `resolutions` (Yarn).
+
 ## Still Having Issues?
 
 1. **Check the [Limitations](/limitations)** page for known constraints
