@@ -39,7 +39,11 @@ import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { createClient as createClient017 } from "libsql-client-017";
 import { describe, expect, it } from "vitest";
 
-import { asNodeId, createAdapterStoreWithSchema } from "../src";
+import {
+  asNodeId,
+  createAdapterStore,
+  createAdapterStoreWithSchema,
+} from "../src";
 import { createPostgresBackend } from "../src/backend/postgres";
 import { createSqliteBackend } from "../src/backend/sqlite";
 import { createLibsqlBackend } from "../src/backend/sqlite/libsql";
@@ -49,6 +53,8 @@ import type {
   TransactionBackend,
 } from "../src/backend/types";
 import { TypeGraphError } from "../src/errors";
+import { exportGraph } from "../src/interchange";
+import { listGraphIds } from "../src/maintenance";
 import { parseSerializedSchema } from "../src/schema";
 import { requireDefined } from "../src/utils/presence";
 import {
@@ -118,12 +124,14 @@ function noFault(): undefined {
 
 /**
  * A statement's text with whitespace collapsed and per-call random values
- * (PostgreSQL's commit-outcome marker, generated names) replaced.
+ * (PostgreSQL's commit-outcome marker, generated names, an algorithm's
+ * working table) replaced.
  */
 function normalize(text: string): string {
   return text
     .replaceAll(/\s+/g, " ")
     .replaceAll(/'[0-9a-f]{32}'/g, "'<marker>'")
+    .replaceAll(/typegraph_iterative_[\w-]+/g, "typegraph_iterative_<id>")
     .replaceAll(/_[0-9a-f]{8,}\b/g, "_<id>")
     .trim();
 }
@@ -485,6 +493,59 @@ function backendBuiltOver(
   }
 }
 
+/** Prefix of a cell that runs one call on a Store over a caller's transaction. */
+const OVER_CALLER_CELL = "over a caller's read-write transaction: ";
+
+/**
+ * The calls a Store over a caller's read-write transaction makes that open
+ * a read-only unit: TypeGraph's own (an export's snapshot, the confirm read
+ * of a get-or-create that finds its edge, an iterative algorithm, a shortest
+ * path, the graph-storage listing) and one the caller asked for. Each runs
+ * main's statements exactly: no savepoint or access-mode statement of its
+ * own.
+ */
+const OVER_CALLER_CALLS: readonly (readonly [
+  string,
+  (over: RotStore, backend: AdapterBackend<unknown>) => Promise<unknown>,
+])[] = [
+  ["exportGraph()", (over) => exportGraph(over)],
+  [
+    "getOrCreateByEndpoints() that finds its edge",
+    (over) =>
+      over.edges.rotKnows.getOrCreateByEndpoints(
+        { kind: "RotPerson", id: asNodeId("p1") },
+        { kind: "RotPerson", id: asNodeId("p2") },
+        {},
+      ),
+  ],
+  [
+    "algorithms.pageRank()",
+    (over) =>
+      over.algorithms.pageRank({
+        edges: ["rotKnows"],
+        nodeKinds: ["RotPerson"],
+      }),
+  ],
+  [
+    "algorithms.shortestPath()",
+    (over) =>
+      over.algorithms.shortestPath(asNodeId("p1"), asNodeId("p2"), {
+        edges: ["rotKnows"],
+      }),
+  ],
+  ["listGraphIds()", (_over, backend) => listGraphIds(backend)],
+  [
+    "a read-only store.transaction() with a read",
+    (over) =>
+      over.transaction(
+        async (tx) => {
+          await tx.nodes.RotTeam.find();
+        },
+        { accessMode: "read_only" },
+      ),
+  ],
+];
+
 /** Prefix of a cell that calls one Store member from another flow. */
 const STORE_CALL_CELL = "read-only held: ";
 
@@ -740,6 +801,47 @@ const CELLS: Readonly<Record<string, Cell>> = {
       ),
     ),
 
+  ...Object.fromEntries(
+    OVER_CALLER_CALLS.map(([call, invoke]): [string, Cell] => [
+      `${OVER_CALLER_CELL}${call}`,
+      ({ harness, track }) =>
+        track(
+          "transaction",
+          harness.store.transaction(async (tx) => {
+            const built = backendBuiltOver(
+              harness.lane,
+              (tx as Readonly<{ sql?: unknown }>).sql,
+            );
+            const over = createAdapterStore(
+              buildGraph(GRAPH_ID),
+              built,
+            ) as unknown as RotStore;
+            await track(call, invoke(over, built));
+          }),
+        ),
+    ]),
+  ),
+
+  // On better-sqlite3 and libSQL 0.17 the handle is the connection's
+  // database object, so the backend is built over the same object a root
+  // backend over that connection is.
+  "read-only held: a backend built over tx.sql from another flow writes": (
+    context,
+  ) =>
+    whileHeld(context, "read_only", (handle) => [
+      context.track(
+        "built insertNode",
+        Promise.resolve().then(() =>
+          backendBuiltOver(context.harness.lane, handle).insertNode({
+            graphId: GRAPH_ID,
+            kind: "RotTeam",
+            id: "w",
+            props: team("w"),
+          }),
+        ),
+      ),
+    ]),
+
   "read-only: a write through a backend built over tx.sql": ({
     harness,
     track,
@@ -836,6 +938,19 @@ const DIVERGENT_CELLS: Readonly<Record<string, Divergence>> = {
       adoptSchemaWriteTransaction: REFUSED,
       "held transaction": "fulfilled",
     },
+  },
+  // A backend another flow builds over the held transaction's handle is
+  // built over the same object one built inside the callback is: on
+  // better-sqlite3 the connection's database object while the transaction is
+  // published on it, on libSQL and PGlite the transaction object. Its
+  // statements run inside the read-only transaction, so it is refused before
+  // its first. On main better-sqlite3 and libSQL committed the row with the
+  // reader, and PGlite's engine rejected it and aborted the transaction.
+  // libSQL 0.17 proves nothing, as in the cell below.
+  "read-only held: a backend built over tx.sql from another flow writes": {
+    route: "an adoption of the transaction's native handle",
+    lanes: ["better-sqlite3", "libsql", "pglite"],
+    branch: { "built insertNode": REFUSED, "held transaction": "fulfilled" },
   },
   // libSQL 0.17 hands the callback its one connection's database handle and
   // reports no transaction state, so nothing proves a backend built over it
