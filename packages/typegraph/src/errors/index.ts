@@ -3674,6 +3674,100 @@ export class TransactionClosedError extends TypeGraphError {
   }
 }
 
+/**
+ * Why a call on a transaction was refused before it issued any statement.
+ *
+ * - `"savepoint-open"`: another call on the same transaction session has a
+ *   TypeGraph savepoint unit open (a hard-delete batch, an adopted merge
+ *   apply). A call started then would run inside that savepoint, and its
+ *   writes would be lost if the unit rolled back.
+ * - `"siblings-in-flight"`: the refused call was about to open such a unit
+ *   while other calls it did not start were still running on the session.
+ *   Their statements would land inside the savepoint.
+ */
+export type TransactionCallRefusalReason =
+  "savepoint-open" | "siblings-in-flight";
+
+/** Details of a {@link TransactionCallRefusedError}. */
+export type TransactionCallRefusedErrorDetails = Readonly<{
+  reason: TransactionCallRefusalReason;
+}>;
+
+/**
+ * Thrown when a TypeGraph call inside a transaction is refused because it
+ * would interleave its statements with another call's savepoint unit on the
+ * same transaction session.
+ *
+ * The calls of one transaction share one database session. A savepoint unit
+ * rolls back everything the session wrote since the unit opened, so a call
+ * that overlapped another call's unit could report success for a write the
+ * unit's rollback then removed. TypeGraph refuses the overlap instead of
+ * queueing it: a queued call deadlocks when the unit's own callback awaits
+ * it.
+ *
+ * ```typescript
+ * await store.transaction(async (tx) => {
+ *   // The create may start while the hard delete's unit is open, or the
+ *   // unit may open while the create is still running: one is refused.
+ *   await Promise.all([
+ *     tx.nodes.Doc.bulkHardDelete(ids),
+ *     tx.nodes.Doc.create(props),
+ *   ]);
+ * });
+ * ```
+ *
+ * A `"savepoint-open"` refusal is raised before the refused call issues any
+ * statement. A `"siblings-in-flight"` refusal of a bulk hard delete or an
+ * adopted merge apply is also raised before its first statement. Await the calls in sequence
+ * inside the transaction.
+ */
+export class TransactionCallRefusedError extends TypeGraphError {
+  declare readonly details: TransactionCallRefusedErrorDetails;
+
+  constructor(
+    reason: TransactionCallRefusalReason,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      reason === "savepoint-open" ?
+        "A call was started while another call's savepoint unit is open on the same transaction. The call was refused before it issued any statement."
+      : "A savepoint unit was about to open while other calls are still running on the same transaction. The call was refused before its savepoint.",
+      "TRANSACTION_CALL_REFUSED",
+      {
+        category: "user",
+        details: { reason },
+        suggestion:
+          "Await each call inside the transaction before starting the next one, and do not start a bulk hard delete or an adopted merge apply beside calls that are still running.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "TransactionCallRefusedError";
+  }
+}
+
+/**
+ * The error for a call that ran inside a transaction that is rolling back:
+ * its statements were issued, and none of them will commit. The failure that
+ * doomed the transaction is its `cause`. It never replaces that failure: the
+ * owner of the transaction, and a retry owner classifying it, still receive
+ * the original failure.
+ */
+export class TransactionDoomedError extends TypeGraphError {
+  constructor(options?: { cause?: unknown }) {
+    super(
+      "The call ran inside a transaction that is rolling back. None of its writes will commit.",
+      "TRANSACTION_DOOMED",
+      {
+        category: "user",
+        suggestion:
+          "Await every call inside the transaction callback, and inspect the cause for the failure that rolled the transaction back.",
+        cause: options?.cause,
+      },
+    );
+    this.name = "TransactionDoomedError";
+  }
+}
+
 // ============================================================
 // Utility Functions
 // ============================================================

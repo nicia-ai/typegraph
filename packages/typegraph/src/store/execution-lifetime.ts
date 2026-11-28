@@ -5,8 +5,11 @@ import { GRAPH_BACKEND_PROJECTION_KEYS } from "../backend/graph-backend-keys";
 import type { GraphBackend } from "../backend/types";
 import { TransactionClosedError } from "../errors";
 import { createDataKeyedBag } from "../utils/object";
-import type { StoreTransactionBackend } from "./operation-scope";
-import { inheritRecordedTransactionBindings } from "./recorded-capture";
+import type {
+  StoreTransactionBackend,
+  TransactionSession,
+} from "./operation-scope";
+import { guardRecordedSessionLifetime } from "./recorded-capture";
 
 /** A callback-owned backend whose operations refuse execution after sealing. */
 export type ScopedExecutionBackend<
@@ -27,10 +30,15 @@ const NESTED_OPERATION_PORTS = new Set<PropertyKey>([
  * Decorates an adopted session before any callback views are constructed.
  * A deferred operation keeps this backend, so its execution checks the scope
  * even if its query or collection was built while the callback was active.
+ *
+ * `session` is the session the decorated backend is the surface of: its
+ * recorded binding takes the same lifetime, so a recorded control statement
+ * or identity write one of its operations issues beneath the surface is
+ * refused once the scope is sealed, as the surface's own members are.
  */
 export function scopeBackendExecution<
   T extends GraphBackend | StoreTransactionBackend,
->(sourceBackend: T): ScopedExecutionBackend<T> {
+>(sourceBackend: T, session: TransactionSession): ScopedExecutionBackend<T> {
   let active = true;
 
   function assertActive(): void {
@@ -80,7 +88,7 @@ export function scopeBackendExecution<
   }
 
   const backend = deriveBackend(sourceBackend, guardedMembers as T);
-  inheritRecordedTransactionBindings(sourceBackend, backend, assertActive);
+  guardRecordedSessionLifetime(session, assertActive);
   return {
     backend,
     seal: () => {

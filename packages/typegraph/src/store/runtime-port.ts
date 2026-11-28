@@ -82,8 +82,14 @@ export const STORE_RUNTIME: unique symbol =
  * caller holds. It runs in that operation, of that operation's session, and
  * never opens a session of its own over a transaction its caller already
  * holds. An operation another copy of TypeGraph minted joins as a binding of
- * its own (`portOperationEntry`). The import members below take the narrow
- * statement projection of an import frame instead, and open no session.
+ * its own (`portOperationEntry`).
+ *
+ * The import members that take an entry also accept an import frame's narrow
+ * statement projection on its own. A copy whose import members took the
+ * frame's transaction itself still calls them that way under this port
+ * version, and `portOperationEntry` normalises it.
+ * `lockIdentityImportTarget` takes only that projection, and opens no
+ * session.
  */
 export type StoreRuntime<G extends GraphDef> = Readonly<{
   backend: GraphBackend;
@@ -439,15 +445,17 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     >,
   ) => Promise<void>;
   foldImportedIdentityNodes: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry:
+      | OperationEntry
+      | Readonly<
+          BackendIdentity &
+            GraphEntityReadBackend &
+            SchemaReadBackend &
+            QueryExecutionBackend &
+            SqlCompilationBackend &
+            RawQueryExecutionBackend &
+            Pick<GraphBackend, "executeStatement">
+        >,
     references: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
   /**
@@ -461,15 +469,17 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * assertion's window.
    */
   applyImportedNodeWindowEnd: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry:
+      | OperationEntry
+      | Readonly<
+          BackendIdentity &
+            GraphEntityReadBackend &
+            SchemaReadBackend &
+            QueryExecutionBackend &
+            SqlCompilationBackend &
+            RawQueryExecutionBackend &
+            Pick<GraphBackend, "executeStatement">
+        >,
     input: Readonly<{ kind: string; id: string; validTo?: string }>,
   ) => Promise<void>;
   /**
@@ -478,27 +488,31 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * `assertImportedRequiredPartsAttached` (`src/interchange/import.ts`).
    */
   detachDeletedImportedIdentityNode: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry:
+      | OperationEntry
+      | Readonly<
+          BackendIdentity &
+            GraphEntityReadBackend &
+            SchemaReadBackend &
+            QueryExecutionBackend &
+            SqlCompilationBackend &
+            RawQueryExecutionBackend &
+            Pick<GraphBackend, "executeStatement">
+        >,
     reference: Readonly<{ kind: string; id: string }>,
   ) => Promise<void>;
   importIdentityAssertionsAtTarget: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry:
+      | OperationEntry
+      | Readonly<
+          BackendIdentity &
+            GraphEntityReadBackend &
+            SchemaReadBackend &
+            QueryExecutionBackend &
+            SqlCompilationBackend &
+            RawQueryExecutionBackend &
+            Pick<GraphBackend, "executeStatement">
+        >,
     assertions: readonly Readonly<{
       id: string;
       relation: "same" | "different";
@@ -539,15 +553,17 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * graph's restored cut (see `importIdentityTransitionsIntoTarget`).
    */
   importIdentityTransitionsAtTarget: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry:
+      | OperationEntry
+      | Readonly<
+          BackendIdentity &
+            GraphEntityReadBackend &
+            SchemaReadBackend &
+            QueryExecutionBackend &
+            SqlCompilationBackend &
+            RawQueryExecutionBackend &
+            Pick<GraphBackend, "executeStatement">
+        >,
     transitions: readonly IdentityTransitionTransfer[],
     carriedCut: IdentityTransitionCut | undefined,
   ) => Promise<Readonly<{ created: number }>>;
@@ -660,6 +676,63 @@ export function storeQueryBackend<G extends GraphDef>(
 type TransactionRuntimePort = Readonly<{
   [TRANSACTION_RUNTIME]?: TransactionRuntime;
 }>;
+
+// Module-private: only `transactionChildSurfaceCarrier` puts a child-surface
+// builder on a transaction context's runtime, and only
+// `transactionChildSurface` reads one back.
+const TRANSACTION_CHILD_SURFACE: unique symbol = Symbol(
+  "typegraph.transactionChildSurface",
+);
+
+/**
+ * A transaction's write surface whose calls are children of one call's
+ * operation: the same collections, receipt chain and policy delete as the
+ * context it was built from, each entering its operation with that parent.
+ */
+export type TransactionChildSurface = Readonly<{
+  nodes: Readonly<Record<string, unknown>>;
+  edges: Readonly<Record<string, unknown>>;
+  deleteNodeWithPolicy: TransactionDeleteNodeWithPolicy;
+}>;
+
+type TransactionChildSurfaceBuilder = (
+  parent: Operation,
+) => TransactionChildSurface;
+
+/**
+ * What a transaction context's runtime carries for its child surfaces, spread
+ * into the runtime where the context's surface is built: `build`, under a
+ * module-private key, as {@link transactionRuntimeSession} carries the
+ * session. Nothing is looked up from the object.
+ */
+export function transactionChildSurfaceCarrier(
+  build: TransactionChildSurfaceBuilder,
+): Readonly<{ [TRANSACTION_CHILD_SURFACE]: TransactionChildSurfaceBuilder }> {
+  return { [TRANSACTION_CHILD_SURFACE]: build };
+}
+
+/**
+ * The write surface of `transaction` whose calls run as children of
+ * `parent`, the operation of a call that composes collection writes of its
+ * own inside one savepoint unit (an adopted merge apply). Its writes belong to
+ * `parent`'s root call, so the unit that call holds open does not refuse them,
+ * while a call started beside it through `transaction` itself still is.
+ */
+export function transactionChildSurface(
+  transaction: Readonly<{ [TRANSACTION_RUNTIME]?: object }>,
+  parent: Operation,
+): TransactionChildSurface {
+  const runtime: Readonly<{
+    [TRANSACTION_CHILD_SURFACE]?: TransactionChildSurfaceBuilder;
+  }> = requireTransactionRuntime(transaction);
+  const build = runtime[TRANSACTION_CHILD_SURFACE];
+  if (build === undefined) {
+    throw new TypeError(
+      "Cannot build a child surface of this transaction. The transaction may come from an incompatible TypeGraph version.",
+    );
+  }
+  return build(parent);
+}
 
 /**
  * A node delete bound to the transaction it is invoked from — see

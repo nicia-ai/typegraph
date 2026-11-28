@@ -29,11 +29,13 @@ import {
 } from "./collections/node-collection";
 import type {
   EntryScope,
+  Operation,
   OperationEntry,
   StatementBackend,
 } from "./operation-scope";
 import type { ResolvedMutationSetAttempt } from "./resolved-mutation-set";
 import { type EdgeRow, type NodeRow } from "./row-mappers";
+import type { TransactionReceiptRecorder } from "./transaction-receipt";
 import {
   type CreateEdgeInput,
   type CreateNodeInput,
@@ -345,6 +347,8 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
   writes: EntryScope,
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   operations: NodeOperations,
+  parent?: Operation,
+  receiptRecorders: readonly TransactionReceiptRecorder[] = [],
 ): GraphNodeCollections<G> {
   const collectionCache = new Map<string, unknown>();
 
@@ -367,6 +371,8 @@ export function createNodeCollectionsProxy<G extends GraphDef>(
         kind,
         backend,
         writes,
+        ...(parent === undefined ? {} : { parent }),
+        receiptRecorders,
         batchPointRead,
         ...operations,
       });
@@ -391,6 +397,8 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
   batchPointRead: BundleVerdictOf<typeof BATCH_POINT_READ>,
   endpointSetRead: BundleVerdictOf<typeof ENDPOINT_SET_READ>,
   operations: EdgeOperations,
+  parent?: Operation,
+  receiptRecorders: readonly TransactionReceiptRecorder[] = [],
 ): GraphEdgeCollections<G> {
   const collectionCache = new Map<string, unknown>();
 
@@ -413,6 +421,8 @@ export function createEdgeCollectionsProxy<G extends GraphDef>(
         kind,
         backend,
         writes,
+        ...(parent === undefined ? {} : { parent }),
+        receiptRecorders,
         batchPointRead,
         endpointSetRead,
         ...operations,

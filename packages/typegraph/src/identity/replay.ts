@@ -28,6 +28,7 @@ import {
   ValidationError,
 } from "../errors";
 import { readGraphAllocationOwner } from "../store/allocation-owner";
+import { type OperationEntry } from "../store/operation-scope";
 import { hasPendingIdentityTransitionNotes } from "../store/recorded-capture";
 import { groupBy } from "../utils/array";
 import { requireDefined } from "../utils/presence";
@@ -1253,6 +1254,8 @@ export function identityTransitionWalkRequest<G extends GraphDef>(
  */
 async function walkedTransitionsFor<G extends GraphDef>(
   ctx: IdentityCallContext<G>,
+  // The operation the call entered; `ctx.backend` is its handle.
+  entry: OperationEntry,
   request: IdentityTransitionWalkRequest,
   options: IdentityReplayOptions | undefined,
 ): Promise<WalkedTransitions> {
@@ -1325,7 +1328,7 @@ async function walkedTransitionsFor<G extends GraphDef>(
       unattributedRestored,
       uncapturedMembers: start.uncapturedMembers,
       pendingTransactionNotes: hasPendingIdentityTransitionNotes(
-        ctx.backend,
+        entry,
         ctx.graphId,
       ),
     },
@@ -1342,11 +1345,13 @@ async function walkedTransitionsFor<G extends GraphDef>(
  */
 export async function identityTransitionsOf<G extends GraphDef>(
   ctx: IdentityCallContext<G>,
+  entry: OperationEntry,
   request: IdentityTransitionWalkRequest,
   options?: IdentityReplayOptions,
 ): Promise<IdentityTransitionHistory<G>> {
   const { owner, boundaries, completenessFacts } = await walkedTransitionsFor(
     ctx,
+    entry,
     request,
     options,
   );
@@ -1387,11 +1392,12 @@ export async function identityTransitionsOf<G extends GraphDef>(
  */
 export async function identityReplay<G extends GraphDef>(
   ctx: IdentityCallContext<G>,
+  entry: OperationEntry,
   request: IdentityTransitionWalkRequest,
   options?: IdentityReplayOptions,
 ): Promise<IdentityReplay<G>> {
   const { owner, toRevision, retention, boundaries, completenessFacts } =
-    await walkedTransitionsFor(ctx, request, options);
+    await walkedTransitionsFor(ctx, entry, request, options);
 
   // "Entirely below the watermark" is a property of the REQUESTED range, not
   // of what came back: only a range bounded on both ends (`toRecorded` given)

@@ -4361,6 +4361,20 @@ export type SchemaCommitPreflightBackend = TransactionBackend &
   }>;
 
 /**
+ * How each read member of a {@link createTransactionReadBackend} projection
+ * is admitted on its transaction's session: `enter` admits one read call and
+ * returns the transaction its statements go through, refusing it with a
+ * thrown error when it may not run, and `exit` releases it once it has
+ * settled.
+ *
+ * @internal
+ */
+export type TransactionReadAdmission = Readonly<{
+  enter: () => TransactionBackend;
+  exit: () => void;
+}>;
+
+/**
  * Builds the actual runtime projection exposed as `TransactionContext.backend`.
  * This is an explicit object rather than a type-only narrowing so portable
  * callers cannot discover write or statement-execution methods on the
@@ -4368,15 +4382,17 @@ export type SchemaCommitPreflightBackend = TransactionBackend &
  *
  * `backend` supplies what the projection exposes without a statement: its
  * identity, its compiler, and which optional read members it implements.
- * Every read member's call goes through the transaction `reads()` returns at
- * that call — the Store hands one operation of the transaction's session per
- * call — which is the same transaction `backend` is.
+ * Every read member's call is one read call of the transaction's session:
+ * admitted by `reads.enter()` (the transaction it returns is the same
+ * transaction `backend` is) and released by `reads.exit()` once its promise
+ * has settled. Every read member returns a promise and never throws
+ * synchronously: a refused admission, or a member's own throw, rejects it.
  *
  * @internal
  */
 export function createTransactionReadBackend(
   backend: TransactionBackend,
-  reads: () => TransactionBackend,
+  reads: TransactionReadAdmission,
 ): TransactionReadBackend {
   const compileSql = backend.compileSql;
 
@@ -4392,48 +4408,176 @@ export function createTransactionReadBackend(
     ...(backend.vectorStrategy === undefined ?
       {}
     : { vectorStrategy: backend.vectorStrategy }),
-    getNode: (graphId, kind, id) => reads().getNode(graphId, kind, id),
+    getNode: async (graphId, kind, id) => {
+      const transaction = reads.enter();
+      try {
+        return await transaction.getNode(graphId, kind, id);
+      } finally {
+        reads.exit();
+      }
+    },
     ...(backend.getNodes === undefined ?
       {}
     : {
-        getNodes: (graphId: string, kind: string, ids: readonly string[]) =>
-          presentReadMember(reads(), "getNodes")(graphId, kind, ids),
+        getNodes: async (
+          graphId: string,
+          kind: string,
+          ids: readonly string[],
+        ) => {
+          const transaction = reads.enter();
+          try {
+            return await presentReadMember(transaction, "getNodes")(
+              graphId,
+              kind,
+              ids,
+            );
+          } finally {
+            reads.exit();
+          }
+        },
       }),
-    getEdge: (graphId, id) => reads().getEdge(graphId, id),
+    getEdge: async (graphId, id) => {
+      const transaction = reads.enter();
+      try {
+        return await transaction.getEdge(graphId, id);
+      } finally {
+        reads.exit();
+      }
+    },
     ...(backend.getEdges === undefined ?
       {}
     : {
-        getEdges: (graphId: string, ids: readonly string[]) =>
-          presentReadMember(reads(), "getEdges")(graphId, ids),
+        getEdges: async (graphId: string, ids: readonly string[]) => {
+          const transaction = reads.enter();
+          try {
+            return await presentReadMember(transaction, "getEdges")(
+              graphId,
+              ids,
+            );
+          } finally {
+            reads.exit();
+          }
+        },
       }),
-    countEdgesAtEndpoint: (params) => reads().countEdgesAtEndpoint(params),
-    edgeExistsBetween: (params) => reads().edgeExistsBetween(params),
-    findEdgesConnectedTo: (params) => reads().findEdgesConnectedTo(params),
-    findNodesByKind: (params) => reads().findNodesByKind(params),
+    countEdgesAtEndpoint: async (params) => {
+      const transaction = reads.enter();
+      try {
+        return await transaction.countEdgesAtEndpoint(params);
+      } finally {
+        reads.exit();
+      }
+    },
+    edgeExistsBetween: async (params) => {
+      const transaction = reads.enter();
+      try {
+        return await transaction.edgeExistsBetween(params);
+      } finally {
+        reads.exit();
+      }
+    },
+    findEdgesConnectedTo: async (params) => {
+      const transaction = reads.enter();
+      try {
+        return await transaction.findEdgesConnectedTo(params);
+      } finally {
+        reads.exit();
+      }
+    },
+    findNodesByKind: async (params) => {
+      const transaction = reads.enter();
+      try {
+        return await transaction.findNodesByKind(params);
+      } finally {
+        reads.exit();
+      }
+    },
     ...(backend.findNodesAcrossKinds === undefined ?
       {}
     : {
-        findNodesAcrossKinds: (params: FindRowsAcrossKindsParams) =>
-          presentReadMember(reads(), "findNodesAcrossKinds")(params),
+        findNodesAcrossKinds: async (params: FindRowsAcrossKindsParams) => {
+          const transaction = reads.enter();
+          try {
+            return await presentReadMember(
+              transaction,
+              "findNodesAcrossKinds",
+            )(params);
+          } finally {
+            reads.exit();
+          }
+        },
       }),
-    countNodesByKind: (params) => reads().countNodesByKind(params),
-    findEdgesByKind: (params) => reads().findEdgesByKind(params),
+    countNodesByKind: async (params) => {
+      const transaction = reads.enter();
+      try {
+        return await transaction.countNodesByKind(params);
+      } finally {
+        reads.exit();
+      }
+    },
+    findEdgesByKind: async (params) => {
+      const transaction = reads.enter();
+      try {
+        return await transaction.findEdgesByKind(params);
+      } finally {
+        reads.exit();
+      }
+    },
     ...(backend.findActiveEdgesBySourceV1 === undefined ?
       {}
     : {
-        findActiveEdgesBySourceV1: (params: FindActiveEdgesBySourceV1Params) =>
-          presentReadMember(reads(), "findActiveEdgesBySourceV1")(params),
+        findActiveEdgesBySourceV1: async (
+          params: FindActiveEdgesBySourceV1Params,
+        ) => {
+          const transaction = reads.enter();
+          try {
+            return await presentReadMember(
+              transaction,
+              "findActiveEdgesBySourceV1",
+            )(params);
+          } finally {
+            reads.exit();
+          }
+        },
       }),
     ...(backend.findEdgesAcrossKinds === undefined ?
       {}
     : {
-        findEdgesAcrossKinds: (params: FindRowsAcrossKindsParams) =>
-          presentReadMember(reads(), "findEdgesAcrossKinds")(params),
+        findEdgesAcrossKinds: async (params: FindRowsAcrossKindsParams) => {
+          const transaction = reads.enter();
+          try {
+            return await presentReadMember(
+              transaction,
+              "findEdgesAcrossKinds",
+            )(params);
+          } finally {
+            reads.exit();
+          }
+        },
       }),
-    countEdgesByKind: (params) => reads().countEdgesByKind(params),
-    getActiveSchema: (graphId) => reads().getActiveSchema(graphId),
-    getSchemaVersion: (graphId, version) =>
-      reads().getSchemaVersion(graphId, version),
+    countEdgesByKind: async (params) => {
+      const transaction = reads.enter();
+      try {
+        return await transaction.countEdgesByKind(params);
+      } finally {
+        reads.exit();
+      }
+    },
+    getActiveSchema: async (graphId) => {
+      const transaction = reads.enter();
+      try {
+        return await transaction.getActiveSchema(graphId);
+      } finally {
+        reads.exit();
+      }
+    },
+    getSchemaVersion: async (graphId, version) => {
+      const transaction = reads.enter();
+      try {
+        return await transaction.getSchemaVersion(graphId, version);
+      } finally {
+        reads.exit();
+      }
+    },
     ...(compileSql === undefined ?
       {}
     : { compileSql: (query: SqlFragment) => compileSql(query) }),
@@ -4444,8 +4588,9 @@ export function createTransactionReadBackend(
  * `transaction`'s optional read member `key`, which
  * {@link createTransactionReadBackend} offers only when the transaction
  * implements it — and the transaction a read goes through is that same
- * transaction. Returned detached, as the projection always called it, so a
- * member's own synchronous throw stays synchronous.
+ * transaction. Returned detached, as the projection always called it; the
+ * projection's member awaits it, so its own throw rejects that member's
+ * promise.
  */
 function presentReadMember<
   Key extends

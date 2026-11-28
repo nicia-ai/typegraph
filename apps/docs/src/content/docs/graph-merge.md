@@ -218,7 +218,10 @@ await db.transaction(async (nativeTx) => {
 ```
 
 The adopted applier returns `Promise<MergeReport>` and throws a typed
-`MergeError` on refusal or failure. It does not open, commit, or retry a
+`MergeError` on refusal or failure, except when the transaction refuses the
+apply as an overlapping call: that refusal is thrown as the
+`TransactionCallRefusedError` itself, so `instanceof` and `details.reason`
+work on it. It does not open, commit, or retry a
 transaction. It runs the plan behind a savepoint inside the caller's
 transaction: a refusal or failure, including one raised after some of the
 plan's rows were written, rolls every merge row back before the error reaches
@@ -234,10 +237,15 @@ revision clock, so `receipt.recorded` and `revisionNow()` reflect only the
 transaction's other writes. Let the
 exception reject the outer callback anyway, so the application writes that
 depended on the merge roll back with it. Await the apply before starting
-other calls on the same transaction: the savepoint's rollback undoes every
-statement issued on the transaction since the apply began, including those of
-an overlapping call (see
+other calls on the same transaction: the savepoint's rollback would undo every
+statement issued on the transaction since the apply began, so an apply started
+beside running calls, and a call started on the same transaction context while
+the apply runs (a hook's write through a captured `tx` included), is refused
+with `TransactionCallRefusedError` (see
 [Overlapping calls in one transaction](/schemas-stores#overlapping-calls-in-one-transaction)).
+The apply is admitted before its first asynchronous step, the plan's
+validation included: an apply started while another call's unit is open is
+refused even if that unit closes while the plan would still be validating.
 A target whose transactions expose no statement execution cannot take the savepoint and is refused with
 `MergePlanCapabilityError` (`details.capability: "mergeTransactionSavepoint"`)
 before anything is applied. When the driver reports a retryable transaction failure, retry

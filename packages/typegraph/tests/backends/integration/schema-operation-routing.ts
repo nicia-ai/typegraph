@@ -191,8 +191,9 @@ function recordSchemaChannel(base: AdapterBackend<unknown>) {
   const enterOperation = operationScope.enterOperation;
   function routedEnter(
     scope: operationScope.EntryScope,
+    parent?: operationScope.Operation,
   ): operationScope.OperationEntry {
-    const entry = enterOperation(scope);
+    const entry = enterOperation(scope, parent);
     const session = operationScope.operationEntrySession(entry);
     if (session === undefined) return entry;
     const routed: { backend?: unknown } = { ...(entry as object) };

@@ -6,12 +6,18 @@ import {
 } from "../core/allocation-owner";
 import { recordedInstantOwner } from "../core/temporal";
 import { parseRecordedInstant } from "../core/temporal";
-import { IdentityEndpointValidityError } from "../errors";
+import {
+  IdentityEndpointValidityError,
+  TransactionCallRefusedError,
+} from "../errors";
 import type { EvolutionPlan } from "../schema/evolution-plan";
 import {
+  enterCall,
   enterTransactionOperation,
+  exitCall,
   type Operation,
   type OperationBackend,
+  runOperationUnit,
   type StatementBackend,
 } from "../store/operation-scope";
 import { lockStoreWriteFence } from "../store/operations/write-fence-prelude";
@@ -312,11 +318,13 @@ import {
   planCompositionCascade,
   readRecordedClock,
   readRevisionOrigin,
+  recordedGraphLockMemoOf,
   runRetriedUnit,
   storeBackend,
   storeCaptureEnabled,
   storeRuntime,
   transactionAssertWritable,
+  transactionChildSurface,
   transactionDeleteNodeWithPolicy,
   TypeGraphError,
   uncapturedGraphWriteLock,
@@ -2600,9 +2608,10 @@ type EdgeUpsertDecision = Readonly<{
  */
 async function decideEdgeUpserts<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   writes: MergePlanWrites,
 ): Promise<EdgeUpsertDecision> {
+  const txBackend = operation.backend;
   const planned = await readPlannedEdgeRows(target, txBackend, writes);
   const releasingEdgeIds = new Set(
     planned.edgeRows
@@ -2624,7 +2633,11 @@ async function decideEdgeUpserts<G extends GraphDef>(
     {
       graphId: target.graphId,
       registry: target.registry,
-      lock: await lockRecordedGraphWrite(txBackend, target.graphId),
+      lock: await lockRecordedGraphWrite(
+        txBackend,
+        target.graphId,
+        recordedGraphLockMemoOf(operation),
+      ),
     },
     txBackend,
     compositionWrites,
@@ -2680,7 +2693,7 @@ async function applyGraphRows<G extends GraphDef>(
   // Authoritative re-verification, before any row work below: a part
   // attached to a deleted whole after the branch point (and neither deleted
   // nor moved away by this plan) must abort the WHOLE apply.
-  await assertNoCompositionOrphans(target, txBackend, rows.writes);
+  await assertNoCompositionOrphans(target, operation, rows.writes);
 
   // Resolved before any row is written: a deleted composition edge's
   // endpoints are read while it is still live in `txBackend`.
@@ -2692,7 +2705,7 @@ async function applyGraphRows<G extends GraphDef>(
 
   const edgeUpsertDecision = await decideEdgeUpserts(
     target,
-    txBackend,
+    operation,
     rows.writes,
   );
 
@@ -2722,7 +2735,7 @@ async function applyGraphRows<G extends GraphDef>(
 
   await assertNoUnattachedRequiredParts(
     target,
-    txBackend,
+    operation,
     unattachedCandidates,
   );
   return applied;
@@ -2817,7 +2830,12 @@ async function applyNodeWritePhase<G extends GraphDef>(
     const nodes =
       decision === undefined ?
         await applyRows()
-      : await withRecordedIdentityDecision(txBackend, decision, applyRows);
+      : await withRecordedIdentityDecision(
+          operation,
+          txBackend,
+          decision,
+          applyRows,
+        );
     return { nodes, retracted: earlyIdentity.retracted };
   } catch (error) {
     throw error instanceof IdentityEndpointValidityError ?
@@ -4007,9 +4025,10 @@ export async function assertMergeWritesStructurallySound<G extends GraphDef>(
  */
 async function assertNoCompositionOrphans<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   writes: MergePlanWrites,
 ): Promise<void> {
+  const txBackend = operation.backend;
   const registry = target.registry;
   if (
     !writes.nodeDeletes.some(
@@ -4021,7 +4040,7 @@ async function assertNoCompositionOrphans<G extends GraphDef>(
     return;
   }
   const planned = plannedCompositionState(registry, writes);
-  await refuseFirstOrphan(target, txBackend, async (ctx) => [
+  await refuseFirstOrphan(target, operation, async (ctx) => [
     ...(await compositionOrphansAmong(
       ctx,
       txBackend,
@@ -4045,7 +4064,7 @@ async function assertNoCompositionOrphans<G extends GraphDef>(
  */
 async function refuseFirstOrphan<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   find: (
     ctx: Readonly<{
       graphId: string;
@@ -4054,7 +4073,11 @@ async function refuseFirstOrphan<G extends GraphDef>(
     }>,
   ) => Promise<readonly MergePlanCompositionOrphan[]>,
 ): Promise<void> {
-  const lock = await lockRecordedGraphWrite(txBackend, target.graphId);
+  const lock = await lockRecordedGraphWrite(
+    operation.backend,
+    target.graphId,
+    recordedGraphLockMemoOf(operation),
+  );
   const [firstOrphan] = await find({
     graphId: target.graphId,
     registry: target.registry,
@@ -4321,11 +4344,12 @@ async function liveOrphanCandidates(
  */
 async function assertNoUnattachedRequiredParts<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   candidates: readonly MergePlanEntityRef[],
 ): Promise<void> {
+  const txBackend = operation.backend;
   if (candidates.length === 0) return;
-  await refuseFirstOrphan(target, txBackend, (ctx) =>
+  await refuseFirstOrphan(target, operation, (ctx) =>
     unattachedRequiredPartOrphansAmong(
       ctx,
       txBackend,
@@ -6011,7 +6035,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
       ),
   );
   if (
-    !forceRecordedGraphRevision(txBackend, target.graphId) &&
+    !forceRecordedGraphRevision(operation, target.graphId) &&
     !forceWriteTransactionRevision(operation)
   ) {
     await advanceRevisionClock(
@@ -6141,23 +6165,24 @@ async function applyValidatedMergePlanInTransaction<G extends GraphDef>(
       "beforeApply",
     );
   }
-  await preflightWireMergeWrites(
-    target,
-    tx.nodes as unknown as TxNodes,
-    tx.edges as unknown as TxEdges,
-    artifact,
-  );
+  // The apply's collection writes are children of its operation: an adopted
+  // apply holds its savepoint unit open around them, and a write entered
+  // through `tx` itself is refused while that unit is open.
+  const child = transactionChildSurface(tx, operation);
+  const nodes = child.nodes as unknown as TxNodes;
+  const edges = child.edges as unknown as TxEdges;
+  await preflightWireMergeWrites(target, nodes, edges, artifact);
   await assertPlannedIdentityIdsFresh(target, operation, {
     identityAssertions: artifact.writes.identityAssertions,
     identityRetractions: artifact.writes.identityRetractions,
   });
   const applied = await applyWireMergeWrites(
     target,
-    tx.nodes as unknown as TxNodes,
-    tx.edges as unknown as TxEdges,
+    nodes,
+    edges,
     operation,
     artifact,
-    (work, policy) => transactionDeleteNodeWithPolicy(tx, work, policy),
+    (work, policy) => child.deleteNodeWithPolicy(work, policy),
     decision,
   );
   if (afterApply !== undefined) {
@@ -6317,40 +6342,56 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
     // collections, so it passes their write gate itself, before any read:
     // a read-only transaction is refused rather than written to.
     transactionAssertWritable(tx, "applyMergePlanInTransaction()");
-    const artifact = await validateMergePlanForTarget(effectiveTarget, input);
-    assertPublicPlanCapability(effectiveTarget);
-    if (artifact.provenance.persist) {
-      throw new MergePlanCapabilityError(
-        "A caller-owned merge transaction cannot persist merge provenance atomically.",
-        {
-          details: { capability: "adoptedMergeProvenance" },
-          suggestion:
-            "Create the merge plan without persisted provenance, or apply it through applyMergePlan so TypeGraph can manage provenance persistence.",
-        },
-      );
-    }
     // One operation of the caller's transaction's session for the whole
-    // apply: its fences, savepoint and direct statements.
-    const operation = enterTransactionOperation(tx);
-    const txBackend = operation.backend;
-    await assertMergeTransactionPristine(effectiveTarget, operation);
-    const decision = mergeIdentityDecisionFromArtifact(artifact, options);
-    const merged = await withAdoptedMergeApplySavepoint(
-      effectiveTarget,
-      txBackend,
-      () =>
-        applyValidatedMergePlanInTransaction(
+    // apply: its fences, savepoint and direct statements. It is a call of
+    // that session, counted as running until the apply settles, and the
+    // apply's collection writes and reads are its children. It is admitted,
+    // and holds its savepoint unit, before its first asynchronous step (the
+    // artifact's validation): a unit another call holds open, or a call
+    // still running beside it, refuses the apply before it awaits anything.
+    const operation = enterCall(enterTransactionOperation(tx));
+    try {
+      return await runOperationUnit(operation, async () => {
+        const artifact = await validateMergePlanForTarget(
           effectiveTarget,
-          tx,
+          input,
+        );
+        assertPublicPlanCapability(effectiveTarget);
+        if (artifact.provenance.persist) {
+          throw new MergePlanCapabilityError(
+            "A caller-owned merge transaction cannot persist merge provenance atomically.",
+            {
+              details: { capability: "adoptedMergeProvenance" },
+              suggestion:
+                "Create the merge plan without persisted provenance, or apply it through applyMergePlan so TypeGraph can manage provenance persistence.",
+            },
+          );
+        }
+        await assertMergeTransactionPristine(effectiveTarget, operation);
+        const decision = mergeIdentityDecisionFromArtifact(artifact, options);
+        const applied = await withAdoptedMergeApplySavepoint(
+          effectiveTarget,
           operation,
-          artifact,
-          {},
-          true,
-          decision,
-        ),
-    );
-    return reportFromArtifact(artifact, merged, artifact.review.warnings);
+          () =>
+            applyValidatedMergePlanInTransaction(
+              effectiveTarget,
+              tx,
+              operation,
+              artifact,
+              {},
+              true,
+              decision,
+            ),
+        );
+        return reportFromArtifact(artifact, applied, artifact.review.warnings);
+      });
+    } finally {
+      exitCall(operation);
+    }
   } catch (error) {
+    // The session's refusal of the apply as a call crosses this boundary as
+    // itself, so a caller can branch on its type and `details.reason`.
+    if (error instanceof TransactionCallRefusedError) throw error;
     const translated = translateMergeCommitError(error);
     throw translated instanceof MergeError ? translated : (
         new MergeError(

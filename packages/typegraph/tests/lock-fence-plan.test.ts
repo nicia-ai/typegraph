@@ -83,6 +83,7 @@ import type {
   BackendCapabilities,
   TransactionBackend,
 } from "../src/backend/types";
+import { CompilerInvariantError } from "../src/errors";
 import { openProvenanceStore } from "../src/graph-merge";
 import { ensureIdentitySchemaStorage } from "../src/identity/schema-transition";
 import { rebuildIdentityClosureForContext } from "../src/identity/service";
@@ -105,6 +106,8 @@ import {
 } from "../src/store/operation-scope";
 import {
   allocateRecordedCommit,
+  createRecordedGraphLockMemo,
+  lockRecordedGraphDecision,
   lockRecordedGraphWrite,
 } from "../src/store/recorded-capture/clock";
 import { STORE_RUNTIME } from "../src/store/runtime-port";
@@ -239,7 +242,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     try {
       logged.reset();
       await expect(
-        lockRecordedGraphWrite(logged.backend, "graph-a"),
+        lockRecordedGraphWrite(logged.backend, "graph-a", undefined),
       ).resolves.toBeDefined();
       expect(
         advisoryLockIndices(
@@ -257,7 +260,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     try {
       logged.reset();
       await expect(
-        lockRecordedGraphWrite(logged.backend, "graph-a"),
+        lockRecordedGraphWrite(logged.backend, "graph-a", undefined),
       ).resolves.toBeDefined();
       expect(
         advisoryLockIndices(
@@ -277,7 +280,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     try {
       logged.reset();
       await expect(
-        lockRecordedGraphWrite(logged.backend, "graph-a"),
+        lockRecordedGraphWrite(logged.backend, "graph-a", undefined),
       ).resolves.toBeDefined();
       expect(
         advisoryLockIndices(
@@ -297,7 +300,9 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
         logged.backend.capabilities;
       const target = overlayCapabilities(logged.backend, undeclared);
       logged.reset();
-      await expect(lockRecordedGraphWrite(target, "graph-a")).rejects.toThrow(
+      await expect(
+        lockRecordedGraphWrite(target, "graph-a", undefined),
+      ).rejects.toThrow(
         expect.objectContaining({
           details: expect.objectContaining({
             code: "WRITE_FENCE_UNAVAILABLE",
@@ -322,7 +327,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     try {
       logged.reset();
       await expect(
-        lockRecordedGraphWrite(logged.backend, "graph-a"),
+        lockRecordedGraphWrite(logged.backend, "graph-a", undefined),
       ).resolves.toBeDefined();
       expect(
         advisoryLockIndices(
@@ -342,7 +347,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     try {
       logged.reset();
       await expect(
-        lockRecordedGraphWrite(logged.backend, "graph-a"),
+        lockRecordedGraphWrite(logged.backend, "graph-a", undefined),
       ).resolves.toBeDefined();
       expect(
         rowFenceAcquireIndices(
@@ -369,7 +374,7 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
     try {
       logged.reset();
       await expect(
-        lockRecordedGraphWrite(logged.backend, "graph-a"),
+        lockRecordedGraphWrite(logged.backend, "graph-a", undefined),
       ).resolves.toBeDefined();
       expect(
         advisoryLockIndices(
@@ -415,6 +420,146 @@ describe("T15 — J1 lockRecordedGraphWrite", () => {
       expect(logged.statements).toHaveLength(0);
     } finally {
       await logged.close();
+    }
+  });
+});
+
+describe("T15 — J1 a lock-only decision reads the memo of the session its lock was taken in", () => {
+  it("updates the memo the held lock carries, and refuses a held lock paired with another session's memo before any statement", async () => {
+    const logged = await createLoggedPostgresBackend();
+    try {
+      await logged.backend.transaction(async (target) => {
+        // Two sessions' single-flight memos over one transaction, as two
+        // capture scopes bind them.
+        const sessionMemo = createRecordedGraphLockMemo(
+          openTransactionSession(target),
+        );
+        const otherSessionMemo = createRecordedGraphLockMemo(
+          openTransactionSession(target),
+        );
+        const held = await lockRecordedGraphWrite(
+          target,
+          "graph-a",
+          sessionMemo,
+        );
+        expect(held.graphLocks).toBe(sessionMemo);
+
+        // With no session memo named, the decision reads and updates the one
+        // the held lock was taken into, and the other session's stays empty.
+        const before = sessionMemo.get("graph-a");
+        const decided = await lockRecordedGraphDecision(
+          target,
+          "graph-a",
+          held,
+        );
+        expect(decided.graphLocks).toBe(sessionMemo);
+        expect(sessionMemo.get("graph-a")).not.toBe(before);
+        expect(otherSessionMemo.size).toBe(0);
+
+        logged.reset();
+        await expect(
+          lockRecordedGraphDecision(target, "graph-a", held, otherSessionMemo),
+        ).rejects.toBeInstanceOf(CompilerInvariantError);
+        expect(logged.statements).toHaveLength(0);
+        expect(otherSessionMemo.size).toBe(0);
+
+        // The same pairing with a lock whose fence row is already advanced,
+        // which the decision would otherwise hand back at no statement.
+        await expect(
+          lockRecordedGraphDecision(
+            target,
+            "graph-a",
+            decided,
+            otherSessionMemo,
+          ),
+        ).rejects.toBeInstanceOf(CompilerInvariantError);
+        expect(logged.statements).toHaveLength(0);
+        expect(otherSessionMemo.size).toBe(0);
+      });
+    } finally {
+      await logged.close();
+    }
+  });
+});
+
+describe("T15 — J1 a lock-only decision never takes a memo from another transaction's lock", () => {
+  it("refuses a held lock earned on another transaction, before any statement on the deciding one", async () => {
+    const first = await createLoggedPostgresBackend();
+    const second = await createLoggedPostgresBackend();
+    try {
+      await first.backend.transaction(async (firstTarget) => {
+        // An advanced fence in the first transaction's memo.
+        const firstMemo = createRecordedGraphLockMemo(
+          openTransactionSession(firstTarget),
+        );
+        const firstLock = await lockRecordedGraphDecision(
+          firstTarget,
+          "graph-a",
+          undefined,
+          firstMemo,
+        );
+        expect(firstLock.graphLocks).toBe(firstMemo);
+        await second.backend.transaction(async (secondTarget) => {
+          second.reset();
+          await expect(
+            lockRecordedGraphDecision(secondTarget, "graph-a", firstLock),
+          ).rejects.toBeInstanceOf(CompilerInvariantError);
+          expect(second.statements).toHaveLength(0);
+        });
+      });
+    } finally {
+      await first.close();
+      await second.close();
+    }
+  });
+});
+
+describe("T15 — J1 a graph-lock memo serves only the transaction that filled it", () => {
+  it("refuses another transaction's memo on every entry path, before any statement on the deciding one", async () => {
+    const first = await createLoggedPostgresBackend();
+    const second = await createLoggedPostgresBackend();
+    try {
+      await first.backend.transaction(async (firstTarget) => {
+        // An advanced fence in the first transaction's memo.
+        const firstMemo = createRecordedGraphLockMemo(
+          openTransactionSession(firstTarget),
+        );
+        const firstLock = await lockRecordedGraphDecision(
+          firstTarget,
+          "graph-a",
+          undefined,
+          firstMemo,
+        );
+        await second.backend.transaction(async (secondTarget) => {
+          second.reset();
+          // The memo named on its own, with no held lock.
+          await expect(
+            lockRecordedGraphDecision(
+              secondTarget,
+              "graph-a",
+              undefined,
+              firstMemo,
+            ),
+          ).rejects.toBeInstanceOf(CompilerInvariantError);
+          // The memo and the lock it came with, together.
+          await expect(
+            lockRecordedGraphDecision(
+              secondTarget,
+              "graph-a",
+              firstLock,
+              firstMemo,
+            ),
+          ).rejects.toBeInstanceOf(CompilerInvariantError);
+          // The plain write lock reads the same memo.
+          await expect(
+            lockRecordedGraphWrite(secondTarget, "graph-a", firstMemo),
+          ).rejects.toBeInstanceOf(CompilerInvariantError);
+          expect(second.statements).toHaveLength(0);
+        });
+      });
+    } finally {
+      await first.close();
+      await second.close();
     }
   });
 });
@@ -860,13 +1005,16 @@ function identityProvisioningOptions(
     enablement: false as const,
     registry,
     recomputeDerivedRelations: (entry: OperationEntry) =>
-      rebuildIdentityClosureForContext({
-        backend: operationEntryBackend(entry),
-        graphId: identityGraph.id,
-        registry,
-        schema,
-        sameIdAcrossKinds: "fold",
-      }),
+      rebuildIdentityClosureForContext(
+        {
+          backend: operationEntryBackend(entry),
+          graphId: identityGraph.id,
+          registry,
+          schema,
+          sameIdAcrossKinds: "fold",
+        },
+        entry,
+      ),
   };
 }
 

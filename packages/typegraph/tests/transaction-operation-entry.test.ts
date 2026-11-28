@@ -41,6 +41,14 @@ import { TRANSACTION_RUNTIME } from "../src/store/types";
 import { requireDefined } from "../src/utils/presence";
 import { createTestBackend } from "./test-utils";
 
+/**
+ * The session each `openRootTransaction` call handed its callback: the one a
+ * root's own `transaction` member opened (the capture overlay's), or the one
+ * the mint opened over what the member handed out, inside the mint module
+ * where the `openTransactionSession` spy cannot see.
+ */
+const rootTransactionSessions = vi.hoisted((): unknown[] => []);
+
 vi.mock("../src/store/operation-scope", async (importOriginal) => {
   const actual: typeof OperationScopeModule = await importOriginal();
   return {
@@ -48,6 +56,17 @@ vi.mock("../src/store/operation-scope", async (importOriginal) => {
     enterOperation: vi.fn(actual.enterOperation),
     enterTransactionOperation: vi.fn(actual.enterTransactionOperation),
     openTransactionSession: vi.fn(actual.openTransactionSession),
+    openRootTransaction: vi.fn(
+      (...[root, fn, options]: Parameters<typeof actual.openRootTransaction>) =>
+        actual.openRootTransaction(
+          root,
+          (session) => {
+            rootTransactionSessions.push(session);
+            return fn(session);
+          },
+          options,
+        ),
+    ),
     openBoundTransactionSession: vi.fn(actual.openBoundTransactionSession),
   };
 });
@@ -105,13 +124,19 @@ function enteredScopes(): readonly EntryScope[] {
   ];
 }
 
-/** What each `openTransactionSession` call since the last clear returned. */
+/**
+ * What each `openTransactionSession` call since the last clear returned, then
+ * each session an `openRootTransaction` call handed its callback.
+ */
 function openedSessions(): readonly TransactionSession[] {
-  return openTransactionSessionSpy.mock.results.map((result) => {
-    if (result.type !== "return") throw new Error("mint threw");
-    const session: TransactionSession = result.value;
-    return session;
-  });
+  return [
+    ...openTransactionSessionSpy.mock.results.map((result) => {
+      if (result.type !== "return") throw new Error("mint threw");
+      const session: TransactionSession = result.value;
+      return session;
+    }),
+    ...rootTransactionSessions.map((session) => session as TransactionSession),
+  ];
 }
 
 /**
@@ -134,6 +159,7 @@ function clearMints(): void {
   enterOperationSpy.mockClear();
   enterTransactionOperationSpy.mockClear();
   openTransactionSessionSpy.mockClear();
+  rootTransactionSessions.length = 0;
   openBoundTransactionSessionSpy.mockClear();
 }
 
@@ -209,25 +235,22 @@ describe("a transaction-bound internal enters an operation of its transaction's 
     const source = { kind: "Source" as const, id: "source" };
 
     // A history store's backend is the recorded capture overlay: it opens
-    // the native transaction and a session of its own for its isolation
-    // check, flush and pre-commit hook, and runs them as one operation of it.
-    // `store.transaction` opens the Store's one session over the surface the
-    // overlay hands it, and enters every other operation from it.
+    // the native transaction and its one session, binds that session over
+    // the capture surface, and runs its isolation check, flush and pre-commit
+    // hook as one operation of it. `store.transaction` receives that session
+    // (`openRootTransaction`) and enters every other operation from it.
     function entered(session: TransactionSession | undefined): number {
       return enteredScopes().filter((scope) => scope === session).length;
     }
 
     clearMints();
     await provenance.holding();
-    const [holdingOverlay] = openedSessions();
-    const [holdingSession] = await boundSessions();
+    const [holdingSession] = openedSessions();
     expect(openedSessions()).toHaveLength(1);
-    expect(await boundSessions()).toHaveLength(1);
-    // The overlay's operation; then the transaction's opener and its
-    // context, and holding()'s one operation, which the lock and the read
-    // share.
+    expect(await boundSessions()).toEqual([holdingSession]);
+    // The overlay's operation, the transaction's opener and its context, and
+    // holding()'s one operation, which the lock and the read share.
     expect({
-      overlay: entered(holdingOverlay),
       session: entered(holdingSession),
       holding: enterTransactionOperationSpy.mock.results.map((result) =>
         result.type === "return" ?
@@ -235,22 +258,20 @@ describe("a transaction-bound internal enters an operation of its transaction's 
         : undefined,
       ),
       all: enteredScopes().length,
-    }).toEqual({ overlay: 1, session: 3, holding: [holdingSession], all: 4 });
+    }).toEqual({ session: 4, holding: [holdingSession], all: 4 });
 
     clearMints();
     await provenance.retract(source);
-    const [retractOverlay] = openedSessions();
-    const [retractSession] = await boundSessions();
+    const [retractSession] = openedSessions();
     expect(openedSessions()).toHaveLength(1);
-    expect(await boundSessions()).toHaveLength(1);
-    // The overlay's operation; then the transaction's opener and its
-    // context, the fences, the transition's reads, the source update and the
-    // fact's close: one operation each, all of the transaction's session.
+    expect(await boundSessions()).toEqual([retractSession]);
+    // The overlay's operation, the transaction's opener and its context, the
+    // fences, the transition's reads, the source update and the fact's
+    // close: one operation each, all of the transaction's one session.
     expect({
-      overlay: entered(retractOverlay),
       session: entered(retractSession),
       all: enteredScopes().length,
-    }).toEqual({ overlay: 1, session: 6, all: 7 });
+    }).toEqual({ session: 7, all: 7 });
     expect(store.graphId).toBe(graph.id);
   });
 

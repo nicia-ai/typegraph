@@ -7,7 +7,10 @@ import type { GraphBackend, RowProps } from "../backend/types";
 import type { AllNodeTypes, EdgeKinds, GraphDef } from "../core/define-graph";
 import type { TemporalMode } from "../core/types";
 import { ValidationError } from "../errors";
-import { enterQueryExecution } from "../query/builder/query-operation";
+import {
+  enterQueryExecution,
+  exitQueryExecution,
+} from "../query/builder/query-operation";
 import type { ExecutableOneStatementRead } from "../query/builder/types";
 import { compileKindFilter } from "../query/compiler/predicate-utils";
 import type { SqlSchema } from "../query/compiler/schema";
@@ -147,11 +150,14 @@ export function createNeighborRead<G extends GraphDef, K extends EdgeKinds<G>>(
   return {
     execute: async () => {
       if (options.edges.length === 0) return [];
-      return mapRows(
-        await enterQueryExecution(ctx).execute<NeighborRow>(
-          asCompiledRowsSql(query),
-        ),
-      );
+      const target = enterQueryExecution(ctx);
+      try {
+        return mapRows(
+          await target.execute<NeighborRow>(asCompiledRowsSql(query)),
+        );
+      } finally {
+        exitQueryExecution(ctx);
+      }
     },
     compileOneStatementBatchItem: () => ({
       query: asCompiledRowsSql(query),
@@ -198,11 +204,14 @@ export function createNeighborCountRead<
   return {
     execute: async () => {
       if (options.edges.length === 0) return 0;
-      return mapNeighborCountRows(
-        await enterQueryExecution(ctx).execute<NeighborRow>(
-          asCompiledRowsSql(query),
-        ),
-      );
+      const target = enterQueryExecution(ctx);
+      try {
+        return mapNeighborCountRows(
+          await target.execute<NeighborRow>(asCompiledRowsSql(query)),
+        );
+      } finally {
+        exitQueryExecution(ctx);
+      }
     },
     compileOneStatementBatchItem: () => ({
       query: asCompiledRowsSql(query),

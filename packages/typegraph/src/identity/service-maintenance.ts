@@ -12,7 +12,7 @@ import {
   enterOperation,
   openTransactionSession,
   type OperationEntry,
-  type StatementBackend,
+  operationEntryBackend,
   type StoreTransactionBackend,
 } from "../store/operation-scope";
 import {
@@ -122,16 +122,18 @@ function requireAtomicIdentityBackend(backend: Backend, graphId: string): void {
  * and has no `transaction` method to nest with, so it runs as-is.
  */
 async function runOnTransactionIfSupported(
-  backend: StatementBackend,
-  fn: (target: Backend) => Promise<void>,
+  entry: OperationEntry,
+  fn: (operation: OperationEntry, target: Backend) => Promise<void>,
 ): Promise<void> {
+  const backend = operationEntryBackend(entry);
   if ("transaction" in backend) {
-    await backend.transaction(async (transaction: StoreTransactionBackend) =>
-      fn(enterOperation(openTransactionSession(transaction)).backend),
-    );
+    await backend.transaction(async (transaction: StoreTransactionBackend) => {
+      const operation = enterOperation(openTransactionSession(transaction));
+      await fn(operation, operation.backend);
+    });
     return;
   }
-  await fn(backend);
+  await fn(entry, backend);
 }
 
 /**
@@ -142,39 +144,50 @@ async function runOnTransactionIfSupported(
  */
 export async function rebuildIdentityClosureForContext<G extends GraphDef>(
   ctx: IdentityRebuildContext<G>,
+  // Where `ctx.backend` came from: the root, or the operation whose handle it is.
+  entry: OperationEntry,
 ): Promise<void> {
   requireAtomicIdentityBackend(ctx.backend, ctx.graphId);
 
-  async function rebuildAtTarget(target: Backend): Promise<void> {
+  async function rebuildAtTarget(
+    operation: OperationEntry,
+    target: Backend,
+  ): Promise<void> {
     await lockIdentityGraph(target, ctx.graphId);
-    await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
-      const activeKinds = identityActiveKinds(ctx.registry);
-      const snapshot = await loadSnapshot(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        undefined,
-        activeKinds,
-        ctx.sameIdAcrossKinds,
-      );
-      validateSnapshotIntegrity(snapshot, ctx.registry, ctx.graphId);
-      await replaceClosure(
-        rawTarget,
-        ctx.schema,
-        ctx.graphId,
-        activeKinds,
-        ctx.sameIdAcrossKinds,
-      );
-    });
+    await withRecordedIdentityMutationTarget(
+      operation,
+      target,
+      async (rawTarget) => {
+        const activeKinds = identityActiveKinds(ctx.registry);
+        const snapshot = await loadSnapshot(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          undefined,
+          activeKinds,
+          ctx.sameIdAcrossKinds,
+        );
+        validateSnapshotIntegrity(snapshot, ctx.registry, ctx.graphId);
+        await replaceClosure(
+          rawTarget,
+          ctx.schema,
+          ctx.graphId,
+          activeKinds,
+          ctx.sameIdAcrossKinds,
+        );
+      },
+    );
   }
 
-  await runOnTransactionIfSupported(ctx.backend, async (target) =>
-    rebuildAtTarget(target),
+  await runOnTransactionIfSupported(entry, async (operation, target) =>
+    rebuildAtTarget(operation, target),
   );
 }
 
 export async function validateIdentityForContext<G extends GraphDef>(
   ctx: IdentityCallContext<G>,
+  // Where `ctx.backend` came from: the root, or the operation whose handle it is.
+  entry: OperationEntry,
 ): Promise<void> {
   requireAtomicIdentityBackend(ctx.backend, ctx.graphId);
 
@@ -205,7 +218,7 @@ export async function validateIdentityForContext<G extends GraphDef>(
     );
   }
 
-  await runOnTransactionIfSupported(ctx.backend, async (target) =>
+  await runOnTransactionIfSupported(entry, async (_operation, target) =>
     validateAtTarget(target),
   );
 }
@@ -451,6 +464,7 @@ export async function assertAffectedIdentityClassesConsistent<
   G extends GraphDef,
 >(
   ctx: IdentityConsistencyContext<G>,
+  entry: OperationEntry,
   target: Backend,
   seeds: readonly PlainNodeRef[],
 ): Promise<void> {
@@ -458,7 +472,7 @@ export async function assertAffectedIdentityClassesConsistent<
   await lockIdentityGraph(target, ctx.graphId);
   const observed = await findAffectedClassInconsistency(ctx, target, seeds);
   if (observed === undefined) return;
-  await withRecordedIdentityMutationTarget(target, async (rawTarget) => {
+  await withRecordedIdentityMutationTarget(entry, target, async (rawTarget) => {
     await replaceClosure(
       rawTarget,
       ctx.schema,
@@ -936,15 +950,20 @@ const NO_IDENTITY_FOLD: IdentityFoldPlan = { closureReferences: [] };
  */
 export async function assertIdentityFoldable(
   ctx: FoldContext,
+  entry: OperationEntry,
   target: Backend,
   references: readonly PlainNodeRef[],
 ): Promise<IdentityFoldPlan> {
   if (references.length === 0 || ctx.sameIdAcrossKinds === "ignore") {
     return NO_IDENTITY_FOLD;
   }
-  return withRecordedIdentityMutationTarget(target, async (rawTarget) => ({
-    closureReferences: await validateFoldPeers(ctx, rawTarget, references),
-  }));
+  return withRecordedIdentityMutationTarget(
+    entry,
+    target,
+    async (rawTarget) => ({
+      closureReferences: await validateFoldPeers(ctx, rawTarget, references),
+    }),
+  );
 }
 
 /**
@@ -953,6 +972,7 @@ export async function assertIdentityFoldable(
  */
 export async function applyIdentityFold(
   ctx: FoldContext,
+  entry: OperationEntry,
   target: Backend,
   plan: IdentityFoldPlan,
   // See {@link foldIdentityForCreatedNodes} for how the call site decides it.
@@ -960,11 +980,12 @@ export async function applyIdentityFold(
 ): Promise<void> {
   if (plan.closureReferences.length === 0) return;
   await lockIdentityGraph(target, ctx.graphId);
-  await writeIdentityFold(ctx, target, plan, cause);
+  await writeIdentityFold(ctx, entry, target, plan, cause);
 }
 
 export async function foldIdentityForCreatedNodes(
   ctx: FoldContext,
+  entry: OperationEntry,
   target: Backend,
   references: readonly PlainNodeRef[],
   // `restore` (a node resurrection re-running the fold) vs. `fold` (an
@@ -984,18 +1005,20 @@ export async function foldIdentityForCreatedNodes(
 ): Promise<void> {
   if (references.length === 0 || ctx.sameIdAcrossKinds === "ignore") return;
   await lockIdentityGraph(target, ctx.graphId);
-  const plan = await assertIdentityFoldable(ctx, target, references);
-  await writeIdentityFold(ctx, target, plan, cause);
+  const plan = await assertIdentityFoldable(ctx, entry, target, references);
+  await writeIdentityFold(ctx, entry, target, plan, cause);
 }
 
 async function writeIdentityFold(
   ctx: FoldContext,
+  entry: OperationEntry,
   target: Backend,
   plan: IdentityFoldPlan,
   cause: "fold" | "restore",
 ): Promise<void> {
   if (plan.closureReferences.length === 0) return;
   await withRecordedIdentityMutationTarget(
+    entry,
     target,
     async (rawTarget, _touch, noteTransition) => {
       const transitions = await replaceAffectedClosure(
@@ -1163,11 +1186,13 @@ async function refuseStrandedAssertionHistory(
  */
 export async function requireNodeValidityEndCompatible(
   ctx: Pick<IdentityServiceContext<GraphDef>, "graphId" | "schema">,
+  entry: OperationEntry,
   target: Backend,
   ref: PlainNodeRef,
   validTo: string | undefined,
 ): Promise<void> {
   await withRecordedIdentityMutationTarget(
+    entry,
     target,
     async (rawTarget, _touch, noteTransition) => {
       if (validTo !== undefined) {
@@ -1221,6 +1246,7 @@ export async function detachIdentityForNode(
     IdentityServiceContext<GraphDef>,
     "graphId" | "sameIdAcrossKinds" | "schema"
   >,
+  entry: OperationEntry,
   target: Backend,
   ref: PlainNodeRef,
   mode: "soft" | "hard",
@@ -1228,6 +1254,7 @@ export async function detachIdentityForNode(
 ): Promise<void> {
   await lockIdentityGraph(target, ctx.graphId);
   await withRecordedIdentityMutationTarget(
+    entry,
     target,
     async (rawTarget, touch, noteTransition) => {
       const touchesNode = sql`

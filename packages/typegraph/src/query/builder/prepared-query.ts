@@ -73,6 +73,7 @@ import { type SchemaIntrospector } from "../schema-introspector";
 import { assertComparedOperand } from "./order-by-field";
 import {
   enterQueryExecution,
+  exitQueryExecution,
   queryOperationSourceOf,
   withQueryOperationSource,
 } from "./query-operation";
@@ -628,7 +629,18 @@ export class PreparedQuery<R> {
   ): Promise<readonly R[]> {
     validateBindings(bindings, this.#parameterMetadata);
     const backend = enterQueryExecution(this.#execution);
+    try {
+      return await this.#executeAdmitted(backend, bindings);
+    } finally {
+      exitQueryExecution(this.#execution);
+    }
+  }
 
+  /** One {@link execute}, on the execution's admitted target. */
+  async #executeAdmitted(
+    backend: GraphBackend,
+    bindings: Readonly<Record<string, unknown>>,
+  ): Promise<readonly R[]> {
     if (
       this.#selectiveFields !== undefined &&
       !this.#selectiveExecutionDisabled

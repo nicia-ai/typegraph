@@ -1688,7 +1688,7 @@ export function registerRecordedTimeIntegrationTests(
         const reached = createGate();
         const release = createGate();
         const writing = base.transaction(async (target) => {
-          await lockRecordedGraphWrite(target, store.graphId);
+          await lockRecordedGraphWrite(target, store.graphId, undefined);
           await advanceRevisionClock(
             target,
             store.revisionSchema,

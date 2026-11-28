@@ -91,8 +91,9 @@ function routeOperations(): Routing {
   const enterOperation = operationScope.enterOperation;
   function recordingEnter(
     scope: operationScope.EntryScope,
+    parent?: operationScope.Operation,
   ): operationScope.OperationEntry {
-    const entry = enterOperation(scope);
+    const entry = enterOperation(scope, parent);
     const session = operationScope.operationEntrySession(entry);
     if (session === undefined) return entry;
     entered.push(session);
@@ -222,7 +223,7 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
   context: IntegrationTestContext,
 ): void {
   describe("capture and flush operation routing", () => {
-    it("a history transaction's writes enter its one session, and the capture flush goes through the overlay's operation", async () => {
+    it("a history transaction has one session, which its writes enter and the capture flush goes through the overlay's operation of", async () => {
       const store = await context.createHistoryStore(integrationTestGraph);
       const routing = routeOperations();
       try {
@@ -236,9 +237,9 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
         });
         expect({
           sessions: routing.sessions.length,
-          // The overlay's session first, then the Store's.
-          writesOfTheStoreSession: writes.map(
-            (session) => session === routing.sessions[1],
+          // The overlay opens the session and hands it to the Store.
+          writesOfTheSession: writes.map(
+            (session) => session === routing.sessions[0],
           ),
           // The overlay's isolation check, on PostgreSQL.
           isolation: sessionsRouted(routing, "setup", isIsolationCheck),
@@ -251,20 +252,44 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
           ),
           recorded: outcome.receipt.recorded !== undefined,
         }).toEqual({
-          sessions: 2,
+          sessions: 1,
           isolation: store.backend.dialect === "postgres" ? [0] : [],
-          writesOfTheStoreSession: writes.map(() => true),
-          // The write goes through its operation of the Store session, whose
-          // surface the Store bound over the transaction the overlay's
-          // operation handed it.
-          callback: [0, 1],
+          writesOfTheSession: writes.map(() => true),
+          // The write goes through its operation of that session, which hands
+          // out the capture surface the overlay bound it over.
+          callback: [0],
           // The capture flush, once the callback settled, goes through the
-          // overlay's own operation and nothing else.
+          // overlay's own operation of it.
           flush: [0],
           flushWrites: [0],
           recorded: true,
         });
         expect(writes.length).toBeGreaterThan(0);
+      } finally {
+        routing.restore();
+      }
+    });
+
+    it("a history Store's own write opens one session, the capture overlay's", async () => {
+      const store = await context.createHistoryStore(
+        routedGraph("capture_routing_root_write"),
+      );
+      const routing = routeOperations();
+      try {
+        routing.enter("write");
+        await store.nodes.RoutedItem.create({ label: "root" });
+        expect({
+          sessions: routing.sessions.length,
+          write: sessionsRouted(routing, "write"),
+          flushWrites: sessionsRouted(routing, "write", isRecordedNodeWrite),
+        }).toEqual({
+          // The write opens its transaction through the capture overlay,
+          // which opens the transaction's one session and hands it to the
+          // write; the capture flush goes through that session too.
+          sessions: 1,
+          write: [0],
+          flushWrites: [0],
+        });
       } finally {
         routing.restore();
       }
@@ -461,11 +486,11 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
         const components = await view.algorithms.weaklyConnectedComponents({
           edges: ["routedLink"],
         });
-        // Three units, each opening a session where it opens or joins the
-        // read transaction: the capture overlay under the recorded read
-        // overlay under the algorithm. Each statement the algorithm sends
-        // goes through an operation of each of the three, and the read
-        // overlay's own origin checks through two of them.
+        // One session over the read transaction: the one the capture
+        // overlay opens and hands the recorded read overlay above it, which
+        // narrows it to its guarded surface and hands it to the algorithm.
+        // The read overlay's origin checks and every statement the algorithm
+        // sends go through operations of that session.
         const perSession = routing.sessions.map(
           (session) =>
             routing.calls.filter((call) => call.session === session).length,
@@ -474,7 +499,7 @@ export function registerCaptureFlushOperationRoutingIntegrationTests(
           found: components.some((component) => component.size === 2),
           sessions: routing.sessions.length,
           everySessionRouted: perSession.every((count) => count > 0),
-        }).toEqual({ found: true, sessions: 3, everySessionRouted: true });
+        }).toEqual({ found: true, sessions: 1, everySessionRouted: true });
       } finally {
         routing.restore();
       }

@@ -54,7 +54,7 @@ import { sql } from "../../query/sql-fragment";
 import { markFixedSchemaWorkingCopyBackend } from "../../store/fixed-schema-working-copy";
 import {
   enterOperation,
-  openTransactionSession,
+  openRootTransaction,
 } from "../../store/operation-scope";
 import {
   createStore,
@@ -1571,12 +1571,11 @@ export function createPostgresWorkingCopyManager<G extends GraphDef>(
         );
       }
       await assertAllocationSession(backend, allocationId, ownershipToken);
-      await sourceBackend.transaction(async (sourceTransaction) => {
-        // The clone opened this transaction on the source: its session opens
-        // here, and the clone is its one operation.
-        const operation = enterOperation(
-          openTransactionSession(sourceTransaction),
-        );
+      await openRootTransaction(sourceBackend, async (session) => {
+        // The clone opens this transaction on the source, in the one session
+        // of it (a history source's capture overlay opens its own), and the
+        // clone is its one operation.
+        const operation = enterOperation(session);
         const transaction = operation.backend;
         await assertAllocationSession(
           transaction,

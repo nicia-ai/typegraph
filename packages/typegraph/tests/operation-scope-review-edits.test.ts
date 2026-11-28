@@ -88,12 +88,14 @@ const STATEMENT_ON_PUBLIC_PARAMETER: Edit = {
   file: "src/query/builder/executable-projection-query.ts",
   replacements: [
     [
-      `    return this.#executeOnStatementBackend(() =>
-      operationEntryBackend(enterTargetOperation(backend)),
+      `    return this.#executeOnStatementBackend(
+      () => operationEntryBackend(enterTargetOperation(backend)),
+      false,
     );`,
       `    void backend.getNode("graph", "Kind", "id");
-    return this.#executeOnStatementBackend(() =>
-      operationEntryBackend(enterTargetOperation(backend)),
+    return this.#executeOnStatementBackend(
+      () => operationEntryBackend(enterTargetOperation(backend)),
+      false,
     );`,
     ],
   ],

@@ -69,6 +69,7 @@ import {
 } from "../../store/operation-scope";
 import {
   lockRecordedGraphWrite,
+  recordedGraphLockMemoOf,
   withTransactionPreCommitHook,
 } from "../../store/recorded-capture";
 import type { Store } from "../../store/store";
@@ -445,7 +446,13 @@ async function operateInAllocation<G extends GraphDef>(
     }
     // The write fence comes BEFORE the coordinate read: a writer that takes
     // this lock cannot commit between `before` and `apply` once we hold it.
-    await lockRecordedGraphWrite(target, store.graphId);
+    // Into the session's single-flight memo, so the host's captured writes
+    // in this transaction find the lock already held.
+    await lockRecordedGraphWrite(
+      target,
+      store.graphId,
+      recordedGraphLockMemoOf(operation),
+    );
     attempt.before = await coordinatesAt(store, operation);
     await operations.apply(transaction, request.mutation);
   };

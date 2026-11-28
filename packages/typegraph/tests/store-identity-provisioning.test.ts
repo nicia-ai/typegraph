@@ -168,13 +168,16 @@ async function rebuildSeparationFromLedger(
   result: LocalSqliteBackendResult,
   entry: OperationEntry,
 ): Promise<void> {
-  await rebuildIdentityClosureForContext<typeof enabledGraph>({
-    backend: operationEntryBackend(entry),
-    graphId: GRAPH_ID,
-    registry: buildKindRegistry(enabledGraph),
-    schema: identitySchema(result),
-    sameIdAcrossKinds: "fold",
-  });
+  await rebuildIdentityClosureForContext<typeof enabledGraph>(
+    {
+      backend: operationEntryBackend(entry),
+      graphId: GRAPH_ID,
+      registry: buildKindRegistry(enabledGraph),
+      schema: identitySchema(result),
+      sameIdAcrossKinds: "fold",
+    },
+    entry,
+  );
 }
 
 /** The same backend with one optional port withheld, as a custom backend may. */

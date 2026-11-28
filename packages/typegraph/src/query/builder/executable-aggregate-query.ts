@@ -33,7 +33,7 @@ import type {
   PreparedParameterDeclaration,
 } from "./prepared-bindings";
 import { hasParameterReferences } from "./prepared-query";
-import { enterQueryExecution } from "./query-operation";
+import { enterQueryExecution, exitQueryExecution } from "./query-operation";
 import {
   buildQueryTemplate,
   type CompiledTemplate,
@@ -505,29 +505,33 @@ export class ExecutableAggregateQuery<
     }
 
     const target = enterQueryExecution(this.#config) ?? backend;
-    const executeRaw = target.executeRaw;
-    const template =
-      executeRaw === undefined ? undefined : this.#resolveTemplate(ast);
-    const rows =
-      template !== undefined && executeRaw !== undefined ?
-        await executeRaw<Record<string, unknown>>(
-          template.sql,
-          fillTemplateParams(
-            template.params,
-            {},
-            this.#config.dialect ?? "sqlite",
-          ),
-        )
-      : await target.execute<Record<string, unknown>>(
-          compileNameCheckedQuery(
-            ast,
-            this.#config.graphId,
-            this.#compileOptions(),
-            "decoded",
-          ),
-        );
+    try {
+      const executeRaw = target.executeRaw;
+      const template =
+        executeRaw === undefined ? undefined : this.#resolveTemplate(ast);
+      const rows =
+        template !== undefined && executeRaw !== undefined ?
+          await executeRaw<Record<string, unknown>>(
+            template.sql,
+            fillTemplateParams(
+              template.params,
+              {},
+              this.#config.dialect ?? "sqlite",
+            ),
+          )
+        : await target.execute<Record<string, unknown>>(
+            compileNameCheckedQuery(
+              ast,
+              this.#config.graphId,
+              this.#compileOptions(),
+              "decoded",
+            ),
+          );
 
-    return this.#mapResults(rows);
+      return this.#mapResults(rows);
+    } finally {
+      exitQueryExecution(this.#config);
+    }
   }
 
   /**

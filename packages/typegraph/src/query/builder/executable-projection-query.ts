@@ -27,7 +27,7 @@ import {
   hasParameterReferences,
   validateQueryBindings,
 } from "./prepared-query";
-import { enterQueryExecution } from "./query-operation";
+import { enterQueryExecution, exitQueryExecution } from "./query-operation";
 import {
   buildQueryTemplate,
   buildReadInstantTemplate,
@@ -187,7 +187,7 @@ export class ExecutableProjectionQuery<
 
   execute(): Promise<readonly Result[]> {
     this.#requireBackend();
-    return this.#executeOnStatementBackend(() => this.#enterExecution());
+    return this.#executeOnStatementBackend(() => this.#enterExecution(), true);
   }
   /** Runs on an explicitly supplied target, including store.batch() transactions. */
   executeOn(
@@ -196,21 +196,30 @@ export class ExecutableProjectionQuery<
   executeOn(
     backend: GraphBackend | StoreTransactionBackend,
   ): Promise<readonly Result[]> {
-    return this.#executeOnStatementBackend(() =>
-      operationEntryBackend(enterTargetOperation(backend)),
+    return this.#executeOnStatementBackend(
+      () => operationEntryBackend(enterTargetOperation(backend)),
+      false,
     );
   }
   /**
    * One row read: refuses an unbound query, then `enter` supplies its
-   * statement target, once; a read that refuses enters no operation.
+   * statement target, once; a read that refuses enters no operation. With
+   * `admitted`, `enter` admitted the read on its session
+   * (`enterQueryExecution`), and it is released once the read settles.
    */
   async #executeOnStatementBackend(
     enter: () => StatementBackend,
+    admitted: boolean,
   ): Promise<readonly Result[]> {
     const ast = this.toAst();
     this.#assertBound(ast);
-    const rows = await this.#fetchRows(enter(), ast);
-    return rows.map((row) => this.#decodeRow(row));
+    const backend = enter();
+    try {
+      const rows = await this.#fetchRows(backend, ast);
+      return rows.map((row) => this.#decodeRow(row));
+    } finally {
+      if (admitted) exitQueryExecution(this.#config);
+    }
   }
   async first(): Promise<Result | undefined> {
     const rows = await this.limit(
@@ -238,12 +247,13 @@ export class ExecutableProjectionQuery<
     return {
       execute: async (bindings) => {
         validateQueryBindings([ast], bindings);
-        const rows = await this.#fetchRows(
-          this.#enterExecution(),
-          ast,
-          bindings,
-        );
-        return rows.map((row) => this.#decodeRow(row));
+        const backend = this.#enterExecution();
+        try {
+          const rows = await this.#fetchRows(backend, ast, bindings);
+          return rows.map((row) => this.#decodeRow(row));
+        } finally {
+          exitQueryExecution(this.#config);
+        }
       },
     };
   }
@@ -456,6 +466,18 @@ export class ExecutableProjectionQuery<
     this.#assertBound(ast);
     this.#requireBackend();
     const backend = this.#enterExecution();
+    try {
+      return await this.#scalarTerminalOn(backend, ast, operation);
+    } finally {
+      exitQueryExecution(this.#config);
+    }
+  }
+  /** {@link #scalarTerminal} on the execution's admitted target. */
+  async #scalarTerminalOn(
+    backend: GraphBackend,
+    ast: QueryAst,
+    operation: "count" | "exists",
+  ): Promise<number> {
     const checked = getQueryBuilderInternalContext(
       this.#config,
     ).expectedSchemaVersion;

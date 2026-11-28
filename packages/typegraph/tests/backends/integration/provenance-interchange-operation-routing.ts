@@ -154,8 +154,9 @@ function routeOperationsThroughRecordingHandles(): Recording {
   const spies = [
     vi
       .spyOn(operationScope, "enterOperation")
-      .mockImplementation((scope: operationScope.EntryScope) =>
-        recordingEntry(enterOperation(scope)),
+      .mockImplementation(
+        (scope: operationScope.EntryScope, parent?: operationScope.Operation) =>
+          recordingEntry(enterOperation(scope, parent)),
       ),
     vi
       .spyOn(operationScope, "enterTransactionOperation")
@@ -289,19 +290,16 @@ export function registerProvenanceInterchangeOperationRoutingIntegrationTests(
       try {
         clear(recording);
         const report = await provenance.retract(source);
-        const [overlay, session, ...others] = distinctSessions(recording);
+        const [session, ...others] = distinctSessions(recording);
         const transitionReads = callsNaming(recording, [
           "Source",
           ...SUPPORT_EDGE_KINDS,
         ]);
         expect({
           died: report.died.map((fact) => fact.id),
-          // The capture overlay's session, and the one session the
-          // transition's transaction opened for the Store.
+          // The one session of the transition's transaction: the capture
+          // overlay opens it and hands it to the Store.
           sessions: distinctSessions(recording).length,
-          overlayOperations: recording.entered.filter(
-            (entered) => entered === overlay,
-          ).length,
           otherSessions: others.length,
           // The transition's own source read and support reads went through
           // a handle, of the session the transition's transaction opened.
@@ -314,8 +312,7 @@ export function registerProvenanceInterchangeOperationRoutingIntegrationTests(
           ),
         }).toEqual({
           died: ["fact"],
-          sessions: 2,
-          overlayOperations: 1,
+          sessions: 1,
           otherSessions: 0,
           sourceRead: true,
           supportReads: true,
@@ -366,19 +363,16 @@ export function registerProvenanceInterchangeOperationRoutingIntegrationTests(
             (call) => call.operation,
           ),
         );
-        const [overlay] = recording.entered;
-        // The Store's session: the transaction's opener, its context, and
-        // holding()'s own operation, entered last.
+        // The transaction's one session: the capture overlay's own operation
+        // (the first), the transaction's opener, its context, and holding()'s
+        // own operation, entered last.
         const holdingOperation = recording.entered.length - 1;
         const storeCalls = recording.calls.filter(
-          (call) => call.session !== overlay,
+          (call) => call.operation !== 0,
         );
         expect({
           believed: believed.map((fact) => fact.id),
           sessions: distinctSessions(recording).length,
-          overlayOperations: recording.entered.filter(
-            (entered) => entered === overlay,
-          ).length,
           supportOperations: [...supportOperations],
           // On a backend whose plan takes a keyed lock, the graph lock went
           // through the operation the support reads went through.
@@ -395,8 +389,7 @@ export function registerProvenanceInterchangeOperationRoutingIntegrationTests(
           ),
         }).toEqual({
           believed: ["fact"],
-          sessions: 2,
-          overlayOperations: 1,
+          sessions: 1,
           supportOperations: [holdingOperation],
           graphLocks: lockSql === undefined ? [] : [holdingOperation],
           throughTheOperation: true,
@@ -472,19 +465,16 @@ export function registerProvenanceInterchangeOperationRoutingIntegrationTests(
         clear(recording);
         const chunks: unknown[] = [];
         for await (const chunk of exportGraphStream(store)) chunks.push(chunk);
-        const [overlay] = recording.entered;
+        // The snapshot transaction's one session: the capture overlay's own
+        // operation is the first, the export's the second.
         const exportCalls = recording.calls.filter(
-          (call) => call.session !== overlay,
+          (call) => call.operation !== 0,
         );
         expect({
           exported: chunks.length > 0,
           operations: recording.entered.length,
-          overlayOperations: recording.entered.filter(
-            (entered) => entered === overlay,
-          ).length,
+          sessions: distinctSessions(recording).length,
           routed: exportCalls.length > 0,
-          // The overlay's operation is the first; the export's own is the
-          // second, of the session the export opened.
           throughTheOperation: exportCalls.every(
             (call) => call.operation === 1,
           ),
@@ -493,7 +483,7 @@ export function registerProvenanceInterchangeOperationRoutingIntegrationTests(
           // A backend without interactive transactions exports from the
           // root, which enters nothing.
           operations: interactive ? 2 : 0,
-          overlayOperations: interactive ? 1 : 0,
+          sessions: interactive ? 1 : 0,
           routed: interactive,
           throughTheOperation: true,
         });

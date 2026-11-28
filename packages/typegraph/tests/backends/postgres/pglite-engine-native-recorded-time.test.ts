@@ -9,7 +9,7 @@
  */
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import {
@@ -31,11 +31,15 @@ import {
   type TransactionBackend,
 } from "../../../src/backend/types";
 import { sql } from "../../../src/query/sql-fragment";
+import type * as OperationScopeModule from "../../../src/store/operation-scope";
 import {
   enterOperation,
+  enterTransactionOperation,
   openTransactionSession,
 } from "../../../src/store/operation-scope";
 import { createMutationWitness } from "../../../src/store/recorded-capture";
+import { storeRuntime } from "../../../src/store/runtime-port";
+import { requireDefined } from "../../../src/utils/presence";
 import { attachEngineNativeRecordedTime } from "../../engine-native-recorded-time-fixture";
 import {
   buildEngineNativeSimulation,
@@ -310,6 +314,57 @@ describe("engine-native recorded time: transaction receipts (PGlite)", () => {
   });
 
   /**
+   * An identity write another copy of TypeGraph hands this copy's Store
+   * through the runtime port, inside the Store's receipted transaction: the
+   * operation it hands over was opened by that copy over the witness's
+   * surface, so the port re-enters the session the surface was built for and
+   * the write reaches the witness bound to it. MUTATION-PROOF: dropping the
+   * session the witness's `wrap` puts on its surface makes this test fail:
+   * the port joins the handle as a session of its own, the assertion commits
+   * unobserved, and `receipt.recorded` comes back `undefined`.
+   */
+  it("stamps a recorded instant for an identity write another copy hands the store's runtime port", async () => {
+    pglite = await PGlite.create();
+    const observedSessions: TransactionBackend[] = [];
+    const backend = await createEngineNativeReceiptBackend(
+      pglite,
+      observedSessions,
+    );
+    const [store] = await createStoreWithSchema(identityReceiptGraph, backend, {
+      history: true,
+    });
+    const person = await store.nodes.PersonRecord.create({ name: "Ada" });
+    const author = await store.nodes.AuthorRecord.create({
+      penName: "A. Lovelace",
+    });
+    vi.resetModules();
+    const foreign: typeof OperationScopeModule =
+      await import("../../../src/store/operation-scope");
+    expect(foreign.enterTransactionOperation).not.toBe(
+      enterTransactionOperation,
+    );
+
+    const outcome = await store.transactionWithReceipt(async (tx) => {
+      await storeRuntime(store).applyIdentityMergeAtTarget(
+        foreign.enterTransactionOperation(tx),
+        [],
+        [
+          {
+            id: "assertion-from-another-copy",
+            relation: "same",
+            a: { kind: "AuthorRecord", id: author.id },
+            b: { kind: "PersonRecord", id: person.id },
+            validFrom: requireDefined(author.meta.validFrom),
+          },
+        ],
+      );
+    });
+
+    expect(outcome.receipt.recorded).toBeDefined();
+    expect(await store.identity.membersOf(person)).toHaveLength(2);
+  });
+
+  /**
    * `createMutationWitness().wrap` uses `deriveBackend`, not
    * `deriveTransactionSessionBackend`, so wrapping a session that declared
    * `atomicBatch: "session"` (PostgreSQL-family backends inside an open
@@ -329,9 +384,8 @@ describe("engine-native recorded time: transaction receipts (PGlite)", () => {
     await backend.transaction((txBackend) => {
       capabilitiesSeen.push(txBackend.capabilities.execution.atomicBatch);
       const witness = createMutationWitness();
-      const wrapped = witness.wrap(
-        enterOperation(openTransactionSession(txBackend)).backend,
-      );
+      const session = openTransactionSession(txBackend);
+      const wrapped = witness.wrap(enterOperation(session).backend, session);
       capabilitiesSeen.push(wrapped.capabilities.execution.atomicBatch);
       return Promise.resolve();
     });

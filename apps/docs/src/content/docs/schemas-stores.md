@@ -2399,37 +2399,63 @@ writes keeps none of them:
 
 - node and edge `bulkHardDelete`
   (see [Batch methods and failures](#batch-methods-and-failures));
-- `importGraph` writing into a transaction that other calls also use (its window-end updates, edge rounds
-  and composition moves each run behind a savepoint; see [Interchange](/interchange));
 - `applyMergePlanInTransaction`, the adopted merge apply
   (see [Apply a plan with application writes](/graph-merge#apply-a-plan-with-application-writes)).
 
 A savepoint's rollback undoes every statement issued on its transaction since the savepoint was taken,
-whichever call issued it. When another call on the same transaction starts without awaiting one of these
-calls, for example under `Promise.all`, and the savepoint-guarded call fails after it has written, a
-callback that catches the failure and commits loses the other call's writes, even though that call
-completed and reported success. The same rollback can drop that call's recorded-history row and its count
-in the transaction receipt while its write still commits.
+whichever call issued it. A call that overlapped such a call could therefore complete, report success, and
+still lose its write, its count in the transaction receipt and its recorded-history row when the
+savepoint rolled back. TypeGraph refuses the overlap instead, with
+[`TransactionCallRefusedError`](/errors#transactioncallrefusederror):
+
+- a call started while another call's savepoint unit is open on the same transaction context is refused
+  before it issues any statement (`details.reason: "savepoint-open"`). This includes a write that a hook
+  starts through a captured `tx` while an adopted merge apply runs;
+- a `bulkHardDelete` or adopted merge apply started while other calls are still running on the same
+  transaction context is refused before its first statement (`details.reason: "siblings-in-flight"`).
+
+A read is a call like any other, and the rule has no exemption for it. Every member a transaction
+context offers is a call: collection reads (`getById`, `find`, `count`, …), query terminals
+(`execute`, `first`, `count`, `paginate`, …), `describe()`, `validateStore()`, `batchOnce()`,
+`neighbors()`, `subgraph()`, the identity facade's reads, `assertUnchangedSince()` and the read members
+of `tx.backend`. A read started while another call's unit is open is refused before its first statement,
+and a read is running from its call until its promise settles, so a unit that tries to open beside it is
+refused. A refused read rejects its promise; no member that returns a promise throws its refusal
+synchronously.
+
+A stream is a call page by page: each page it fetches is its own call, running only while that page's
+statement does. A unit may therefore open between two pages, and the stream's next page is then refused
+while the unit is open; advance the stream once the unit's call has settled.
+
+A write is running until everything it records has been recorded, its count in the transaction receipt
+(and in every enclosing `tx.measure()` scope) included, so a unit's rollback never removes the count of
+a row written before the unit opened.
+
+The overlap is refused, not queued: a queued call would wait forever when the unit's own work awaits it.
+The writes and reads an adopted merge apply composes run as part of that call and are not refused. Calls
+awaited one after another are unaffected.
 
 Await each of these calls before starting other work on the same transaction:
 
 ```typescript
-// Unsafe: the bulkHardDelete's rollback can undo the bulkCreate.
+// Refused: one of the two calls rejects with TransactionCallRefusedError.
 await store.transaction(async (tx) => {
   await Promise.all([
-    tx.nodes.Person.bulkHardDelete(staleIds).catch(() => undefined),
+    tx.nodes.Person.bulkHardDelete(staleIds),
     tx.nodes.Person.bulkCreate(newPeople),
   ]);
 });
 
-// Safe: one call at a time.
+// One call at a time.
 await store.transaction(async (tx) => {
-  await tx.nodes.Person.bulkHardDelete(staleIds).catch(() => undefined);
+  await tx.nodes.Person.bulkHardDelete(staleIds);
   await tx.nodes.Person.bulkCreate(newPeople);
 });
 ```
 
-TypeGraph does not detect or refuse overlapping calls; see
+The refusal covers calls on one transaction context. Two contexts over one native transaction (for
+example a history Store and a plain Store adopting the same `sql` transaction) are not checked against
+each other; see
 [Limitations](/limitations#overlapping-calls-inside-one-transaction).
 
 #### Return values

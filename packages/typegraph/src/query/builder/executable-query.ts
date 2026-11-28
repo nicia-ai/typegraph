@@ -86,6 +86,7 @@ import {
 import { hasParameterReferences, PreparedQuery } from "./prepared-query";
 import {
   enterQueryExecution,
+  exitQueryExecution,
   queryOperationSourceOf,
   withQueryOperationSource,
 } from "./query-operation";
@@ -680,27 +681,35 @@ export class ExecutableQuery<
     if (checked !== undefined) return this.executeChecked(checked.value);
 
     const backend = this.#enterExecution();
+    try {
+      // Phase 1: Try optimized execution
+      const optimizedResult = await this.#tryOptimizedExecutionOn(
+        backend,
+        "recorded-query",
+      );
+      if (optimizedResult !== undefined) {
+        return optimizedResult;
+      }
 
-    // Phase 1: Try optimized execution
-    const optimizedResult = await this.#tryOptimizedExecutionOn(
-      backend,
-      "recorded-query",
-    );
-    if (optimizedResult !== undefined) {
-      return optimizedResult;
+      // Phase 2: Fall back to full fetch (cached template + executeRaw, or a
+      // fresh literal compile on backends without raw execution).
+      const rows = await this.#fetchRows(
+        backend,
+        ast,
+        "full",
+        "recorded-query",
+      );
+
+      // Cast: runtime context includes recursive aliases; type erasure in mapResults is safe
+      return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
+        rows,
+        this.#state.startAlias,
+        this.#state.traversals,
+        this.#selectFn,
+      );
+    } finally {
+      exitQueryExecution(this.#config);
     }
-
-    // Phase 2: Fall back to full fetch (cached template + executeRaw, or a
-    // fresh literal compile on backends without raw execution).
-    const rows = await this.#fetchRows(backend, ast, "full", "recorded-query");
-
-    // Cast: runtime context includes recursive aliases; type erasure in mapResults is safe
-    return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
-      rows,
-      this.#state.startAlias,
-      this.#state.traversals,
-      this.#selectFn,
-    );
   }
 
   /** Returns the first mapped row, preserving an existing zero limit. */
@@ -718,18 +727,23 @@ export class ExecutableQuery<
       const rows = await query.executeChecked(checked.value);
       return rows[0];
     }
-    const rows = await query.#fetchRows(
-      query.#enterExecution(),
-      query.toAst(),
-      "full",
-      "recorded-query-first",
-    );
-    return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
-      rows,
-      this.#state.startAlias,
-      this.#state.traversals,
-      this.#selectFn,
-    )[0];
+    const backend = query.#enterExecution();
+    try {
+      const rows = await query.#fetchRows(
+        backend,
+        query.toAst(),
+        "full",
+        "recorded-query-first",
+      );
+      return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
+        rows,
+        this.#state.startAlias,
+        this.#state.traversals,
+        this.#selectFn,
+      )[0];
+    } finally {
+      exitQueryExecution(query.#config);
+    }
   }
 
   /** Counts SQL match rows after grouping, offset, and limit, without running the selector. */
@@ -761,23 +775,27 @@ export class ExecutableQuery<
     }
     const ast = this.toAst();
     const backend = this.#enterExecution();
-    const rows = await this.#executeOnBackend(
-      backend,
-      executeSchemaCheckedRead({
+    try {
+      const rows = await this.#executeOnBackend(
         backend,
-        ast,
-        graphId: this.#config.graphId,
-        expectedVersion: expectedSchemaVersion,
-        compile: () => this.#compileCheckedRead(ast),
-      }),
-      "recorded-checked-query",
-    );
-    return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
-      rows,
-      this.#state.startAlias,
-      this.#state.traversals,
-      this.#selectFn,
-    );
+        executeSchemaCheckedRead({
+          backend,
+          ast,
+          graphId: this.#config.graphId,
+          expectedVersion: expectedSchemaVersion,
+          compile: () => this.#compileCheckedRead(ast),
+        }),
+        "recorded-checked-query",
+      );
+      return mapResults<Aliases, EdgeAliases, R, RecursiveAliases>(
+        rows,
+        this.#state.startAlias,
+        this.#state.traversals,
+        this.#selectFn,
+      );
+    } finally {
+      exitQueryExecution(this.#config);
+    }
   }
 
   /**
@@ -1717,6 +1735,31 @@ export class ExecutableQuery<
 
     const direction = isBackward ? "backward" : "forward";
     const backend = this.#enterExecution();
+    try {
+      return await this.#paginateOn(
+        backend,
+        cursorData,
+        direction,
+        limit,
+        fetchLimit,
+        cursor,
+        isBackward,
+      );
+    } finally {
+      exitQueryExecution(this.#config);
+    }
+  }
+
+  /** One page of {@link paginate}, run on the execution's admitted target. */
+  async #paginateOn(
+    backend: StatementBackend,
+    cursorData: CursorData | undefined,
+    direction: "forward" | "backward",
+    limit: number,
+    fetchLimit: number,
+    cursor: string | undefined,
+    isBackward: boolean,
+  ): Promise<PaginatedResult<R>> {
     const optimized = await this.#tryOptimizedPaginate(
       backend,
       cursorData,
