@@ -153,6 +153,16 @@ export { defineSubgraphProject, indexSubgraph } from "./subgraph";
 
 // Store
 export type { ClaimOwner, ClaimTarget } from "./claims/axis";
+export type {
+  UniquenessClaimFinding,
+  UniquenessClaimMissingFinding,
+  UniquenessClaimStaleFinding,
+  UniquenessValueDuplicate,
+} from "./claims/uniqueness-claim-audit";
+export type {
+  UniquenessClaimRepairOptions,
+  UniquenessClaimRepairResult,
+} from "./claims/uniqueness-claim-repair";
 export type { ConstraintFenceViolation } from "./claims/verify";
 export type { HistoryStoreBackend } from "./history-store-backend";
 export type {

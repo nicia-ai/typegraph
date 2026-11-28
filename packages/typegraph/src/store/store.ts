@@ -311,6 +311,12 @@ import {
   type ResolvedNodeUpsert,
 } from "./claims/resolved-node-claims";
 import {
+  applyUniquenessClaimRepair,
+  planUniquenessClaimRepairResult,
+  type UniquenessClaimRepairOptions,
+  type UniquenessClaimRepairResult,
+} from "./claims/uniqueness-claim-repair";
+import {
   type ConstraintFenceViolation,
   verifyConstraintFences as verifyConstraintFencesImpl,
 } from "./claims/verify";
@@ -1053,6 +1059,9 @@ export type StoreCore<G extends GraphDef> = Readonly<{
   ) => Promise<ReembedVectorFieldResult>;
   verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
   verifyConstraintFences: () => Promise<readonly ConstraintFenceViolation[]>;
+  repairUniquenessClaims: (
+    options?: UniquenessClaimRepairOptions,
+  ) => Promise<UniquenessClaimRepairResult>;
   repairContributions: () => Promise<ContributionRepairResult>;
   probeContributions: () => Promise<ContributionProbeResult>;
   rebuildContribution: (
@@ -7328,8 +7337,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * is then refused with the ordinary typed error naming the incumbent. This is
    * how an operator sees that state before a user does.
    *
+   * It also reports every uniqueness claim that no longer fences the value its
+   * holder stores (`nodeUniquenessClaimStale`, `nodeUniquenessClaimMissing`),
+   * found by deriving each holder's key again from its stored row, and every
+   * value two live nodes store under one constraint (`nodeUniqueness`).
+   *
    * Reports; never repairs. Which of two live claimants keeps the axis is a
-   * data-loss decision that belongs to the operator.
+   * data-loss decision that belongs to the operator. Stale and missing claims
+   * are re-keyed by {@link repairUniquenessClaims}.
    *
    * Declarations are resolved from the active persisted schema, not this
    * Store's construction-time graph snapshot. A Store left stale by another
@@ -7341,13 +7356,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    *   looked is indistinguishable from a clean database.
    */
   async verifyConstraintFences(): Promise<readonly ConstraintFenceViolation[]> {
-    const activeRow = await this.#baseBackend.getActiveSchema(this.graphId);
-    const graph =
-      activeRow === undefined ?
-        this.#graph
-      : this.#catchUpToStored(parseSerializedSchema(activeRow.schema_doc));
-    const registry =
-      graph === this.#graph ? this.#registry : buildKindRegistry(graph);
+    const { graph, registry } = await this.#activeConstraintDeclarations();
     return verifyConstraintFencesImpl({
       graph,
       registry,
@@ -7355,6 +7364,92 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       backend: this.#baseBackend,
       batchPointRead: this.#batchPointRead,
     });
+  }
+
+  /** The graph and registry whose declarations currently govern the database. */
+  async #activeConstraintDeclarations(): Promise<
+    Readonly<{ graph: GraphDef; registry: KindRegistry }>
+  > {
+    const activeRow = await this.#baseBackend.getActiveSchema(this.graphId);
+    const graph =
+      activeRow === undefined ?
+        this.#graph
+      : this.#catchUpToStored(parseSerializedSchema(activeRow.schema_doc));
+    const registry =
+      graph === this.#graph ? this.#registry : buildKindRegistry(graph);
+    return { graph, registry };
+  }
+
+  /**
+   * Re-keys the uniqueness claims `verifyConstraintFences()` reports as
+   * `nodeUniquenessClaimStale` or `nodeUniquenessClaimMissing`: a claim an
+   * earlier release keyed in another form than the one a create derives
+   * today, which fences no create of its holder's value. It writes only claim
+   * rows: no node row, edge, history row, validity window or revision changes.
+   *
+   * - A live holder's stale claims are released and the claim of the key it
+   *   derives is taken, so a create of its value is refused again.
+   * - A soft-deleted holder whose released claim has another form gets a
+   *   released claim of the key it derives, so `getOrCreateByConstraint()`
+   *   resurrects it rather than creating a second node.
+   * - A constraint where two live nodes store one value is reported in
+   *   `duplicates`, and none of its claims change (`blocked`). Resolve each
+   *   duplicate, for example by hard-deleting one holder, and run again.
+   *
+   * Dry run by default: `{ dryRun: false }` applies the plan. An applying run
+   * is one write transaction that takes the graph's write fence, row-locks
+   * the holders it re-keys and audits again before writing. A concurrent
+   * create of a repaired value is refused by the repaired claim, or, when it
+   * claimed the key first, refuses the run with `UniquenessError`; a holder
+   * a concurrent write changed refuses the run with `ConfigurationError`
+   * (`UNIQUENESS_CLAIM_REPAIR_CONCURRENT_WRITE`). Either refusal writes
+   * nothing, and a second run is safe. Run it with writers to the graph
+   * stopped when an upgrade must establish uniqueness before writes resume.
+   *
+   * @throws {ConfigurationError} `CONSTRAINT_WRITE_FENCE_UNSUPPORTED` when an
+   *   applying run's backend has no transactions.
+   */
+  async repairUniquenessClaims(
+    options: UniquenessClaimRepairOptions = {},
+  ): Promise<UniquenessClaimRepairResult> {
+    const dryRun = options.dryRun ?? true;
+    if (typeof dryRun !== "boolean") {
+      throw new ConfigurationError(
+        "repairUniquenessClaims: `dryRun` must be a boolean.",
+        { option: "dryRun" },
+      );
+    }
+    const { graph, registry } = await this.#activeConstraintDeclarations();
+    if (dryRun) {
+      return planUniquenessClaimRepairResult({
+        graph,
+        registry,
+        graphId: this.graphId,
+        backend: this.#baseBackend,
+      });
+    }
+    return runInWriteTransaction(
+      {
+        graphId: this.graphId,
+        schemaVersion: this.#schemaMetadata.schemaVersion,
+        historyEnabled: this.#captureEnabled,
+        revisionTrackingEnabled: this.#revisionTrackingEnabled,
+        revisionSchema: this.#sqlSchema(),
+        statementExecution: this.#statementExecution,
+      },
+      this.#baseBackend,
+      async (target) =>
+        applyUniquenessClaimRepair({
+          graph,
+          registry,
+          graphId: this.graphId,
+          backend: target,
+        }),
+      {
+        didWrite: () => false,
+        fencesConstraintProbe: "nodeUniquenessClaim",
+      },
+    );
   }
 
   /**

@@ -1515,17 +1515,131 @@ function groupBy<T>(
   return groups;
 }
 
+/** The constraint, its claim axis and every axis it probes, per unique kind. */
+function uniqueDeclarationOf(kind: string):
+  | Readonly<{
+      constraintName: string;
+      axis: string;
+      probeAxes: readonly string[];
+    }>
+  | undefined {
+  if (kind === "FencedEmployee" || kind === "FencedContractor") {
+    return {
+      constraintName: STAFF_EMAIL_CONSTRAINT,
+      axis: STAFF_AXIS,
+      probeAxes: [STAFF_AXIS, ...LEGACY_STAFF_AXES],
+    };
+  }
+  if (kind === "FencedVendor") {
+    return {
+      constraintName: VENDOR_CODE_CONSTRAINT,
+      axis: "FencedVendor",
+      probeAxes: ["FencedVendor"],
+    };
+  }
+  return undefined;
+}
+
+/** The key a live node derives from the value it stores, by the model's rule. */
+function derivedKeyOf(node: ModelNode | undefined): string | undefined {
+  if (node?.uniqueValue === undefined) return undefined;
+  return node.kind === "FencedVendor" ?
+      vendorKey(node.uniqueValue)
+    : staffKey(node.uniqueValue);
+}
+
 /**
  * Every violation the audit must report, derived from the model's rows by the
  * DECLARED rules rather than from the claim rows: two owners of one key on a
- * uniqueness axis (store-written claims plus planted legacy-axis rows), one id
- * live under both kinds of the disjoint pair, two members of one cardinality
+ * uniqueness axis (store-written claims plus planted legacy-axis rows) or two
+ * live nodes storing one value, a live claim whose key is not the one its
+ * owner derives, a live holder with no live claim of its key, one id live
+ * under both kinds of the disjoint pair, two members of one cardinality
  * population, two wholes of one part.
  */
 function expectedViolations(model: ClaimModel): readonly unknown[] {
   const violations: unknown[] = [];
 
+  const liveClaims = [
+    ...model
+      .expectedUniqueRows()
+      .filter((row) => row.constraint_name !== DISJOINT_CONSTRAINT_NAME)
+      .map((row) => ({
+        axis: row.node_kind,
+        constraintName: row.constraint_name,
+        key: row.key,
+        owner: { concreteKind: row.concrete_kind, nodeId: row.node_id },
+      })),
+    ...model.plantedUniques.map((row) => ({
+      axis: row.nodeKind,
+      constraintName: STAFF_EMAIL_CONSTRAINT,
+      key: row.key,
+      owner: { concreteKind: row.concreteKind, nodeId: row.nodeId },
+    })),
+  ];
+  for (const claim of liveClaims) {
+    const expectedKey = derivedKeyOf(
+      model.liveNode(claim.owner.concreteKind, claim.owner.nodeId),
+    );
+    if (claim.key === expectedKey) continue;
+    violations.push({
+      family: "nodeUniquenessClaimStale",
+      target: {
+        relation: "uniques",
+        graphId: claimGraph.id,
+        axis: claim.axis,
+        constraintName: claim.constraintName,
+        key: claim.key,
+      },
+      owner: claim.owner,
+      expectedKey,
+    });
+  }
+  const derivedHolders = model.liveNodes().flatMap((node) => {
+    const declaration = uniqueDeclarationOf(node.kind);
+    const key = derivedKeyOf(node);
+    if (declaration === undefined || key === undefined) return [];
+    return [
+      {
+        axis: declaration.axis,
+        constraintName: declaration.constraintName,
+        key,
+        owner: { concreteKind: node.kind, nodeId: node.id },
+        probeAxes: declaration.probeAxes,
+      },
+    ];
+  });
+  for (const holder of derivedHolders) {
+    const fenced = liveClaims.some(
+      (claim) =>
+        claim.owner.concreteKind === holder.owner.concreteKind &&
+        claim.owner.nodeId === holder.owner.nodeId &&
+        claim.constraintName === holder.constraintName &&
+        claim.key === holder.key &&
+        holder.probeAxes.includes(claim.axis),
+    );
+    if (fenced) continue;
+    violations.push({
+      family: "nodeUniquenessClaimMissing",
+      target: {
+        relation: "uniques",
+        graphId: claimGraph.id,
+        axis: holder.axis,
+        constraintName: holder.constraintName,
+        key: holder.key,
+      },
+      owner: holder.owner,
+      released: false,
+    });
+  }
+
   const uniqueRows = [
+    ...derivedHolders.map((holder) => ({
+      axis: holder.axis,
+      constraintName: holder.constraintName,
+      key: holder.key,
+      owner: holder.owner,
+    })),
     ...model
       .expectedUniqueRows()
       .filter((row) => row.constraint_name !== DISJOINT_CONSTRAINT_NAME)

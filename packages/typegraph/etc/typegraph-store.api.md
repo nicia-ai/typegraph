@@ -1118,7 +1118,7 @@ export type ConstraintFenceViolation = Readonly<{
     edgeKind: string;
     allowedPairs: readonly (readonly [string, string])[];
     edges: readonly MisassignedEdgeEndpointRow[];
-}> | EdgeAcyclicityViolation;
+}> | UniquenessClaimFinding | EdgeAcyclicityViolation;
 
 // @public
 type ConstraintFenceViolationRows = Readonly<{
@@ -7118,6 +7118,7 @@ export type StoreCore<G extends GraphDef> = Readonly<{
     reembedVectorField: (kind: string, fieldPath: string, options?: ReembedVectorFieldOptions) => Promise<ReembedVectorFieldResult>;
     verifyContributions: () => Promise<readonly ContributionDiagnostic[]>;
     verifyConstraintFences: () => Promise<readonly ConstraintFenceViolation[]>;
+    repairUniquenessClaims: (options?: UniquenessClaimRepairOptions) => Promise<UniquenessClaimRepairResult>;
     repairContributions: () => Promise<ContributionRepairResult>;
     probeContributions: () => Promise<ContributionProbeResult>;
     rebuildContribution: (scope: ContributionRebuildScope, options?: RebuildContributionOptions) => Promise<ContributionRebuildResult>;
@@ -8397,7 +8398,46 @@ export type UniqueIntrospection = Readonly<{
 }>;
 
 // @public
+export type UniquenessClaimFinding = UniquenessClaimStaleFinding | UniquenessClaimMissingFinding;
+
+// @public
+export type UniquenessClaimMissingFinding = Readonly<{
+    family: "nodeUniquenessClaimMissing";
+    target: ClaimTarget;
+    owner: ClaimOwner;
+    released: boolean;
+}>;
+
+// @public
+export type UniquenessClaimRepairOptions = Readonly<{
+    dryRun?: boolean;
+}>;
+
+// @public
+export type UniquenessClaimRepairResult = Readonly<{
+    dryRun: boolean;
+    repaired: readonly UniquenessClaimFinding[];
+    duplicates: readonly UniquenessValueDuplicate[];
+    blocked: readonly UniquenessClaimFinding[];
+}>;
+
+// @public
+export type UniquenessClaimStaleFinding = Readonly<{
+    family: "nodeUniquenessClaimStale";
+    target: ClaimTarget;
+    owner: ClaimOwner;
+    expectedKey: string | undefined;
+}>;
+
+// @public
 type UniquenessScope = "kind" | "kindWithSubClasses";
+
+// @public
+export type UniquenessValueDuplicate = Readonly<{
+    family: "nodeUniqueness";
+    target: ClaimTarget;
+    owners: readonly ClaimOwner[];
+}>;
 
 // @public
 type UniqueRow = Readonly<{

@@ -233,6 +233,20 @@ export function registerConstraintFenceVerificationIntegrationTests(
               compareStrings(left.nodeId, right.nodeId),
           ),
         },
+        // The contractor's planted claim names a value it does not store, so
+        // it is also a stale claim of its owner.
+        {
+          family: "nodeUniquenessClaimStale",
+          target: {
+            relation: "uniques",
+            graphId: verifyGraph.id,
+            axis: "VerifyEmployee",
+            constraintName: STAFF_EMAIL_CONSTRAINT,
+            key: emailKey("ada@example.com"),
+          },
+          owner: { concreteKind: "VerifyContractor", nodeId: contractor.id },
+          expectedKey: emailKey("grace@example.com"),
+        },
       ]);
     });
 

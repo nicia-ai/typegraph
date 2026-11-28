@@ -1534,7 +1534,23 @@ export function registerCompositionExistenceIntegrationTests(
       expect(
         await store.nodes.EeKeyedSegment.getById(segment.id),
       ).toBeUndefined();
-      expect(await store.verifyConstraintFences()).toEqual([]);
+      // No composition violation. The tombstone written past the store left
+      // the segment's claim live, which the audit reports as a stale claim of
+      // a soft-deleted holder.
+      expect(await store.verifyConstraintFences()).toEqual([
+        {
+          family: "nodeUniquenessClaimStale",
+          target: {
+            relation: "uniques",
+            graphId: store.graphId,
+            axis: "EeKeyedSegment",
+            constraintName: "byKey",
+            key: "seg-1",
+          },
+          owner: { concreteKind: "EeKeyedSegment", nodeId: segment.id },
+          expectedKey: undefined,
+        },
+      ]);
     });
 
     it("getOrCreateByConstraint: partOf applied on created, refused on found/updated naming the current whole", async () => {
