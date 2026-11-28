@@ -5,7 +5,7 @@
  * (recorded-time capture, revision tracking only, content fingerprint).
  */
 import { drizzle } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
+import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -54,6 +54,7 @@ const LEDGER = "typegraph_working_copy_allocations";
 const CONCURRENT_OPERATION_COUNT = 6;
 const SETTLE_WINDOW_MS = 500;
 const TEST_TIMEOUT_MS = 120_000;
+const RECORDED_GRAPH_WRITE_LOCK = "typegraph:recorded-graph-write";
 const POLL_INTERVAL_MS = 20;
 const MAX_CAUSE_DEPTH = 12;
 // A schema a connected session searches first, ahead of the allocation's own.
@@ -612,6 +613,80 @@ describe.runIf(process.env["POSTGRES_URL"])(
           expect(stored?.mutation).toEqual(personMutation("Alice"));
         } finally {
           await branch.close();
+        }
+      },
+      TEST_TIMEOUT_MS,
+    );
+
+    it(
+      "takes the recorded graph write lock once per durable operation on a history branch: the host's captured write finds it in the session's memo",
+      async () => {
+        const counting = { active: false, graphWriteLocks: 0 };
+        // Recorded at the driver: every statement of every connection the
+        // operation uses, transaction handles included.
+        class CountingClient extends Client {
+          override query(...args: unknown[]): never {
+            const [query, values] = args;
+            const text =
+              typeof query === "string" ? query
+              : typeof query === "object" && query !== null && "text" in query ?
+                String(query.text)
+              : "";
+            const params =
+              Array.isArray(values) ? values
+              : (
+                typeof query === "object" &&
+                query !== null &&
+                "values" in query &&
+                Array.isArray(query.values)
+              ) ?
+                (query.values as unknown[])
+              : [];
+            if (
+              counting.active &&
+              text.includes("pg_advisory_xact_lock") &&
+              (text.includes(RECORDED_GRAPH_WRITE_LOCK) ||
+                params.includes(RECORDED_GRAPH_WRITE_LOCK))
+            )
+              counting.graphWriteLocks += 1;
+            return (super.query as (...queryArguments: unknown[]) => never)(
+              ...args,
+            );
+          }
+        }
+        const countingPool = new Pool({
+          connectionString: TEST_DATABASE_URL,
+          max: 8,
+          Client: CountingClient,
+        });
+        const { control, manager } = createManager(true, countingPool);
+        const [source] = await createStoreWithSchema(graph, control, {
+          history: true,
+        });
+        allocationCounter += 1;
+        const branch = unwrap(
+          await branchDurable(source, manager.durable, {
+            id: asBranchId(`operations-branch-${allocationCounter}`),
+            allocationId: `operations-allocation-${allocationCounter}`,
+          }),
+        );
+        try {
+          counting.active = true;
+          const applied = unwrap(
+            await operateDurableBranch(
+              branch.descriptor,
+              manager.durable,
+              operation("op-lock-once", personMutation("Ada")),
+            ),
+          );
+          counting.active = false;
+          expect({
+            outcome: applied.outcome,
+            graphWriteLocks: counting.graphWriteLocks,
+          }).toEqual({ outcome: "applied", graphWriteLocks: 1 });
+        } finally {
+          await branch.branch.close();
+          await countingPool.end();
         }
       },
       TEST_TIMEOUT_MS,

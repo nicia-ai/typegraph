@@ -64,12 +64,7 @@ import {
 import { asBranchId } from "../../../src/graph-merge/types";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
-import {
-  enterOperation,
-  openTransactionSession,
-} from "../../../src/store/operation-scope";
 import { runRecordedTransactionSavepoint } from "../../../src/store/recorded-capture";
-import { transactionBackend } from "../../../src/store/runtime-port";
 import type { StoreHooks } from "../../../src/store/types";
 import { requireDefined } from "../../../src/utils/presence";
 import { unwrap } from "../../../src/utils/result";
@@ -79,6 +74,7 @@ import {
   expectObservation,
   type KnownDefect,
 } from "../../helpers/known-defect";
+import { savepointUnitEntry } from "../../helpers/savepoint-unit";
 import type {
   IntegrationLaneDriver,
   IntegrationTestContext,
@@ -1106,11 +1102,7 @@ export function registerTransactionSessionHazardTests(
           history.withRecordedTransaction(native, async (tx) =>
             statusOf(
               runRecordedTransactionSavepoint(
-                enterOperation(
-                  openTransactionSession(
-                    transactionBackend(plain.withTransaction(native)),
-                  ),
-                ).backend,
+                ...savepointUnitEntry(plain.withTransaction(native)),
                 statements,
                 "hazard_plain_unit",
                 async () => {
@@ -1167,8 +1159,7 @@ export function registerTransactionSessionHazardTests(
           return history.withRecordedTransaction(native, (tx) =>
             statusOf(
               runRecordedTransactionSavepoint(
-                enterOperation(openTransactionSession(transactionBackend(tx)))
-                  .backend,
+                ...savepointUnitEntry(tx),
                 statements,
                 "hazard_history_unit",
                 async () => {
@@ -1325,11 +1316,7 @@ export function registerTransactionSessionHazardTests(
         await backend.transactionWithNative((_target, native) =>
           statusOf(
             runRecordedTransactionSavepoint(
-              enterOperation(
-                openTransactionSession(
-                  transactionBackend(plain.withTransaction(native)),
-                ),
-              ).backend,
+              ...savepointUnitEntry(plain.withTransaction(native)),
               statements,
               "hazard_plain_unit",
               async () => {
@@ -1407,11 +1394,7 @@ export function registerTransactionSessionHazardTests(
         await backend.transactionWithNative((_target, native) =>
           statusOf(
             runRecordedTransactionSavepoint(
-              enterOperation(
-                openTransactionSession(
-                  transactionBackend(plain.withTransaction(native)),
-                ),
-              ).backend,
+              ...savepointUnitEntry(plain.withTransaction(native)),
               statements,
               "hazard_plain_unit",
               async () => {

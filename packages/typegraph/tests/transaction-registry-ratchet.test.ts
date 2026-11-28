@@ -78,20 +78,6 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
     keyedBy: "transaction-binding",
     reason: "As `checkpoints`: moves with it.",
   },
-  "store/recorded-capture.ts#recordedTransactionBindings": {
-    keyedBy: "transaction-binding",
-    reason:
-      "One recorded-capture scope per Store binding, registered on its overlay and raw target; two history Stores on one transaction each have their own scope, so the owner is the capture scope, not the transaction.",
-  },
-  "store/recorded-capture.ts#recordedRevisionBindings": {
-    keyedBy: "transaction-binding",
-    reason: "The capture scope's revision session; owned like its bindings.",
-  },
-  "store/recorded-capture/clock.ts#recordedGraphLockMemos": {
-    keyedBy: "transaction-binding",
-    reason:
-      "A capture scope's graph-lock memo, set on that scope's overlay and rolled back with its savepoints; owned by the capture scope.",
-  },
   "store/claims/composition-windows.ts#openCompositionWindowVerdicts": {
     keyedBy: "transaction-binding",
     reason:
@@ -266,7 +252,7 @@ const OBJECT_KEYED_COLLECTIONS: Readonly<Record<string, Allowance>> = {
  * May only decrease: lower it when a registry moves onto state the
  * transaction carries explicitly.
  */
-const TRANSACTION_BINDING_KEYED_BASELINE = 7;
+const TRANSACTION_BINDING_KEYED_BASELINE = 4;
 
 /** `"transaction" in x` probes in the Store layers. May only decrease. */
 const TRANSACTION_MEMBER_PROBE_BASELINE = 5;

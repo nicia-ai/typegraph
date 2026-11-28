@@ -312,6 +312,7 @@ import {
   planCompositionCascade,
   readRecordedClock,
   readRevisionOrigin,
+  recordedGraphLockMemoOf,
   runRetriedUnit,
   storeBackend,
   storeCaptureEnabled,
@@ -2600,9 +2601,10 @@ type EdgeUpsertDecision = Readonly<{
  */
 async function decideEdgeUpserts<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   writes: MergePlanWrites,
 ): Promise<EdgeUpsertDecision> {
+  const txBackend = operation.backend;
   const planned = await readPlannedEdgeRows(target, txBackend, writes);
   const releasingEdgeIds = new Set(
     planned.edgeRows
@@ -2624,7 +2626,11 @@ async function decideEdgeUpserts<G extends GraphDef>(
     {
       graphId: target.graphId,
       registry: target.registry,
-      lock: await lockRecordedGraphWrite(txBackend, target.graphId),
+      lock: await lockRecordedGraphWrite(
+        txBackend,
+        target.graphId,
+        recordedGraphLockMemoOf(operation),
+      ),
     },
     txBackend,
     compositionWrites,
@@ -2680,7 +2686,7 @@ async function applyGraphRows<G extends GraphDef>(
   // Authoritative re-verification, before any row work below: a part
   // attached to a deleted whole after the branch point (and neither deleted
   // nor moved away by this plan) must abort the WHOLE apply.
-  await assertNoCompositionOrphans(target, txBackend, rows.writes);
+  await assertNoCompositionOrphans(target, operation, rows.writes);
 
   // Resolved before any row is written: a deleted composition edge's
   // endpoints are read while it is still live in `txBackend`.
@@ -2692,7 +2698,7 @@ async function applyGraphRows<G extends GraphDef>(
 
   const edgeUpsertDecision = await decideEdgeUpserts(
     target,
-    txBackend,
+    operation,
     rows.writes,
   );
 
@@ -2722,7 +2728,7 @@ async function applyGraphRows<G extends GraphDef>(
 
   await assertNoUnattachedRequiredParts(
     target,
-    txBackend,
+    operation,
     unattachedCandidates,
   );
   return applied;
@@ -2817,7 +2823,12 @@ async function applyNodeWritePhase<G extends GraphDef>(
     const nodes =
       decision === undefined ?
         await applyRows()
-      : await withRecordedIdentityDecision(txBackend, decision, applyRows);
+      : await withRecordedIdentityDecision(
+          operation,
+          txBackend,
+          decision,
+          applyRows,
+        );
     return { nodes, retracted: earlyIdentity.retracted };
   } catch (error) {
     throw error instanceof IdentityEndpointValidityError ?
@@ -4007,9 +4018,10 @@ export async function assertMergeWritesStructurallySound<G extends GraphDef>(
  */
 async function assertNoCompositionOrphans<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   writes: MergePlanWrites,
 ): Promise<void> {
+  const txBackend = operation.backend;
   const registry = target.registry;
   if (
     !writes.nodeDeletes.some(
@@ -4021,7 +4033,7 @@ async function assertNoCompositionOrphans<G extends GraphDef>(
     return;
   }
   const planned = plannedCompositionState(registry, writes);
-  await refuseFirstOrphan(target, txBackend, async (ctx) => [
+  await refuseFirstOrphan(target, operation, async (ctx) => [
     ...(await compositionOrphansAmong(
       ctx,
       txBackend,
@@ -4045,7 +4057,7 @@ async function assertNoCompositionOrphans<G extends GraphDef>(
  */
 async function refuseFirstOrphan<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   find: (
     ctx: Readonly<{
       graphId: string;
@@ -4054,7 +4066,11 @@ async function refuseFirstOrphan<G extends GraphDef>(
     }>,
   ) => Promise<readonly MergePlanCompositionOrphan[]>,
 ): Promise<void> {
-  const lock = await lockRecordedGraphWrite(txBackend, target.graphId);
+  const lock = await lockRecordedGraphWrite(
+    operation.backend,
+    target.graphId,
+    recordedGraphLockMemoOf(operation),
+  );
   const [firstOrphan] = await find({
     graphId: target.graphId,
     registry: target.registry,
@@ -4321,11 +4337,12 @@ async function liveOrphanCandidates(
  */
 async function assertNoUnattachedRequiredParts<G extends GraphDef>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   candidates: readonly MergePlanEntityRef[],
 ): Promise<void> {
+  const txBackend = operation.backend;
   if (candidates.length === 0) return;
-  await refuseFirstOrphan(target, txBackend, (ctx) =>
+  await refuseFirstOrphan(target, operation, (ctx) =>
     unattachedRequiredPartOrphansAmong(
       ctx,
       txBackend,
@@ -6011,7 +6028,7 @@ async function applyWireMergeWrites<G extends GraphDef>(
       ),
   );
   if (
-    !forceRecordedGraphRevision(txBackend, target.graphId) &&
+    !forceRecordedGraphRevision(operation, target.graphId) &&
     !forceWriteTransactionRevision(operation)
   ) {
     await advanceRevisionClock(
@@ -6332,12 +6349,11 @@ export async function applyMergePlanInTransaction<G extends GraphDef>(
     // One operation of the caller's transaction's session for the whole
     // apply: its fences, savepoint and direct statements.
     const operation = enterTransactionOperation(tx);
-    const txBackend = operation.backend;
     await assertMergeTransactionPristine(effectiveTarget, operation);
     const decision = mergeIdentityDecisionFromArtifact(artifact, options);
     const merged = await withAdoptedMergeApplySavepoint(
       effectiveTarget,
-      txBackend,
+      operation,
       () =>
         applyValidatedMergePlanInTransaction(
           effectiveTarget,

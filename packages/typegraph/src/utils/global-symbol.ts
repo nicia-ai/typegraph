@@ -8,7 +8,7 @@ type TypeGraphGlobalSymbolName =
   | "external-recorded-read-source-v1"
   | "sql-schema-v1"
   | "compare-and-set-absent-v1"
-  | "store-runtime-v1"
+  | "store-runtime-v2"
   | "typegraph-recorded-read-source-v1"
   | "engine-recorded-read-source-v1"
   | "transaction-runtime-v1";

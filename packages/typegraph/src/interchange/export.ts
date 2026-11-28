@@ -23,11 +23,10 @@ import {
 import { activeOnlyAxisReferences } from "../store/claims/edge-claims";
 import {
   enterOperation,
-  openTransactionSession,
+  openRootTransaction,
   type OperationEntry,
   operationEntryBackend,
   type StatementBackend,
-  type StoreTransactionBackend,
 } from "../store/operation-scope";
 import { storeBackend, storeRuntime } from "../store/runtime-port";
 import { type Store } from "../store/store";
@@ -408,13 +407,13 @@ async function* exportGraphStreamFromBackend<G extends GraphDef>(
       try {
         const started =
           backend.capabilities.execution.interactiveTransactions ?
-            backend.transaction(
-              // The export opened this snapshot transaction: its session opens
-              // here, and the whole stream is its one operation. Nothing else
-              // holds the transaction, so no other call interleaves with the
-              // pages it produces.
-              (target: StoreTransactionBackend) =>
-                produce(enterOperation(openTransactionSession(target))),
+            openRootTransaction(
+              backend,
+              // The export opened this snapshot transaction, with its one
+              // session, and the whole stream is its one operation. Nothing
+              // else holds the transaction, so no other call interleaves with
+              // the pages it produces.
+              (session) => produce(enterOperation(session)),
               {
                 isolationLevel: "repeatable_read",
                 accessMode: "read_only",

@@ -18,6 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { deriveBackend } from "../../../src/backend/derive-backend";
 import type { GraphBackend } from "../../../src/backend/types";
+import { renderSql, type SqlFragment } from "../../../src/query/sql-fragment";
 import * as operationScope from "../../../src/store/operation-scope";
 import { integrationTestGraph } from "./fixtures";
 import type { IntegrationTestContext } from "./test-context";
@@ -27,7 +28,19 @@ type RoutedCall = Readonly<{
   operation: number;
   session: operationScope.TransactionSession;
   member: string;
+  /** The statement text an `execute` or `executeStatement` call sent. */
+  sql: string | undefined;
 }>;
+
+/** The text of the statement `member` sends with `args`, if it sends one. */
+function statementText(
+  member: string,
+  args: readonly unknown[],
+  dialect: GraphBackend["dialect"],
+): string | undefined {
+  if (member !== "execute" && member !== "executeStatement") return undefined;
+  return renderSql(args[0] as SqlFragment, dialect).sql;
+}
 
 /**
  * Wraps `enterOperation` so every operation of a session gets a handle of its
@@ -49,36 +62,76 @@ function routeOperationsThroughRecordingHandles(
     if (entered === undefined) return entry;
     const session: operationScope.TransactionSession = entered;
     const operation = operations.push(session);
+    /**
+     * A recording derivation of `transaction`: each statement and read
+     * member call it carries is recorded as a call through this operation.
+     */
+    function recordingHandle(transaction: GraphBackend): GraphBackend {
+      function recorded<Arguments extends unknown[], Result>(
+        member: string,
+        call: (...args: Arguments) => Result,
+      ): (...args: Arguments) => Result {
+        return (...args) => {
+          calls.push({
+            operation,
+            session,
+            member,
+            sql: statementText(member, args, transaction.dialect),
+          });
+          return call.apply(transaction, args);
+        };
+      }
+      // A history capture surface refuses raw statement members on read, so
+      // a member it refuses is left as it is rather than wrapped.
+      function member<Key extends "executeRaw" | "executeStatement">(
+        key: Key,
+      ): GraphBackend[Key] | undefined {
+        try {
+          return transaction[key];
+        } catch {
+          return undefined;
+        }
+      }
+      const executeRaw = member("executeRaw");
+      const executeStatement = member("executeStatement");
+      const { getNodes } = transaction;
+      return deriveBackend(transaction, {
+        execute: recorded("execute", transaction.execute),
+        ...(executeRaw === undefined ?
+          {}
+        : { executeRaw: recorded("executeRaw", executeRaw) }),
+        ...(executeStatement === undefined ?
+          {}
+        : {
+            executeStatement: recorded("executeStatement", executeStatement),
+          }),
+        getNode: recorded("getNode", transaction.getNode),
+        ...(getNodes === undefined ?
+          {}
+        : { getNodes: recorded("getNodes", getNodes) }),
+        findNodesByKind: recorded(
+          "findNodesByKind",
+          transaction.findNodesByKind,
+        ),
+        getActiveSchema: recorded(
+          "getActiveSchema",
+          transaction.getActiveSchema,
+        ),
+      });
+    }
     const transaction = operationScope.operationEntryBackend(
       entry,
     ) as GraphBackend;
-    /** `call`, recorded as a call of `member` through this operation. */
-    function recorded<Arguments extends unknown[], Result>(
-      member: string,
-      call: (...args: Arguments) => Result,
-    ): (...args: Arguments) => Result {
-      return (...args) => {
-        calls.push({ operation, session, member });
-        return call.apply(transaction, args);
-      };
-    }
-    const { executeRaw, executeStatement, getNodes } = transaction;
-    const handle = deriveBackend(transaction, {
-      execute: recorded("execute", transaction.execute),
-      ...(executeRaw === undefined ?
-        {}
-      : { executeRaw: recorded("executeRaw", executeRaw) }),
-      ...(executeStatement === undefined ?
-        {}
-      : { executeStatement: recorded("executeStatement", executeStatement) }),
-      getNode: recorded("getNode", transaction.getNode),
-      ...(getNodes === undefined ?
-        {}
-      : { getNodes: recorded("getNodes", getNodes) }),
-      findNodesByKind: recorded("findNodesByKind", transaction.findNodesByKind),
-      getActiveSchema: recorded("getActiveSchema", transaction.getActiveSchema),
-    });
-    const routed: object = { ...entry, backend: handle };
+    const handle = recordingHandle(transaction);
+    // The session's undecorated holding, as the operation holds it, records
+    // through this operation too: where it is a different object from the
+    // handle (a history session's capture surface), its own derivation.
+    const control = operationScope.operationEntryControl(entry) as GraphBackend;
+    const routed: object = {
+      ...entry,
+      backend: handle,
+      control: control === transaction ? handle : recordingHandle(control),
+    };
     return routed as operationScope.OperationEntry;
   }
   return vi
@@ -245,6 +298,68 @@ export function registerIdentityOperationRoutingIntegrationTests(
           expect(routedCalls.get("nodesOf") ?? 0).toBeGreaterThan(
             routedCalls.get("membersOf") ?? 0,
           );
+        });
+      } finally {
+        entered.mockRestore();
+      }
+    });
+
+    it("a history transaction's identity write goes through the operation its call entered", async () => {
+      const store = await context.createHistoryStore(integrationTestGraph);
+      const alice = await store.nodes.Person.create({ name: "Alice" });
+      const bob = await store.nodes.Person.create({ name: "Bob" });
+      const a = { kind: "Person" as const, id: alice.id };
+      const b = { kind: "Person" as const, id: bob.id };
+
+      const calls: RoutedCall[] = [];
+      const operations: operationScope.TransactionSession[] = [];
+      const entered = routeOperationsThroughRecordingHandles(calls, operations);
+      try {
+        const observed = await store.transaction(async (tx) => {
+          operations.length = 0;
+          await tx.nodes.Person.create({ name: "Dave" });
+          const session = operations[0];
+          if (session === undefined)
+            throw new Error("the write entered no operation of a session");
+          const routes: Record<string, readonly string[]> = {};
+          for (const [label, call] of [
+            ["assertSame", () => tx.identity.assertSame(a, b)],
+            [
+              "retractSameAssertion",
+              () => tx.identity.retractSameAssertion(a, b),
+            ],
+          ] as const) {
+            calls.length = 0;
+            operations.length = 0;
+            await call();
+            // Where each statement that writes an identity relation went.
+            routes[label] = [
+              ...new Set(
+                calls
+                  .filter(
+                    (routed) =>
+                      routed.sql !== undefined &&
+                      /^\s*(insert|update|delete)\b/i.test(routed.sql) &&
+                      /identity/i.test(routed.sql),
+                  )
+                  .map((routed) => {
+                    if (routed.session !== session) {
+                      return "an operation of another session";
+                    }
+                    return routed.operation === 1 ?
+                        "its operation"
+                      : "another operation of its session";
+                  }),
+              ),
+            ];
+          }
+          return routes;
+        });
+        // A history Store's identity writes go beneath the capture surface,
+        // through the operation the identity call entered.
+        expect(observed).toEqual({
+          assertSame: ["its operation"],
+          retractSameAssertion: ["its operation"],
         });
       } finally {
         entered.mockRestore();

@@ -72,6 +72,7 @@ export const PGLITE_TEST_FILES = [
   "tests/schema-kind-emptiness.test.ts",
   "tests/snapshot-fence-retry.test.ts",
   "tests/sql-identifier-differential.test.ts",
+  "tests/store-runtime-version.test.ts",
   "tests/subgraph-membership-postgres.test.ts",
   "tests/transaction-retry.test.ts",
   "tests/transaction-session-write-locks-pglite.test.ts",

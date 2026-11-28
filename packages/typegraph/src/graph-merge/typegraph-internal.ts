@@ -148,6 +148,7 @@ export {
   mintsOriginNamespacedAnchor,
   readRecordedClock,
   readRevisionOrigin,
+  recordedGraphLockMemoOf,
   recordedRelationsLineage,
   resolveLineage,
   withRecordedIdentityDecision,

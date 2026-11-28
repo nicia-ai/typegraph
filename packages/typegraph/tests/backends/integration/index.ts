@@ -57,6 +57,7 @@ export { registerErasureAuditIntegrationTests } from "./erasure-audit";
 export { registerExpressionSubqueryQueryIntegrationTests } from "./expression-subquery-queries";
 export type { IntegrationStore } from "./fixtures";
 export { integrationTestGraph } from "./fixtures";
+export { registerFreshCommandPortIntegrationTests } from "./fresh-command-port";
 export { registerFulltextIntegrationTests } from "./fulltext";
 export { registerGraphAnnotationsIntegrationTests } from "./graph-annotations";
 export { registerGraphMergeCallbackIntegrationTests } from "./graph-merge-callbacks";

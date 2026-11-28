@@ -94,7 +94,9 @@ export async function rotateGraphAllocationOwner(
             { graphId, schemaVersion },
             operation,
           );
-          await lockRecordedGraphWrite(target, graphId);
+          // The session this unit opened itself: no capture scope is bound to
+          // it, so it has no memo.
+          await lockRecordedGraphWrite(target, graphId, undefined);
           const previous = await readGraphAllocationOwner(
             target,
             schema,

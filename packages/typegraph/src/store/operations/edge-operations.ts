@@ -4465,7 +4465,7 @@ export async function executeEdgeHardDeleteBatch<G extends GraphDef>(
     ctx,
     edgeWritePlan(edgeDetachNeedsConstraintFence(ctx.registry, expectedKind)),
     entry,
-    async (session, target, _overlaidSession, lock, transactionMode) => {
+    async (session, target, _overlaidSession, lock, transactionMode, frame) => {
       const rowsById = await getEdgeRowsByIds(
         target,
         ctx.batchPointRead,
@@ -4495,7 +4495,7 @@ export async function executeEdgeHardDeleteBatch<G extends GraphDef>(
       // Every refusal is behind us; what is left is the rows and their claim
       // releases, which a caller catching a failure among them inside its own
       // transaction must not keep half of.
-      await runFrameWritesAsUnit(ctx, target, transactionMode, () =>
+      await runFrameWritesAsUnit(ctx, frame, target, transactionMode, () =>
         session.purgeEdges(purges),
       );
       return purges.length;

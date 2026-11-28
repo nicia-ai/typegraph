@@ -75,16 +75,12 @@ import { asCompiledStatementSql } from "../src/query/sql-intent";
 import { recordedRelation } from "../src/query-entry";
 import { buildKindRegistry } from "../src/registry";
 import { createVerifiedStore } from "../src/schema";
-import {
-  enterOperation,
-  openTransactionSession,
-} from "../src/store/operation-scope";
 import { runRecordedTransactionSavepoint } from "../src/store/recorded-capture";
 import { resolveLineage } from "../src/store/recorded-capture";
-import { transactionBackend } from "../src/store/runtime-port";
 import { storeCaptureEnabled } from "../src/store/runtime-port";
 import { requireDefined } from "../src/utils/presence";
 import { attachEngineNativeRecordedTime } from "./engine-native-recorded-time-fixture";
+import { savepointUnitEntry } from "./helpers/savepoint-unit";
 import { toSqlString } from "./sql-test-utils";
 import { createTestBackend, matchingObject } from "./test-utils";
 
@@ -445,8 +441,7 @@ describe("engine-native recorded time: transaction receipts", () => {
             { id: "survivor" },
           );
         await runRecordedTransactionSavepoint(
-          enterOperation(openTransactionSession(transactionBackend(tx)))
-            .backend,
+          ...savepointUnitEntry(tx),
           statements,
           "test_native_rollback",
           async () => {

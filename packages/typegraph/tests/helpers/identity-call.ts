@@ -3,6 +3,7 @@
  * root `store.identity` call does: a context whose statements go through the
  * store's pooled root, and the call's statement-free refusals run first.
  */
+import type { GraphBackend } from "../../src/backend/types";
 import type { GraphDef } from "../../src/core/define-graph";
 import {
   identityReplay,
@@ -13,6 +14,17 @@ import {
 import type { IdentityCallContext } from "../../src/identity/service-types";
 import type { IdentityNodeRefInput } from "../../src/identity/types";
 import { storeRuntime } from "../../src/store/runtime-port";
+
+/** The root a root identity call's context goes through, as its entry. */
+function rootEntry<G extends GraphDef>(
+  ctx: IdentityCallContext<G>,
+): GraphBackend {
+  const backend = ctx.backend;
+  if (!("transaction" in backend)) {
+    throw new TypeError("A root identity call context goes through the root.");
+  }
+  return backend;
+}
 
 /** The context of a root identity call on `store`. */
 export function rootIdentityCallContext<G extends GraphDef>(
@@ -34,7 +46,7 @@ export async function transitionsOfAt<G extends GraphDef>(
     options,
     "transitionsOf",
   );
-  return identityTransitionsOf(ctx, request, options);
+  return identityTransitionsOf(ctx, rootEntry(ctx), request, options);
 }
 
 /** `identityReplay` as `store.identity.replay` calls it. */
@@ -44,5 +56,5 @@ export async function replayAt<G extends GraphDef>(
   options?: IdentityReplayOptions,
 ): ReturnType<typeof identityReplay<G>> {
   const request = identityTransitionWalkRequest(ctx, ref, options, "replay");
-  return identityReplay(ctx, request, options);
+  return identityReplay(ctx, rootEntry(ctx), request, options);
 }

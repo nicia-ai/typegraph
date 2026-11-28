@@ -69,7 +69,7 @@ import {
 } from "./types";
 
 export const STORE_RUNTIME: unique symbol =
-  typeGraphGlobalSymbol("store-runtime-v1");
+  typeGraphGlobalSymbol("store-runtime-v2");
 
 /**
  * @internal Operations used by Store-owned views. The port is absent from the
@@ -82,8 +82,16 @@ export const STORE_RUNTIME: unique symbol =
  * caller holds. It runs in that operation, of that operation's session, and
  * never opens a session of its own over a transaction its caller already
  * holds. An operation another copy of TypeGraph minted joins as a binding of
- * its own (`portOperationEntry`). The import members below take the narrow
- * statement projection of an import frame instead, and open no session.
+ * its own (`portOperationEntry`).
+ *
+ * `lockIdentityImportTarget` alone takes an import frame's narrow statement
+ * projection, and opens no session.
+ *
+ * The port's symbol names its version (`store-runtime-v2`, under which the
+ * members take an entry rather than the caller's transaction). A copy of
+ * TypeGraph built against another version reads another symbol, finds no
+ * port on this Store, and refuses it in {@link storeRuntime} before any
+ * statement. Change the version whenever a member's call shape changes.
  */
 export type StoreRuntime<G extends GraphDef> = Readonly<{
   backend: GraphBackend;
@@ -439,15 +447,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
     >,
   ) => Promise<void>;
   foldImportedIdentityNodes: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry: OperationEntry,
     references: readonly Readonly<{ kind: string; id: string }>[],
   ) => Promise<void>;
   /**
@@ -461,15 +461,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * assertion's window.
    */
   applyImportedNodeWindowEnd: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry: OperationEntry,
     input: Readonly<{ kind: string; id: string; validTo?: string }>,
   ) => Promise<void>;
   /**
@@ -478,27 +470,11 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * `assertImportedRequiredPartsAttached` (`src/interchange/import.ts`).
    */
   detachDeletedImportedIdentityNode: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry: OperationEntry,
     reference: Readonly<{ kind: string; id: string }>,
   ) => Promise<void>;
   importIdentityAssertionsAtTarget: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry: OperationEntry,
     assertions: readonly Readonly<{
       id: string;
       relation: "same" | "different";
@@ -539,15 +515,7 @@ export type StoreRuntime<G extends GraphDef> = Readonly<{
    * graph's restored cut (see `importIdentityTransitionsIntoTarget`).
    */
   importIdentityTransitionsAtTarget: (
-    target: Readonly<
-      BackendIdentity &
-        GraphEntityReadBackend &
-        SchemaReadBackend &
-        QueryExecutionBackend &
-        SqlCompilationBackend &
-        RawQueryExecutionBackend &
-        Pick<GraphBackend, "executeStatement">
-    >,
+    entry: OperationEntry,
     transitions: readonly IdentityTransitionTransfer[],
     carriedCut: IdentityTransitionCut | undefined,
   ) => Promise<Readonly<{ created: number }>>;
@@ -609,6 +577,12 @@ export function hasScopedIdentityReads<G extends GraphDef>(
   );
 }
 
+/**
+ * THE refusal of a Store whose runtime port this copy of TypeGraph cannot
+ * read: a Store another port version built (see {@link StoreRuntime}), or an
+ * object that is not a Store. Every port read goes through it, so a mixed
+ * pair of copies fails here, before any statement.
+ */
 export function storeRuntime<G extends GraphDef>(
   store: Readonly<{ [STORE_RUNTIME]?: StoreRuntime<G> }>,
 ): StoreRuntime<G> {

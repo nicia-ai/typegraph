@@ -204,6 +204,7 @@ async function executeConvergence(
     const lock = await lockRecordedGraphWrite(
       transaction,
       command.plan.params.graphId,
+      undefined,
     );
     const result = await transaction.commands.execute(
       command,
