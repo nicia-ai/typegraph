@@ -2444,11 +2444,62 @@ traversal. `having()` and `whereEdge()` throw it when they are called with a pre
 Thrown when a statement reaches a transaction-scoped backend after its
 transaction boundary has already returned.
 
-A transaction pins one database connection, which carries one statement at a
-time. When `store.transaction(...)` resolves or rejects, the driver emits
-`COMMIT` or `ROLLBACK` on that connection and hands it back to the pool. Any
-statement still in flight then has nowhere safe to go — it would execute inside
-somebody else's transaction — so TypeGraph refuses it.
+A transaction runs on one database connection. When `store.transaction(...)`
+resolves or rejects, `COMMIT` or `ROLLBACK` runs on that connection: on
+PostgreSQL the pool then hands it to somebody else, and on SQLite the next
+transaction may open on it at once. A statement arriving afterwards would
+execute outside the transaction that issued it — in autocommit, or inside
+somebody else's transaction. So before the boundary TypeGraph lets every
+statement already running finish, and from then on refuses every statement
+issued through that transaction with this error. This holds on every bundled
+driver, and covers a prepared query or a `stream()` iterator kept past the
+callback, a `backend.trustedImport()` session kept past its import, and the
+contribution-marker reads a transaction backend's vector and fulltext
+operations make, as well as an orphaned write. The refusal is per statement,
+not per call: a call that issues several statements and is still running when
+the callback returns has the statements it already issued settle and every
+later one refused, so its work can be cut part way (a vector slot's marker
+deletion can remove one of its markers and not the other). Await every call
+before the callback returns.
+
+The rule covers transactions TypeGraph opens and ends, and every backend
+bound to one: a backend adopted with `adoptTransaction(native)` over the
+native handle `transactionWithNative()` passes its callback, or built over
+that handle with `createPostgresTransactionBackend(native)`,
+`createPostgresBackend(native)` or `createSqliteBackend(native)`, is refused
+after the end too, on every driver that can identify the transaction behind
+the handle (better-sqlite3, bun:sqlite, libSQL 0.18 and later, PGlite,
+node-postgres, postgres-js). A backend built over a database handle is a root
+backend and is not refused; on better-sqlite3 the native handle is the
+connection itself. Every member of a constructor-built backend is refused,
+including the ones that write marker, materialization, kind-removal and
+graph-template rows, run lazy DDL or refresh statistics, and its
+`transaction()` is refused before it opens a savepoint. A backend bound to
+the native handle only after the transaction ended is refused only on
+node-postgres and postgres-js for now: on libSQL and PGlite it cannot
+identify the ended transaction, and its statements reach the driver, which
+refuses them with its own error. A backend adopted
+over a savepoint's native handle closes with the enclosing transaction, not
+with the savepoint, for now. A savepoint a constructor-built backend opens with
+`transaction()` closes with the savepoint, not with the enclosing transaction,
+for now: a savepoint callback left running when the enclosing transaction ends
+can still reach the connection. On sql.js, libSQL before 0.18 and Durable Object
+storage, which report no transaction state, such an adoption is not closed. A
+transaction the caller ends (one adopted with `withTransaction` or
+`adoptTransaction`) is not closed by TypeGraph, and an end SQLite makes on
+its own (a trigger's
+`RAISE(ROLLBACK)`, an `ON CONFLICT ROLLBACK` constraint, `SQLITE_FULL`, or a
+`COMMIT` / `ROLLBACK` sent through the native handle or as raw SQL) is not
+observed yet: a later statement of the callback still reaches the driver, as
+before (on better-sqlite3 it runs in autocommit).
+
+The backend a transaction callback receives, and one `adoptTransaction()`
+returns, refuses `createVectorIndex()` outright, open or ended, with a
+[`ConfigurationError`](#configurationerror) whose `details.capability` is
+`"contributionAdministration"`: creating a vector index provisions storage,
+which only a root backend does. A backend you build over a transaction handle
+with `createPostgresTransactionBackend()` still provisions in your
+transaction, so `store.reembedVectorField()` works on a Store over it.
 
 The usual source is a callback that lets work escape it. `Promise.all` rejects
 on its first rejection while its siblings keep running:
@@ -2465,9 +2516,10 @@ the original failure and discards the orphan's. It surfaces only if you await
 the orphaned promise yourself. To avoid orphaning writes at all, use
 `Promise.allSettled` and inspect the results, or await the writes in sequence.
 
-`adoptTransaction()` never closes its queue — only the caller knows when their
-transaction ends — so this error cannot arise there. It remains the caller's
-job to await every graph write before committing.
+On a transaction the caller opened, `adoptTransaction()` never closes its
+queue — only the caller knows when their transaction ends — so this error
+arises there only for an adoption of a transaction TypeGraph opened (above).
+It remains the caller's job to await every graph write before committing.
 
 ### `TransactionConflictError`
 

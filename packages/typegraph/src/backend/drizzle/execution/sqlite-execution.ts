@@ -10,7 +10,9 @@ import {
   SQLITE_MAX_BIND_PARAMETERS,
 } from "../../types";
 import { isLibsqlClient, type LibsqlClient } from "../libsql-client";
+import { admitHandleStatementDirectly } from "./handle-statement";
 import { getOrCreateLru } from "./lru";
+import type { TransactionView } from "./transaction-view";
 import {
   type CompiledSqlQuery,
   compileQueryWithDialect,
@@ -154,6 +156,22 @@ export type SqliteExecutionAdapter = Readonly<
      * `db.run()` when absent.
      */
     executeCompiledRun?: (compiledQuery: CompiledSqlQuery) => Promise<void>;
+    /**
+     * Executes a statement that returns no rows: through the prepared-statement
+     * cache when `executeCompiledRun` is present, else through Drizzle's
+     * `db.run()`. Every row-less statement a backend issues goes through here,
+     * so a transaction view (`createSqliteTransactionExecutionView`) sees it.
+     */
+    executeRun: (query: ExecutableSql) => Promise<void>;
+    /**
+     * Admits a statement composed on the Drizzle handle: directly on a root
+     * connection, through the view on a transaction's
+     * (`createSqliteTransactionExecutionView`). Required here, so a view
+     * always has a member to admit through.
+     */
+    admitHandleStatement: NonNullable<
+      SqlExecutionAdapter["admitHandleStatement"]
+    >;
     /** Rebinds one cached non-reader statement for every parameter row. */
     executePreparedRunBatch?: (
       sqlText: string,
@@ -715,6 +733,7 @@ export function createSqliteExecutionAdapter(
     }
 
     return {
+      admitHandleStatement: admitHandleStatementDirectly,
       clearStatementCache() {
         statementCache.clear();
       },
@@ -725,6 +744,9 @@ export function createSqliteExecutionAdapter(
       },
       executeCompiled,
       executeCompiledRun,
+      executeRun(query: ExecutableSql): Promise<void> {
+        return executeCompiledRun(compile(query));
+      },
       executePreparedRunBatch,
       ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
       prepare(sqlText: string): PreparedSqlStatement {
@@ -740,6 +762,7 @@ export function createSqliteExecutionAdapter(
   }
 
   return {
+    admitHandleStatement: admitHandleStatementDirectly,
     clearStatementCache() {
       // No-op: no statement cache in async/D1 mode
     },
@@ -750,7 +773,99 @@ export function createSqliteExecutionAdapter(
         isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
       );
     },
+    async executeRun(query: ExecutableSql): Promise<void> {
+      // Unconditional `await`: Drizzle returns SQLiteRaw thenables
+      // (drizzle-team/drizzle-orm#2275).
+      await db.run(
+        isSqlFragment(query) ? toDrizzleSql(query, "sqlite") : query,
+      );
+    },
     ...(executeAtomicBatch === undefined ? {} : { executeAtomicBatch }),
     profile,
+  };
+}
+
+/**
+ * How a transaction view treats each member of a {@link SqliteExecutionAdapter}.
+ * A `Record` over every key, so a member added to the adapter cannot reach a
+ * transaction view unclassified: `statement` members run SQL and are admitted
+ * through the view, `prepare` hands out statements whose execution is
+ * admitted, `local` members touch no connection.
+ */
+const SQLITE_ADAPTER_MEMBER_ROLES = {
+  admitHandleStatement: "statement",
+  clearStatementCache: "local",
+  compile: "local",
+  execute: "statement",
+  executeAtomicBatch: "statement",
+  executeCompiled: "statement",
+  executeCompiledRun: "statement",
+  executePreparedRunBatch: "statement",
+  executeRun: "statement",
+  prepare: "prepare",
+  profile: "local",
+  runExclusive: "statement",
+  serializationFailure: "local",
+} as const satisfies Record<
+  keyof SqliteExecutionAdapter,
+  "local" | "prepare" | "statement"
+>;
+
+/** A transaction's execution adapter and the hook that ends its view. */
+export type SqliteTransactionExecutionView = Readonly<{
+  adapter: SqliteExecutionAdapter;
+  /**
+   * Admits work that reaches the connection by another route than
+   * `adapter` (the shared contribution marker reads) through the same view.
+   */
+  admit: TransactionView["admit"];
+  /** Ends the view: see `TransactionView.drainAndClose` in `./transaction-view`. */
+  drainAndClose: () => Promise<void>;
+}>;
+
+/**
+ * Wraps `adapter` in `view`, the {@link TransactionView} of the transaction one
+ * bind runs on (`openTransactionView`): every statement it runs is admitted
+ * through the view, so once the transaction's runner calls `drainAndClose`
+ * (before COMMIT / ROLLBACK) a late statement is refused instead of running
+ * outside the transaction that issued it. The runner's own frame statements
+ * go through the unwrapped adapter.
+ */
+export function createSqliteTransactionExecutionView(
+  adapter: SqliteExecutionAdapter,
+  view: TransactionView,
+): SqliteTransactionExecutionView {
+  function viewMember(
+    role: (typeof SQLITE_ADAPTER_MEMBER_ROLES)[keyof SqliteExecutionAdapter],
+    member: unknown,
+  ): unknown {
+    if (role === "local" || typeof member !== "function") return member;
+    if (role === "statement") {
+      return (...args: readonly unknown[]) =>
+        view.admit(
+          () => Reflect.apply(member, adapter, args) as Promise<unknown>,
+        );
+    }
+    return (sqlText: string): PreparedSqlStatement => {
+      const statement = Reflect.apply(member, adapter, [
+        sqlText,
+      ]) as PreparedSqlStatement;
+      return {
+        execute<TRow>(params: readonly unknown[]) {
+          return view.admit(() => statement.execute<TRow>(params));
+        },
+      };
+    };
+  }
+  const members = Object.fromEntries(
+    Object.entries(SQLITE_ADAPTER_MEMBER_ROLES).flatMap(([key, role]) => {
+      const member: unknown = adapter[key as keyof SqliteExecutionAdapter];
+      return member === undefined ? [] : [[key, viewMember(role, member)]];
+    }),
+  );
+  return {
+    adapter: members as unknown as SqliteExecutionAdapter,
+    admit: view.admit,
+    drainAndClose: view.drainAndClose,
   };
 }

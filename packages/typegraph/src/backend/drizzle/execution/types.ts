@@ -59,6 +59,14 @@ export type SqlExecutionAdapter = Readonly<{
     critical: (connection: SqlExecutionAdapter) => Promise<T>,
   ) => Promise<T>;
   /**
+   * Admits a statement a member composed on the Drizzle handle this adapter
+   * executes on, exactly as the adapter admits its own statements: through
+   * the transaction's view and the connection's statement queue where the
+   * adapter has them. Absent on an adapter that has neither; callers go
+   * through `runHandleStatement` (`./handle-statement`), never this member.
+   */
+  admitHandleStatement?: <T>(statement: () => Promise<T>) => Promise<T>;
+  /**
    * Recognizes this engine's own commit-conflict shape when it is not
    * PostgreSQL's `40001`/`40P01` SQLSTATE (or the fixed message fallback for
    * a driver that drops the code). `createSqlBackend` registers this

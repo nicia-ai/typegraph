@@ -234,25 +234,12 @@ async function observeEnded(
 }
 
 /**
- * What a select does on a transaction that has ended, per driver: the
- * shared expectation of every terminal in that cell.
+ * What a select does on a transaction that has ended, on every driver: its
+ * view of the connection closed at the boundary
+ * (`src/backend/drizzle/execution/transaction-view.ts`), so the statement
+ * is refused before it reaches the connection.
  */
-function endedTransactionOutcome(context: IntegrationTestContext): string {
-  switch (context.driver) {
-    // The handle reads through the connection it was opened on.
-    case "better-sqlite3": {
-      return "ok";
-    }
-    case "libsql": {
-      return "refuses: Error, cause LibsqlError: TRANSACTION_CLOSED: The transaction is closed";
-    }
-    case "pglite":
-    case "node-postgres":
-    case "postgres-js": {
-      return "refuses: TransactionClosedError";
-    }
-  }
-}
+const ENDED_TRANSACTION_OUTCOME = "refuses: TransactionClosedError";
 
 export function registerReadEntryPointIntegrationTests(
   context: IntegrationTestContext,
@@ -395,7 +382,7 @@ export function registerReadEntryPointIntegrationTests(
             results["this database"],
           );
         expected[name]["executeOn(engine transaction, after its callback)"] =
-          endedTransactionOutcome(context);
+          ENDED_TRANSACTION_OUTCOME;
       }
       expect(observed).toEqual(expected);
     });
@@ -473,8 +460,7 @@ export function registerReadEntryPointIntegrationTests(
           () => read.execute(),
           result,
         );
-        expectedCells["execute, after it ends"] =
-          endedTransactionOutcome(context);
+        expectedCells["execute, after it ends"] = ENDED_TRANSACTION_OUTCOME;
         cells["executeOn(root), after it ends"] = await observe(
           () => read.executeOn(backend),
           result,
@@ -493,7 +479,7 @@ export function registerReadEntryPointIntegrationTests(
         requireDefined(observed[name])["execute, after it ends"] =
           await observeEnded(run, rootResults.get(name));
         requireDefined(expected[name])["execute, after it ends"] =
-          endedTransactionOutcome(context);
+          ENDED_TRANSACTION_OUTCOME;
       }
       expect(observed).toEqual(expected);
     });

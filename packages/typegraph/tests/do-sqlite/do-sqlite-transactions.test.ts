@@ -58,6 +58,7 @@ import {
   isSqliteNotAuthorizedError,
 } from "../../src/utils/sql-errors";
 
+import { expectObservation } from "../helpers/known-defect";
 import { SpikeDO } from "./worker";
 
 // The product's own relational ledger — NOT a TypeGraph table. The
@@ -649,3 +650,153 @@ describe("#140 do-sqlite transactions (Durable Objects, real workerd)", () => {
     });
   });
 });
+
+describe("a typed refusal inside a Durable Object transaction", () => {
+  it("does not end the transaction: a missing contribution marker refused after a successful marker read keeps earlier and later writes", async () => {
+    await inObject("missing-marker-refusal", async (_booted, storage) => {
+      const db = drizzle(storage);
+      await db.run(
+        sql.raw("DELETE FROM typegraph_contribution_materializations"),
+      );
+      // A fresh backend, so no marker verdict is cached from the boot.
+      const backend = createSqliteBackend(db, { tables: defaultTables });
+      const node = (id: string) => ({
+        graphId: DocGraph.id,
+        kind: "Doc",
+        id,
+        props: { title: id },
+      });
+      let refusal: unknown;
+      const outcome = await captureRejection(
+        backend.transaction(async (tx) => {
+          await tx.insertNode(node("before"));
+          // The marker SELECT succeeds and finds no row: a typed refusal
+          // the callback catches, not a statement failure.
+          refusal = await captureRejection(
+            requireDeleteFulltext(tx.deleteFulltext)({
+              graphId: DocGraph.id,
+              nodeKind: "SearchableDoc",
+              nodeId: "missing",
+            }),
+          );
+          await tx.insertNode(node("after"));
+        }),
+      );
+      expect({
+        refusal: refusal instanceof Error ? refusal.name : refusal,
+        outcome,
+        nodes: await backend.countNodesByKind({
+          graphId: DocGraph.id,
+          kind: "Doc",
+          excludeDeleted: false,
+        }),
+      }).toEqual({
+        refusal: "StoreNotInitializedError",
+        outcome: undefined,
+        nodes: 2,
+      });
+    });
+  });
+});
+
+describe("a backend kept past a Durable Object transaction", () => {
+  function docNode(id: string) {
+    return { graphId: DocGraph.id, kind: "Doc", id, props: { title: id } };
+  }
+
+  async function docCount(backend: ReturnType<typeof createSqliteBackend>) {
+    return backend.countNodesByKind({
+      graphId: DocGraph.id,
+      kind: "Doc",
+      excludeDeleted: false,
+    });
+  }
+
+  function errorName(error: unknown): unknown {
+    return error instanceof Error ? error.name : error;
+  }
+
+  it.each(["committed", "rolled back"] as const)(
+    "is refused once TypeGraph %s the transaction, and its late write is not saved",
+    async (end) => {
+      await inObject(`kept-backend-${end}`, async (_booted, storage) => {
+        const backend = createSqliteBackend(drizzle(storage), {
+          tables: defaultTables,
+        });
+        const before = await docCount(backend);
+        let kept:
+          Parameters<Parameters<typeof backend.transaction>[0]>[0] | undefined;
+        const outcome = await captureRejection(
+          backend.transaction(async (tx) => {
+            kept = tx;
+            await tx.insertNode(docNode("inside"));
+            if (end === "rolled back") throw new Error("callback failed");
+          }),
+        );
+        const late = await captureRejection(
+          requireKept(kept).insertNode(docNode("late")),
+        );
+        expect({
+          outcome: errorName(outcome),
+          late: errorName(late),
+          saved: (await docCount(backend)) - before,
+        }).toEqual({
+          outcome: end === "rolled back" ? "Error" : undefined,
+          late: "TransactionClosedError",
+          saved: end === "rolled back" ? 0 : 1,
+        });
+      });
+    },
+  );
+
+  // Durable Object storage reports no transaction state, so an adoption of
+  // the native handle is not proven to run on the transaction TypeGraph
+  // opened (`src/backend/native-transaction-handle.ts`, proof 4): it gets a
+  // view of its own that nothing closes, and its write after the rollback
+  // runs outside the transaction and is saved.
+  it("does not close an adoption of the native handle, which the engine cannot prove is the same transaction (known limit)", async () => {
+    await inObject("kept-adoption", async (_booted, storage) => {
+      const backend = createSqliteBackend(drizzle(storage), {
+        tables: defaultTables,
+      });
+      const before = await docCount(backend);
+      let adopted: ReturnType<typeof backend.adoptTransaction> | undefined;
+      const outcome = await captureRejection(
+        backend.transactionWithNative(async (_tx, native) => {
+          adopted = backend.adoptTransaction(native);
+          await adopted.insertNode(docNode("adopted-inside"));
+          throw new Error("callback failed");
+        }),
+      );
+      const late = await captureRejection(
+        requireKept(adopted).insertNode(docNode("adopted-late")),
+      );
+      expectObservation({
+        lane: { driver: "durable-object" },
+        observed: {
+          outcome: errorName(outcome),
+          late: errorName(late),
+          saved: (await docCount(backend)) - before,
+        },
+        correct: { outcome: "Error", late: "TransactionClosedError", saved: 0 },
+        defects: [
+          {
+            label: "unproven adoption",
+            on: { driver: ["durable-object"] },
+            today: { outcome: "Error", late: undefined, saved: 1 },
+          },
+        ],
+      });
+    });
+  });
+});
+
+function requireKept<T>(kept: T | undefined): T {
+  if (kept === undefined) throw new Error("the callback kept no backend");
+  return kept;
+}
+
+function requireDeleteFulltext<T>(member: T | undefined): T {
+  if (member === undefined) throw new Error("deleteFulltext is absent");
+  return member;
+}

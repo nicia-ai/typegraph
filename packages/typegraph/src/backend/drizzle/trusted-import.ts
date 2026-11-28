@@ -279,6 +279,12 @@ function postgresArray(values: readonly (string | null)[]): string {
 }
 
 /**
+ * In both sessions below, a batch's statement is admitted by the import
+ * transaction's view as it is issued, synchronously within the call; an
+ * empty batch, which issues none, enters the view (`enterView`) instead. A
+ * session kept past its import is therefore refused with
+ * `TransactionClosedError` whether or not the batch has rows.
+ *
  * Both sessions below decide their stored lower bound through
  * {@link resolveStampedValidityLowerBound}, the same owner the Drizzle insert
  * builders use, mapping "no bound" to an explicit SQL NULL. Trusted import
@@ -292,6 +298,7 @@ function postgresArray(values: readonly (string | null)[]): string {
 export function createSqliteTrustedImportSession(
   executionAdapter: SqliteExecutionAdapter,
   tableNames: TrustedImportTableNames,
+  enterView: () => Promise<void>,
 ): TrustedImportSession {
   const executePreparedRunBatch = executionAdapter.executePreparedRunBatch;
   if (executePreparedRunBatch === undefined) {
@@ -310,7 +317,9 @@ export function createSqliteTrustedImportSession(
 
   return {
     async insertNodes(params: readonly InsertNodeParams[]): Promise<void> {
-      if (params.length === 0) return;
+      // An empty batch issues no statement: it enters the view instead, so it
+      // is refused exactly when a statement would be.
+      if (params.length === 0) return enterView();
       const timestamp = new Date().toISOString();
       await executePreparedRunBatch(
         nodeSql,
@@ -328,7 +337,9 @@ export function createSqliteTrustedImportSession(
       );
     },
     async insertEdges(params: readonly InsertEdgeParams[]): Promise<void> {
-      if (params.length === 0) return;
+      // An empty batch issues no statement: it enters the view instead, so it
+      // is refused exactly when a statement would be.
+      if (params.length === 0) return enterView();
       const timestamp = new Date().toISOString();
       await executePreparedRunBatch(
         edgeSql,
@@ -357,6 +368,7 @@ export function createSqliteTrustedImportSession(
 export function createPostgresTrustedImportSession(
   backend: TransactionBackend,
   tableNames: TrustedImportTableNames,
+  enterView: () => Promise<void>,
 ): TrustedImportSession {
   const executeRaw = requireRawExecution(backend);
   const nodeSql = `INSERT INTO ${quoteSqlIdentifier(tableNames.nodes)}
@@ -381,7 +393,9 @@ export function createPostgresTrustedImportSession(
 
   return {
     async insertNodes(params: readonly InsertNodeParams[]): Promise<void> {
-      if (params.length === 0) return;
+      // An empty batch issues no statement: it enters the view instead, so it
+      // is refused exactly when a statement would be.
+      if (params.length === 0) return enterView();
       const timestamp = new Date().toISOString();
       await executeRaw(nodeSql, [
         postgresArray(params.map((item) => item.graphId)),
@@ -400,7 +414,9 @@ export function createPostgresTrustedImportSession(
       ]);
     },
     async insertEdges(params: readonly InsertEdgeParams[]): Promise<void> {
-      if (params.length === 0) return;
+      // An empty batch issues no statement: it enters the view instead, so it
+      // is refused exactly when a statement would be.
+      if (params.length === 0) return enterView();
       const timestamp = new Date().toISOString();
       await executeRaw(edgeSql, [
         postgresArray(params.map((item) => item.graphId)),

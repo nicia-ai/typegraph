@@ -14,6 +14,7 @@ const PGLITE_BOOT_MARKERS = [
   /\bregisterWriteShapeGoldenFile\("pglite"\)/u,
   /\bregisterEdgeCreatePathGoldenFile\("pglite",/u,
   /\bopenWriteShapeEngine\(/u,
+  /\bsetupSharedPgliteEngine\(/u,
 ] as const;
 
 function discoverRootPgliteSuites(): readonly string[] {

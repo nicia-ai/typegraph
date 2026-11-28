@@ -154,9 +154,10 @@ import { deriveBackend } from "../derive-backend";
 import { FIND_EDGES_ENDPOINT_FIXED_PARAM_COUNT } from "../edge-endpoint-sets";
 import { buildLiveNodeCandidates } from "../live-node-candidates";
 import {
+  identifyNativeTransaction,
   type NativeHandle,
+  recordBoundNativeTransaction,
   recordEngineSavepoint,
-  recordNativeTransactionHandle,
 } from "../native-transaction-handle";
 import {
   deferNativeHandle,
@@ -235,9 +236,9 @@ import {
   buildContributionInsertValues,
   buildContributionOnConflictSet,
   type ContributionMaterializer,
+  createSessionMarkerBatchRead,
   ensureAdoptedVectorSlots,
   gateFulltext,
-  mapContributionMaterializationRow,
   POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
   type RawContributionMaterializationRow,
 } from "./contribution-materializations";
@@ -277,6 +278,7 @@ import {
   type EngineOperationsContext,
   resolveSchemaProvisioning,
 } from "./engine/profile";
+import { runHandleStatement } from "./execution/handle-statement";
 import { runMarkedPostgresTransaction } from "./execution/postgres-commit-outcome";
 import {
   type AnyPgDatabase,
@@ -296,6 +298,11 @@ import {
 import { createPostgresTransactionSession } from "./execution/postgres-transaction-session";
 import { createSessionAtomicBatchAdapter } from "./execution/session-atomic-batch";
 import { createSerialExecutionAdapter } from "./execution/statement-queue";
+import {
+  openTransactionView,
+  type TransactionViewRole,
+} from "./execution/transaction-view";
+import type { CompiledSqlQuery } from "./execution/types";
 import { type ExecutableSql, toDrizzleSql } from "./execution/types";
 import { postgresInstantiateGraphTemplateStatement } from "./graph-template-sql";
 import {
@@ -1164,7 +1171,8 @@ function postgresNativeHandle(db: object): NativeHandle {
         pinned,
         // PGlite marks its transaction client closed once the transaction
         // has committed or rolled back, and refuses statements from then on.
-        isOpen: () => (pinned as Readonly<{ closed?: unknown }>).closed !== true,
+        isOpen: () =>
+          (pinned as Readonly<{ closed?: unknown }>).closed !== true,
       };
 }
 
@@ -1350,8 +1358,7 @@ function buildPostgresEngineProfileInternal(
   // object carries one anyway, so it is read as what it may be.
   const requestedCommitOutcome: unknown = (
     options.capabilities?.execution as
-      | Readonly<{ commitOutcome?: unknown }>
-      | undefined
+      Readonly<{ commitOutcome?: unknown }> | undefined
   )?.commitOutcome;
   if (transactionScoped && requestedCommitOutcome === "commit-reply") {
     throw new ConfigurationError(
@@ -1439,10 +1446,26 @@ function buildPostgresEngineProfileInternal(
     transactionScoped ?
       (getPinnedPostgresTransactionConnection(db) ?? db)
     : bareClient;
+  // A backend built over a transaction handle (`createPostgresTransactionBackend`,
+  // and `createPostgresBackend` given one) adopts that transaction: proven
+  // to run on a transaction TypeGraph opened, it admits through the view the
+  // transaction's owner closes, so a statement it issues once that
+  // transaction ended is refused (`openTransactionView`). This profile never
+  // closes the view itself.
   const executionAdapter =
     queueOwner === undefined ?
       unqueuedExecutionAdapter
-    : createSerialExecutionAdapter(unqueuedExecutionAdapter, queueOwner);
+    : createSerialExecutionAdapter(
+        unqueuedExecutionAdapter,
+        queueOwner,
+        transactionScoped ?
+          openTransactionView(
+            "adoption",
+            identifyNativeTransaction(postgresNativeHandle(db)),
+            db,
+          )
+        : undefined,
+      );
   const atomicSqlProgramExecutor =
     createAtomicSqlProgramExecutor(executionAdapter);
   // `declaredCapabilities` above is this profile's contribution; the
@@ -1578,7 +1601,7 @@ function buildPostgresEngineProfileInternal(
     statement: ReturnType<typeof sql.raw>,
   ): Promise<void> {
     if (allocationPin === undefined || allocationSchema === undefined) {
-      await db.execute(statement);
+      await runHandleStatement(executionAdapter, () => db.execute(statement));
       return;
     }
     if (isPostgresTransactionHandle(db)) {
@@ -1587,7 +1610,7 @@ function buildPostgresEngineProfileInternal(
         allocationSchema,
         "Lazy DDL",
       );
-      await db.execute(statement);
+      await runHandleStatement(executionAdapter, () => db.execute(statement));
       return;
     }
     await db.transaction(async (transaction) => {
@@ -1694,16 +1717,20 @@ function buildPostgresEngineProfileInternal(
       await executeConcurrentCreateDdl(ddl);
       return;
     }
+    // The whole transaction is one admission: on a transaction-scoped
+    // backend it is a savepoint, whose statements run on `tx` directly.
     await withConcurrentCreateRetry(async () => {
-      await db.transaction(async (tx) => {
-        await tx.execute(
-          toDrizzleSql(
-            fencePlan.sql.acquireKeyed(extensionDdlLockKey(validated), 0),
-            "postgres",
-          ),
-        );
-        await tx.execute(sql.raw(ddl));
-      });
+      await runHandleStatement(executionAdapter, () =>
+        db.transaction(async (tx) => {
+          await tx.execute(
+            toDrizzleSql(
+              fencePlan.sql.acquireKeyed(extensionDdlLockKey(validated), 0),
+              "postgres",
+            ),
+          );
+          await tx.execute(sql.raw(ddl));
+        }),
+      );
     });
   }
 
@@ -1722,45 +1749,56 @@ function buildPostgresEngineProfileInternal(
     timestamps: POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS,
     contributionMarkerColumns: matTable,
     contributionMarkerRows: {
-      selectWhere: (condition) => db.select().from(matTable).where(condition),
+      selectWhere: (condition) =>
+        runHandleStatement(executionAdapter, () =>
+          db.select().from(matTable).where(condition),
+        ),
       async upsert(params) {
-        await db
-          .insert(matTable)
-          .values(
-            buildContributionInsertValues(
-              params,
-              POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.encode,
-            ),
-          )
-          .onConflictDoUpdate({
-            target: [
-              matTable.graphId,
-              matTable.logicalName,
-              matTable.owner,
-              matTable.tableName,
-            ],
-            set: buildContributionOnConflictSet(
-              matTable.materializedAt,
-              params.materializedAt,
-            ),
-          });
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(matTable)
+            .values(
+              buildContributionInsertValues(
+                params,
+                POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.encode,
+              ),
+            )
+            .onConflictDoUpdate({
+              target: [
+                matTable.graphId,
+                matTable.logicalName,
+                matTable.owner,
+                matTable.tableName,
+              ],
+              set: buildContributionOnConflictSet(
+                matTable.materializedAt,
+                params.materializedAt,
+              ),
+            }),
+        );
       },
       async deleteWhere(condition) {
-        await db.delete(matTable).where(condition);
+        await runHandleStatement(executionAdapter, () =>
+          db.delete(matTable).where(condition),
+        );
       },
     },
     reconciliationMarkerColumns: tables.reconciliationMarkers,
     reconciliationMarkerRows: {
       selectWhere: (condition) =>
-        db.select().from(tables.reconciliationMarkers).where(condition),
+        runHandleStatement(executionAdapter, () =>
+          db.select().from(tables.reconciliationMarkers).where(condition),
+        ),
       async upsert(graphId, version) {
-        await db
-          .insert(tables.reconciliationMarkers)
-          .values({ graphId, reconciledToVersion: version })
-          .onConflictDoUpdate({
-            target: tables.reconciliationMarkers.graphId,
-            set: { reconciledToVersion: version },
-          });
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(tables.reconciliationMarkers)
+            .values({ graphId, reconciledToVersion: version })
+            .onConflictDoUpdate({
+              target: tables.reconciliationMarkers.graphId,
+              set: { reconciledToVersion: version },
+            }),
+        );
       },
     },
   };
@@ -1839,6 +1877,7 @@ function buildPostgresEngineProfileInternal(
       schemaVersionsTable: tables.schemaVersions,
       fenceTarget: ctx.fenceTarget,
       transactionScoped,
+      transactionBind: false,
       // The SAME object exposed as `backend.catalog` (via
       // `provisioning.catalog`), not a second one built from this call's own
       // `db`/`executionAdapter` — see `CreatePostgresOperationBackendOptions.catalog`.
@@ -1889,17 +1928,26 @@ function buildPostgresEngineProfileInternal(
   }
 
   /**
-   * Reads the base-schema marker on `session`: the root connection by
-   * default, or a caller-owned transaction a schema-write adoption checks on.
+   * Reads the base-schema marker on this backend's handle by default, or on
+   * `callerSession`, a caller-owned transaction a schema-write adoption
+   * checks on (not this backend's handle, so not admitted through its view).
    */
   async function readBaseSchemaVersion(
-    session: Pick<AnyPgDatabase, "select"> = db,
+    callerSession?: Pick<AnyPgDatabase, "select">,
   ): Promise<number | undefined> {
+    const marker = tables.baseSchemaVersions;
     try {
-      const rows = await session
-        .select({ version: tables.baseSchemaVersions.version })
-        .from(tables.baseSchemaVersions)
-        .where(eq(tables.baseSchemaVersions.installation, 1));
+      const rows = await (callerSession === undefined ?
+        runHandleStatement(executionAdapter, () =>
+          db
+            .select({ version: marker.version })
+            .from(marker)
+            .where(eq(marker.installation, 1)),
+        )
+      : callerSession
+          .select({ version: marker.version })
+          .from(marker)
+          .where(eq(marker.installation, 1)));
       return rows.at(0)?.version;
     } catch (error) {
       if (isMissingTableError(error)) return undefined;
@@ -1912,14 +1960,16 @@ function buildPostgresEngineProfileInternal(
   ): Promise<number | undefined> {
     const marker = tables.baseSchemaVersions;
     const timestamp = new Date();
-    await db
-      .insert(marker)
-      .values({ installation: 1, version, updatedAt: timestamp })
-      .onConflictDoUpdate({
-        target: marker.installation,
-        set: { version, updatedAt: timestamp },
-        setWhere: lte(marker.version, version),
-      });
+    await runHandleStatement(executionAdapter, () =>
+      db
+        .insert(marker)
+        .values({ installation: 1, version, updatedAt: timestamp })
+        .onConflictDoUpdate({
+          target: marker.installation,
+          set: { version, updatedAt: timestamp },
+          setWhere: lte(marker.version, version),
+        }),
+    );
     // Read back on this backend's primary connection: remote adapters do not
     // all support RETURNING. The monotonic upsert plus same-primary read makes
     // this two-statement observation safe when a concurrent adopter is ahead.
@@ -2009,21 +2059,28 @@ function buildPostgresEngineProfileInternal(
       // Fresh `tx`/`txAdapter` every call, so a replayed attempt never
       // reuses a rolled-back attempt's connection state (the attempt-factory
       // contract `runRetriedUnit` requires of `attempt`).
+      // One admission per attempt: on a transaction-scoped backend the
+      // transaction is a savepoint, whose statements run on `tx` directly.
       const attempt = (): Promise<readonly Record<string, unknown>[]> =>
-        db.transaction(async (tx) => {
-          const txAdapter = createPostgresExecutionAdapter(tx, adapterOptions);
-          await txAdapter.execute(
-            fencePlan.sql.acquireKeyed(
-              SCHEMA_COMMIT_FENCE_NAMESPACE,
-              params.graphId,
-            ),
-          );
-          return txAdapter.execute<Record<string, unknown>>(
-            asCompiledRowsSql(
-              postgresInstantiateGraphTemplateStatement(params, fencePlan),
-            ),
-          );
-        });
+        runHandleStatement(executionAdapter, () =>
+          db.transaction(async (tx) => {
+            const txAdapter = createPostgresExecutionAdapter(
+              tx,
+              adapterOptions,
+            );
+            await txAdapter.execute(
+              fencePlan.sql.acquireKeyed(
+                SCHEMA_COMMIT_FENCE_NAMESPACE,
+                params.graphId,
+              ),
+            );
+            return txAdapter.execute<Record<string, unknown>>(
+              asCompiledRowsSql(
+                postgresInstantiateGraphTemplateStatement(params, fencePlan),
+              ),
+            );
+          }),
+        );
       // Under `conflict: "commit-time"` (the `"optimistic-retry"` tier) two
       // concurrent instantiations can both acquire the fence row and only one
       // COMMITs; the other's whole attempt — open, fence-row acquisition, CTE
@@ -2044,22 +2101,23 @@ function buildPostgresEngineProfileInternal(
     rowAccess: {
       async insertIgnoringConflict(params) {
         const t = tables.graphTemplates;
-        await db
-          .insert(t)
-          .values({
-            templateId: params.templateId,
-            schemaHash: params.schemaHash,
-            schemaDoc: params.schemaDoc,
-            createdAt: new Date(),
-          })
-          .onConflictDoNothing();
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(t)
+            .values({
+              templateId: params.templateId,
+              schemaHash: params.schemaHash,
+              schemaDoc: params.schemaDoc,
+              createdAt: new Date(),
+            })
+            .onConflictDoNothing(),
+        );
       },
       async selectByTemplateId(templateId) {
         const t = tables.graphTemplates;
-        const templateRows = await db
-          .select()
-          .from(t)
-          .where(eq(t.templateId, templateId));
+        const templateRows = await runHandleStatement(executionAdapter, () =>
+          db.select().from(t).where(eq(t.templateId, templateId)),
+        );
         const row = templateRows.at(0);
         if (row === undefined) return;
         return {
@@ -2121,10 +2179,12 @@ function buildPostgresEngineProfileInternal(
         if (isPostgresTransactionHandle(db)) {
           // Savepoint rollback restores both the caller's session and GUC after a timeout.
           await withConcurrentCreateRetry(() =>
-            db.transaction(async (transaction: AnyPgTransaction) => {
-              await bindSchemaWriteSessionToAllocation(transaction);
-              await transaction.execute(sql.raw(ddl));
-            }),
+            runHandleStatement(executionAdapter, () =>
+              db.transaction(async (transaction: AnyPgTransaction) => {
+                await bindSchemaWriteSessionToAllocation(transaction);
+                await transaction.execute(sql.raw(ddl));
+              }),
+            ),
           );
         } else {
           await executeConcurrentCreateDdl(ddl);
@@ -2187,29 +2247,35 @@ function buildPostgresEngineProfileInternal(
     rowAccess: {
       async selectByIndexName(indexName) {
         const t = tables.indexMaterializations;
-        return db.select().from(t).where(eq(t.indexName, indexName));
+        return runHandleStatement(executionAdapter, () =>
+          db.select().from(t).where(eq(t.indexName, indexName)),
+        );
       },
       async selectByIndexNames(indexNames) {
         const t = tables.indexMaterializations;
-        return db
-          .select()
-          .from(t)
-          .where(inArray(t.indexName, [...indexNames]));
+        return runHandleStatement(executionAdapter, () =>
+          db
+            .select()
+            .from(t)
+            .where(inArray(t.indexName, [...indexNames])),
+        );
       },
       async upsert(params) {
         const t = tables.indexMaterializations;
-        await db
-          .insert(t)
-          .values(
-            buildMaterializationInsertValues(
-              params,
-              POSTGRES_INDEX_MAT_TIMESTAMPS.encode,
-            ),
-          )
-          .onConflictDoUpdate({
-            target: t.indexName,
-            set: buildMaterializationOnConflictSet(params.materializedAt),
-          });
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(t)
+            .values(
+              buildMaterializationInsertValues(
+                params,
+                POSTGRES_INDEX_MAT_TIMESTAMPS.encode,
+              ),
+            )
+            .onConflictDoUpdate({
+              target: t.indexName,
+              set: buildMaterializationOnConflictSet(params.materializedAt),
+            }),
+        );
       },
     },
   };
@@ -2221,29 +2287,35 @@ function buildPostgresEngineProfileInternal(
     rowAccess: {
       async selectPending(graphId) {
         const t = tables.kindRemovals;
-        return db
-          .select()
-          .from(t)
-          .where(and(eq(t.graphId, graphId), isNull(t.removedAt)));
+        return runHandleStatement(executionAdapter, () =>
+          db
+            .select()
+            .from(t)
+            .where(and(eq(t.graphId, graphId), isNull(t.removedAt))),
+        );
       },
       async selectAll(graphId) {
         const t = tables.kindRemovals;
-        return db.select().from(t).where(eq(t.graphId, graphId));
+        return runHandleStatement(executionAdapter, () =>
+          db.select().from(t).where(eq(t.graphId, graphId)),
+        );
       },
       async upsert(params: RecordKindRemovalParams) {
         const t = tables.kindRemovals;
-        await db
-          .insert(t)
-          .values(
-            buildKindRemovalInsertValues(
-              params,
-              POSTGRES_KIND_REMOVAL_TIMESTAMPS.encode,
-            ),
-          )
-          .onConflictDoUpdate({
-            target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
-            set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
-          });
+        await runHandleStatement(executionAdapter, () =>
+          db
+            .insert(t)
+            .values(
+              buildKindRemovalInsertValues(
+                params,
+                POSTGRES_KIND_REMOVAL_TIMESTAMPS.encode,
+              ),
+            )
+            .onConflictDoUpdate({
+              target: [t.graphId, t.kindName, t.entity, t.schemaVersion],
+              set: buildKindRemovalOnConflictSet(t.removedAt, params.removedAt),
+            }),
+        );
       },
     },
   };
@@ -2279,10 +2351,17 @@ function buildPostgresEngineProfileInternal(
      * `db.transaction` opens a savepoint on the enclosing transaction, whose
      * outcome is decided by whoever opened that transaction.
      */
-    function openCommittingTransaction<T>(
+    async function openCommittingTransaction<T>(
       config: PgTransactionConfig | undefined,
       body: (tx: AnyPgTransaction) => Promise<T>,
     ): Promise<T> {
+      // The savepoint a transaction-scoped backend opens runs on the
+      // enclosing transaction's connection: refused, as its statements are,
+      // once that transaction ended. Admitted and settled before the
+      // savepoint opens, so the savepoint's body does not wait on it.
+      if (transactionScoped) {
+        await runHandleStatement(executionAdapter, () => Promise.resolve());
+      }
       // On a transaction-scoped backend `tx` is a savepoint on `db`: it runs
       // in `db`'s native transaction, not one of its own.
       const run = (tx: AnyPgTransaction): Promise<T> => {
@@ -2558,58 +2637,56 @@ function buildPostgresEngineProfileInternal(
           SCHEMA_WRITE_ADVISORY_FENCE_TRANSACTION
         : undefined;
       const attempt = (): Promise<T> =>
-        openCommittingTransaction(
-          transactionConfig,
-          async (tx) => {
-            await acquireSchemaWriteFence(tx, graphId, fence, {
-              kind: "read-with-lock",
+        openCommittingTransaction(transactionConfig, async (tx) => {
+          await acquireSchemaWriteFence(tx, graphId, fence, {
+            kind: "read-with-lock",
+          });
+          // Schema writes run DDL: over an allocation, where it lives.
+          await bindSchemaWriteSessionToAllocation(tx);
+          // The fence resolved above is held here, so the schema-write-capable
+          // InternalOperationBackend is used intentionally (see its type).
+          const { backend: txBackend, drainAndClose } =
+            createTransactionBackend({
+              db: tx,
+              connection: nestedTransactionConnection,
+              adapterOptions,
+              operationStrategy,
+              tableNames,
+              capabilities,
+              fulltextStrategy,
+              vectorStrategy,
+              contributionMaterializer: ctx.contributionMaterializer,
+              iterativeScanProbe,
+              schemaVersionsTable: tables.schemaVersions,
+              contributionMaterializationsTable:
+                tables.contributionMaterializations,
+              fenceTarget,
+              allocationSchema,
+              lineage: provisioning.lineage,
+              recordedTime: provisioning.recordedTime,
+              isFirstParty,
+              viewRole: "owner",
             });
-            // Schema writes run DDL: over an allocation, where it lives.
-            await bindSchemaWriteSessionToAllocation(tx);
-            // The fence resolved above is held here, so the schema-write-capable
-            // InternalOperationBackend is used intentionally (see its type).
-            const { backend: txBackend, drainAndClose } =
-              createTransactionBackend({
-                db: tx,
-                connection: nestedTransactionConnection,
-                adapterOptions,
-                operationStrategy,
-                tableNames,
-                capabilities,
-                fulltextStrategy,
-                vectorStrategy,
-                contributionMaterializer: ctx.contributionMaterializer,
-                iterativeScanProbe,
-                schemaVersionsTable: tables.schemaVersions,
-                contributionMaterializationsTable:
-                  tables.contributionMaterializations,
-                fenceTarget,
-                allocationSchema,
-                lineage: provisioning.lineage,
-                recordedTime: provisioning.recordedTime,
-                isFirstParty,
-              });
-            // `executeSchemaDdl` forwards any SQL text, transaction control
-            // included: the view handed to code TypeGraph does not own (a
-            // preflight, a public `schemaWriteTransaction` callback)
-            // releases control of the transaction before its statement is
-            // sent.
-            registerRawSqlReleasingView(
-              txBackend,
-              deriveBackend(txBackend, {
-                executeSchemaDdl(ddl: string): Promise<void> {
-                  releaseNativeTransaction(tx);
-                  return txBackend.executeSchemaDdl(ddl);
-                },
-              }),
-            );
-            try {
-              return await fn(txBackend);
-            } finally {
-              await drainAndClose();
-            }
-          },
-        );
+          // `executeSchemaDdl` forwards any SQL text, transaction control
+          // included: the view handed to code TypeGraph does not own (a
+          // preflight, a public `schemaWriteTransaction` callback)
+          // releases control of the transaction before its statement is
+          // sent.
+          registerRawSqlReleasingView(
+            txBackend,
+            deriveBackend(txBackend, {
+              executeSchemaDdl(ddl: string): Promise<void> {
+                releaseNativeTransaction(tx);
+                return txBackend.executeSchemaDdl(ddl);
+              },
+            }),
+          );
+          try {
+            return await fn(txBackend);
+          } finally {
+            await drainAndClose();
+          }
+        });
 
       if (!isOptimisticRetryTier(fenceTarget)) return attempt();
       return runRetriedUnit(
@@ -2633,33 +2710,41 @@ function buildPostgresEngineProfileInternal(
     function bindTransactionBackend(
       tx: AnyPgTransaction,
       txIsFirstParty: boolean,
+      viewRole: TransactionViewRole,
       connection?: object,
     ): Readonly<{
       backend: TransactionBackend;
       privilegedBackend: InternalOperationBackend;
+      executeCompiled: TransactionCompiledExecution | undefined;
+      enterView: () => Promise<void>;
       drainAndClose: () => Promise<void>;
     }> {
-      const { backend, contributionReadGate, drainAndClose } =
-        createTransactionBackend({
-          db: tx,
-          connection,
-          adapterOptions,
-          operationStrategy,
-          tableNames,
-          capabilities,
-          fulltextStrategy,
-          vectorStrategy,
-          contributionMaterializer: ctx.contributionMaterializer,
-          iterativeScanProbe,
-          schemaVersionsTable: tables.schemaVersions,
-          contributionMaterializationsTable:
-            tables.contributionMaterializations,
-          fenceTarget,
-          allocationSchema,
-          lineage: provisioning.lineage,
-          recordedTime: provisioning.recordedTime,
-          isFirstParty: txIsFirstParty,
-        });
+      const {
+        backend,
+        contributionReadGate,
+        executeCompiled,
+        enterView,
+        drainAndClose,
+      } = createTransactionBackend({
+        db: tx,
+        connection,
+        adapterOptions,
+        operationStrategy,
+        tableNames,
+        capabilities,
+        fulltextStrategy,
+        vectorStrategy,
+        contributionMaterializer: ctx.contributionMaterializer,
+        iterativeScanProbe,
+        schemaVersionsTable: tables.schemaVersions,
+        contributionMaterializationsTable: tables.contributionMaterializations,
+        fenceTarget,
+        allocationSchema,
+        lineage: provisioning.lineage,
+        recordedTime: provisioning.recordedTime,
+        isFirstParty: txIsFirstParty,
+        viewRole,
+      });
       const gatedBackend = carryAtomicMutationSessionRegistration(
         backend,
         gateFulltext(
@@ -2671,8 +2756,103 @@ function buildPostgresEngineProfileInternal(
       return {
         backend: gatedBackend,
         privilegedBackend: backend,
+        executeCompiled,
+        enterView,
         drainAndClose,
       };
+    }
+
+    /**
+     * Opens a transaction TypeGraph owns and runs `fn` on its backend, its
+     * native handle, and the pinned-client compiled execution behind the
+     * backend's view (absent when the driver exposes none).
+     * `transactionWithNative` is this minus that execution; `trustedImport`
+     * issues its batches through it, so they queue and are admitted by the
+     * same view the backend's own statements are, and are refused once the
+     * transaction ends.
+     */
+    async function openTransaction<T>(
+      fn: (
+        tx: TransactionBackend,
+        sql: AnyPgTransaction,
+        executeCompiled: TransactionCompiledExecution | undefined,
+        enterView: () => Promise<void>,
+      ) => Promise<T>,
+      options?: InternalTransactionOptions,
+    ): Promise<T> {
+      // #134/#135: NO DDL or ensure here. The tx-scoped backend's
+      // fulltext-touching methods assert the durable contribution
+      // marker (one cached SELECT — never DDL) at point of use, exactly
+      // like the non-tx wrappers. A transaction that never touches
+      // fulltext never asserts; one that does runs pure DML against an
+      // already-materialized table, with the "no DDL in the business
+      // transaction" guarantee backed by the durable fact.
+      const temporaryWrites =
+        options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
+      if (temporaryWrites && options.accessMode !== "read_only") {
+        throw new ConfigurationError(
+          "Temporary-write transactions must be semantically read-only.",
+          { dialect: "postgres" },
+        );
+      }
+      const txConfig =
+        (
+          options?.isolationLevel !== undefined ||
+          options?.accessMode !== undefined ||
+          temporaryWrites
+        ) ?
+          {
+            ...(options.isolationLevel === undefined ?
+              {}
+            : {
+                isolationLevel: options.isolationLevel.replace("_", " ") as
+                  | "read uncommitted"
+                  | "read committed"
+                  | "repeatable read"
+                  | "serializable",
+              }),
+            ...(options.accessMode === undefined && !temporaryWrites ?
+              {}
+            : {
+                accessMode:
+                  temporaryWrites ?
+                    ("read write" as const)
+                  : (requireDefined(options.accessMode).replace("_", " ") as
+                      "read only" | "read write"),
+              }),
+          }
+        : undefined;
+
+      return openCommittingTransaction(txConfig, async (tx) => {
+        const {
+          backend: txBackend,
+          executeCompiled,
+          enterView,
+          drainAndClose,
+        } = bindTransactionBackend(
+          tx,
+          isFirstParty,
+          "owner",
+          nestedTransactionConnection,
+        );
+        try {
+          return await fn(
+            markSchemaFencedInsertEligibleUnderFence(txBackend, fencePlan),
+            nativeHandleForCallback(tx, options),
+            executeCompiled,
+            enterView,
+          );
+        } finally {
+          // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
+          // instant the callback settles, and those control statements do not
+          // travel through the backend's statement queue. Wait for whatever is
+          // on the wire, and refuse anything the callback left running — a
+          // `Promise.all` that rejects orphans its siblings, whose statements
+          // would otherwise overlap the ROLLBACK and then land on a connection
+          // the pool had already handed to somebody else.
+          await drainAndClose();
+        }
+      });
     }
 
     return {
@@ -2691,80 +2871,7 @@ function buildPostgresEngineProfileInternal(
           fn: (tx: TransactionBackend, sql: AnyPgTransaction) => Promise<T>,
           options?: InternalTransactionOptions,
         ): Promise<T> {
-          // #134/#135: NO DDL or ensure here. The tx-scoped backend's
-          // fulltext-touching methods assert the durable contribution
-          // marker (one cached SELECT — never DDL) at point of use, exactly
-          // like the non-tx wrappers. A transaction that never touches
-          // fulltext never asserts; one that does runs pure DML against an
-          // already-materialized table, with the "no DDL in the business
-          // transaction" guarantee backed by the durable fact.
-          const temporaryWrites =
-            options?.temporaryWrites === INTERNAL_TEMPORARY_WRITES;
-          if (temporaryWrites && options.accessMode !== "read_only") {
-            throw new ConfigurationError(
-              "Temporary-write transactions must be semantically read-only.",
-              { dialect: "postgres" },
-            );
-          }
-          const txConfig =
-            (
-              options?.isolationLevel !== undefined ||
-              options?.accessMode !== undefined ||
-              temporaryWrites
-            ) ?
-              {
-                ...(options.isolationLevel === undefined ?
-                  {}
-                : {
-                    isolationLevel: options.isolationLevel.replace("_", " ") as
-                      | "read uncommitted"
-                      | "read committed"
-                      | "repeatable read"
-                      | "serializable",
-                  }),
-                ...(options.accessMode === undefined && !temporaryWrites ?
-                  {}
-                : {
-                    accessMode:
-                      temporaryWrites ?
-                        ("read write" as const)
-                      : (requireDefined(options.accessMode).replace(
-                          "_",
-                          " ",
-                        ) as "read only" | "read write"),
-                  }),
-              }
-            : undefined;
-
-          return openCommittingTransaction(
-            txConfig,
-            async (tx) => {
-              const { backend: txBackend, drainAndClose } =
-                bindTransactionBackend(
-                  tx,
-                  isFirstParty,
-                  nestedTransactionConnection,
-                );
-              try {
-                return await fn(
-                  markSchemaFencedInsertEligibleUnderFence(
-                    txBackend,
-                    fencePlan,
-                  ),
-                  nativeHandleForCallback(tx, options),
-                );
-              } finally {
-                // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
-                // instant the callback settles, and those control statements do not
-                // travel through the backend's statement queue. Wait for whatever is
-                // on the wire, and refuse anything the callback left running — a
-                // `Promise.all` that rejects orphans its siblings, whose statements
-                // would otherwise overlap the ROLLBACK and then land on a connection
-                // the pool had already handed to somebody else.
-                await drainAndClose();
-              }
-            },
-          );
+          return openTransaction((tx, native) => fn(tx, native), options);
         },
 
         adoptTransaction(externalTx: AnyPgTransaction): TransactionBackend {
@@ -2804,7 +2911,7 @@ function buildPostgresEngineProfileInternal(
           // the caller opened this transaction, its lifetime is not one
           // TypeGraph has audited, and it must not qualify for the
           // dialect-derivation fallback or the lazy schema-fence lease.
-          return bindTransactionBackend(externalTx, false).backend;
+          return bindTransactionBackend(externalTx, false, "adoption").backend;
         },
 
         ...(capabilities.execution.interactiveTransactions ?
@@ -2875,6 +2982,7 @@ function buildPostgresEngineProfileInternal(
                 const { privilegedBackend } = bindTransactionBackend(
                   externalTx,
                   false,
+                  "adoption",
                 );
                 const schemaVersionsTableName = getTableName(
                   tables.schemaVersions,
@@ -3106,7 +3214,9 @@ function buildPostgresEngineProfileInternal(
           // autovacuum catches up. Sequential per-table statements — see
           // coreAnalyzeStatements for why they are never combined.
           for (const statement of coreAnalyzeStatements) {
-            await db.execute(statement);
+            await runHandleStatement(executionAdapter, () =>
+              db.execute(statement),
+            );
           }
           // The recorded and identity relations may be absent on a schema created
           // before recorded-time history or Operational Identity landed
@@ -3122,10 +3232,12 @@ function buildPostgresEngineProfileInternal(
             .filter((entry) => entry.exists)
             .map((entry) => entry.tableName);
           for (const tableName of presentGuardedTables) {
-            await db.execute(
-              toDrizzleSql(
-                portableSql`ANALYZE (SKIP_LOCKED) ${portableSql.identifier(tableName)}`,
-                "postgres",
+            await runHandleStatement(executionAdapter, () =>
+              db.execute(
+                toDrizzleSql(
+                  portableSql`ANALYZE (SKIP_LOCKED) ${portableSql.identifier(tableName)}`,
+                  "postgres",
+                ),
               ),
             );
           }
@@ -3141,18 +3253,13 @@ function buildPostgresEngineProfileInternal(
             fn: (session: TrustedImportSession) => Promise<T>,
             options_?: TrustedImportOptions,
           ): Promise<T> {
-            return ctx.self().transactionWithNative(
-              async (tx, rawSql) => {
+            return openTransaction(
+              async (tx, _native, executeCompiled, enterView) => {
                 if (options_?.schemaWrite !== undefined) {
                   await requireDefined(tx.lockSchemaVersionForWrite)({
                     ...options_.schemaWrite,
                   });
                 }
-                const trustedExecutionAdapter = createPostgresExecutionAdapter(
-                  rawSql,
-                  { ...adapterOptions, useTransactionClient: true },
-                );
-                const executeCompiled = trustedExecutionAdapter.executeCompiled;
                 if (executeCompiled === undefined) {
                   throw new ConfigurationError(
                     "Trusted import could not bind raw execution to the PostgreSQL transaction.",
@@ -3175,14 +3282,19 @@ function buildPostgresEngineProfileInternal(
                   allocationSchema,
                 );
                 const result = await fn(
-                  createPostgresTrustedImportSession(trustedTx, tableNames),
+                  createPostgresTrustedImportSession(
+                    trustedTx,
+                    tableNames,
+                    enterView,
+                  ),
                 );
                 await restoreSecondaryIndexes(trustedTx, indexDefinitions);
                 await analyzeImportedTables(trustedTx, tableNames);
                 return result;
               },
-              // The raw handle carries only the import's own statements; the
-              // session handed to `fn` exposes none.
+              // The raw handle is never used: the import's own statements run
+              // through `executeCompiled`, and the session handed to `fn`
+              // exposes none.
               deferNativeHandle(undefined),
             );
           },
@@ -3206,24 +3318,26 @@ function buildPostgresEngineProfileInternal(
           // mutex, so this works identically through pools and across
           // processes (unlike session advisory locks, which pin a
           // connection).
-          const rows = await db.execute(sql`
-            INSERT INTO ${t} (
-              "index_name", "graph_id", "entity", "kind", "signature",
-              "schema_version", "last_attempted_at", "building_since",
-              "claim_token"
-            )
-            VALUES (
-              ${params.indexName}, ${params.graphId}, ${params.entity},
-              ${params.kind}, ${params.signature}, ${params.schemaVersion},
-              now(), now(), ${params.token}
-            )
-            ON CONFLICT ("index_name") DO UPDATE SET
-              "building_since" = now(),
-              "claim_token" = EXCLUDED."claim_token"
-            WHERE ${t}."building_since" IS NULL
-               OR ${t}."building_since" < now() - (${params.leaseMs} * interval '1 millisecond')
-            RETURNING "index_name"
-          `);
+          const rows = await runHandleStatement(executionAdapter, () =>
+            db.execute(sql`
+              INSERT INTO ${t} (
+                "index_name", "graph_id", "entity", "kind", "signature",
+                "schema_version", "last_attempted_at", "building_since",
+                "claim_token"
+              )
+              VALUES (
+                ${params.indexName}, ${params.graphId}, ${params.entity},
+                ${params.kind}, ${params.signature}, ${params.schemaVersion},
+                now(), now(), ${params.token}
+              )
+              ON CONFLICT ("index_name") DO UPDATE SET
+                "building_since" = now(),
+                "claim_token" = EXCLUDED."claim_token"
+              WHERE ${t}."building_since" IS NULL
+                 OR ${t}."building_since" < now() - (${params.leaseMs} * interval '1 millisecond')
+              RETURNING "index_name"
+            `),
+          );
           const result = rows;
           const returned =
             Array.isArray(result) ? result : (
@@ -3238,12 +3352,14 @@ function buildPostgresEngineProfileInternal(
           const t = tables.indexMaterializations;
           // Token-guarded: a lease-expired claim taken over by another
           // materializer must not be released by the original holder.
-          await db.execute(sql`
-            UPDATE ${t}
-            SET "building_since" = NULL, "claim_token" = NULL
-            WHERE "index_name" = ${params.indexName}
-              AND "claim_token" = ${params.token}
-          `);
+          await runHandleStatement(executionAdapter, () =>
+            db.execute(sql`
+              UPDATE ${t}
+              SET "building_since" = NULL, "claim_token" = NULL
+              WHERE "index_name" = ${params.indexName}
+                AND "claim_token" = ${params.token}
+            `),
+          );
         },
 
         ensureEdgeMatchIdentityStorage,
@@ -3582,6 +3698,14 @@ type CreatePostgresOperationBackendOptions = Readonly<{
   /** Whether this operation backend is bound to an explicit transaction. */
   transactionScoped: boolean;
   /**
+   * Whether this operation backend is a bind of a transaction TypeGraph
+   * opened or adopted (`createTransactionBackend`), whose marker gate
+   * refuses contribution administration. `false` on a backend a caller
+   * built over a transaction handle, which is `transactionScoped` but
+   * provisions through its own materializer in the caller's transaction.
+   */
+  transactionBind: boolean;
+  /**
    * The root backend's own `catalog` bag, threaded through so this call
    * exposes the SAME object rather than building a second one from `db` /
    * `executionAdapter` — see `EngineProvisioning.catalog`. Omitted on the
@@ -3624,6 +3748,12 @@ type CreatePostgresTransactionBackendOptions = Readonly<{
    * and must share its queue. Absent: the client `db` itself is pinned to.
    */
   connection?: object | undefined;
+  /**
+   * Whether this bind opened the transaction and its runner closes the view
+   * at the end (`owner`), or adopts a transaction already open (`adoption`):
+   * see `openTransactionView`.
+   */
+  viewRole: TransactionViewRole;
   adapterOptions?: PostgresExecutionAdapterOptions;
   operationStrategy: ReturnType<typeof createPostgresOperationStrategy>;
   tableNames: ResolvedSqlTableNames;
@@ -3674,6 +3804,7 @@ function createPostgresOperationBackend(
     schemaVersionsTable,
     fenceTarget,
     transactionScoped,
+    transactionBind,
     catalog,
     allocationSchema,
     lineage,
@@ -4078,8 +4209,12 @@ function createPostgresOperationBackend(
   // `runIndexBuild`.
   const vectorMembers =
     vectorStrategy === undefined ?
-      createVectorMembers({ vectorStrategy: undefined })
+      createVectorMembers({
+        vectorStrategy: undefined,
+        refusesContributionAdministration: transactionBind,
+      })
     : createVectorMembers({
+        refusesContributionAdministration: transactionBind,
         vectorStrategy,
         execution: { execRun },
         batchConfig,
@@ -4473,8 +4608,26 @@ function createPostgresOperationBackend(
 type BoundTransactionBackend = Readonly<{
   backend: InternalOperationBackend;
   contributionReadGate: ContributionMaterializer;
+  /**
+   * The pinned client's compiled-text execution, queued and admitted by the
+   * same view as `backend`'s statements. A session that issues statements
+   * of its own on this transaction (trusted import) runs them here.
+   */
+  executeCompiled: TransactionCompiledExecution | undefined;
+  /**
+   * Admits nothing through the transaction's view and queue: resolves while
+   * the transaction is open and is refused like a statement once it ended.
+   * A session that may issue no statement (an empty trusted-import batch)
+   * enters here first, so it is refused exactly when a statement would be.
+   */
+  enterView: () => Promise<void>;
   drainAndClose: () => Promise<void>;
 }>;
+
+/** Compiled-text execution on one transaction's pinned client. */
+type TransactionCompiledExecution = <TRow>(
+  compiledQuery: CompiledSqlQuery,
+) => Promise<readonly TRow[]>;
 
 function resolvedSetOnlyEdgeMutationProgram(
   executor: AtomicEdgeMutationProgramExecutor,
@@ -4531,11 +4684,18 @@ function createTransactionBackend(
   // compiled-text seam; changing every statement to that seam would also
   // bypass driver logging and other Drizzle session behavior merely because
   // this transaction can execute programs.
+  // The native transaction this bind runs on, identified once: the view is
+  // the one its owner closes (`openTransactionView`), and the record is what
+  // the Store resolves.
+  const nativeTransaction = identifyNativeTransaction(
+    postgresNativeHandle(options.db),
+  );
   const txExecutionAdapter = createSerialExecutionAdapter(
     session.operation,
     options.connection ??
       getPinnedPostgresTransactionConnection(options.db) ??
       options.db,
+    openTransactionView(options.viewRole, nativeTransaction, options.db),
   );
   const runExclusive = txExecutionAdapter.runExclusive;
   const sessionAtomicBatchAdapter =
@@ -4559,33 +4719,15 @@ function createTransactionBackend(
   // A marker confirmed by the root backend can be invisible to an older
   // transaction snapshot. Resolve assertions on this exact pinned session;
   // the bound materializer owns a cache that cannot leak across transactions.
-  const markerTable = portableSql.identifier(
-    getTableName(options.contributionMaterializationsTable),
-  );
   const txContributionMaterializer =
-    options.contributionMaterializer.bindReadSession(async (graphIds) => {
-      if (graphIds.length === 0) return [];
-      const rows =
-        await txExecutionAdapter.execute<RawContributionMaterializationRow>(
-          portableSql`
-          SELECT graph_id AS "graphId", logical_name AS "logicalName",
-            owner, table_name AS "tableName", signature,
-            materialized_at AS "materializedAt",
-            last_attempted_at AS "lastAttemptedAt",
-            last_error AS "lastError"
-          FROM ${markerTable} WHERE graph_id IN (${portableSql.join(
-            graphIds.map((graphId) => portableSql`${graphId}`),
-            portableSql`, `,
-          )})
-        `,
-        );
-      return rows.map((row) =>
-        mapContributionMaterializationRow(
-          row,
-          POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
-        ),
-      );
-    });
+    options.contributionMaterializer.bindReadSession(
+      createSessionMarkerBatchRead(
+        (query) =>
+          txExecutionAdapter.execute<RawContributionMaterializationRow>(query),
+        getTableName(options.contributionMaterializationsTable),
+        POSTGRES_CONTRIBUTION_MAT_TIMESTAMPS.decode,
+      ),
+    );
   const txOperationBackend = createPostgresOperationBackend({
     db: options.db,
     executionAdapter: txExecutionAdapter,
@@ -4605,6 +4747,7 @@ function createTransactionBackend(
     schemaVersionsTable: options.schemaVersionsTable,
     fenceTarget: options.fenceTarget,
     transactionScoped: true,
+    transactionBind: true,
     allocationSchema: options.allocationSchema,
     lineage: options.lineage,
     recordedTime: options.recordedTime,
@@ -4617,7 +4760,7 @@ function createTransactionBackend(
     registerDriverSavepointScope(backend, enterDriverScope);
   }
   registerSavepointGuard(backend, guardSavepoint);
-  recordNativeTransactionHandle(backend, postgresNativeHandle(options.db));
+  recordBoundNativeTransaction(backend, nativeTransaction);
 
   if (sessionAtomicBatchAdapter !== undefined) {
     registerAtomicSqlProgram(backend, sessionAtomicBatchAdapter);
@@ -4634,6 +4777,12 @@ function createTransactionBackend(
   return {
     backend,
     contributionReadGate: txContributionMaterializer,
+    executeCompiled:
+      executeCompiled === undefined ? undefined : (
+        <TRow>(compiledQuery: CompiledSqlQuery) =>
+          runExclusive(() => executeCompiled<TRow>(compiledQuery))
+      ),
+    enterView: () => runExclusive(() => Promise.resolve()),
     drainAndClose: txExecutionAdapter.drainAndClose,
   };
 }

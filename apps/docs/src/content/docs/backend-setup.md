@@ -1027,6 +1027,21 @@ transaction-scoped backend automatically. Use `createPostgresTransactionBackend`
 when you want the transaction-scoped intent to be explicit; a regular database
 handle passed to `createPostgresBackend(db)` still creates the pooled backend.
 
+Built over the native handle `backend.transactionWithNative()` passes its
+callback, a transaction TypeGraph opened, the backend closes with that
+transaction: once TypeGraph commits or rolls it back, a statement issued
+through the kept backend is refused with
+[`TransactionClosedError`](/errors#transactionclosederror) instead of running
+on a connection the pool has taken back. That covers every member, including
+the ones that write contribution, reconciliation, index-materialization,
+kind-removal and graph-template rows, run lazy DDL, or refresh statistics,
+and opening a savepoint with `transaction()`. A savepoint the backend opened
+while the transaction was open is not closed by the enclosing transaction's
+end yet: await it before the callback returns. The refusal is per statement,
+so await every call on the backend before the callback returns: a call that
+issues several statements and is still running at the end has its later
+statements refused part way through.
+
 #### `createLocalPgliteBackend(options?)`
 
 Creates an in-process PGlite backend with automatic engine construction,

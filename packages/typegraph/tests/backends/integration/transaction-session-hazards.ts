@@ -32,6 +32,7 @@
  */
 import { isDeepStrictEqual } from "node:util";
 
+import { type SQL, sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -52,7 +53,10 @@ import { createPostgresBackend } from "../../../src/backend/postgres";
 import type {
   AdapterBackend,
   GraphBackend,
+  InsertEdgeParams,
+  InsertNodeParams,
   TransactionBackend,
+  TrustedImportSession,
 } from "../../../src/backend/types";
 import { TypeGraphError } from "../../../src/errors";
 import { defineGraphExtension } from "../../../src/graph-extension";
@@ -79,6 +83,10 @@ import {
   expectObservation,
   type KnownDefect,
 } from "../../helpers/known-defect";
+import {
+  prefixedTableNames,
+  type TracedStatement,
+} from "../../helpers/traced-connection";
 import type {
   IntegrationLaneDriver,
   IntegrationTestContext,
@@ -130,6 +138,15 @@ const POSTGRES_DRIVERS: readonly IntegrationLaneDriver[] = [
 ];
 
 /** The scope of a known defect every driver shows today. */
+/** The lanes whose backend offers `trustedImport`: a synchronous SQLite driver, or PostgreSQL. */
+const TRUSTED_IMPORT_DRIVERS: ReadonlySet<IntegrationLaneDriver> = new Set([
+  "better-sqlite3",
+  "pglite",
+  "node-postgres",
+  "postgres-js",
+]);
+/** The lanes whose serialized backend carries a vector strategy. */
+const VECTOR_DRIVERS: ReadonlySet<IntegrationLaneDriver> = new Set(ALL_DRIVERS);
 const ON_EVERY_DRIVER: DefectScope = { driver: ALL_DRIVERS };
 /** The scope of a known defect every PostgreSQL driver shows today. */
 const ON_POSTGRES_DRIVERS: DefectScope = { driver: POSTGRES_DRIVERS };
@@ -208,6 +225,26 @@ function refusalOf(pending: Promise<unknown>): Promise<Refusal> {
     (error: unknown): Refusal => typedErrorOf(error),
   );
 }
+
+/** The refusal of a statement issued after its transaction's view closed. */
+const TRANSACTION_CLOSED: TypedError = {
+  error: "TransactionClosedError",
+  code: "TRANSACTION_CLOSED",
+  details: {},
+};
+
+/**
+ * The refusal of contribution administration (here `createVectorIndex`)
+ * through a transaction-scoped backend.
+ */
+const VECTOR_INDEX_ADMINISTRATION_REFUSAL: TypedError = {
+  error: "ConfigurationError",
+  code: "CONFIGURATION_ERROR",
+  details: {
+    capability: "contributionAdministration",
+    member: "createVectorIndex",
+  },
+};
 
 /**
  * The refusal of a unit whose transaction target lacks `executeStatement`:
@@ -311,7 +348,7 @@ async function liveClaims(
 
 async function countRows(
   backend: GraphBackend,
-  table: "nodes" | "recordedNodes",
+  table: "nodes" | "edges" | "recordedNodes",
   graphId: string,
 ): Promise<number> {
   const tables = requireDefined(backend.tableNames);
@@ -323,6 +360,224 @@ async function countRows(
     `),
   );
   return Number(requireDefined(rows[0]).count);
+}
+
+/** One node row as trusted import writes it. */
+function importedNode(graphId: string, id: string): InsertNodeParams {
+  return { graphId, kind: "HzItem", id, props: { label: id } };
+}
+
+/** One edge row as trusted import writes it. */
+function importedEdge(graphId: string, id: string): InsertEdgeParams {
+  return {
+    graphId,
+    id,
+    kind: "hzLink",
+    fromKind: "HzItem",
+    fromId: "a",
+    toKind: "HzItem",
+    toId: "b",
+    props: {},
+  };
+}
+
+/**
+ * The lanes where a second session can hold a statement of the import open on
+ * the wire: the server PostgreSQL drivers. better-sqlite3 runs every
+ * statement synchronously, so none is ever in flight at the boundary, and
+ * PGlite is one session, so no other session can hold the lock. The SQLite
+ * manual frame's drain is pinned against an async driver in
+ * `tests/transaction-view.test.ts`.
+ */
+const HELD_STATEMENT_DRIVERS: ReadonlySet<IntegrationLaneDriver> = new Set([
+  "node-postgres",
+  "postgres-js",
+]);
+
+/** The advisory lock the held-insert trigger waits for. */
+const HELD_INSERT_LOCK_KEY = 954_998;
+
+/** The node id whose insert waits for {@link HELD_INSERT_LOCK_KEY}. */
+const HELD_INSERT_ID = "held";
+
+/**
+ * Installs a PostgreSQL trigger under which inserting node `HELD_INSERT_ID`
+ * into `graphId` waits until no other session holds
+ * {@link HELD_INSERT_LOCK_KEY}. Returns the teardown.
+ */
+async function installHeldInsertTrigger(
+  backend: Pick<GraphBackend, "executeDdl" | "tableNames">,
+  graphId: string,
+): Promise<() => Promise<void>> {
+  const executeDdl = requireDefined(backend.executeDdl);
+  const nodesTable = `"${requireDefined(backend.tableNames).nodes}"`;
+  const trigger = `tg_held_insert_${graphCounter}`;
+  await executeDdl(
+    `CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$
+     BEGIN PERFORM pg_advisory_xact_lock_shared(${HELD_INSERT_LOCK_KEY}); RETURN NEW; END $$`,
+  );
+  await executeDdl(
+    `CREATE TRIGGER ${trigger} BEFORE INSERT ON ${nodesTable}
+     FOR EACH ROW WHEN (NEW.graph_id = '${graphId.replaceAll("'", "''")}' AND NEW.id = '${HELD_INSERT_ID}')
+     EXECUTE FUNCTION ${trigger}()`,
+  );
+  return async () => {
+    await executeDdl(`DROP TRIGGER ${trigger} ON ${nodesTable}`);
+    await executeDdl(`DROP FUNCTION ${trigger}()`);
+  };
+}
+
+/**
+ * The import batches into `graphId` (as `insert <node id>`) and the
+ * transaction-control statements among `statements`, in the order they
+ * reached the client.
+ */
+function importStatementsOf(
+  statements: readonly TracedStatement[],
+  graphId: string,
+): readonly string[] {
+  return statements.flatMap((statement) => {
+    const text = statement.text.trim();
+    if (/^(?:COMMIT|ROLLBACK)\b/i.test(text)) return [text.toUpperCase()];
+    // A batch binds its columns as arrays (`UNNEST`), which a driver may
+    // record as array literals: match the serialized parameters.
+    const params = statement.params
+      .map((parameter) =>
+        typeof parameter === "string" ? parameter : JSON.stringify(parameter),
+      )
+      .join(" ");
+    if (!/^INSERT\b/i.test(text) || !params.includes(graphId)) return [];
+    return [HELD_INSERT_ID, "queued"]
+      .filter((id) => params.includes(`"${id}"`))
+      .map((id) => `insert ${id}`);
+  });
+}
+
+/** Resolves once `condition` holds, checking every few milliseconds. */
+async function waitUntil(condition: () => boolean): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("condition never held");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+/** Whether `pending` has settled once every queued microtask has run. */
+async function hasSettled(pending: Promise<unknown>): Promise<boolean> {
+  return Promise.race([
+    pending.then(
+      () => true,
+      () => true,
+    ),
+    new Promise<boolean>((resolve) => {
+      setTimeout(() => {
+        resolve(false);
+      }, 0);
+    }),
+  ]);
+}
+
+/** The node id whose insert the engine-rollback trigger answers. */
+const ENGINE_ROLLBACK_ID = "engine-rollback";
+
+/**
+ * Installs a trigger under which inserting node `ENGINE_ROLLBACK_ID` into
+ * `graphId` fails in the engine, ending (SQLite's `RAISE(ROLLBACK)`) or
+ * aborting (PostgreSQL) the transaction it runs in. Returns the teardown.
+ */
+async function installEngineRollbackTrigger(
+  backend: Pick<GraphBackend, "dialect" | "executeDdl" | "tableNames">,
+  graphId: string,
+): Promise<() => Promise<void>> {
+  const executeDdl = requireDefined(backend.executeDdl);
+  const nodesTable = `"${requireDefined(backend.tableNames).nodes}"`;
+  const trigger = `tg_engine_rollback_${graphCounter}`;
+  const when = `graph_id = '${graphId.replaceAll("'", "''")}' AND NEW.id = '${ENGINE_ROLLBACK_ID}'`;
+  if (backend.dialect === "postgres") {
+    await executeDdl(
+      `CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN RAISE EXCEPTION 'engine ended the transaction'; END $$`,
+    );
+    await executeDdl(
+      `CREATE TRIGGER ${trigger} BEFORE INSERT ON ${nodesTable}
+       FOR EACH ROW WHEN (NEW.${when}) EXECUTE FUNCTION ${trigger}()`,
+    );
+    return async () => {
+      await executeDdl(`DROP TRIGGER ${trigger} ON ${nodesTable}`);
+      await executeDdl(`DROP FUNCTION ${trigger}()`);
+    };
+  }
+  await executeDdl(
+    `CREATE TRIGGER ${trigger} BEFORE INSERT ON ${nodesTable}
+     WHEN NEW.${when}
+     BEGIN SELECT RAISE(ROLLBACK, 'engine ended the transaction'); END`,
+  );
+  return async () => {
+    await executeDdl(`DROP TRIGGER ${trigger}`);
+  };
+}
+
+/**
+ * How a write the callback issues after the engine ended (SQLite) or aborted
+ * (PostgreSQL) its transaction should be refused. On SQLite nothing observes
+ * an end the engine made on its own yet: the cases below pin today's value
+ * under {@link ENGINE_ENDED_ON_SQLITE}.
+ */
+const ENGINE_ROLLBACK_LATER_REFUSAL: Readonly<
+  Record<IntegrationLaneDriver, string>
+> = {
+  "better-sqlite3": "TransactionRolledBackError",
+  libsql: "TransactionRolledBackError",
+  // The server refuses every statement of an aborted transaction itself
+  // (`25P02`); the refusal reaches the caller as the driver raised it.
+  pglite: "untyped driver error",
+  "node-postgres": "untyped driver error",
+  "postgres-js": "untyped driver error",
+};
+
+/**
+ * The label of the engine-ended known defect: SQLite ended the transaction
+ * itself (a trigger's `RAISE(ROLLBACK)` on a TypeGraph statement), and a
+ * later statement of the callback still reaches the connection. On
+ * better-sqlite3 it runs in autocommit and persists; libSQL refuses it with
+ * the driver's own error.
+ */
+const ENGINE_ENDED_ON_SQLITE =
+  "engine-ended (trigger on a TypeGraph statement)";
+
+/**
+ * The label of the engine-ended known defect where the caller committed
+ * through the native handle and the callback then failed with an error the
+ * Store retries.
+ */
+const RETRY_AFTER_NATIVE_COMMIT =
+  "engine-ended (callback error after a native commit, with retry)";
+
+/** Whether `refusal` records a call that succeeded. */
+function isFulfilled(refusal: Refusal): boolean {
+  return typeof refusal === "object" && "fulfilled" in refusal;
+}
+
+/** A refusal as its error class, `"fulfilled"`, or `"untyped driver error"`. */
+function typedOutcome(refusal: Refusal | undefined): string {
+  if (refusal === undefined) return "never issued";
+  if (typeof refusal === "string") return "untyped driver error";
+  return "fulfilled" in refusal ? "fulfilled" : refusal.error;
+}
+
+/** Whether a relation named `name` exists in the backend's catalog. */
+async function relationExists(
+  backend: GraphBackend,
+  name: string,
+): Promise<boolean> {
+  const rows = await backend.execute<{ count: number | string }>(
+    asCompiledRowsSql(
+      backend.dialect === "sqlite" ?
+        sql`SELECT COUNT(*) AS count FROM sqlite_master WHERE name = ${name}`
+      : sql`SELECT COUNT(*) AS count FROM pg_catalog.pg_class WHERE relname = ${name}`,
+    ),
+  );
+  return Number(requireDefined(rows[0]).count) > 0;
 }
 
 async function activeSchemaVersion(
@@ -750,17 +1005,6 @@ export function registerTransactionSessionHazardTests(
           [
             {
               label: "hazard 2c",
-              on: { driver: ["better-sqlite3", "libsql"] },
-              today: {
-                transaction: { status: "fulfilled", receiptTotal: 0 },
-                late: "fulfilled",
-                items: ["s3"],
-                claims: { s1: 0, s2: 0 },
-                unhandled: [],
-              },
-            },
-            {
-              label: "hazard 2c",
               on: { driver: ["postgres-js"] },
               today: {
                 transaction: { status: "fulfilled", receiptTotal: 0 },
@@ -849,18 +1093,6 @@ export function registerTransactionSessionHazardTests(
             ],
           ),
           ACCEPTED,
-          [
-            {
-              label: "hazard 2d",
-              on: { driver: ["better-sqlite3"] },
-              today: {
-                first: "fulfilled",
-                late: "fulfilled",
-                seenInSecond: ["n1", "n2"],
-                items: [],
-              },
-            },
-          ],
         );
       });
     });
@@ -1675,14 +1907,574 @@ export function registerTransactionSessionHazardTests(
           context,
           { sawUncommittedRow: seen.includes("x1") },
           { sawUncommittedRow: false },
+        );
+      });
+    });
+
+    describe("a transaction's view once the transaction ends", () => {
+      // The Store seals its own collections when the callback returns, so a
+      // kept collection is refused before it reaches the backend; a kept
+      // transaction backend, prepared query or stream reaches the view.
+      it("refuses a kept transaction backend, prepared query and stream with TransactionClosedError", async () => {
+        const graph = buildGraph();
+        const backend = context.getBackend();
+        const [store] = await createStoreWithSchema(graph, backend);
+        await store.nodes.HzItem.bulkCreate([
+          { props: { label: "s1" }, id: "s1" },
+          { props: { label: "s2" }, id: "s2" },
+        ]);
+        const kept = await store.transaction(async (tx) => {
+          const query = () =>
+            tx
+              .query()
+              .from("HzItem", "item")
+              .select((select) => select.item.id)
+              .orderBy("item", "id");
+          const stream = query()
+            .stream({ batchSize: 1 })
+            [Symbol.asyncIterator]();
+          await stream.next();
+          return { prepared: query().prepare(), stream };
+        });
+        let escaped: TransactionBackend | undefined;
+        await backend.transaction((tx) => {
+          escaped = tx;
+          return Promise.resolve();
+        });
+        expect({
+          backend: await refusalOf(
+            requireDefined(escaped).getNode(graph.id, "HzItem", "s1"),
+          ),
+          prepared: await refusalOf(kept.prepared.execute()),
+          stream: await refusalOf(kept.stream.next()),
+        }).toEqual({
+          backend: TRANSACTION_CLOSED,
+          prepared: TRANSACTION_CLOSED,
+          stream: TRANSACTION_CLOSED,
+        });
+      });
+
+      it("refuses a kept trusted-import session's batches once its import committed or rolled back", async () => {
+        const backend = context.getBackend();
+        const trustedImport = backend.trustedImport;
+        expect({
+          driver: context.driver,
+          trustedImport: trustedImport !== undefined,
+        }).toEqual({
+          driver: context.driver,
+          trustedImport: TRUSTED_IMPORT_DRIVERS.has(context.driver),
+        });
+        if (trustedImport === undefined) return;
+        const graphId = buildGraph().id;
+
+        const committed = await trustedImport((session) =>
+          Promise.resolve(session),
+        );
+        const abort = new Error("abort the import");
+        let rolledBack: TrustedImportSession | undefined;
+        await expect(
+          trustedImport((session) => {
+            rolledBack = session;
+            return Promise.reject(abort);
+          }),
+        ).rejects.toBe(abort);
+        const kept = requireDefined(rolledBack);
+
+        const afterCommit = await refusalOf(
+          committed.insertNodes([importedNode(graphId, "after-commit")]),
+        );
+        const edgeAfterCommit = await refusalOf(
+          committed.insertEdges([importedEdge(graphId, "after-commit")]),
+        );
+        const afterRollback = await refusalOf(
+          kept.insertNodes([importedNode(graphId, "after-rollback")]),
+        );
+        // An empty batch issues no statement, and is refused all the same.
+        const emptyAfterCommit = await refusalOf(committed.insertNodes([]));
+        const emptyEdgesAfterRollback = await refusalOf(kept.insertEdges([]));
+        // Issued while the next transaction on the connection is open, a late
+        // batch must not join that transaction either.
+        let insideNext: Refusal | undefined;
+        await backend.transaction(async () => {
+          insideNext = await refusalOf(
+            kept.insertEdges([importedEdge(graphId, "inside-next")]),
+          );
+        });
+        expect({
+          afterCommit,
+          edgeAfterCommit,
+          afterRollback,
+          emptyAfterCommit,
+          emptyEdgesAfterRollback,
+          insideNext,
+          nodes: await countRows(backend, "nodes", graphId),
+          edges: await countRows(backend, "edges", graphId),
+        }).toEqual({
+          afterCommit: TRANSACTION_CLOSED,
+          edgeAfterCommit: TRANSACTION_CLOSED,
+          afterRollback: TRANSACTION_CLOSED,
+          emptyAfterCommit: TRANSACTION_CLOSED,
+          emptyEdgesAfterRollback: TRANSACTION_CLOSED,
+          insideNext: TRANSACTION_CLOSED,
+          nodes: 0,
+          edges: 0,
+        });
+      });
+
+      // A callback that keeps its backend and then fails, whichever way it
+      // fails: a synchronous throw from the call itself, or a rejection. The
+      // runner rolls back either way, and the kept backend's next write must
+      // be refused rather than reach the connection after that ROLLBACK, in
+      // autocommit.
+      it.each([
+        ["throws synchronously", "sync"],
+        ["rejects", "async"],
+      ] as const)(
+        "refuses a kept backend's write once a callback that %s rolled its transaction back, on every runner",
+        async (_failure, mode) => {
+          const backend = context.getBackend();
+          const graphId = buildGraph().id;
+          const abort = new Error("the callback fails");
+          /** Keeps its argument, then fails the way this case says. */
+          function failingCallback<TKept>(
+            keep: (kept: TKept) => void,
+          ): (kept: TKept) => Promise<never> {
+            return (kept) => {
+              keep(kept);
+              if (mode === "sync") throw abort;
+              return Promise.reject(abort);
+            };
+          }
+          const outcomes: Record<string, Refusal> = {};
+          const lateWrites: Record<string, Refusal> = {};
+
+          // First: trusted import refuses a database that already holds a row.
+          const trustedImport = backend.trustedImport;
+          if (trustedImport !== undefined) {
+            let session: TrustedImportSession | undefined;
+            outcomes["trustedImport"] = await refusalOf(
+              trustedImport(
+                failingCallback<TrustedImportSession>((kept) => {
+                  session = kept;
+                }),
+              ),
+            );
+            lateWrites["trustedImport"] = await refusalOf(
+              requireDefined(session).insertNodes([
+                importedNode(graphId, "after-import"),
+              ]),
+            );
+          }
+
+          let transactionBackend: TransactionBackend | undefined;
+          outcomes["transaction"] = await refusalOf(
+            backend.transaction(
+              failingCallback<TransactionBackend>((kept) => {
+                transactionBackend = kept;
+              }),
+            ),
+          );
+          lateWrites["transaction"] = await refusalOf(
+            requireDefined(transactionBackend).insertNode(
+              importedNode(graphId, "after-transaction"),
+            ),
+          );
+
+          const schemaWriteTransaction = backend.schemaWriteTransaction;
+          if (schemaWriteTransaction !== undefined) {
+            let schemaWriteBackend: TransactionBackend | undefined;
+            outcomes["schemaWriteTransaction"] = await refusalOf(
+              schemaWriteTransaction(
+                graphId,
+                failingCallback<TransactionBackend>((kept) => {
+                  schemaWriteBackend = kept;
+                }),
+              ),
+            );
+            lateWrites["schemaWriteTransaction"] = await refusalOf(
+              requireDefined(schemaWriteBackend).insertNode(
+                importedNode(graphId, "after-schema-write"),
+              ),
+            );
+          }
+
+          const runners = Object.keys(outcomes);
+          expect({
+            outcomes,
+            lateWrites,
+            nodes: await countRows(backend, "nodes", graphId),
+          }).toEqual({
+            outcomes: Object.fromEntries(
+              runners.map((runner) => [runner, String(abort)]),
+            ),
+            lateWrites: Object.fromEntries(
+              runners.map((runner) => [runner, TRANSACTION_CLOSED]),
+            ),
+            nodes: 0,
+          });
+        },
+      );
+
+      // The import runs on a traced connection of its own, so the order in
+      // which its statements reach the pinned client is observable. On
+      // node-postgres the trace records each statement as it is handed to the
+      // client, so a batch that skipped the transaction's queue would show
+      // before the release; postgres-js records a statement as it is written
+      // to the wire, and holds each until the previous one completed, so
+      // there only the order is observable.
+      it.each([
+        ["ROLLBACK, so none lands", "ROLLBACK"],
+        ["COMMIT, so both land", "COMMIT"],
+      ] as const)(
+        "settles every trusted-import batch the callback left running before its %s",
+        async (_outcome, frameEnd) => {
+          const backend = context.getBackend();
+          if (!HELD_STATEMENT_DRIVERS.has(context.driver)) return;
+          const graphId = buildGraph().id;
+          const traced = await context.openTracedConnection([
+            prefixedTableNames(`hz_held_import_${graphCounter}`),
+          ]);
+          const importBackend = requireDefined(traced.backends[0]);
+          const trustedImport = requireDefined(importBackend.trustedImport);
+          const removeTrigger = await installHeldInsertTrigger(
+            importBackend,
+            graphId,
+          );
+          const holding = createGate();
+          const release = createGate();
+          // Another session holds the lock the trigger waits for, so the first
+          // batch stays on the wire until the test releases it.
+          const holder = backend.transaction(async (tx) => {
+            await tx.execute(
+              asCompiledRowsSql(
+                sql`SELECT pg_advisory_xact_lock(${HELD_INSERT_LOCK_KEY})`,
+              ),
+            );
+            holding.open();
+            await release.opened;
+          });
+          try {
+            await holding.opened;
+            traced.reset();
+            const abort = new Error("abort the import");
+            let held: Promise<Status> = Promise.resolve("rejected");
+            let queued: Promise<Status> = Promise.resolve("rejected");
+            let callbackReturned = false;
+            const imported = statusOf(
+              trustedImport((session) => {
+                held = statusOf(
+                  session.insertNodes([importedNode(graphId, HELD_INSERT_ID)]),
+                );
+                // Queued behind the held batch on the transaction's statement
+                // queue: without the queue it would reach the client while the
+                // held batch is on the wire, and without the drain after the
+                // ROLLBACK, in autocommit.
+                queued = statusOf(
+                  session.insertNodes([importedNode(graphId, "queued")]),
+                );
+                callbackReturned = true;
+                return frameEnd === "ROLLBACK" ?
+                    Promise.reject(abort)
+                  : Promise.resolve();
+              }),
+            );
+            // Wait until the callback has rejected and the held batch has
+            // reached the client: the import cannot settle while it is held.
+            await waitUntil(
+              () =>
+                callbackReturned &&
+                importStatementsOf(traced.statements(), graphId).length > 0,
+            );
+            const settledWhileHeld = await hasSettled(imported);
+            const reachedBeforeRelease = importStatementsOf(
+              traced.statements(),
+              graphId,
+            );
+            release.open();
+            await holder;
+            const importOutcome = await imported;
+            expect({
+              settledWhileHeld,
+              reachedBeforeRelease,
+              reached: importStatementsOf(traced.statements(), graphId),
+              imported: importOutcome,
+              held: await held,
+              queued: await queued,
+              nodes: await countRows(importBackend, "nodes", graphId),
+            }).toEqual({
+              settledWhileHeld: false,
+              reachedBeforeRelease: [`insert ${HELD_INSERT_ID}`],
+              reached: [`insert ${HELD_INSERT_ID}`, "insert queued", frameEnd],
+              imported: frameEnd === "ROLLBACK" ? "rejected" : "fulfilled",
+              held: "fulfilled",
+              queued: "fulfilled",
+              nodes: frameEnd === "ROLLBACK" ? 0 : 2,
+            });
+          } finally {
+            release.open();
+            await holder;
+            await removeTrigger();
+            await traced.close();
+          }
+        },
+      );
+
+      // Known defect on SQLite (see ENGINE_ENDED_ON_SQLITE): kept as the
+      // reproduction for the design that follows.
+      it("refuses a write the callback issues after the engine ended its transaction, and saves nothing", async () => {
+        const graph = buildGraph();
+        const backend = context.getBackend();
+        const [store] = await createStoreWithSchema(graph, backend);
+        const removeTrigger = await installEngineRollbackTrigger(
+          backend,
+          graph.id,
+        );
+        try {
+          let failed: Refusal | undefined;
+          let later: Refusal | undefined;
+          const transaction = await refusalOf(
+            store.transaction(async (tx) => {
+              await tx.nodes.HzItem.create({ label: "first" }, { id: "first" });
+              // The callback catches the statement's failure and carries on.
+              failed = await refusalOf(
+                tx.nodes.HzItem.create(
+                  { label: ENGINE_ROLLBACK_ID },
+                  { id: ENGINE_ROLLBACK_ID },
+                ),
+              );
+              later = await refusalOf(
+                tx.nodes.HzItem.create({ label: "later" }, { id: "later" }),
+              );
+            }),
+          );
+          expectOnLane(
+            context,
+            {
+              failed: failed !== undefined && !isFulfilled(failed),
+              later: typedOutcome(later),
+              transaction: typedOutcome(transaction),
+              nodes: await countRows(backend, "nodes", graph.id),
+            },
+            {
+              failed: true,
+              later: ENGINE_ROLLBACK_LATER_REFUSAL[context.driver],
+              transaction: "TransactionRolledBackError",
+              nodes: 0,
+            },
+            [
+              {
+                label: ENGINE_ENDED_ON_SQLITE,
+                on: { driver: ["better-sqlite3"] },
+                // The later write autocommits; COMMIT then finds no
+                // transaction.
+                today: {
+                  failed: true,
+                  later: "fulfilled",
+                  transaction: "untyped driver error",
+                  nodes: 1,
+                },
+              },
+              {
+                label: ENGINE_ENDED_ON_SQLITE,
+                on: { driver: ["libsql"] },
+                today: {
+                  failed: true,
+                  later: "untyped driver error",
+                  transaction: "untyped driver error",
+                  nodes: 0,
+                },
+              },
+            ],
+          );
+        } finally {
+          await removeTrigger();
+        }
+      });
+
+      it("refuses a sibling write submitted in the same turn as the failure that ended its transaction, and saves nothing", async () => {
+        const graphId = buildGraph().id;
+        const backend = context.getBackend();
+        const removeTrigger = await installEngineRollbackTrigger(
+          backend,
+          graphId,
+        );
+        try {
+          const statements: Record<string, Promise<Refusal>> = {};
+          const transaction = await refusalOf(
+            backend.transaction(async (tx) => {
+              await tx.insertNode(importedNode(graphId, "first"));
+              // Both submitted before either settles.
+              statements["failing"] = refusalOf(
+                tx.insertNode(importedNode(graphId, ENGINE_ROLLBACK_ID)),
+              );
+              statements["sibling"] = refusalOf(
+                tx.insertNode(importedNode(graphId, "sibling")),
+              );
+              await Promise.all(Object.values(statements));
+            }),
+          );
+          const sibling = await requireDefined(statements["sibling"]);
+          expectOnLane(
+            context,
+            {
+              failed: !isFulfilled(await requireDefined(statements["failing"])),
+              sibling: typedOutcome(sibling),
+              transaction: isFulfilled(transaction) ? "fulfilled" : "rejected",
+              nodes: await countRows(backend, "nodes", graphId),
+            },
+            {
+              failed: true,
+              sibling: ENGINE_ROLLBACK_LATER_REFUSAL[context.driver],
+              transaction: "rejected",
+              nodes: 0,
+            },
+            [
+              {
+                label: ENGINE_ENDED_ON_SQLITE,
+                on: { driver: ["better-sqlite3"] },
+                // The sibling runs after the trigger ended the transaction,
+                // in autocommit.
+                today: {
+                  failed: true,
+                  sibling: "fulfilled",
+                  transaction: "rejected",
+                  nodes: 1,
+                },
+              },
+              {
+                label: ENGINE_ENDED_ON_SQLITE,
+                on: { driver: ["libsql"] },
+                today: {
+                  failed: true,
+                  sibling: "untyped driver error",
+                  transaction: "rejected",
+                  nodes: 0,
+                },
+              },
+            ],
+          );
+        } finally {
+          await removeTrigger();
+        }
+      });
+
+      // Known defect on SQLite: the caller's own COMMIT through the native
+      // handle ended the transaction, and the callback then failed with an
+      // error the Store retries. Nothing observes that the attempt's writes
+      // already committed.
+      it("does not replay a callback whose retryable error followed a commit through the native handle", async () => {
+        const backend = context.getBackend();
+        if (backend.dialect !== "sqlite") return;
+        const graph = buildGraph();
+        const [store] = await createAdapterStoreWithSchema(graph, backend);
+        let attempts = 0;
+        const transaction = await refusalOf(
+          store.transaction(
+            async (tx) => {
+              attempts += 1;
+              const id = `attempt-${attempts}`;
+              await tx.nodes.HzItem.create({ label: id }, { id });
+              const native = requireDefined(
+                (tx as Readonly<{ sql?: unknown }>).sql,
+              ) as Readonly<{ run: (query: SQL) => unknown }>;
+              await native.run(drizzleSql.raw("COMMIT"));
+              // An error the Store classifies as a transaction conflict.
+              throw Object.assign(new Error("could not serialize access"), {
+                code: "40001",
+              });
+            },
+            { retry: { attempts: 2 } },
+          ),
+        );
+        expectOnLane(
+          context,
+          {
+            attempts,
+            transaction: typedOutcome(transaction),
+            nodes: await countRows(backend, "nodes", graph.id),
+          },
+          {
+            attempts: 1,
+            transaction: "TransactionOutcomeUnknownError",
+            nodes: 1,
+          },
           [
             {
-              label: "hazard 7b",
+              label: RETRY_AFTER_NATIVE_COMMIT,
               on: { driver: ["better-sqlite3"] },
-              today: { sawUncommittedRow: true },
+              // The callback is replayed, and both attempts' rows stay
+              // committed.
+              today: {
+                attempts: 2,
+                transaction: "TransactionConflictError",
+                nodes: 2,
+              },
+            },
+            {
+              label: RETRY_AFTER_NATIVE_COMMIT,
+              on: { driver: ["libsql"] },
+              // TypeGraph's COMMIT on the closed driver transaction fails, so
+              // the attempt is not replayed; the row it wrote stays
+              // committed and the outcome is the driver error.
+              today: {
+                attempts: 1,
+                transaction: "untyped driver error",
+                nodes: 1,
+              },
             },
           ],
         );
+      });
+
+      it("refuses vector index creation through a transaction backend, open or ended, and creates no storage", async () => {
+        const handle = await context.createSerializedBackend();
+        try {
+          const backend = handle.backend;
+          const strategy = backend.vectorStrategy;
+          expect({
+            driver: context.driver,
+            vector: strategy !== undefined,
+          }).toEqual({
+            driver: context.driver,
+            vector: VECTOR_DRIVERS.has(context.driver),
+          });
+          if (strategy === undefined) return;
+          const graph = buildGraph();
+          await createStoreWithSchema(graph, backend);
+          // A slot no schema declares, so nothing has materialized it.
+          const params = {
+            graphId: graph.id,
+            nodeKind: "HzUndeclared",
+            fieldPath: "embedding",
+            dimensions: 3,
+            metric: "cosine",
+            indexType:
+              requireDefined(backend.capabilities.vector).indexTypes[0] ??
+              "none",
+          } as const;
+          let escaped: TransactionBackend | undefined;
+          const whileOpen = await backend.transaction((tx) => {
+            escaped = tx;
+            return refusalOf(requireDefined(tx.createVectorIndex)(params));
+          });
+          const afterEnd = await refusalOf(
+            requireDefined(requireDefined(escaped).createVectorIndex)(params),
+          );
+          expect({
+            whileOpen,
+            afterEnd,
+            storage: await relationExists(
+              backend,
+              strategy.tableName(graph.id, params.nodeKind, params.fieldPath),
+            ),
+          }).toEqual({
+            whileOpen: VECTOR_INDEX_ADMINISTRATION_REFUSAL,
+            afterEnd: VECTOR_INDEX_ADMINISTRATION_REFUSAL,
+            storage: false,
+          });
+        } finally {
+          await handle.close();
+        }
       });
     });
   });

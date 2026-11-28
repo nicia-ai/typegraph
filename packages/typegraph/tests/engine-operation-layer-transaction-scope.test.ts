@@ -18,9 +18,10 @@
  * transaction-scoped operation backend excludes the atomic SQL program
  * executor entirely — its `createTransactionBackend` call site never
  * supplies one to `createSqliteOperationBackend` at all, so it registers no
- * mutation programs — and it has no comparable close step: the transaction
- * IS the connection's own framing, so a handle that escapes the callback
- * keeps working exactly as an ordinary read would.
+ * mutation programs. Its transaction view closes at the boundary all the
+ * same (`../src/backend/drizzle/execution/transaction-view.ts`, the owner
+ * both dialects share), so an escaped handle rejects with the same
+ * `TransactionClosedError`.
  * `fusion.atomicProgramsAtTransactionScope` (`../src/backend/drizzle/
  * engine/operation-layer.ts`) is the profile-level seam for a dialect that
  * DOES supply a transaction-scoped executor and must still exclude it; it
@@ -88,7 +89,7 @@ describe("engine operation-layer transaction-scope parity", () => {
     }
   });
 
-  it("has no comparable close step on SQLite: an escaped handle keeps working", async () => {
+  it("closes SQLite's transaction view on exit: an escaped handle rejects with TransactionClosedError", async () => {
     const { backend } = createLocalSqliteBackend();
     try {
       let escaped: TransactionBackend | undefined;
@@ -102,7 +103,7 @@ describe("engine operation-layer transaction-scope parity", () => {
           "Person",
           "does-not-exist",
         ),
-      ).resolves.toBeUndefined();
+      ).rejects.toThrow(TransactionClosedError);
     } finally {
       await backend.close();
     }

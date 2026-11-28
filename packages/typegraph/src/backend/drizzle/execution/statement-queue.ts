@@ -25,7 +25,10 @@
  *
  * Edge-safe: no `node:*` imports (loaded on Workers via neon-serverless).
  */
-import { TransactionClosedError } from "../../../errors";
+import {
+  createTransactionView,
+  type TransactionView,
+} from "./transaction-view";
 import {
   type CompiledSqlQuery,
   type ExecutableSql,
@@ -42,7 +45,8 @@ export type SerialExecutionAdapter = SqlExecutionAdapter &
     runExclusive: NonNullable<SqlExecutionAdapter["runExclusive"]>;
     /**
      * Waits for the statement currently on the wire, then refuses every
-     * later one with a {@link TransactionClosedError}.
+     * later one with a `TransactionClosedError`; `./transaction-view` owns
+     * that decision for both dialects.
      *
      * Callers invoke this at the transaction boundary, before the driver
      * emits `COMMIT` / `ROLLBACK` on the same connection. The driver's control
@@ -109,28 +113,32 @@ function queueForTransaction(owner: object): StatementQueue {
  *
  * The queue is a leaf: nothing it runs re-enters it, so a queued statement
  * can never wait on a statement queued behind it.
+ *
+ * Every statement is admitted through `view` before it queues: a
+ * transaction bind passes the view of its native transaction
+ * (`openTransactionView`), shared by the transaction's owner and every
+ * proven adoption of it; a root queue gets a view of its own.
  */
 export function createSerialExecutionAdapter(
   adapter: SqlExecutionAdapter,
   transactionOwner?: object,
+  view: TransactionView = createTransactionView(),
 ): SerialExecutionAdapter {
   const queue =
     transactionOwner === undefined ?
       createStatementQueue()
     : queueForTransaction(transactionOwner);
-  let closed = false;
   const { executeCompiled, prepare } = adapter;
 
   function enqueue<T>(task: () => Promise<T>): Promise<T> {
-    if (closed) return Promise.reject(new TransactionClosedError());
-    return queue.enqueue(task);
+    return view.admit(() => queue.enqueue(task));
   }
 
   return {
     async drainAndClose(): Promise<void> {
       // Close this transaction's view before draining the shared connection.
       // A later transaction may reuse that connection with a fresh view.
-      closed = true;
+      await view.drainAndClose();
       await queue.drain();
     },
 
@@ -150,6 +158,12 @@ export function createSerialExecutionAdapter(
       // would deadlock, and it needs no serializing anyway — nothing else can
       // reach the connection until the slot is released.
       return enqueue(() => critical(adapter));
+    },
+
+    admitHandleStatement<T>(statement: () => Promise<T>): Promise<T> {
+      // A statement on the Drizzle handle runs on the same connection, so it
+      // takes a queue slot of its own and is admitted through the view.
+      return enqueue(statement);
     },
 
     ...(executeCompiled === undefined ?

@@ -33,7 +33,7 @@ import {
   type VectorSlot,
   type VectorStrategy,
 } from "../../query/dialect/vector-strategy";
-import { sql as portableSql } from "../../query/sql-fragment";
+import { sql as portableSql, type SqlFragment } from "../../query/sql-fragment";
 import {
   asCompiledRowsSql,
   asCompiledStatementSql,
@@ -141,6 +141,40 @@ export function mapContributionMaterializationRow(
     materializedAt: decode(row.materializedAt),
     lastAttemptedAt,
     lastError: row.lastError ?? undefined,
+  };
+}
+
+/**
+ * THE marker read a transaction-bound gate runs on its own session
+ * ({@link ContributionMaterializer.bindReadSession}): every marker row of
+ * `graphIds` from `markerTableName`, through `execute` — the transaction
+ * session's statement path, so the rows are the transaction snapshot's,
+ * never the root session's. `decode` is the dialect's timestamp decoder.
+ */
+export function createSessionMarkerBatchRead(
+  execute: (
+    query: SqlFragment,
+  ) => Promise<readonly RawContributionMaterializationRow[]>,
+  markerTableName: string,
+  decode: (value: unknown) => string | undefined,
+): NonNullable<ContributionMaterializerDeps["getMarkerBatch"]> {
+  const markerTable = portableSql.identifier(markerTableName);
+  return async (graphIds) => {
+    if (graphIds.length === 0) return [];
+    // The statement text, indentation included, is the one the compiled-SQL
+    // goldens pin.
+    const rows = await execute(portableSql`
+          SELECT graph_id AS "graphId", logical_name AS "logicalName",
+            owner, table_name AS "tableName", signature,
+            materialized_at AS "materializedAt",
+            last_attempted_at AS "lastAttemptedAt",
+            last_error AS "lastError"
+          FROM ${markerTable} WHERE graph_id IN (${portableSql.join(
+            graphIds.map((graphId) => portableSql`${graphId}`),
+            portableSql`, `,
+          )})
+        `);
+    return rows.map((row) => mapContributionMaterializationRow(row, decode));
   };
 }
 
@@ -690,7 +724,9 @@ export type ContributionMaterializer = Readonly<{
    * Bind marker reads to one pinned transaction session. The returned gate
    * owns a fresh positive cache: a root-session marker read cannot authorize
    * a transaction whose snapshot predates that marker, and a rolled-back
-   * transaction cannot populate the root backend's cache.
+   * transaction cannot populate the root backend's cache. Evicting a vector
+   * slot through it evicts this materializer's cache too: a marker the
+   * session deleted is trusted by no cache once the delete commits.
    */
   bindReadSession: (
     getMarkerBatch: NonNullable<ContributionMaterializerDeps["getMarkerBatch"]>,
@@ -835,10 +871,23 @@ export type ContributionMaterializer = Readonly<{
   ) => Promise<ContributionRebuildResult>;
 }>;
 
-function transactionGateAdministrationError(): ConfigurationError {
+/**
+ * THE refusal of contribution administration — creating or dropping a
+ * contribution's storage, or writing its durable marker — through a
+ * transaction. Storage is provisioned by the privileged root backend only:
+ * a transaction-scoped marker gate refuses it (both dialects' gates), and so
+ * does a transaction backend's `createVectorIndex`, named by `member`.
+ */
+export function transactionContributionAdministrationError(
+  member?: string,
+): ConfigurationError {
   return new ConfigurationError(
-    "Contribution administration is unavailable through a transaction-scoped marker gate",
-    { capability: "contributionAdministration", scope: "transaction" },
+    "Contribution administration is unavailable through a transaction-scoped backend; run it on the root backend.",
+    {
+      capability: "contributionAdministration",
+      scope: "transaction",
+      ...(member === undefined ? {} : { member }),
+    },
   );
 }
 
@@ -2418,25 +2467,39 @@ export function createContributionMaterializer(
 
   return {
     bindReadSession(getMarkerBatch) {
-      return createContributionMaterializer({
+      const bound = createContributionMaterializer({
         ...deps,
         // This instance is for runtime assertions on the pinned session. Its
         // other methods must never fall through to the root session captured
         // by the source materializer, even if a transaction backend exposes
         // an administrative member.
-        execDdl: () => Promise.reject(transactionGateAdministrationError()),
+        execDdl: () =>
+          Promise.reject(transactionContributionAdministrationError()),
         ensureMarkerTable: () =>
-          Promise.reject(transactionGateAdministrationError()),
+          Promise.reject(transactionContributionAdministrationError()),
         getMarkerBatch,
         getMarkers: (graphId) => getMarkerBatch([graphId]),
         recordMarker: () =>
-          Promise.reject(transactionGateAdministrationError()),
+          Promise.reject(transactionContributionAdministrationError()),
         deleteMarker: () =>
-          Promise.reject(transactionGateAdministrationError()),
-        tableExists: () => Promise.reject(transactionGateAdministrationError()),
+          Promise.reject(transactionContributionAdministrationError()),
+        tableExists: () =>
+          Promise.reject(transactionContributionAdministrationError()),
         schemaWriteTransaction: () =>
-          Promise.reject(transactionGateAdministrationError()),
+          Promise.reject(transactionContributionAdministrationError()),
       });
+      return {
+        ...bound,
+        // A slot this session evicts (its marker was deleted on the session)
+        // leaves every cache that can hold the marker: the session's own and
+        // this materializer's, which a root backend's reads fill. Eviction
+        // makes the key read-through for good, so a root read before the
+        // delete commits re-reads the marker rather than caching it again.
+        evictVectorSlot(slot: VectorSlot): void {
+          bound.evictVectorSlot(slot);
+          evictVectorSlot(slot);
+        },
+      };
     },
     ensureRuntimeContributions,
     assertInitialized,
@@ -2456,6 +2519,79 @@ export function createContributionMaterializer(
     probeContributions,
     rebuildContribution,
   };
+}
+
+/**
+ * How a transaction-scoped view of a materializer treats each member. A
+ * `Record` over every key, so a member added to {@link ContributionMaterializer}
+ * cannot reach a transaction backend unclassified: `read` members may read
+ * markers and are admitted through the transaction's view, `administration`
+ * members create, drop, or attest storage and are refused, `local` members
+ * touch no connection.
+ */
+const TRANSACTION_MATERIALIZER_MEMBER_ROLES = {
+  bindReadSession: "local",
+  ensureRuntimeContributions: "administration",
+  assertInitialized: "read",
+  refuseUnavailableFulltext: "local",
+  refuseUnavailableNodeInsertProjections: "read",
+  ensureVectorSlot: "administration",
+  ensureVectorSlots: "administration",
+  assertVectorSlot: "read",
+  assertVectorSlots: "read",
+  assertNodeInsertProjections: "read",
+  resolveNodeProjectionEvidence: "local",
+  diagnoseNodeProjectionEvidence: "read",
+  dropVectorSlot: "administration",
+  evictVectorSlot: "local",
+  verifyContributions: "read",
+  repairContributions: "administration",
+  probeContributions: "read",
+  rebuildContribution: "administration",
+} as const satisfies Record<
+  keyof ContributionMaterializer,
+  "administration" | "local" | "read"
+>;
+
+/**
+ * `materializer` as a transaction backend that shares its marker cache sees
+ * it: every member that may read runs through `admit` (the transaction's
+ * view, so it settles before the boundary and is refused after it), and every
+ * administrative member is refused with
+ * {@link transactionContributionAdministrationError}.
+ *
+ * For a transaction that runs on the root session's own connection (SQLite's
+ * single-connection drivers and manual frame), the root reads what the
+ * transaction reads, so sharing the root cache is sound and saves a marker
+ * read per transaction. A transaction on a session of its own, whose snapshot
+ * can predate the root's confirmation (a libSQL transaction handle, every
+ * PostgreSQL transaction), passes the gate
+ * {@link ContributionMaterializer.bindReadSession} binds to that session
+ * instead.
+ */
+export function admitContributionReadsThroughView(
+  materializer: ContributionMaterializer,
+  admit: <T>(task: () => Promise<T>) => Promise<T>,
+): ContributionMaterializer {
+  function viewMember(
+    role: (typeof TRANSACTION_MATERIALIZER_MEMBER_ROLES)[keyof ContributionMaterializer],
+    member: unknown,
+  ): unknown {
+    if (role === "local" || typeof member !== "function") return member;
+    if (role === "administration") {
+      return () => Promise.reject(transactionContributionAdministrationError());
+    }
+    return (...args: readonly unknown[]) =>
+      admit(
+        () => Reflect.apply(member, materializer, args) as Promise<unknown>,
+      );
+  }
+  return Object.fromEntries(
+    Object.entries(TRANSACTION_MATERIALIZER_MEMBER_ROLES).map(([key, role]) => [
+      key,
+      viewMember(role, materializer[key as keyof ContributionMaterializer]),
+    ]),
+  ) as unknown as ContributionMaterializer;
 }
 
 /**
