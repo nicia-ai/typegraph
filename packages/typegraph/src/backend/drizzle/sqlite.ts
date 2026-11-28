@@ -74,6 +74,10 @@ import {
   asCompiledRowsSql,
   type CompiledRowsSql,
 } from "../../query/sql-intent";
+import {
+  rootStatementRefusal,
+  runRootSavepointUnit,
+} from "../../store/root-savepoint-units";
 import { requireDefined } from "../../utils/presence";
 import {
   isMissingTableError,
@@ -120,6 +124,7 @@ import {
 } from "../revision-journal";
 import {
   createSerializedExecutionQueue,
+  refusingSerializedExecutionQueue,
   runWithSerializedQueue,
   type SerializedExecutionQueue,
 } from "../serialized-execution-queue";
@@ -1472,6 +1477,17 @@ export function buildSqliteEngineProfile(
         subject: "sqlite",
       })
     );
+  // The queue the backend's operations submit to. Over a caller's
+  // transaction object, an operation's statement on it is refused while
+  // another call's savepoint unit is open there; the transactions this
+  // backend opens submit to `serializedQueue` itself and are refused by
+  // their own unit instead (`runSqliteEngineTransaction`).
+  const operationQueue =
+    serializedQueue === undefined || !isSqliteTransactionHandle(db) ?
+      serializedQueue
+    : refusingSerializedExecutionQueue(serializedQueue, () =>
+        sqliteRootStatementRefusal(db),
+      );
 
   // Durable fulltext + vector materialization (#135): the dialect-specific
   // marker-table primitives. Orchestration (materialize / assert /
@@ -1488,6 +1504,10 @@ export function buildSqliteEngineProfile(
   // contribution members' `ensureTable` dep and `provisioning.ensureTable`
   // below.
   const runDdlStatement = async (ddl: string): Promise<void> => {
+    // Straight through `db`: over a caller's transaction object, refused
+    // while another call's savepoint unit is open on it.
+    const refusal = sqliteRootStatementRefusal(db);
+    if (refusal !== undefined) throw refusal;
     await db.run(sql.raw(ddl));
   };
 
@@ -1635,7 +1655,9 @@ export function buildSqliteEngineProfile(
       contributionMaterializer: ctx.contributionMaterializer,
       transactionScoped: false,
       fenceTarget: ctx.fenceTarget,
-      ...(serializedQueue === undefined ? {} : { serializedQueue }),
+      ...(operationQueue === undefined ?
+        {}
+      : { serializedQueue: operationQueue }),
       // The SAME object exposed as `backend.catalog` (via
       // `provisioning.catalog`), not a second one built from this call's own
       // `executionAdapter` — see `CreateSqliteOperationBackendOptions.catalog`.
@@ -1716,15 +1738,13 @@ export function buildSqliteEngineProfile(
   }
 
   const provisioning: EngineProvisioning = {
-    executeDdl: async (ddl) => {
-      await db.run(sql.raw(ddl));
-    },
+    executeDdl: runDdlStatement,
     ensureTable: runDdlStatement,
     generateDdl: () => generateSqliteDDL(tables, fulltextStrategy ?? false),
     catalog: createSqliteCatalogProbes(
       executionAdapter,
       operationStrategy,
-      serializedQueue,
+      operationQueue,
     ),
   };
 
@@ -2143,30 +2163,32 @@ export function buildSqliteEngineProfile(
       // accepts a `behavior` option that maps to BEGIN / BEGIN IMMEDIATE /
       // BEGIN EXCLUSIVE; "immediate" is what we need to acquire a reserved
       // write lock at the start of the transaction.
-      return runWithSerializedQueue(
-        serializedQueue,
-        async () =>
-          db.transaction(
-            async (tx) => {
-              recordSqliteEngineSavepoint(db, tx);
-              const txBackend = createTransactionBackend({
-                capabilities,
-                db: tx,
-                operationStrategy,
-                profileHints: { isSync },
-                tableNames,
-                fulltextStrategy,
-                vectorStrategy,
-                contributionMaterializer: ctx.contributionMaterializer,
-                fenceTarget,
-                lineage: provisioning.lineage,
-                recordedTime: provisioning.recordedTime,
-                isFirstParty,
-              });
-              return fn(txBackend);
-            },
-            { behavior: "immediate" },
-          ) as Promise<T>,
+      return runSqliteEngineTransaction(db, () =>
+        runWithSerializedQueue(
+          serializedQueue,
+          async () =>
+            db.transaction(
+              async (tx) => {
+                recordSqliteEngineSavepoint(db, tx);
+                const txBackend = createTransactionBackend({
+                  capabilities,
+                  db: tx,
+                  operationStrategy,
+                  profileHints: { isSync },
+                  tableNames,
+                  fulltextStrategy,
+                  vectorStrategy,
+                  contributionMaterializer: ctx.contributionMaterializer,
+                  fenceTarget,
+                  lineage: provisioning.lineage,
+                  recordedTime: provisioning.recordedTime,
+                  isFirstParty,
+                });
+                return fn(txBackend);
+              },
+              { behavior: "immediate" },
+            ) as Promise<T>,
+        ),
       );
     }
 
@@ -2342,27 +2364,29 @@ export function buildSqliteEngineProfile(
 
           // transactionMode === "drizzle". Read-only work uses a deferred snapshot;
           // business transactions retain BEGIN IMMEDIATE for safe lock upgrades.
-          return runWithSerializedQueue(
-            serializedQueue,
-            async () =>
-              db.transaction(
-                async (tx) => {
-                  recordSqliteEngineSavepoint(db, tx);
-                  return fn(
-                    markSchemaFencedInsertEligibleUnderFence(
-                      bindTransactionBackend(tx, isFirstParty),
-                      fencePlan,
-                    ),
-                    tx,
-                  );
-                },
-                {
-                  behavior:
-                    options?.accessMode === "read_only" || temporaryWrites ?
-                      "deferred"
-                    : "immediate",
-                },
-              ) as Promise<T>,
+          return runSqliteEngineTransaction(db, () =>
+            runWithSerializedQueue(
+              serializedQueue,
+              async () =>
+                db.transaction(
+                  async (tx) => {
+                    recordSqliteEngineSavepoint(db, tx);
+                    return fn(
+                      markSchemaFencedInsertEligibleUnderFence(
+                        bindTransactionBackend(tx, isFirstParty),
+                        fencePlan,
+                      ),
+                      tx,
+                    );
+                  },
+                  {
+                    behavior:
+                      options?.accessMode === "read_only" || temporaryWrites ?
+                        "deferred"
+                      : "immediate",
+                  },
+                ) as Promise<T>,
+            ),
           );
         },
 
@@ -2572,6 +2596,10 @@ export function buildSqliteEngineProfile(
 
       maintenance: {
         async refreshStatistics(): Promise<void> {
+          // Straight through `db`: over a caller's transaction object,
+          // refused while another call's savepoint unit is open on it.
+          const refusal = sqliteRootStatementRefusal(db);
+          if (refusal !== undefined) throw refusal;
           // `ANALYZE` populates `sqlite_stat1`. With no stat table, the
           // planner falls back to heuristics that, at least for FTS5
           // virtual-table queries and multi-column index selection, can be
@@ -2866,6 +2894,33 @@ function recordSqliteEngineSavepoint(
   if (isSqliteTransactionHandle(db)) {
     recordEngineSavepoint(tx, sqliteNativeHandle(db));
   }
+}
+
+/**
+ * Runs `open`, which opens one transaction with the engine's own
+ * `db.transaction()`. On a transaction object that transaction is a savepoint
+ * on the caller's transaction, so it runs as a unit of it: refused, before
+ * its SAVEPOINT, while another call's unit is open on `db`
+ * (`root-savepoint-units.ts`). On a database it is a BEGIN of its own.
+ */
+function runSqliteEngineTransaction<T>(
+  db: AnySqliteDatabase,
+  open: () => Promise<T>,
+): Promise<T> {
+  return isSqliteTransactionHandle(db) ?
+      runRootSavepointUnit(sqliteNativeHandle(db), open)
+    : open();
+}
+
+/**
+ * The refusal of a statement a backend built over `db` issues on it directly:
+ * over a caller's transaction object, while another call's savepoint unit is
+ * open on it (`root-savepoint-units.ts`).
+ */
+function sqliteRootStatementRefusal(db: AnySqliteDatabase): Error | undefined {
+  return isSqliteTransactionHandle(db) ?
+      rootStatementRefusal(sqliteNativeHandle(db))
+    : undefined;
 }
 
 /**

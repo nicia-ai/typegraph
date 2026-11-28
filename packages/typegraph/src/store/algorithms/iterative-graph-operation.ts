@@ -39,9 +39,8 @@ import {
 } from "../../utils/sql-errors";
 import {
   enterOperation,
-  openTransactionSession,
+  openRootTransaction,
   type OperationBackend,
-  type StoreTransactionBackend,
 } from "../operation-scope";
 import type { AlgorithmContext, InternalTraversalOptions } from "./context";
 import { resolveReadSchema, resolveTemporalOptions } from "./context";
@@ -349,15 +348,10 @@ export async function withInlineIterativeGraphOperation<T>(
   run: (operation: IterativeGraphOperation) => Promise<T>,
 ): Promise<T> {
   if (ctx.backend.capabilities.execution.interactiveTransactions) {
-    return ctx.backend.transaction(
-      async (backend: StoreTransactionBackend) =>
-        run(
-          createOperation(
-            ctx,
-            options,
-            enterOperation(openTransactionSession(backend)).backend,
-          ),
-        ),
+    return openRootTransaction(
+      ctx.backend,
+      async (session) =>
+        run(createOperation(ctx, options, enterOperation(session).backend)),
       {
         isolationLevel: "repeatable_read",
         accessMode: "read_only",
@@ -399,14 +393,15 @@ export async function runIterativeGraphOperation<
   // before the callback started is that refusal and nothing else.
   const rounds = { started: false };
   try {
-    return await ctx.backend.transaction(
-      async (backend: StoreTransactionBackend) => {
+    return await openRootTransaction(
+      ctx.backend,
+      async (session) => {
         rounds.started = true;
         return runWorkingTableRounds(
           ctx,
           options,
           plan,
-          enterOperation(openTransactionSession(backend)).backend,
+          enterOperation(session).backend,
         );
       },
       transactionOptions,

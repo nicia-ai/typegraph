@@ -802,10 +802,11 @@ describe.each(ENGINES)("import write-plan attempt state (%s)", (engine) => {
           },
           mixedWritePlan(undefined, true),
           backend,
-          (session, target, overlaidSession, lock, transactionMode) =>
+          (session, target, overlaidSession, lock, transactionMode, frame) =>
             runImportWritePlanAttempt(
               attemptInputs,
               session,
+              frame,
               target,
               overlaidSession,
               transactionMode,

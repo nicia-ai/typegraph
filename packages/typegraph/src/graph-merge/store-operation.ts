@@ -18,6 +18,7 @@ import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql, asCompiledStatementSql } from "../query/sql-intent";
 import {
   enterTransactionOperation,
+  type Operation,
   type OperationBackend,
   type StatementBackend,
 } from "../store/operation-scope";
@@ -467,12 +468,19 @@ export async function operateStore<G extends GraphDef>(
       result: JsonValue;
       receipt: TransactionReceipt;
       before: string | undefined;
+      /** The operation this attempt's callback entered. */
+      operation: Operation;
     }>;
     let pending: Pending | undefined;
     const options = withTransactionPreCommitHook(
       { isolationLevel: "read_committed" },
-      async ({ backend }) => {
+      async () => {
         if (pending === undefined) return;
+        // The evidence is this call's own statement: it goes through the
+        // operation the callback entered, beneath any surface its session
+        // hands out (a history Store's capture surface refuses raw SQL), as
+        // every recorded control statement does.
+        const backend = pending.operation.control;
         const recorded =
           store.historyEnabled ?
             await readRecordedClock(
@@ -552,7 +560,12 @@ export async function operateStore<G extends GraphDef>(
       assertJsonValue(measured.result, "result", "Durable Store operation");
       const result = structuredClone(measured.result);
       assertJsonValue(result, "result", "Durable Store operation");
-      const attempt: Pending = { result, receipt: measured.receipt, before };
+      const attempt: Pending = {
+        result,
+        receipt: measured.receipt,
+        before,
+        operation,
+      };
       pending = attempt;
       attemptState.phase = "evidence";
       return { outcome: "applied" as const, attempt };

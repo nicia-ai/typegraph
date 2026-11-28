@@ -13,6 +13,7 @@ import { type SQL } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createIterativeScanProbe } from "../src/backend/drizzle/postgres";
+import { TransactionCallRefusedError } from "../src/errors";
 
 /**
  * A fake `execAll` that reports one pgvector `extversion`, counting its calls.
@@ -99,6 +100,20 @@ describe("createIterativeScanProbe", () => {
   it("treats a probe failure as unsupported and does not cache it as a warning", async () => {
     const probe = createIterativeScanProbe();
     await expect(probe.isSupported(failingExecAll)).resolves.toBe(false);
+  });
+
+  // A probe statement refused because another call holds a savepoint open on
+  // the caller's transaction read nothing: the search that asked is refused,
+  // and the next search probes again instead of inheriting "unsupported".
+  it("refuses its caller when the probe statement is refused, and probes again next time", async () => {
+    const probe = createIterativeScanProbe();
+    const refusal = new TransactionCallRefusedError("savepoint-open");
+    await expect(
+      probe.isSupported(<T>() => Promise.reject<readonly T[]>(refusal)),
+    ).rejects.toBe(refusal);
+    const source = fakeExecAll("0.8.0");
+    expect(await probe.isSupported(source.execAll)).toBe(true);
+    expect(source.calls()).toBe(1);
   });
 
   it("is callable with the ANY_SQL placeholder without inspecting the query", async () => {

@@ -3539,6 +3539,7 @@ type GraphWriteFenceAcquisition = Readonly<{
 type GraphWriteLock = Readonly<{
     [GRAPH_WRITE_LOCK_BRAND]: true;
     coordination: GraphCommandCoordination | undefined;
+    graphLocks: RecordedGraphLockMemo | undefined;
 }>;
 
 // @public
@@ -4647,12 +4648,13 @@ type MisassignedEdgeEndpointRow = Readonly<{
     toId: string;
 }>;
 
-// @public (undocumented)
+// @public
 const NATIVE_TRANSACTION_STATE: unique symbol;
 
 // @public
 type NativeTransactionState = Readonly<{
     [NATIVE_TRANSACTION_STATE]: true;
+    engineSavepointLevels: object[];
 }>;
 
 // @public
@@ -5269,10 +5271,24 @@ type OntologyRelation = Readonly<{
 }> & CompositionRealization;
 
 // @public
-type Operation<Engine extends TransactionBackend = TransactionBackend> = OperationScoped<Readonly<{
+type Operation<Engine extends TransactionBackend = TransactionBackend> = OperationScoped<{
+    [OPERATION_IN_FLIGHT]: boolean;
+} & Readonly<{
     [OPERATION_SESSION]: TransactionSession<Engine>;
+    [OPERATION_ROOT]: Operation;
+    [OPERATION_PARENT]: Operation | undefined;
     backend: OperationScoped<Engine>;
+    control: OperationScoped<Engine>;
 }>>;
+
+// @public (undocumented)
+const OPERATION_IN_FLIGHT: unique symbol;
+
+// @public (undocumented)
+const OPERATION_PARENT: unique symbol;
+
+// @public (undocumented)
+const OPERATION_ROOT: unique symbol;
 
 // @public (undocumented)
 const OPERATION_SCOPED: unique symbol;
@@ -5965,6 +5981,9 @@ type RecordedAdjacencyPage<T> = Readonly<{
 }>;
 
 // @public
+type RecordedGraphLockMemo = Map<string, Promise<GraphWriteFenceAcquisition>>;
+
+// @public
 type RecordedHeterogeneousNodeWriteBatch<G extends GraphDef> = Readonly<{
     writeNodeUpsertBatch: <const Entries extends readonly HeterogeneousNodeUpsertInput<G>[]>(entries: Entries) => Promise<HeterogeneousNodeUpsertResult<G, Entries>>;
 }>;
@@ -6024,6 +6043,11 @@ type RecordedScanPage<T> = Readonly<{
     nextCursor: string | undefined;
     hasNextPage: boolean;
 }>;
+
+// @public
+interface RecordedSessionState {
+    binding: unknown;
+}
 
 // @public
 type RecordedSourceTable = "nodes" | "edges" | "identityAssertions";
@@ -6709,6 +6733,12 @@ type SerializedUniqueConstraint = Readonly<{
 }>;
 
 // @public (undocumented)
+const SESSION_CALLS: unique symbol;
+
+// @public (undocumented)
+const SESSION_CONTROL: unique symbol;
+
+// @public (undocumented)
 const SESSION_TRANSACTION: unique symbol;
 
 // @public
@@ -7248,20 +7278,20 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         done: boolean;
     }>>;
     lockIdentityImportTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>) => Promise<void>;
-    foldImportedIdentityNodes: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, references: readonly Readonly<{
+    foldImportedIdentityNodes: (entry: OperationEntry | Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, references: readonly Readonly<{
         kind: string;
         id: string;
     }>[]) => Promise<void>;
-    applyImportedNodeWindowEnd: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, input: Readonly<{
+    applyImportedNodeWindowEnd: (entry: OperationEntry | Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, input: Readonly<{
         kind: string;
         id: string;
         validTo?: string;
     }>) => Promise<void>;
-    detachDeletedImportedIdentityNode: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, reference: Readonly<{
+    detachDeletedImportedIdentityNode: (entry: OperationEntry | Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, reference: Readonly<{
         kind: string;
         id: string;
     }>) => Promise<void>;
-    importIdentityAssertionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, assertions: readonly Readonly<{
+    importIdentityAssertionsAtTarget: (entry: OperationEntry | Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, assertions: readonly Readonly<{
         id: string;
         relation: "same" | "different";
         a: Readonly<{
@@ -7291,7 +7321,7 @@ type StoreRuntime<G extends GraphDef> = Readonly<{
         done: boolean;
     }>>;
     identityTransitionRetentionAtTarget: (target: OperationEntry) => Promise<IdentityTransitionRetention>;
-    importIdentityTransitionsAtTarget: (target: Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, transitions: readonly IdentityTransitionTransfer[], carriedCut: IdentityTransitionCut | undefined) => Promise<Readonly<{
+    importIdentityTransitionsAtTarget: (entry: OperationEntry | Readonly<BackendIdentity & GraphEntityReadBackend & SchemaReadBackend & QueryExecutionBackend & SqlCompilationBackend & RawQueryExecutionBackend & Pick<GraphBackend, "executeStatement">>, transitions: readonly IdentityTransitionTransfer[], carriedCut: IdentityTransitionCut | undefined) => Promise<Readonly<{
         created: number;
     }>>;
     applyIdentityMergeAtTarget: (target: OperationEntry, retractions: readonly Readonly<{
@@ -7847,9 +7877,16 @@ type TransactionRuntime = Readonly<{
 type TransactionSession<Engine extends TransactionBackend = TransactionBackend> = OperationScoped<{
     [SESSION_TRANSACTION]: OperationScoped<Engine>;
 } & Readonly<{
+    [SESSION_CONTROL]: OperationScoped<Engine>;
+    [SESSION_CALLS]: {
+        inFlight: number;
+        unitDepth: number;
+        unitRoot: Operation | undefined;
+    };
     heldGraphWriteLocks: Map<string, Promise<GraphWriteLock>>;
     managedWrite: ManagedWriteState;
     native: NativeTransactionState;
+    recorded: RecordedSessionState;
 }>>;
 
 // @public (undocumented)

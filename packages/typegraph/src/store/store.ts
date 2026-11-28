@@ -369,16 +369,19 @@ import {
 import { readNodeByReference } from "./node-reference-read";
 import {
   decorateOperation,
+  enterCall,
   enterOperation,
   enterTargetOperation,
   type EntryScope,
+  exitCall,
   openBoundTransactionSession,
+  openRootTransaction,
   openTransactionSession,
   type Operation,
   type OperationBackend,
   type OperationEntry,
   operationEntryBackend,
-  type OperationScoped,
+  type PortEntry,
   portOperationEntry,
   type StatementBackend,
   storeAdoptSchemaWriteTransaction,
@@ -475,7 +478,7 @@ import {
   readRecordedClock,
   recordedCaptureRequiresCallbackTransactionError,
   type RecordedFlushInstants,
-  registeredRecordedGraphLockMemo,
+  recordedGraphLockMemoOf,
   registerRecordedIdentityMutationWitness,
   resetRevisionOrigin,
   resolveLineage,
@@ -505,6 +508,7 @@ import {
   runInTransactionContext,
   STORE_RUNTIME,
   type StoreRuntime,
+  transactionChildSurfaceCarrier,
 } from "./runtime-port";
 import {
   publishSavepointEffect,
@@ -809,6 +813,19 @@ type PendingOperationOutcome =
       affectedCount: number;
       durationMs: number;
     }>;
+
+/**
+ * The session one `store.transaction` attempt runs in, with what it bound
+ * over it: the operation the attempt's own statements go through, the
+ * engine-native mutation witness when one observes the writes, and the
+ * surface every later operation hands out.
+ */
+type AttemptSession = Readonly<{
+  session: TransactionSession;
+  txOperation: Operation;
+  mutationWitness: ReturnType<typeof createMutationWitness> | undefined;
+  writeTarget: OperationBackend;
+}>;
 
 type TransactionRunResult<T> = Readonly<{
   result: T;
@@ -1806,7 +1823,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         // rebuild below writes claim rows, and the lock is what the claim
         // discipline requires ahead of them. It is reentrant and memoized per
         // transaction, so a merge that already took it pays no round trip.
-        const lock = await lockRecordedGraphWrite(target, this.graphId);
+        const lock = await lockRecordedGraphWrite(
+          target,
+          this.graphId,
+          recordedGraphLockMemoOf(claimOperation),
+        );
         return applyResolvedNodeClaims(
           {
             graphId: this.graphId,
@@ -1905,19 +1926,33 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ) => this.readIdentityAssertionPageAtTarget(target, mode, options),
       lockIdentityImportTarget: (target) =>
         this.lockIdentityImportTarget(target),
-      foldImportedIdentityNodes: (target, references) =>
-        this.foldImportedIdentityNodes(target, references),
-      applyImportedNodeWindowEnd: (target, input) =>
-        applyIdentityWindowEnd(this.#identityWindowEndContext(), target, input),
-      detachDeletedImportedIdentityNode: (target, reference) =>
-        this.detachDeletedImportedIdentityNode(target, reference),
-      importIdentityAssertionsAtTarget: (target, assertions, mode) =>
+      foldImportedIdentityNodes: (entry: PortEntry, references) =>
+        this.foldImportedIdentityNodes(portOperationEntry(entry), references),
+      applyImportedNodeWindowEnd: (entry: PortEntry, input) => {
+        const operation = portOperationEntry(entry);
+        return applyIdentityWindowEnd(
+          this.#identityWindowEndContext(),
+          operation,
+          operationEntryBackend(operation),
+          input,
+        );
+      },
+      detachDeletedImportedIdentityNode: (entry: PortEntry, reference) =>
+        this.detachDeletedImportedIdentityNode(
+          portOperationEntry(entry),
+          reference,
+        ),
+      importIdentityAssertionsAtTarget: (target: PortEntry, assertions, mode) =>
         this.importIdentityAssertionsAtTarget(target, assertions, mode),
       readIdentityTransitionPageAtTarget: (target: OperationEntry, options) =>
         this.readIdentityTransitionPageAtTarget(target, options),
       identityTransitionRetentionAtTarget: (target: OperationEntry) =>
         this.identityTransitionRetentionAtTarget(target),
-      importIdentityTransitionsAtTarget: (target, transitions, carriedCut) =>
+      importIdentityTransitionsAtTarget: (
+        target: PortEntry,
+        transitions,
+        carriedCut,
+      ) =>
         this.importIdentityTransitionsAtTarget(target, transitions, carriedCut),
       applyIdentityMergeAtTarget: (
         target: OperationEntry,
@@ -2100,7 +2135,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * that same operation.
    */
   async identitySchemaPreflight(
-    target: OperationScoped<SchemaCommitPreflightBackend>,
+    operation: Operation<SchemaCommitPreflightBackend>,
     provisionDerivedRelations: readonly string[],
   ): Promise<void> {
     await identitySchemaCommitPreflight(this.#identityContext(this.#backend), {
@@ -2112,7 +2147,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       ...(this.#captureEnabled ?
         { capture: { source: "store", batchPointRead: this.#batchPointRead } }
       : {}),
-    })(target);
+    })(operation);
   }
 
   /** @internal Read-only startup integrity verification. */
@@ -2122,7 +2157,10 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // both enforced here: validateIdentityForContext now also asserts the
     // materialized closure matches the computed components (throws
     // IDENTITY_SCHEMA_CONTRADICTION with a rebuildIdentityClosure suggestion).
-    await validateIdentityForContext(this.#identityContext(this.#baseBackend));
+    await validateIdentityForContext(
+      this.#identityContext(this.#baseBackend),
+      this.#baseBackend,
+    );
   }
 
   /**
@@ -2139,6 +2177,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     const scope =
       this.#captureEnabled ?
         createRecordedTransactionScope(
+          operation,
           target,
           this.#batchPointRead,
           this.#sqlSchema(),
@@ -2254,7 +2293,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * restore.
    */
   foldImportedIdentityNodes(
-    target: IdentityTarget,
+    entry: OperationEntry,
     references: readonly Readonly<{ kind: string; id: string }>[],
   ): Promise<void> {
     if (this.#graph.identity === undefined || references.length === 0) {
@@ -2267,7 +2306,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         sameIdAcrossKinds: this.#graph.identity.sameIdAcrossKinds,
         schema: this.#sqlSchema(),
       },
-      target,
+      entry,
+      operationEntryBackend(entry),
       references,
       "fold",
     );
@@ -2283,7 +2323,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
    * `identity.detachDeleted` already serves for the ordinary write path.
    */
   detachDeletedImportedIdentityNode(
-    target: IdentityTarget,
+    entry: OperationEntry,
     reference: Readonly<{ kind: string; id: string }>,
   ): Promise<void> {
     if (this.#graph.identity === undefined) return Promise.resolve();
@@ -2293,7 +2333,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         sameIdAcrossKinds: this.#graph.identity.sameIdAcrossKinds,
         schema: this.#sqlSchema(),
       },
-      target,
+      entry,
+      operationEntryBackend(entry),
       reference,
       "hard",
     );
@@ -2301,13 +2342,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Applies identity interchange rows inside an import transaction. */
   importIdentityAssertionsAtTarget(
-    target: IdentityTarget,
+    transaction: PortEntry,
     assertions: readonly IdentityTransferAssertion[],
     mode: "state" | "archival",
   ): Promise<IdentityImportSummary> {
     if (assertions.length === 0) {
       return Promise.resolve({ created: 0, skipped: 0 });
     }
+    const operation = portOperationEntry(transaction);
     if (this.#graph.identity === undefined) {
       throw new ConfigurationError(
         "Cannot import identity assertions into an identity-disabled graph.",
@@ -2320,7 +2362,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       // through is the parameter beside it, which is why this method can take
       // the narrow statement projection an import frame is able to offer.
       this.#identityContext(this.#baseBackend),
-      target,
+      operation,
+      operationEntryBackend(operation),
       assertions,
       mode,
     );
@@ -2395,7 +2438,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** @internal Restores archival identity transitions inside an import transaction. */
   importIdentityTransitionsAtTarget(
-    target: IdentityTarget,
+    transaction: PortEntry,
     transitions: readonly IdentityTransitionTransfer[],
     carriedCut: IdentityTransitionCut | undefined,
   ): ReturnType<typeof importIdentityTransitionsIntoTarget> {
@@ -2405,9 +2448,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       return Promise.resolve({ created: 0 });
     }
     this.#requireIdentityTransitionRestore();
+    const operation = portOperationEntry(transaction);
     return importIdentityTransitionsIntoTarget(
       { graphId: this.graphId, schema: this.#sqlSchema() },
-      target,
+      operation,
+      operationEntryBackend(operation),
       transitions,
       carriedCut,
     );
@@ -2425,9 +2470,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     if (this.#graph.identity === undefined || seeds.length === 0) {
       return Promise.resolve();
     }
-    const target = portEntryBackend(transaction);
+    const operation = portOperationEntry(transaction);
+    const target = operationEntryBackend(operation);
     return assertAffectedIdentityClassesConsistent(
       this.#identityContext(target),
+      operation,
       target,
       seeds,
     );
@@ -4741,51 +4788,53 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         : backendOptions,
       );
       try {
-        const run = async (
+        // This attempt opened the transaction, so its session opens here,
+        // once. The statements the attempt issues itself (the pre-commit
+        // hook, the engine instant read) go through one operation of it;
+        // every later operation hands out `writeTarget`, built over the
+        // transaction the session holds.
+        //
+        // A receipt was requested AND this store is engine-native: wrap the
+        // committing session so every write member this transaction body
+        // calls is observed at the point it either changed a row or did
+        // not (`write-touch.ts`'s per-member decision — the same one
+        // TypeGraph-owned capture reads, not a second guess at it), rather
+        // than inferring "did this transaction write" from a
+        // collection-level write-INTENT count — that counts a call, not
+        // its effect, so a delete of a missing row or a coalesced no-op
+        // upsert would otherwise still stamp `recorded`. No receipt
+        // requested, or not engine-native: nothing to observe, so no
+        // wrapping. `writeTarget` is the single object
+        // every write in this attempt runs through — capture's decorator
+        // installs the same way. The write session and schema-fence lease
+        // below are this session's, so every operation of it (each hands
+        // out `writeTarget`) reads them, whichever object it holds.
+        //
+        // Under TypeGraph-owned capture the capture overlay opens the
+        // transaction AND its session (`openRootTransaction`): the session
+        // is bound over the capture surface, which is `writeTarget`, and the
+        // attempt opens no second session over it. No mutation witness is
+        // built there: an engine-native store captures nothing itself.
+        const openAttemptSession = (
           transaction: StoreTransactionBackend,
-          nativeTransaction: TNativeTransaction | undefined,
-        ): Promise<T> => {
-          // This attempt opened the transaction, so its session opens here,
-          // once. The statements the attempt issues itself (the pre-commit
-          // hook, the engine instant read) go through one operation of it;
-          // every later operation hands out `writeTarget`, built over the
-          // transaction the session holds.
-          //
-          // A receipt was requested AND this store is engine-native: wrap the
-          // committing session so every write member this transaction body
-          // calls is observed at the point it either changed a row or did
-          // not (`write-touch.ts`'s per-member decision — the same one
-          // TypeGraph-owned capture reads, not a second guess at it), rather
-          // than inferring "did this transaction write" from a
-          // collection-level write-INTENT count — that counts a call, not
-          // its effect, so a delete of a missing row or a coalesced no-op
-          // upsert would otherwise still stamp `recorded`. No receipt
-          // requested, or not engine-native: nothing to observe, so no
-          // wrapping. `writeTarget` is the single object
-          // every write in this attempt runs through — capture's decorator
-          // installs the same way. The write session and schema-fence lease
-          // below are this session's, so every operation of it (each hands
-          // out `writeTarget`) reads them, whichever object it holds.
-          const {
-            session,
-            binding: { txOperation, mutationWitness, writeTarget },
-          } = await openBoundTransactionSession(transaction, (opened, held) => {
+        ): Promise<AttemptSession> =>
+          openBoundTransactionSession(transaction, (opened, held) => {
             const txOperation = enterOperation(opened);
             const mutationWitness =
               this.#engineNativeHistory && receiptRequested ?
                 createMutationWitness()
               : undefined;
             const writeTarget =
-              mutationWitness === undefined ? held : mutationWitness.wrap(held);
+              mutationWitness === undefined ? held : (
+                mutationWitness.wrap(held, opened)
+              );
             if (mutationWitness !== undefined) {
               // Identity assertions run through a wholly separate seam
               // (`withRecordedIdentityMutationTarget`) that `wrap`'s overlay
-              // does not cover — register the witness's sink against both
-              // object identities `writeTarget` can be reached through, the
+              // does not cover — bind the witness's sink to this session, the
               // same binding capture uses for its own session-backed sink.
               registerRecordedIdentityMutationWitness(
-                writeTarget,
-                held,
+                opened,
                 mutationWitness.sink,
               );
             }
@@ -4793,7 +4842,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               statements: writeTarget,
               binding: { txOperation, mutationWitness, writeTarget },
             };
-          });
+          }).then(({ session, binding }) => ({ session, ...binding }));
+        const run = async (
+          {
+            session,
+            txOperation,
+            mutationWitness,
+            writeTarget,
+          }: AttemptSession,
+          nativeTransaction: TNativeTransaction | undefined,
+        ): Promise<T> => {
           const runHooks = this.#createBufferedHookRunner(pending, writeTarget);
           const runBulkHooks = this.#createBufferedBulkHookRunner(
             pending,
@@ -4860,14 +4918,32 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           return output;
         };
         const result =
-          this.#captureEnabled || this.#adapterBackend === undefined ?
+          this.#captureEnabled ?
+            await openRootTransaction(
+              this.#backend,
+              (session) => {
+                const txOperation = enterOperation(session);
+                return run(
+                  {
+                    session,
+                    txOperation,
+                    mutationWitness: undefined,
+                    writeTarget: txOperation.backend,
+                  },
+                  undefined,
+                );
+              },
+              transactionOptions,
+            )
+          : this.#adapterBackend === undefined ?
             await this.#backend.transaction(
-              (txBackend: StoreTransactionBackend) => run(txBackend, undefined),
+              async (txBackend: StoreTransactionBackend) =>
+                run(await openAttemptSession(txBackend), undefined),
               transactionOptions,
             )
           : await this.#adapterBackend.transactionWithNative(
-              (txBackend: StoreTransactionBackend, nativeTransaction) =>
-                run(txBackend, nativeTransaction),
+              async (txBackend: StoreTransactionBackend, nativeTransaction) =>
+                run(await openAttemptSession(txBackend), nativeTransaction),
               deferNativeHandle(transactionOptions),
             );
         // The COMMIT above already succeeded: flushing `onOperationEnd` is
@@ -5167,11 +5243,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const scope =
         this.#captureEnabled ?
           createRecordedTransactionScope(
+            txOperation,
             held,
             this.#batchPointRead,
             this.#sqlSchema(),
             false,
-            txBackend,
           )
         : {
             backend: held,
@@ -5179,12 +5255,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               Promise.resolve(EMPTY_RECORDED_FLUSH_INSTANTS),
           };
       if (this.#captureEnabled) {
-        // Through this operation, into the capture surface's own lock memo,
-        // so the surface's writes find the graph lock already held.
+        // Through this operation, into the capture scope's lock memo, so
+        // the surface's writes find the graph lock already held.
         await lockRecordedGraphWrite(
           txBackend,
           this.graphId,
-          registeredRecordedGraphLockMemo(scope.backend),
+          recordedGraphLockMemoOf(txOperation),
         );
       }
       // See the matching comment at the other engine-native receipt site
@@ -5197,20 +5273,16 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       const writeTarget =
         mutationWitness === undefined ?
           scope.backend
-        : mutationWitness.wrap(scope.backend);
+        : mutationWitness.wrap(scope.backend, opened);
       if (mutationWitness !== undefined) {
         // Same registration as the other engine-native receipt site: identity
         // assertions bypass `wrap`'s overlay entirely, so the witness's sink
         // needs its own binding to see one.
-        registerRecordedIdentityMutationWitness(
-          writeTarget,
-          scope.backend,
-          mutationWitness.sink,
-        );
+        registerRecordedIdentityMutationWitness(opened, mutationWitness.sink);
       }
       const executionScope =
         originalStore === undefined ? undefined : (
-          scopeBackendExecution(writeTarget)
+          scopeBackendExecution(writeTarget, opened)
         );
       const contextBackend = executionScope?.backend ?? writeTarget;
       return {
@@ -5450,6 +5522,25 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     };
   }
 
+  /**
+   * `tx.writeNodeUpsertBatch` as a call of `session`: one operation, counted
+   * as running on the session until the envelope settles.
+   */
+  async #writeNodeUpsertBatchCall<
+    const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
+  >(
+    session: TransactionSession,
+    entries: Entries,
+    receiptRecorder: TransactionReceiptRecorder | undefined,
+  ): Promise<HeterogeneousNodeUpsertResult<G, Entries>> {
+    const call = enterCall(enterOperation(session));
+    try {
+      return await this.#writeNodeUpsertBatch(call, entries, receiptRecorder);
+    } finally {
+      exitCall(call);
+    }
+  }
+
   /** One CTE-backed upsert envelope for plain history-store node kinds. */
   async #writeNodeUpsertBatch<
     const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
@@ -5569,7 +5660,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
       );
     }
     const rows = await withRecordedNodeMutationTarget(
-      txBackend,
+      operation,
       this.graphId,
       (target) => {
         const upsert = target.upsertHeterogeneousNodes;
@@ -5680,8 +5771,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // (`#attachMeasure`). One builder is why a scoped write reaches the same
     // operations — and therefore the same composition cascade reporting — as
     // an unscoped one.
+    //
+    // `parent`, when given, is the operation of a call that composes writes
+    // through this surface inside its own savepoint unit (an adopted merge
+    // apply): every write the surface offers enters as that call's child.
     const buildSurface = (
       receiptRecorders: readonly TransactionReceiptRecorder[],
+      parent?: Operation,
     ): TransactionWriteSurface<G> => {
       const nodeOperationContext = this.#createNodeOperationContext(
         runHooks,
@@ -5723,21 +5819,33 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         runtime: {
           ...transactionRuntimeSession(session),
           backend: txBackend,
-          deleteNodeWithPolicy: (work, policy) =>
-            executeNodeDelete(
-              nodeOperationContext,
-              work.kind,
-              work.id,
-              enterOperation(session),
-              { policy },
-            ),
-          reviveNode: (work) =>
-            executeNodeRevive(
-              nodeOperationContext,
-              work.kind,
-              work.id,
-              enterOperation(session),
-            ),
+          deleteNodeWithPolicy: async (work, policy) => {
+            const call = enterCall(enterOperation(session, parent));
+            try {
+              await executeNodeDelete(
+                nodeOperationContext,
+                work.kind,
+                work.id,
+                call,
+                { policy },
+              );
+            } finally {
+              exitCall(call);
+            }
+          },
+          reviveNode: async (work) => {
+            const call = enterCall(enterOperation(session, parent));
+            try {
+              await executeNodeRevive(
+                nodeOperationContext,
+                work.kind,
+                work.id,
+                call,
+              );
+            } finally {
+              exitCall(call);
+            }
+          },
           acquireWriteFences: async (refusal) => {
             if (readOnly) {
               refuseReadOnlyTransactionWrite(
@@ -5746,26 +5854,43 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 refusal.suggestion,
               );
             }
-            await acquireManagedWriteFences(
-              nodeOperationContext,
-              enterOperation(session),
-            );
+            const call = enterCall(enterOperation(session, parent));
+            try {
+              await acquireManagedWriteFences(nodeOperationContext, call);
+            } finally {
+              exitCall(call);
+            }
           },
           acquireReadFences: async () => {
             if (readOnly) {
-              await lockRecordedGraphWrite(txBackend, this.graphId);
+              await lockRecordedGraphWrite(
+                txBackend,
+                this.graphId,
+                recordedGraphLockMemoOf(contextOperation),
+              );
               return;
             }
-            await acquireManagedWriteFences(
-              nodeOperationContext,
-              enterOperation(session),
-            );
+            const call = enterCall(enterOperation(session, parent));
+            try {
+              await acquireManagedWriteFences(nodeOperationContext, call);
+            } finally {
+              exitCall(call);
+            }
           },
           assertWritable: (operation) => {
             for (const recorder of receiptRecorders) {
               recorder.assertWritable(operation);
             }
           },
+          ...transactionChildSurfaceCarrier((child) => {
+            const surface = buildSurface(receiptRecorders, child);
+            const wrapped = wrapSurfaceForRecorders(surface, receiptRecorders);
+            return {
+              nodes: wrapped.nodes,
+              edges: wrapped.edges,
+              deleteNodeWithPolicy: surface.runtime.deleteNodeWithPolicy,
+            };
+          }),
         },
         nodes: createNodeCollectionsProxy(
           this.#graph,
@@ -5775,6 +5900,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           session,
           this.#batchPointRead,
           nodeOperations,
+          parent,
         ),
         edges: createEdgeCollectionsProxy(
           this.#graph,
@@ -5785,6 +5911,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
           this.#batchPointRead,
           this.#endpointSetRead,
           edgeOperations,
+          parent,
         ),
         ...(this.#graph.identity === undefined ?
           {}
@@ -5817,12 +5944,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         const Entries extends readonly HeterogeneousNodeUpsertInput<G>[],
       >(
         entries: Entries,
-      ) =>
-        this.#writeNodeUpsertBatch(
-          enterOperation(session),
-          entries,
-          receiptRecorder,
-        ),
+      ) => this.#writeNodeUpsertBatchCall(session, entries, receiptRecorder),
       ...this.#createTransactionReadSurface(txBackend, session, attempt),
       assertUnchangedSince: (
         anchor: EngineRevision,
@@ -5861,7 +5983,11 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                 "Use a backend with TypeGraph-owned history capture; engine-native revision allocation is controlled by the database engine.",
               );
             }
-            if (!forceRecordedGraphRevision(txBackend, this.graphId)) {
+            // A call of its own: refused while another call's savepoint unit
+            // is open, whose rollback would drop the request.
+            if (
+              !forceRecordedGraphRevision(enterOperation(session), this.graphId)
+            ) {
               throw new ConfigurationError(
                 "The history transaction is not bound to a recorded-time capture session.",
                 { graphId: this.graphId },
@@ -5916,7 +6042,9 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
     // to scope; the plain `transaction()` path stays free of a `measure` the
     // caller has no receiver for.
     return measurable && receiptRecorder !== undefined ?
-        this.#attachMeasure(withSql, buildSurface, [receiptRecorder])
+        this.#attachMeasure(withSql, (recorders) => buildSurface(recorders), [
+          receiptRecorder,
+        ])
       : withSql;
   }
 
@@ -6080,7 +6208,8 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         options.preserveContributionMaterializations,
       );
       if (this.#revisionTrackingEnabled) {
-        await lockRecordedGraphWrite(target, this.graphId);
+        // On the base backend, outside capture: no memo.
+        await lockRecordedGraphWrite(target, this.graphId, undefined);
       }
       if (this.#graph.identity !== undefined) {
         await lockIdentityGraph(target, this.graphId);
@@ -6442,7 +6571,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
               },
             );
             await candidate.identitySchemaPreflight(
-              operation.backend,
+              operation,
               storage.provisionInCommit,
             );
           },
@@ -6848,7 +6977,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
         identityCandidate === undefined ? undefined : (
           (operation: Operation<SchemaCommitPreflightBackend>) =>
             identityCandidate.identitySchemaPreflight(
-              operation.backend,
+              operation,
               identityProvisioning?.provisionInCommit ?? [],
             )
         ),
@@ -8092,12 +8221,14 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
 
   /** The one binding of the node window-end identity hook to this graph. */
   readonly #requireValidityEndCompatible = (
+    frame: OperationEntry,
     target: IdentityTarget,
     ref: Readonly<{ kind: string; id: string }>,
     validTo: string | undefined,
   ): Promise<void> =>
     requireNodeValidityEndCompatible(
       { graphId: this.graphId, schema: this.#sqlSchema() },
+      frame,
       target,
       ref,
       validTo,
@@ -8154,6 +8285,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
             lock: (target: IdentityTarget) =>
               lockIdentityGraph(target, this.graphId),
             assertFoldable: (
+              frame: OperationEntry,
               target: IdentityTarget,
               references: readonly Readonly<{ kind: string; id: string }>[],
             ) =>
@@ -8164,10 +8296,12 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                   sameIdAcrossKinds: identityConfig.sameIdAcrossKinds,
                   schema: this.#sqlSchema(),
                 },
+                frame,
                 target,
                 references,
               ),
             applyFold: (
+              frame: OperationEntry,
               target: IdentityTarget,
               plan: IdentityFoldPlan,
               cause: "fold" | "restore",
@@ -8179,11 +8313,13 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                   sameIdAcrossKinds: identityConfig.sameIdAcrossKinds,
                   schema: this.#sqlSchema(),
                 },
+                frame,
                 target,
                 plan,
                 cause,
               ),
             detachDeleted: (
+              frame: OperationEntry,
               target: IdentityTarget,
               ref: Readonly<{ kind: string; id: string }>,
               mode: "soft" | "hard",
@@ -8195,6 +8331,7 @@ class StoreImplementation<G extends GraphDef, TNativeTransaction = unknown> {
                   sameIdAcrossKinds: identityConfig.sameIdAcrossKinds,
                   schema: this.#sqlSchema(),
                 },
+                frame,
                 target,
                 ref,
                 mode,
@@ -9498,8 +9635,11 @@ function rebuildIdentityClosureWithSchemaFence<G extends GraphDef>(
   return runInWriteTransaction(
     writeContext,
     entry,
-    async (target) =>
-      rebuildIdentityClosureForContext({ ...identityContext, backend: target }),
+    async (target, _lock, _transactionMode, frame) =>
+      rebuildIdentityClosureForContext(
+        { ...identityContext, backend: target },
+        frame,
+      ),
     { didWrite: () => false },
   );
 }

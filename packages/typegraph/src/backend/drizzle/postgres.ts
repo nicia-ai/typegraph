@@ -65,6 +65,7 @@ import {
   ConfigurationError,
   SchemaFenceTimeoutError,
   StaleVersionError,
+  TransactionCallRefusedError,
 } from "../../errors";
 import {
   adjacencyIndexAdoptionDdl,
@@ -96,6 +97,10 @@ import {
   asCompiledRowsSql,
   type CompiledRowsSql,
 } from "../../query/sql-intent";
+import {
+  rootStatementRefusal,
+  runRootSavepointUnit,
+} from "../../store/root-savepoint-units";
 import { resolveStampedValidityLowerBound } from "../../utils/date";
 import { requireDefined } from "../../utils/presence";
 import {
@@ -1442,7 +1447,29 @@ function buildPostgresEngineProfileInternal(
   const executionAdapter =
     queueOwner === undefined ?
       unqueuedExecutionAdapter
-    : createSerialExecutionAdapter(unqueuedExecutionAdapter, queueOwner);
+    : createSerialExecutionAdapter(
+        unqueuedExecutionAdapter,
+        queueOwner,
+        // Over a caller's transaction, a statement this backend issues on it
+        // directly is refused while another call's savepoint is open there.
+        transactionScoped ? () => rootStatementRefusalOnDb() : undefined,
+      );
+  /**
+   * Over a caller's transaction, the refusal of a statement this backend
+   * issues on it directly (through its queued adapter, or straight through
+   * `db`) while another call's savepoint unit is open there
+   * (`root-savepoint-units.ts`); `undefined` on a pooled backend.
+   */
+  function rootStatementRefusalOnDb(): Error | undefined {
+    return transactionScoped ?
+        rootStatementRefusal(postgresNativeHandle(db))
+      : undefined;
+  }
+  /** Throws {@link rootStatementRefusalOnDb}'s refusal, for a path that executes on `db` itself. */
+  function refuseDirectStatementOnDb(): void {
+    const refusal = rootStatementRefusalOnDb();
+    if (refusal !== undefined) throw refusal;
+  }
   const atomicSqlProgramExecutor =
     createAtomicSqlProgramExecutor(executionAdapter);
   // `declaredCapabilities` above is this profile's contribution; the
@@ -1577,6 +1604,7 @@ function buildPostgresEngineProfileInternal(
   async function runDdlStatement(
     statement: ReturnType<typeof sql.raw>,
   ): Promise<void> {
+    refuseDirectStatementOnDb();
     if (allocationPin === undefined || allocationSchema === undefined) {
       await db.execute(statement);
       return;
@@ -2291,15 +2319,22 @@ function buildPostgresEngineProfileInternal(
         }
         return body(tx);
       };
-      if (capabilities.execution.commitOutcome !== "commit-reply") {
-        return db.transaction((tx) => run(tx), config);
-      }
-      return runMarkedPostgresTransaction(
-        db,
-        (markedBody) => db.transaction(markedBody, config),
-        (error) => isSerializationFailure(error, ctx.self()),
-        (tx) => run(tx),
-      );
+      const open = (): Promise<T> => {
+        if (capabilities.execution.commitOutcome !== "commit-reply") {
+          return db.transaction((tx) => run(tx), config);
+        }
+        return runMarkedPostgresTransaction(
+          db,
+          (markedBody) => db.transaction(markedBody, config),
+          (error) => isSerializationFailure(error, ctx.self()),
+          (tx) => run(tx),
+        );
+      };
+      // A savepoint on the caller's transaction is a unit of it: refused,
+      // before its SAVEPOINT, while another call's unit is open on `db`.
+      return isPostgresTransactionHandle(db) ?
+          runRootSavepointUnit(postgresNativeHandle(db), open)
+        : open();
     }
 
     /**
@@ -3099,6 +3134,7 @@ function buildPostgresEngineProfileInternal(
 
       maintenance: {
         async refreshStatistics(): Promise<void> {
+          refuseDirectStatementOnDb();
           // Scoped to TypeGraph-managed tables only — we don't touch
           // unrelated tables in the same database. Without fresh stats
           // after a bulk load the planner can pick a reverse-index scan
@@ -3198,6 +3234,7 @@ function buildPostgresEngineProfileInternal(
         async claimIndexMaterialization(
           params: ClaimIndexMaterializationParams,
         ): Promise<boolean> {
+          refuseDirectStatementOnDb();
           const t = tables.indexMaterializations;
           // Atomic claim: insert a fresh claim row, or take over an existing
           // row only when no live claim is on it (NULL or lease-expired
@@ -3235,6 +3272,7 @@ function buildPostgresEngineProfileInternal(
         async releaseIndexMaterializationClaim(
           params: ReleaseIndexMaterializationClaimParams,
         ): Promise<void> {
+          refuseDirectStatementOnDb();
           const t = tables.indexMaterializations;
           // Token-guarded: a lease-expired claim taken over by another
           // materializer must not be released by the original holder.
@@ -3526,7 +3564,13 @@ export function createIterativeScanProbe(): IterativeScanProbe {
           const supported = major > 0 || (major === 0 && minor >= 8);
           if (!supported) warnUnavailable(row.v);
           return supported;
-        } catch {
+        } catch (error) {
+          // A refused probe read nothing: refuse its caller and probe again
+          // on the next search, rather than settle on "unsupported".
+          if (error instanceof TransactionCallRefusedError) {
+            probe = undefined;
+            throw error;
+          }
           return false;
         }
       })();

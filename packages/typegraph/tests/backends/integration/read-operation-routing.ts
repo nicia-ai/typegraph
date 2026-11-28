@@ -39,8 +39,9 @@ function routeOperationsThroughRecordingHandles(
   const enterOperation = operationScope.enterOperation;
   function recordingEnter(
     scope: operationScope.EntryScope,
+    parent?: operationScope.Operation,
   ): operationScope.OperationEntry {
-    const entry = enterOperation(scope);
+    const entry = enterOperation(scope, parent);
     const entered = operationScope.operationEntrySession(entry);
     if (entered === undefined) return entry;
     const session: operationScope.TransactionSession = entered;

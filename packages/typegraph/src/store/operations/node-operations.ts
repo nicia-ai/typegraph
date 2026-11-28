@@ -215,6 +215,7 @@ import {
   type OperationEntry,
   operationEntryBackend,
   type OperationScoped,
+  runOperationUnit,
   type StatementBackend,
 } from "../operation-scope";
 import { collectRecordedIdentityTransitionNotes } from "../recorded-capture";
@@ -453,6 +454,7 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
      * first statement. Returns the fold it decided, for {@link applyFold}.
      */
     assertFoldable: (
+      frame: OperationEntry,
       target: IdentityTarget,
       references: readonly Readonly<{ kind: string; id: string }>[],
     ) => Promise<IdentityFoldPlan>;
@@ -462,11 +464,13 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
      * again.
      */
     applyFold: (
+      frame: OperationEntry,
       target: IdentityTarget,
       plan: IdentityFoldPlan,
       cause: "fold" | "restore",
     ) => Promise<void>;
     detachDeleted: (
+      frame: OperationEntry,
       target: IdentityTarget,
       ref: Readonly<{ kind: string; id: string }>,
       mode: "soft" | "hard",
@@ -490,6 +494,7 @@ export type NodeOperationContext<G extends GraphDef> = Readonly<{
      * (`clearValidTo`), which strands nothing but still moves the boundary.
      */
     requireValidityEndCompatible: (
+      frame: OperationEntry,
       target: IdentityTarget,
       ref: Readonly<{ kind: string; id: string }>,
       validTo: string | undefined,
@@ -679,6 +684,7 @@ function withCascadeConsumedEdges(
 async function deleteNodeRowInFrame<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   session: NodeWriteSession,
+  frame: OperationEntry,
   target: WriteTarget,
   mode: NodeDeleteMode,
   kind: string,
@@ -711,6 +717,7 @@ async function deleteNodeRowInFrame<G extends GraphDef>(
     );
   }
   await ctx.identity?.detachDeleted(
+    frame,
     target,
     { kind, id },
     mode,
@@ -729,11 +736,12 @@ async function deleteNodeRowInFrame<G extends GraphDef>(
 async function reviveNodeRowInFrame<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   session: NodeWriteSession,
+  frame: OperationEntry,
   target: WriteTarget,
   existing: TombstonedNodeRow,
 ): Promise<void> {
   const registration = getNodeRegistration(ctx.graph, existing.kind);
-  const foldRevived = await prepareNodeFold(ctx, target, [
+  const foldRevived = await prepareNodeFold(ctx, frame, target, [
     { kind: existing.kind, id: existing.id },
   ]);
   await session.reviveNode({
@@ -966,6 +974,7 @@ async function applyCompositionCascade<G extends GraphDef>(
   target: WriteTarget,
   mode: NodeDeleteMode,
   session: NodeWriteSession,
+  frame: OperationEntry,
 ): Promise<readonly CompositionCascadedPart[]> {
   const memberPolicy = cascadeMemberDeletePolicy(plan);
   const deletedMembers: CompositionCascadePlan["members"][number][] = [];
@@ -978,6 +987,7 @@ async function applyCompositionCascade<G extends GraphDef>(
     const deleted = await deleteNodeRowInFrame(
       ctx,
       session,
+      frame,
       target,
       mode,
       member.kind,
@@ -1022,6 +1032,7 @@ async function applyCompositionCascade<G extends GraphDef>(
 async function deleteRootWithCascade<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   session: NodeWriteSession,
+  frame: OperationEntry,
   target: WriteTarget,
   mode: NodeDeleteMode,
   root: Readonly<{ kind: string; id: string }>,
@@ -1035,10 +1046,12 @@ async function deleteRootWithCascade<G extends GraphDef>(
     target,
     mode,
     session,
+    frame,
   );
   await deleteNodeRowInFrame(
     ctx,
     session,
+    frame,
     target,
     mode,
     root.kind,
@@ -1770,13 +1783,14 @@ type PreparedNodeFold = (cause: "fold" | "restore") => Promise<void>;
  */
 async function prepareNodeFold<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
+  frame: OperationEntry,
   target: WriteTarget,
   references: readonly Readonly<{ kind: string; id: string }>[],
 ): Promise<PreparedNodeFold> {
   const identity = ctx.identity;
   if (identity === undefined) return () => Promise.resolve();
-  const plan = await identity.assertFoldable(target, references);
-  return (cause) => identity.applyFold(target, plan, cause);
+  const plan = await identity.assertFoldable(frame, target, references);
+  return (cause) => identity.applyFold(frame, target, plan, cause);
 }
 
 /**
@@ -1786,10 +1800,11 @@ async function prepareNodeFold<G extends GraphDef>(
  */
 function prepareNodeCreatesFold<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
+  frame: OperationEntry,
   target: WriteTarget,
   preparedCreates: readonly NodeCreatePrepared[],
 ): Promise<PreparedNodeFold> {
-  return prepareNodeFold(ctx, target, foldReferences(preparedCreates));
+  return prepareNodeFold(ctx, frame, target, foldReferences(preparedCreates));
 }
 
 // ============================================================
@@ -2275,6 +2290,7 @@ function nodeRowOfPendingCreate(prepared: NodeCreatePrepared): BackendNodeRow {
 async function prepareNodeUpdateSet<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   entries: readonly NodeUpsertUpdateBatchEntry[],
+  frame: OperationEntry,
   target: WriteTarget,
   lock: GraphWriteLock,
   sources: Readonly<{
@@ -2324,8 +2340,8 @@ async function prepareNodeUpdateSet<G extends GraphDef>(
     }
     if (nodeWriteMovesWindowEnd(entry.input)) {
       const withdrawWindowEndNote =
-        await collectRecordedIdentityTransitionNotes(target, () =>
-          applyIdentityWindowEnd(ctx, target, entry.input),
+        await collectRecordedIdentityTransitionNotes(frame, target, () =>
+          applyIdentityWindowEnd(ctx, frame, target, entry.input),
         );
       withdrawWindowEndNote();
     }
@@ -2342,7 +2358,7 @@ async function prepareNodeUpdateSet<G extends GraphDef>(
     target,
     restored,
   );
-  await ctx.identity?.assertFoldable(target, restored);
+  await ctx.identity?.assertFoldable(frame, target, restored);
   await assertNodeClaimTransitionsAvailable(
     createUniquenessContext(
       ctx.graphId,
@@ -2369,6 +2385,7 @@ async function writeNodeUpdateSet<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   entries: readonly NodeUpsertUpdateBatchEntry[],
   session: NodeWriteSession,
+  frame: OperationEntry,
   target: WriteTarget,
   lock: GraphWriteLock,
   storedRows: ReadonlyMap<string, BackendNodeRow> | undefined,
@@ -2387,9 +2404,16 @@ async function writeNodeUpdateSet<G extends GraphDef>(
           { ...entry, clearDeleted: false }
         : entry,
       );
-    const prepared = await prepareNodeUpdateSet(ctx, remaining, target, lock, {
-      ...(rows === undefined ? {} : { storedRows: rows }),
-    });
+    const prepared = await prepareNodeUpdateSet(
+      ctx,
+      remaining,
+      frame,
+      target,
+      lock,
+      {
+        ...(rows === undefined ? {} : { storedRows: rows }),
+      },
+    );
     try {
       for (const [offset, entry] of remaining.entries()) {
         const { prepared: update, preparedAgainstStoredRow } = requireDefined(
@@ -2399,21 +2423,26 @@ async function writeNodeUpdateSet<G extends GraphDef>(
         // wrote, and before this row's own write.
         const foldRestored =
           requireDefined(entries[written + offset]).clearDeleted ?
-            await prepareNodeFold(ctx, target, [
+            await prepareNodeFold(ctx, frame, target, [
               { kind: entry.input.kind, id: entry.input.id },
             ])
           : undefined;
         nodes.push(
-          await writeNodeRowMovingWindowEnd(ctx, target, entry.input, () =>
-            preparedAgainstStoredRow ?
-              writePreparedNodeUpdate(session, update)
-            : performNodeUpdate(
-                ctx,
-                entry.input,
-                session,
-                target,
-                nodeUpdateBatchEntryOptions(entry),
-              ),
+          await writeNodeRowMovingWindowEnd(
+            ctx,
+            frame,
+            target,
+            entry.input,
+            () =>
+              preparedAgainstStoredRow ?
+                writePreparedNodeUpdate(session, update)
+              : performNodeUpdate(
+                  ctx,
+                  entry.input,
+                  session,
+                  target,
+                  nodeUpdateBatchEntryOptions(entry),
+                ),
           ),
         );
         await foldRestored?.("restore");
@@ -4903,7 +4932,14 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
         nodeRequiresIdentityLock(ctx),
     ),
     entry,
-    async (_session, target, _overlaidSession, lock) => {
+    async (
+      _session,
+      target,
+      _overlaidSession,
+      lock,
+      _transactionMode,
+      frame,
+    ) => {
       await assertRestoredRequiredPartsAttached(
         { graphId: ctx.graphId, registry: ctx.registry, lock },
         target,
@@ -4957,6 +4993,7 @@ async function assertGetOrCreateBatchApplicable<G extends GraphDef>(
       // A restoring leg re-runs the identity fold when it lands; what that
       // fold would refuse is read here, for every restoring leg at once.
       await ctx.identity?.assertFoldable(
+        frame,
         target,
         revisions
           .filter(({ leg }) => leg.restoresRow)
@@ -5597,7 +5634,9 @@ async function executeNodeCreateInternal<G extends GraphDef>(
       preparationMode,
       claimPlan,
     );
-    const foldCreated = await prepareNodeCreatesFold(ctx, target, [prepared]);
+    const foldCreated = await prepareNodeCreatesFold(ctx, frame, target, [
+      prepared,
+    ]);
     const projectionFusionEligible =
       compositionWork === undefined &&
       shouldReturnRow &&
@@ -5940,16 +5979,25 @@ export async function executeNodeCreateNoReturnBatch<G extends GraphDef>(
       nodeBatchCreateRequiresIdentityLock(ctx, inputs),
     ),
     entry,
-    async (session, target, _overlaidSession, lock) => {
+    async (
+      session,
+      target,
+      _overlaidSession,
+      lock,
+      _transactionMode,
+      frame,
+    ) => {
       const preparedCreates = await prepareBatchCreates(ctx, inputs, target);
       const partition = partitionCreates(preparedCreates);
       const foldInserts = await prepareNodeCreatesFold(
         ctx,
+        frame,
         target,
         partition.inserts,
       );
       const foldResurrections = await prepareNodeCreatesFold(
         ctx,
+        frame,
         target,
         partition.resurrections,
       );
@@ -6101,7 +6149,14 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       nodeRequiresIdentityLock(ctx),
     ),
     entry,
-    async (session, target, _overlaidSession, lock) => {
+    async (
+      session,
+      target,
+      _overlaidSession,
+      lock,
+      _transactionMode,
+      frame,
+    ) => {
       const preparedCreates = await prepareBatchCreates(
         ctx,
         inputs,
@@ -6111,16 +6166,18 @@ export async function executeNodeCreateBatch<G extends GraphDef>(
       const partition = partitionCreates(preparedCreates);
       const foldInserts = await prepareNodeCreatesFold(
         ctx,
+        frame,
         target,
         partition.inserts,
       );
       const foldResurrections = await prepareNodeCreatesFold(
         ctx,
+        frame,
         target,
         partition.resurrections,
       );
       if (pairedUpdates.length > 0) {
-        await prepareNodeUpdateSet(ctx, pairedUpdates, target, lock, {
+        await prepareNodeUpdateSet(ctx, pairedUpdates, frame, target, lock, {
           storedRows: new Map(
             pairedUpdates.flatMap((entry) =>
               entry.existing === undefined ?
@@ -6223,6 +6280,7 @@ function nodeUpdateTouchesIdentity(
  */
 export async function applyIdentityWindowEnd(
   ctx: IdentityWindowEndContext,
+  frame: OperationEntry,
   target: IdentityTarget,
   input: Readonly<{
     kind: string;
@@ -6235,6 +6293,7 @@ export async function applyIdentityWindowEnd(
   const identity = ctx.identity;
   if (identity === undefined || !nodeWriteMovesWindowEnd(input)) return;
   await identity.requireValidityEndCompatible(
+    frame,
     target,
     { kind: input.kind, id: input.id },
     validTo,
@@ -6255,13 +6314,15 @@ export async function applyIdentityWindowEnd(
  */
 async function writeNodeRowMovingWindowEnd<G extends GraphDef, T>(
   ctx: NodeOperationContext<G>,
+  frame: OperationEntry,
   target: IdentityTarget,
-  input: Parameters<typeof applyIdentityWindowEnd>[2],
+  input: Parameters<typeof applyIdentityWindowEnd>[3],
   writeRow: () => Promise<T>,
 ): Promise<T> {
   const withdrawWindowEndNote = await collectRecordedIdentityTransitionNotes(
+    frame,
     target,
-    () => applyIdentityWindowEnd(ctx, target, input),
+    () => applyIdentityWindowEnd(ctx, frame, target, input),
   );
   try {
     return await writeRow();
@@ -6358,7 +6419,14 @@ export async function executeNodeUpdate<G extends GraphDef>(
         nodeRequiresIdentityLock(ctx),
     ),
     entry,
-    async (session, target, _overlaidSession, lock) => {
+    async (
+      session,
+      target,
+      _overlaidSession,
+      lock,
+      _transactionMode,
+      frame,
+    ) => {
       const restoring = options?.clearDeleted === true;
       if (restoring) {
         await assertRestoredRequiredPartsAttached(
@@ -6369,18 +6437,23 @@ export async function executeNodeUpdate<G extends GraphDef>(
       }
       const foldRestored =
         restoring ?
-          await prepareNodeFold(ctx, target, [
+          await prepareNodeFold(ctx, frame, target, [
             { kind: input.kind, id: input.id },
           ])
         : undefined;
-      const node = await writeNodeRowMovingWindowEnd(ctx, target, input, () =>
-        performNodeUpdateWithResurrectionRecovery(
-          ctx,
-          input,
-          session,
-          target,
-          options,
-        ),
+      const node = await writeNodeRowMovingWindowEnd(
+        ctx,
+        frame,
+        target,
+        input,
+        () =>
+          performNodeUpdateWithResurrectionRecovery(
+            ctx,
+            input,
+            session,
+            target,
+            options,
+          ),
       );
       await foldRestored?.("restore");
       return node;
@@ -6744,7 +6817,14 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
         nodeRequiresIdentityLock(ctx),
     ),
     entry,
-    async (session, target, _overlaidSession, lock) => {
+    async (
+      session,
+      target,
+      _overlaidSession,
+      lock,
+      _transactionMode,
+      frame,
+    ) => {
       // A resurrection that states an attachment is decided below; one that
       // states none may only restore a part that still holds a live whole.
       if (
@@ -6760,12 +6840,13 @@ export async function executeNodeUpsertUpdate<G extends GraphDef>(
       const restoresPartRow = options?.clearDeleted === true;
       const foldRestored =
         restoresPartRow ?
-          await prepareNodeFold(ctx, target, [
+          await prepareNodeFold(ctx, frame, target, [
             { kind: input.kind, id: input.id },
           ])
         : undefined;
       const { node, preparedAttachment } = await writeNodeRowMovingWindowEnd(
         ctx,
+        frame,
         target,
         input,
         async () => {
@@ -6975,7 +7056,14 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
       ) && nodeRequiresIdentityLock(ctx),
     ),
     entry,
-    async (session, target, _overlaidSession, lock) => {
+    async (
+      session,
+      target,
+      _overlaidSession,
+      lock,
+      _transactionMode,
+      frame,
+    ) => {
       // A restoring entry never takes the resolved batch statement below; the
       // row-by-row writer judges it, with every other entry, before its
       // first write (`prepareNodeUpdateSet`).
@@ -7071,6 +7159,7 @@ export async function executeNodeUpsertUpdateBatch<G extends GraphDef>(
         ctx,
         entries,
         session,
+        frame,
         target,
         lock,
         fallbackRows,
@@ -7319,6 +7408,8 @@ export async function executeNodeDelete<G extends GraphDef>(
       target,
       _overlaidSession,
       lock,
+      _transactionMode,
+      frame,
     ): Promise<NodeDeleteOutcome> => {
       // This preflight is NOT removable round-trip fat: the soft-delete
       // pipeline consumes the pre-image (uniqueness entries are keyed by
@@ -7367,6 +7458,7 @@ export async function executeNodeDelete<G extends GraphDef>(
         cascadedParts: await deleteRootWithCascade(
           ctx,
           session,
+          frame,
           target,
           "soft",
           { kind, id },
@@ -7506,12 +7598,19 @@ export async function executeNodeRevive<G extends GraphDef>(
       nodeRequiresIdentityLock(ctx),
     ),
     entry,
-    async (session, target): Promise<boolean> => {
+    async (
+      session,
+      target,
+      _overlaidSession,
+      _lock,
+      _transactionMode,
+      frame,
+    ): Promise<boolean> => {
       const existing = await target.getNode(ctx.graphId, kind, id);
       if (existing === undefined || !isTombstonedNodeRow(existing)) {
         return false;
       }
-      await reviveNodeRowInFrame(ctx, session, target, existing);
+      await reviveNodeRowInFrame(ctx, session, frame, target, existing);
       return true;
     },
     { didWrite: (revived) => revived },
@@ -7622,6 +7721,8 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
       target,
       _overlaidSession,
       lock,
+      _transactionMode,
+      frame,
     ): Promise<NodeDeleteBatchOutcome> => {
       // Reads first, for the WHOLE batch: every item's live pre-image, its
       // cascade plan and every delete-behavior verdict, so a refusal on a
@@ -7675,6 +7776,7 @@ export async function executeNodeDeleteBatch<G extends GraphDef>(
           ...(await deleteRootWithCascade(
             ctx,
             session,
+            frame,
             target,
             "soft",
             { kind, id },
@@ -7789,6 +7891,8 @@ export async function executeNodeHardDelete<G extends GraphDef>(
       target,
       _overlaidSession,
       lock,
+      _transactionMode,
+      frame,
     ): Promise<NodeDeleteOutcome> => {
       // The delete lock, before the delete-behavior check reads connected
       // edges. Its row is not needed (unlike soft delete, whose pipeline
@@ -7821,6 +7925,7 @@ export async function executeNodeHardDelete<G extends GraphDef>(
         cascadedParts: await deleteRootWithCascade(
           ctx,
           session,
+          frame,
           target,
           "hard",
           { kind, id },
@@ -7877,6 +7982,20 @@ export async function executeNodeHardDeleteBatch<G extends GraphDef>(
   ids: readonly string[],
   entry: OperationEntry,
 ): Promise<void> {
+  // The batch takes a savepoint unit inside a caller's transaction, so it
+  // holds that unit from before its first statement (its gate read).
+  await runOperationUnit(entry, () =>
+    hardDeleteNodeBatch(ctx, kind, ids, entry),
+  );
+}
+
+/** {@link executeNodeHardDeleteBatch} once its unit is held. */
+async function hardDeleteNodeBatch<G extends GraphDef>(
+  ctx: NodeOperationContext<G>,
+  kind: string,
+  ids: readonly string[],
+  entry: OperationEntry,
+): Promise<void> {
   const backend = operationEntryBackend(entry);
   const statedIds = [...new Set(ids)];
   // Gate outside the frame, as single hardDelete gates each id: a batch that
@@ -7903,6 +8022,7 @@ export async function executeNodeHardDeleteBatch<G extends GraphDef>(
       _overlaidSession,
       lock,
       transactionMode,
+      frame,
     ): Promise<NodeDeleteBatchOutcome> => {
       // One delete-lock statement for the whole batch, in id order, before
       // any connected-edge read — as the soft batch takes it.
@@ -7924,9 +8044,18 @@ export async function executeNodeHardDeleteBatch<G extends GraphDef>(
       // a failure among them inside its own transaction must keep none of.
       const cascadedParts = await runFrameWritesAsUnit(
         ctx,
+        frame,
         target,
         transactionMode,
-        () => applyPlannedNodeHardDeletes(ctx, session, target, kind, planned),
+        () =>
+          applyPlannedNodeHardDeletes(
+            ctx,
+            session,
+            frame,
+            target,
+            kind,
+            planned,
+          ),
       );
       return { affectedCount: planned.length, cascadedParts };
     },
@@ -8037,6 +8166,7 @@ async function planNodeHardDeleteBatch<G extends GraphDef>(
 async function applyPlannedNodeHardDeletes<G extends GraphDef>(
   ctx: NodeOperationContext<G>,
   session: NodeWriteSession,
+  frame: OperationEntry,
   target: WriteTarget,
   kind: string,
   planned: readonly PlannedNodeHardDelete[],
@@ -8049,6 +8179,7 @@ async function applyPlannedNodeHardDeletes<G extends GraphDef>(
         ...(await deleteRootWithCascade(
           ctx,
           session,
+          frame,
           target,
           "hard",
           { kind, id: segment.delete.id },

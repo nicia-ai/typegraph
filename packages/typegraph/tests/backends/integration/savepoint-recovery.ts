@@ -24,21 +24,38 @@ import {
   defineNode,
   UniquenessError,
 } from "../../../src";
-import { statementExecutionVerdict } from "../../../src/backend/capabilities/resolve";
+import {
+  batchPointReadVerdict,
+  statementExecutionVerdict,
+} from "../../../src/backend/capabilities/resolve";
 import {
   deriveBackend,
   projectBackendWithout,
   projectGraphBackend,
 } from "../../../src/backend/derive-backend";
+import { SavepointRecoveryFailure } from "../../../src/backend/session-savepoint";
 import { type GraphBackend } from "../../../src/backend/types";
 import { type GraphData, importGraph } from "../../../src/interchange";
+import { createSqlSchema } from "../../../src/query/compiler/schema";
+import { sql } from "../../../src/query/sql-fragment";
+import { asCompiledRowsSql } from "../../../src/query/sql-intent";
 import {
   enterOperation,
   openTransactionSession,
+  type Operation,
 } from "../../../src/store/operation-scope";
-import { runRecordedTransactionSavepoint } from "../../../src/store/recorded-capture";
-import { transactionBackend } from "../../../src/store/runtime-port";
+import {
+  createRecordedTransactionScope,
+  recordedGraphLockMemoOf,
+  type RecordedTransactionScope,
+  runRecordedTransactionSavepoint,
+} from "../../../src/store/recorded-capture";
 import { type MeasurableTransactionContext } from "../../../src/store/types";
+import { requireDefined } from "../../../src/utils/presence";
+import {
+  savepointUnitChild,
+  savepointUnitEntry,
+} from "../../helpers/savepoint-unit";
 import { type IntegrationTestContext } from "./test-context";
 
 const SavepointStamp = defineNode("SavepointStamp", {
@@ -146,6 +163,53 @@ function knowsEdge(id: string, label: string): GraphData["edges"][number] {
   };
 }
 
+function savepointNote(id: string) {
+  return {
+    graphId: stampGraph.id,
+    kind: "SavepointNote",
+    id,
+    props: { body: id },
+  } as const;
+}
+
+/** Provisions a history store, and returns what the flushed-scope cases drive and read. */
+async function prepareFlushedScopeFixture(context: IntegrationTestContext) {
+  // Provisions the recorded relations on every lane.
+  await context.createHistoryStore(stampGraph);
+  const backend = context.getBackend();
+  const statements = statementExecutionVerdict(backend);
+  if (!statements.supported)
+    throw new Error("Fixture requires statement execution");
+  const schema = createSqlSchema(backend.tableNames);
+  const openScope = (operation: Operation): RecordedTransactionScope =>
+    createRecordedTransactionScope(
+      operation,
+      operation.backend,
+      batchPointReadVerdict(backend),
+      schema,
+    );
+  const liveIds = async (ids: readonly string[]) => {
+    const live: string[] = [];
+    for (const id of ids) {
+      if (
+        (await backend.getNode(stampGraph.id, "SavepointNote", id)) !==
+        undefined
+      )
+        live.push(id);
+    }
+    return live;
+  };
+  const recordedCount = async (): Promise<number> => {
+    const rows = await backend.execute<Readonly<{ count: unknown }>>(
+      asCompiledRowsSql(
+        sql`SELECT COUNT(*) AS count FROM ${schema.recordedNodesTable} WHERE graph_id = ${stampGraph.id}`,
+      ),
+    );
+    return Number(rows[0]?.count);
+  };
+  return { backend, statements, openScope, liveIds, recordedCount };
+}
+
 export function registerSavepointRecoveryIntegrationTests(
   context: IntegrationTestContext,
 ): void {
@@ -169,20 +233,22 @@ export function registerSavepointRecoveryIntegrationTests(
         const { receipt } = await store.transactionWithReceipt(async (tx) => {
           if (priorWrite)
             await tx.nodes.SavepointNote.create({ body: "survivor" });
+          // The unit's own writes are children of the operation it holds.
+          const [outer, outerBackend] = savepointUnitEntry(tx);
+          const child = savepointUnitChild(tx, outer);
           await runRecordedTransactionSavepoint(
-            enterOperation(openTransactionSession(transactionBackend(tx)))
-              .backend,
+            outer,
+            outerBackend,
             statements,
             "test_outer_rollback",
             async () => {
-              await tx.nodes.SavepointNote.create({ body: "rolled back" });
+              await child.nodes.SavepointNote.create({ body: "rolled back" });
               await runRecordedTransactionSavepoint(
-                enterOperation(openTransactionSession(transactionBackend(tx)))
-                  .backend,
+                ...savepointUnitEntry(tx, outer),
                 statements,
                 "test_inner_release",
                 async () => {
-                  await tx.nodes.SavepointNote.bulkCreate([
+                  await child.nodes.SavepointNote.bulkCreate([
                     { props: { body: "also rolled back" } },
                   ]);
                   return { action: "release", value: undefined };
@@ -228,23 +294,24 @@ export function registerSavepointRecoveryIntegrationTests(
             { id: "before" },
           );
           expect(ended).toEqual(["before"]);
+          const [outer, outerBackend] = savepointUnitEntry(tx);
+          const child = savepointUnitChild(tx, outer);
           await runRecordedTransactionSavepoint(
-            enterOperation(openTransactionSession(transactionBackend(tx)))
-              .backend,
+            outer,
+            outerBackend,
             statements,
             "test_hooks_outer",
             async () => {
-              await tx.nodes.SavepointNote.create(
+              await child.nodes.SavepointNote.create(
                 { body: "released" },
                 { id: "released" },
               );
               await runRecordedTransactionSavepoint(
-                enterOperation(openTransactionSession(transactionBackend(tx)))
-                  .backend,
+                ...savepointUnitEntry(tx, outer),
                 statements,
                 "test_hooks_inner",
                 async () => {
-                  await tx.nodes.SavepointNote.updateWhere({
+                  await child.nodes.SavepointNote.updateWhere({
                     all: true,
                     patch: { body: "rolled back" },
                   });
@@ -255,7 +322,7 @@ export function registerSavepointRecoveryIntegrationTests(
                   };
                 },
               );
-              await tx.nodes.SavepointNote.updateWhere({
+              await child.nodes.SavepointNote.updateWhere({
                 all: true,
                 patch: { body: "released bulk" },
               });
@@ -336,28 +403,28 @@ export function registerSavepointRecoveryIntegrationTests(
               { id: "before" },
             );
             const { receipt: nested } = await scoped.measure(async (inner) => {
+              const [outer, outerBackend] = savepointUnitEntry(tx);
+              const child = savepointUnitChild(inner, outer);
               const result = await runRecordedTransactionSavepoint(
-                enterOperation(openTransactionSession(transactionBackend(tx)))
-                  .backend,
+                outer,
+                outerBackend,
                 statements,
                 "test_effects_outer",
                 async () => {
-                  await inner.nodes.SavepointNote.create(
+                  await child.nodes.SavepointNote.create(
                     { body: "rolled back" },
                     { id: "rolled-back" },
                   );
-                  await inner.nodes.SavepointNote.updateWhere({
+                  await child.nodes.SavepointNote.updateWhere({
                     all: true,
                     patch: { body: "rolled back update" },
                   });
                   await runRecordedTransactionSavepoint(
-                    enterOperation(
-                      openTransactionSession(transactionBackend(tx)),
-                    ).backend,
+                    ...savepointUnitEntry(tx, outer),
                     statements,
                     "test_effects_inner",
                     async () => {
-                      await inner.nodes.SavepointNote.create(
+                      await child.nodes.SavepointNote.create(
                         { body: "released inside outer" },
                         { id: "nested" },
                       );
@@ -418,17 +485,21 @@ export function registerSavepointRecoveryIntegrationTests(
         const statements = statementExecutionVerdict(backend);
         if (!statements.supported)
           throw new Error("Fixture requires statement execution");
-        const run = (tx: MeasurableTransactionContext<typeof stampGraph>) =>
-          runRecordedTransactionSavepoint(
-            enterOperation(openTransactionSession(transactionBackend(tx)))
-              .backend,
+        const run = (tx: MeasurableTransactionContext<typeof stampGraph>) => {
+          const [unit, unitBackend] = savepointUnitEntry(tx);
+          return runRecordedTransactionSavepoint(
+            unit,
+            unitBackend,
             statements,
             "test_uncaught_failure",
             async () => {
-              await tx.nodes.SavepointNote.create({ body: "rolled back" });
+              await savepointUnitChild(tx, unit).nodes.SavepointNote.create({
+                body: "rolled back",
+              });
               throw cause;
             },
           );
+        };
         const attempt =
           adopted ?
             backend.transactionWithNative(async (_target, native) =>
@@ -526,6 +597,97 @@ export function registerSavepointRecoveryIntegrationTests(
           asEdgeId("savepoint-conflict"),
         ),
       ).resolves.toBeUndefined();
+    });
+  });
+  describe("a savepoint unit around a capture scope that flushed inside it", () => {
+    it("recovers when the scope was created, written and flushed inside the unit: the memo is restored, the scope stays sealed, and the transaction commits the writes around the unit", async () => {
+      const { backend, statements, openScope, liveIds, recordedCount } =
+        await prepareFlushedScopeFixture(context);
+      const before = await recordedCount();
+      let scope: RecordedTransactionScope | undefined;
+      await backend.transaction(async (transaction) => {
+        const operation = enterOperation(openTransactionSession(transaction));
+        await operation.backend.insertNode(savepointNote("kept-before"));
+        await runRecordedTransactionSavepoint(
+          operation,
+          operation.backend,
+          statements,
+          "test_flushed_scope_rollback",
+          async () => {
+            scope = openScope(operation);
+            await scope.backend.insertNode(savepointNote("rolled-back"));
+            await scope.flush();
+            return {
+              action: "rollback",
+              value: undefined,
+              cause: new Error("refused"),
+            };
+          },
+        );
+        // The rollback released every graph lock the scope took inside the
+        // savepoint, so its memo is back to what it was when the savepoint
+        // opened: empty, as the scope had taken no lock yet.
+        expect([
+          ...requireDefined(recordedGraphLockMemoOf(operation)).keys(),
+        ]).toEqual([]);
+        // The flush sealed the scope, and the rollback reopens nothing: a
+        // write through its surface is refused as it was right after the
+        // flush, before any statement.
+        await expect(
+          requireDefined(scope).backend.insertNode(
+            savepointNote("after-rollback"),
+          ),
+        ).rejects.toThrow(/capture session is sealed/);
+        await operation.backend.insertNode(savepointNote("kept-after"));
+      });
+
+      // The engine discarded the scope's live row and the history rows its
+      // flush wrote; the writes on either side of the unit committed.
+      expect(
+        await liveIds([
+          "kept-before",
+          "rolled-back",
+          "after-rollback",
+          "kept-after",
+        ]),
+      ).toEqual(["kept-before", "kept-after"]);
+      expect(await recordedCount()).toBe(before);
+    });
+
+    it("fails the unit with SavepointRecoveryFailure when the scope captured a write before the unit, and the transaction commits nothing", async () => {
+      const { backend, statements, openScope, liveIds, recordedCount } =
+        await prepareFlushedScopeFixture(context);
+      const before = await recordedCount();
+      await expect(
+        backend.transaction(async (transaction) => {
+          const operation = enterOperation(openTransactionSession(transaction));
+          const scope = openScope(operation);
+          // Captured by the scope before the unit opens: this live row
+          // survives a rollback to the savepoint, while the history row the
+          // flush writes for it inside the unit does not.
+          await scope.backend.insertNode(savepointNote("captured-before"));
+          await runRecordedTransactionSavepoint(
+            operation,
+            operation.backend,
+            statements,
+            "test_flushed_scope_rollback",
+            async () => {
+              await scope.backend.insertNode(savepointNote("rolled-back"));
+              await scope.flush();
+              return {
+                action: "rollback",
+                value: undefined,
+                cause: new Error("refused"),
+              };
+            },
+          );
+        }),
+      ).rejects.toBeInstanceOf(SavepointRecoveryFailure);
+
+      // The recovery failure aborted the transaction: no live write survives
+      // without the history row that records it.
+      expect(await liveIds(["captured-before", "rolled-back"])).toEqual([]);
+      expect(await recordedCount()).toBe(before);
     });
   });
 }

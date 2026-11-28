@@ -1022,6 +1022,18 @@ on its single pinned connection, including concurrent reads started by the
 same Store operation. Backends created for the same transaction handle share
 one queue. The application owns commit and rollback and must await all work
 using these backends before its transaction callback returns.
+Every transaction this backend opens for a Store call (each write, and each
+`store.transaction()`) is a savepoint on the application's transaction, and a
+savepoint's rollback undoes everything issued on that transaction since it was
+taken. So while one call's savepoint is open, another TypeGraph call on the
+same transaction handle is refused before it issues any statement, with
+[`TransactionCallRefusedError`](/errors#transactioncallrefusederror)
+(`details.reason: "savepoint-open"`): await each call before starting the
+next, rather than running them under `Promise.all`. Statements the application
+issues on `tx` itself are not refused; one issued while a TypeGraph call's
+savepoint is open runs inside that savepoint and is rolled back if the call
+fails (see
+[Overlapping calls inside one transaction](/limitations#overlapping-calls-inside-one-transaction)).
 `createPostgresBackend(tx)` also routes a PostgreSQL transaction handle to the
 transaction-scoped backend automatically. Use `createPostgresTransactionBackend`
 when you want the transaction-scoped intent to be explicit; a regular database

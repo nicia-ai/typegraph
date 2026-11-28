@@ -116,7 +116,6 @@ import {
   IDENTITY_IMPORT_PROGRESS,
   isIdentityTransitionRestore,
 } from "../identity/service";
-import { type IdentityTarget } from "../identity/sql-target";
 import { identityTransitionLogUnavailableError } from "../identity/transition-log";
 import { type SqlSchema } from "../query/compiler/schema";
 import { orientCompositionEndpoints } from "../registry/composition-relation";
@@ -152,6 +151,7 @@ import {
   edgeMatchIdentityUpdateRefusal,
   resolveEdgeMatchIdentityStorage,
 } from "../store/edge-match-key";
+import { type OperationEntry } from "../store/operation-scope";
 import { compositionRowEndpoints } from "../store/operations/composition-cascade";
 import {
   assertCompositionExistencePreserved,
@@ -411,6 +411,8 @@ type RequiredPartLedger = Readonly<{
 
 type ImportWriteFrame = Readonly<{
   session: WriteSession;
+  /** The operation the write frame runs under; `target` is its handle. */
+  operation: OperationEntry;
   target: WriteTarget;
   allocateEdgeSavepoint: () => string;
   transactionMode: WriteTransactionMode;
@@ -536,6 +538,9 @@ export type ImportAttemptInputs<G extends GraphDef> = Readonly<{
 export async function runImportWritePlanAttempt<G extends GraphDef>(
   inputs: ImportAttemptInputs<G>,
   session: WriteSession,
+  // The operation the import's write frame runs under: its recorded control
+  // statements and identity writes go through it.
+  operation: OperationEntry,
   target: WriteTarget,
   overlaidSession: OverlaidSessionMint<"mixed">,
   transactionMode: WriteTransactionMode,
@@ -569,6 +574,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
   let nextEdgeSavepointId = 0;
   const frame: ImportWriteFrame = {
     session,
+    operation,
     target,
     allocateEdgeSavepoint: () =>
       `typegraph_import_edge_row_${++nextEdgeSavepointId}`,
@@ -581,7 +587,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     graph: inputs.graph,
     schema: inputs.schema,
     applyNodeWindowEnd: (input) =>
-      inputs.runtime.applyImportedNodeWindowEnd(target, input),
+      inputs.runtime.applyImportedNodeWindowEnd(operation, input),
     endpointLiveness: new Map<string, boolean>(),
     endpointLocksContend: !serializesWriters(resolveWriteFencePlan(target)),
   };
@@ -598,7 +604,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
     requiredPartLedger,
   );
   await inputs.runtime.foldImportedIdentityNodes(
-    target,
+    operation,
     inputs.data.nodes
       .filter((node) => importedNodeIds.has(makeNodeKey(node.kind, node.id)))
       .map((node) => ({ kind: node.kind, id: node.id })),
@@ -637,7 +643,7 @@ export async function runImportWritePlanAttempt<G extends GraphDef>(
   if (inputs.data.identity !== undefined) {
     await importIdentitySection(
       inputs.runtime,
-      target,
+      operation,
       inputs.graphId,
       inputs.data.identity,
       result,
@@ -786,10 +792,11 @@ async function importGraphData<G extends GraphDef>(
     // behavior byte-for-byte.
     mixedWritePlan(owedLockOnlyReason, true),
     backend,
-    (session, target, overlaidSession, lock, transactionMode) =>
+    (session, target, overlaidSession, lock, transactionMode, operation) =>
       runImportWritePlanAttempt(
         attemptInputs,
         session,
+        operation,
         target,
         overlaidSession,
         transactionMode,
@@ -1626,7 +1633,7 @@ function isIdentityAssertionValidationError(
  */
 async function importIdentitySection<G extends GraphDef>(
   runtime: ReturnType<typeof storeRuntime<G>>,
-  target: IdentityTarget,
+  operation: OperationEntry,
   graphId: string,
   identity: NonNullable<GraphData["identity"]>,
   result: ImportResult,
@@ -1634,7 +1641,7 @@ async function importIdentitySection<G extends GraphDef>(
 ): Promise<void> {
   try {
     const summary = await runtime.importIdentityAssertionsAtTarget(
-      target,
+      operation,
       identity.assertions,
       identity.mode,
     );
@@ -1648,7 +1655,7 @@ async function importIdentitySection<G extends GraphDef>(
     result.identity.skipped += progress.skipped;
     errors.push(entry);
   }
-  await importIdentityTransitionsSection(runtime, target, identity);
+  await importIdentityTransitionsSection(runtime, operation, identity);
 }
 
 /**
@@ -1662,7 +1669,7 @@ async function importIdentitySection<G extends GraphDef>(
  */
 async function importIdentityTransitionsSection<G extends GraphDef>(
   runtime: ReturnType<typeof storeRuntime<G>>,
-  target: IdentityTarget,
+  operation: OperationEntry,
   identity: NonNullable<GraphData["identity"]>,
 ): Promise<void> {
   const { transitions = [], retention } = identity;
@@ -1674,7 +1681,7 @@ async function importIdentityTransitionsSection<G extends GraphDef>(
   )
     return;
   await runtime.importIdentityTransitionsAtTarget(
-    target,
+    operation,
     transitions,
     retention === undefined ? undefined : (
       {
@@ -2526,6 +2533,7 @@ async function catchEdgeCreateRefusal<T>(
 async function catchEdgeCreateRefusalWithSavepoint<T>(
   frame: Pick<
     ImportWriteFrame,
+    | "operation"
     | "target"
     | "allocateEdgeSavepoint"
     | "transactionMode"
@@ -2562,12 +2570,18 @@ async function catchEdgeCreateRefusalWithSavepoint<T>(
   const statementExecution = frame.statementExecution;
   const result = await runRecordedTransactionSavepoint<
     EdgeCreateGuardResult<T>
-  >(target, statementExecution, frame.allocateEdgeSavepoint(), async () => {
-    const guarded = await catchEdgeCreateRefusal(fn);
-    return guarded.ok ?
-        { action: "release", value: guarded }
-      : { action: "rollback", value: guarded, cause: guarded.cause };
-  });
+  >(
+    frame.operation,
+    target,
+    statementExecution,
+    frame.allocateEdgeSavepoint(),
+    async () => {
+      const guarded = await catchEdgeCreateRefusal(fn);
+      return guarded.ok ?
+          { action: "release", value: guarded }
+        : { action: "rollback", value: guarded, cause: guarded.cause };
+    },
+  );
   return { result, rollbackProtection: "savepoint" };
 }
 
@@ -2587,6 +2601,7 @@ const NODE_UPDATE_TARGET_CHANGED_CODE =
 /** The slice of an import write frame a node update that states `validTo` reads. */
 type NodeWindowEndFrame = Pick<
   ImportWriteFrame,
+  | "operation"
   | "target"
   | "allocateEdgeSavepoint"
   | "transactionMode"
@@ -2634,6 +2649,7 @@ async function updateNodeUnderWindowEnd(
     return write();
   }
   return runRecordedTransactionSavepoint<string | undefined>(
+    frame.operation,
     frame.target,
     frame.statementExecution,
     frame.allocateEdgeSavepoint(),
@@ -3765,6 +3781,7 @@ async function assertImportedRequiredPartsAttached<G extends GraphDef>(
 async function purgeAsUnit(
   frame: Pick<
     ImportWriteFrame,
+    | "operation"
     | "target"
     | "allocateEdgeSavepoint"
     | "transactionMode"
@@ -3777,6 +3794,7 @@ async function purgeAsUnit(
     return PURGED;
   }
   return runRecordedTransactionSavepoint<PurgeOutcome>(
+    frame.operation,
     frame.target,
     frame.statementExecution,
     frame.allocateEdgeSavepoint(),
@@ -3855,7 +3873,7 @@ async function purgeUnattachedRequiredPart<G extends GraphDef>(
     });
     return false;
   }
-  await runtime.detachDeletedImportedIdentityNode(frame.target, {
+  await runtime.detachDeletedImportedIdentityNode(frame.operation, {
     kind: part.kind,
     id: part.id,
   });
@@ -5339,6 +5357,7 @@ async function settleEdgeRounds(
       return;
     }
     const refusals = await runRecordedTransactionSavepoint<EdgeRoundRefusals>(
+      frame.operation,
       frame.target,
       frame.statementExecution,
       frame.allocateEdgeSavepoint(),
@@ -5456,6 +5475,7 @@ async function settleCompositionMoves(
     const outcome =
       frame.statementExecution.supported ?
         await runRecordedTransactionSavepoint<CompositionMovePass>(
+          frame.operation,
           frame.target,
           frame.statementExecution,
           frame.allocateEdgeSavepoint(),

@@ -30,8 +30,9 @@
  * the one helper every TypeGraph unit (hard-delete batches, import rounds,
  * merge apply) runs through.
  */
-import { isDeepStrictEqual } from "node:util";
+import { inspect, isDeepStrictEqual } from "node:util";
 
+import { sql as drizzleSql } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -49,6 +50,7 @@ import {
 } from "../../../src/backend/derive-backend";
 import { GRAPH_BACKEND_PROJECTION_KEYS } from "../../../src/backend/graph-backend-keys";
 import { createPostgresBackend } from "../../../src/backend/postgres";
+import { createSqliteBackend } from "../../../src/backend/sqlite";
 import type {
   AdapterBackend,
   GraphBackend,
@@ -64,12 +66,7 @@ import {
 import { asBranchId } from "../../../src/graph-merge/types";
 import { sql } from "../../../src/query/sql-fragment";
 import { asCompiledRowsSql } from "../../../src/query/sql-intent";
-import {
-  enterOperation,
-  openTransactionSession,
-} from "../../../src/store/operation-scope";
 import { runRecordedTransactionSavepoint } from "../../../src/store/recorded-capture";
-import { transactionBackend } from "../../../src/store/runtime-port";
 import type { StoreHooks } from "../../../src/store/types";
 import { requireDefined } from "../../../src/utils/presence";
 import { unwrap } from "../../../src/utils/result";
@@ -79,6 +76,7 @@ import {
   expectObservation,
   type KnownDefect,
 } from "../../helpers/known-defect";
+import { savepointUnitEntry } from "../../helpers/savepoint-unit";
 import type {
   IntegrationLaneDriver,
   IntegrationTestContext,
@@ -129,10 +127,17 @@ const POSTGRES_DRIVERS: readonly IntegrationLaneDriver[] = [
   "postgres-js",
 ];
 
+/**
+ * The drivers whose transaction handle a backend can be built over and open
+ * savepoints on: every PostgreSQL driver, and libSQL (Drizzle-framed).
+ */
+const CALLER_TRANSACTION_DRIVERS: readonly IntegrationLaneDriver[] = [
+  ...POSTGRES_DRIVERS,
+  "libsql",
+];
+
 /** The scope of a known defect every driver shows today. */
 const ON_EVERY_DRIVER: DefectScope = { driver: ALL_DRIVERS };
-/** The scope of a known defect every PostgreSQL driver shows today. */
-const ON_POSTGRES_DRIVERS: DefectScope = { driver: POSTGRES_DRIVERS };
 
 /**
  * Asserts a case's one observation on this lane: the correct value, or the
@@ -185,7 +190,13 @@ type TypedError = Readonly<{
 type Refusal = TypedError | Readonly<{ fulfilled: true }> | string;
 
 /** The details that name what a capability refusal is about. */
-const IDENTIFYING_DETAILS = new Set(["bundle", "member", "code", "capability"]);
+const IDENTIFYING_DETAILS = new Set([
+  "bundle",
+  "member",
+  "code",
+  "capability",
+  "reason",
+]);
 
 function typedErrorOf(error: unknown): TypedError | string {
   if (!(error instanceof TypeGraphError)) return String(error);
@@ -200,6 +211,16 @@ function typedErrorOf(error: unknown): TypedError | string {
     details,
     ...(error.cause === undefined ? {} : { cause: typedErrorOf(error.cause) }),
   };
+}
+
+/** What a synchronous call did, as {@link refusalOf} reports a promise. */
+function typedErrorOrFulfilled(call: () => void): Refusal {
+  try {
+    call();
+    return { fulfilled: true };
+  } catch (error) {
+    return typedErrorOf(error);
+  }
 }
 
 function refusalOf(pending: Promise<unknown>): Promise<Refusal> {
@@ -221,6 +242,26 @@ const STATEMENT_EXECUTION_REFUSAL: TypedError = {
     member: "executeStatement",
     code: "BUNDLE_PORT_SURFACE_MISMATCH",
   },
+};
+
+/**
+ * The refusal of a call started while another call's savepoint unit is open
+ * on the same transaction session.
+ */
+const SAVEPOINT_OPEN_REFUSAL: TypedError = {
+  error: "TransactionCallRefusedError",
+  code: "TRANSACTION_CALL_REFUSED",
+  details: { reason: "savepoint-open" },
+};
+
+/**
+ * The refusal of a call that would open a savepoint unit while calls it did
+ * not start are still running on the same transaction session.
+ */
+const SIBLINGS_IN_FLIGHT_REFUSAL: TypedError = {
+  error: "TransactionCallRefusedError",
+  code: "TRANSACTION_CALL_REFUSED",
+  details: { reason: "siblings-in-flight" },
 };
 
 /** How a transaction settled, with its receipt's write total when it committed. */
@@ -349,16 +390,21 @@ type GatedBackendOptions = Readonly<{
   after?: Readonly<Partial<Record<string, AfterMember>>>;
 }>;
 
+/** One transaction-scoped backend member call, rendered with its arguments. */
+type TracedCall = Readonly<{ member: string; rendered: string }>;
+
 /**
  * `backend`, whose transactions hand out a decorated transaction backend:
- * every member call is appended to `calls`, and `after[member]` runs once
- * that member resolves — before the TypeGraph code that called it resumes.
+ * every member call is appended to `calls`, and to `trace` with its
+ * arguments rendered, and `after[member]` runs once that member resolves —
+ * before the TypeGraph code that called it resumes.
  */
 function gatedBackend(
   backend: GraphBackend,
   options: GatedBackendOptions,
-): Readonly<{ backend: GraphBackend; calls: string[] }> {
+): Readonly<{ backend: GraphBackend; calls: string[]; trace: TracedCall[] }> {
   const calls: string[] = [];
+  const trace: TracedCall[] = [];
   function decorate(raw: TransactionBackend): TransactionBackend {
     const target =
       options.withoutTransactionStatements === true ?
@@ -374,6 +420,10 @@ function gatedBackend(
       if (typeof member !== "function") continue;
       overrides[key] = async (...args: unknown[]) => {
         calls.push(key);
+        trace.push({
+          member: key,
+          rendered: inspect(args, { depth: 8, maxStringLength: Infinity }),
+        });
         const result: unknown = await (
           member as (...memberArguments: unknown[]) => Promise<unknown>
         ).apply(target, args);
@@ -385,6 +435,7 @@ function gatedBackend(
   }
   return {
     calls,
+    trace,
     backend: deriveBackend(backend, {
       transaction: (callback, transactionOptions) =>
         backend.transaction(
@@ -393,6 +444,19 @@ function gatedBackend(
         ),
     }),
   };
+}
+
+/**
+ * The backend member calls in `trace` whose arguments mention `token`: the
+ * statements a call identified by `token` (a label, a body, an id) issued.
+ */
+function statementsMentioning(
+  trace: readonly TracedCall[],
+  token: string,
+): readonly string[] {
+  return trace
+    .filter((call) => call.rendered.includes(token))
+    .map((call) => call.member);
 }
 
 /** Rejections no handler claimed while `run` was in flight. */
@@ -459,6 +523,7 @@ async function failingMerge(
   return {
     target,
     artifact,
+    trace: gated.trace,
     arm: () => {
       armed = true;
     },
@@ -866,13 +931,13 @@ export function registerTransactionSessionHazardTests(
     });
 
     describe("a call re-entered from a hook", () => {
-      it("never reports a write that merge apply's rollback removed", async () => {
+      it("refuses a hook's write that starts inside merge apply's unit, before any statement", async () => {
         let captured: CapturedTransaction | undefined;
-        let child: Promise<Status> = Promise.resolve("rejected");
-        const { target, artifact, arm } = await failingMerge(context, {
+        let child: Promise<Refusal> = Promise.resolve("never started");
+        const { target, artifact, arm, trace } = await failingMerge(context, {
           onOperationStart: (operation) => {
             if (operation.id !== "m1" || captured === undefined) return;
-            child = statusOf(
+            child = refusalOf(
               captured.nodes.HzNote.create({ body: "from a hook" }),
             );
           },
@@ -887,45 +952,30 @@ export function registerTransactionSessionHazardTests(
           captured = undefined;
           await child;
         });
-        expectOnLane(
-          context,
-          acceptedOr(
-            {
-              apply,
-              child: await child,
-              notes: await countOf(() => target.nodes.HzNote.find()),
-              items: await ids(() => target.nodes.HzItem.find()),
-            },
-            [
-              { apply: "rejected", child: "rejected", notes: 0, items: [] },
-              { apply: "rejected", child: "fulfilled", notes: 1, items: [] },
-            ],
-          ),
-          ACCEPTED,
-          [
-            {
-              label: "hazard 3a",
-              on: ON_EVERY_DRIVER,
-              today: {
-                apply: "rejected",
-                child: "fulfilled",
-                notes: 0,
-                items: [],
-              },
-            },
-          ],
-        );
+        expect({
+          apply,
+          child: await child,
+          childStatements: statementsMentioning(trace, "from a hook"),
+          notes: await countOf(() => target.nodes.HzNote.find()),
+          items: await ids(() => target.nodes.HzItem.find()),
+        }).toEqual({
+          apply: "rejected",
+          child: SAVEPOINT_OPEN_REFUSAL,
+          childStatements: [],
+          notes: 0,
+          items: [],
+        });
       });
 
-      it("commits and counts a write a discard hook starts after merge apply rolled back", async () => {
+      it("refuses a write an error hook starts inside merge apply's unit, before any statement", async () => {
         let captured: CapturedTransaction | undefined;
-        let child: Promise<Status> = Promise.resolve("rejected");
-        const { target, artifact, arm } = await failingMerge(context, {
+        let child: Promise<Refusal> = Promise.resolve("never started");
+        const { target, artifact, arm, trace } = await failingMerge(context, {
           onError: () => {
             if (captured === undefined) return;
             const tx = captured;
             captured = undefined;
-            child = statusOf(tx.nodes.HzNote.create({ body: "from onError" }));
+            child = refusalOf(tx.nodes.HzNote.create({ body: "from onError" }));
           },
         });
         arm();
@@ -940,44 +990,44 @@ export function registerTransactionSessionHazardTests(
         );
         expect({
           ...result,
-          receiptNotes: receipt.writes.nodes["HzNote"],
+          childStatements: statementsMentioning(trace, "from onError"),
+          receiptTotal: receipt.writes.total,
           notes: await countOf(() => target.nodes.HzNote.find()),
         }).toEqual({
           apply: "rejected",
-          child: "fulfilled",
-          receiptNotes: 1,
-          notes: 1,
+          child: SAVEPOINT_OPEN_REFUSAL,
+          childStatements: [],
+          receiptTotal: 0,
+          notes: 0,
         });
       });
 
-      it("applies both of two bulkHardDelete units one hook starts at once", async () => {
+      it("refuses both of two bulkHardDelete units one hook starts beside the running create, before any statement", async () => {
         const graph = buildGraph();
         let captured: CapturedTransaction | undefined;
-        const children: Promise<Status>[] = [];
-        const [store] = await createStoreWithSchema(
-          graph,
-          context.getBackend(),
-          {
-            hooks: {
-              onOperationStart: (operation: Readonly<{ kind: string }>) => {
-                if (operation.kind !== "HzNote" || captured === undefined)
-                  return;
-                const tx = captured;
-                captured = undefined;
-                children.push(
-                  statusOf(tx.nodes.HzItem.bulkHardDelete([asNodeId("s1")])),
-                  statusOf(tx.nodes.HzItem.bulkHardDelete([asNodeId("s2")])),
-                );
-              },
+        const children: Promise<Refusal>[] = [];
+        const gated = gatedBackend(context.getBackend(), {});
+        const [store] = await createStoreWithSchema(graph, gated.backend, {
+          hooks: {
+            onOperationStart: (operation: Readonly<{ kind: string }>) => {
+              if (operation.kind !== "HzNote" || captured === undefined) return;
+              const tx = captured;
+              captured = undefined;
+              children.push(
+                refusalOf(tx.nodes.HzItem.bulkHardDelete([asNodeId("s1")])),
+                refusalOf(tx.nodes.HzItem.bulkHardDelete([asNodeId("s2")])),
+              );
             },
           },
-        );
+        });
         await store.nodes.HzItem.bulkCreate([
           { props: { label: "s1" }, id: "s1" },
           { props: { label: "s2" }, id: "s2" },
         ]);
+        let mark = 0;
         const { result, receipt } = await store.transactionWithReceipt(
           async (tx) => {
+            mark = gated.trace.length;
             captured = tx as unknown as CapturedTransaction;
             const note = await statusOf(
               tx.nodes.HzNote.create({ body: "starts the children" }),
@@ -985,48 +1035,36 @@ export function registerTransactionSessionHazardTests(
             return { note, children: await Promise.all(children) };
           },
         );
-        expectOnLane(
-          context,
-          {
-            ...result,
-            receiptTotal: receipt.writes.total,
-            items: await ids(() => store.nodes.HzItem.find()),
-            claims: await liveClaims(context.getBackend(), graph.id, [
-              "s1",
-              "s2",
-            ]),
-            notes: await countOf(() => store.nodes.HzNote.find()),
-          },
-          {
-            note: "fulfilled",
-            children: ["fulfilled", "fulfilled"],
-            receiptTotal: 3,
-            items: [],
-            claims: { s1: 0, s2: 0 },
-            notes: 1,
-          },
-          [
-            {
-              label: "hazard 3c",
-              on: { driver: ["postgres-js"] },
-              today: {
-                note: "fulfilled",
-                children: ["rejected", "rejected"],
-                receiptTotal: 1,
-                items: ["s1", "s2"],
-                claims: { s1: 1, s2: 1 },
-                notes: 0,
-              },
-            },
+        const inTransaction = gated.trace.slice(mark);
+        expect({
+          ...result,
+          childStatements: [
+            ...statementsMentioning(inTransaction, "'s1'"),
+            ...statementsMentioning(inTransaction, "'s2'"),
           ],
-        );
+          receiptTotal: receipt.writes.total,
+          items: await ids(() => store.nodes.HzItem.find()),
+          claims: await liveClaims(context.getBackend(), graph.id, [
+            "s1",
+            "s2",
+          ]),
+          notes: await countOf(() => store.nodes.HzNote.find()),
+        }).toEqual({
+          note: "fulfilled",
+          children: [SIBLINGS_IN_FLIGHT_REFUSAL, SIBLINGS_IN_FLIGHT_REFUSAL],
+          childStatements: [],
+          receiptTotal: 1,
+          items: ["s1", "s2"],
+          claims: { s1: 1, s2: 1 },
+          notes: 1,
+        });
       });
 
-      it("never reports a sibling write that a failing bulkHardDelete's rollback removed", async () => {
+      it("refuses a sibling write that starts inside a failing bulkHardDelete's unit, before any statement", async () => {
         const graph = buildGraph();
         const insideUnit = createGate();
         const siblingStarted = createGate();
-        let sibling: Promise<Status> = Promise.resolve("rejected");
+        let sibling: Promise<Refusal> = Promise.resolve("never started");
         const gated = gatedBackend(context.getBackend(), {
           after: {
             hardDeleteNodesBatch: async () => {
@@ -1047,49 +1085,154 @@ export function registerTransactionSessionHazardTests(
           );
           // Started while the unit's savepoint is open.
           await insideUnit.opened;
-          sibling = statusOf(
+          sibling = refusalOf(
             tx.nodes.HzNote.create({ body: "sibling" }, { id: "sibling" }),
           );
           siblingStarted.open();
           return { unit: await unit, sibling: await sibling };
         });
-        expectOnLane(
-          context,
-          acceptedOr(
-            {
-              ...result,
-              notes: await ids(() => store.nodes.HzNote.find()),
-              items: await ids(() => store.nodes.HzItem.find()),
+        expect({
+          ...result,
+          siblingStatements: statementsMentioning(gated.trace, "'sibling'"),
+          notes: await ids(() => store.nodes.HzNote.find()),
+          items: await ids(() => store.nodes.HzItem.find()),
+        }).toEqual({
+          unit: "rejected",
+          sibling: SAVEPOINT_OPEN_REFUSAL,
+          siblingStatements: [],
+          notes: [],
+          items: ["s1"],
+        });
+      });
+
+      it("refuses an upsert that starts inside a failing bulkHardDelete's unit before its pre-read", async () => {
+        const graph = buildGraph();
+        const insideUnit = createGate();
+        const siblingStarted = createGate();
+        let sibling: Promise<Refusal> = Promise.resolve("never started");
+        const gated = gatedBackend(context.getBackend(), {
+          after: {
+            hardDeleteNodesBatch: async () => {
+              insideUnit.open();
+              await siblingStarted.opened;
+              await sibling;
+              throw new Error("injected failure after the delete");
             },
-            [
-              {
-                unit: "rejected",
-                sibling: "fulfilled",
-                notes: ["sibling"],
-                items: ["s1"],
-              },
-              {
-                unit: "rejected",
-                sibling: "rejected",
-                notes: [],
-                items: ["s1"],
-              },
-            ],
+          },
+        });
+        const [store] = await createStoreWithSchema(graph, gated.backend);
+        await store.nodes.HzItem.bulkCreate([
+          { props: { label: "s1" }, id: "s1" },
+        ]);
+        const result = await store.transaction(async (tx) => {
+          const unit = statusOf(
+            tx.nodes.HzItem.bulkHardDelete([asNodeId("s1")]),
+          );
+          await insideUnit.opened;
+          sibling = refusalOf(
+            tx.nodes.HzItem.upsertById("upserted", { label: "upserted" }),
+          );
+          siblingStarted.open();
+          return { unit: await unit, sibling: await sibling };
+        });
+        expect({
+          ...result,
+          siblingStatements: statementsMentioning(gated.trace, "'upserted'"),
+          items: await ids(() => store.nodes.HzItem.find()),
+        }).toEqual({
+          unit: "rejected",
+          sibling: SAVEPOINT_OPEN_REFUSAL,
+          siblingStatements: [],
+          items: ["s1"],
+        });
+      });
+
+      it("refuses a recorded-revision request made inside a bulkHardDelete's unit", async () => {
+        const graph = buildGraph();
+        let requestInsideUnit: Refusal = "never requested";
+        let captured:
+          Readonly<{ requestRecordedRevision: () => void }> | undefined;
+        const gated = gatedBackend(context.getBackend(), {
+          after: {
+            hardDeleteNodesBatch: () => {
+              requestInsideUnit = typedErrorOrFulfilled(() => {
+                requireDefined(captured).requestRecordedRevision();
+              });
+              throw new Error("injected failure after the delete");
+            },
+          },
+        });
+        const [store] = await createStoreWithSchema(graph, gated.backend, {
+          history: true,
+        });
+        await store.nodes.HzItem.bulkCreate([
+          { props: { label: "s1" }, id: "s1" },
+        ]);
+        const unit = await store.transaction(async (tx) => {
+          captured = tx;
+          return statusOf(tx.nodes.HzItem.bulkHardDelete([asNodeId("s1")]));
+        });
+        expect({ unit, requestInsideUnit }).toEqual({
+          unit: "rejected",
+          requestInsideUnit: SAVEPOINT_OPEN_REFUSAL,
+        });
+      });
+
+      it("refuses a bulkHardDelete beside a running create before any statement, and commits the create with its receipt and recorded version", async () => {
+        const graph = buildGraph();
+        const backend = context.getBackend();
+        const createRunning = createGate();
+        const release = createGate();
+        let held = false;
+        const hold: AfterMember = async (args) => {
+          if (held || !inspect(args, { depth: 8 }).includes("'c1'")) return;
+          held = true;
+          createRunning.open();
+          await release.opened;
+        };
+        const gated = gatedBackend(backend, {
+          after: Object.fromEntries(
+            GRAPH_BACKEND_PROJECTION_KEYS.map((key) => [key, hold]),
           ),
-          ACCEPTED,
-          [
-            {
-              label: "hazard 3d",
-              on: ON_EVERY_DRIVER,
-              today: {
-                unit: "rejected",
-                sibling: "fulfilled",
-                notes: [],
-                items: ["s1"],
-              },
-            },
-          ],
+        });
+        const [store] = await createStoreWithSchema(graph, gated.backend, {
+          history: true,
+        });
+        await store.nodes.HzItem.create({ label: "s1" }, { id: "s1" });
+        let mark = 0;
+        const { result, receipt } = await store.transactionWithReceipt(
+          async (tx) => {
+            const create = statusOf(
+              tx.nodes.HzItem.create({ label: "c1" }, { id: "c1" }),
+            );
+            await createRunning.opened;
+            mark = gated.trace.length;
+            const unit = await refusalOf(
+              tx.nodes.HzItem.bulkHardDelete([asNodeId("s1")]),
+            );
+            const unitStatements = statementsMentioning(
+              gated.trace.slice(mark),
+              "'s1'",
+            );
+            release.open();
+            return { create: await create, unit, unitStatements };
+          },
         );
+        expect({
+          ...result,
+          receiptTotal: receipt.writes.total,
+          receiptRecorded: receipt.recorded !== undefined,
+          items: await ids(() => store.nodes.HzItem.find()),
+          recorded: await countRows(backend, "recordedNodes", graph.id),
+        }).toEqual({
+          create: "fulfilled",
+          unit: SIBLINGS_IN_FLIGHT_REFUSAL,
+          unitStatements: [],
+          receiptTotal: 1,
+          receiptRecorded: true,
+          items: ["c1", "s1"],
+          recorded: 2,
+        });
       });
     });
 
@@ -1106,11 +1249,7 @@ export function registerTransactionSessionHazardTests(
           history.withRecordedTransaction(native, async (tx) =>
             statusOf(
               runRecordedTransactionSavepoint(
-                enterOperation(
-                  openTransactionSession(
-                    transactionBackend(plain.withTransaction(native)),
-                  ),
-                ).backend,
+                ...savepointUnitEntry(plain.withTransaction(native)),
                 statements,
                 "hazard_plain_unit",
                 async () => {
@@ -1167,8 +1306,7 @@ export function registerTransactionSessionHazardTests(
           return history.withRecordedTransaction(native, (tx) =>
             statusOf(
               runRecordedTransactionSavepoint(
-                enterOperation(openTransactionSession(transactionBackend(tx)))
-                  .backend,
+                ...savepointUnitEntry(tx),
                 statements,
                 "hazard_history_unit",
                 async () => {
@@ -1201,111 +1339,332 @@ export function registerTransactionSessionHazardTests(
         );
       });
 
-      async function withTransactionStore(
-        run: (store: ItemCreatorWithTransaction) => Promise<void>,
-      ): Promise<readonly string[]> {
+      /**
+       * A backend built over the caller's own transaction handle: every
+       * transaction it opens for a call is a savepoint on that handle. On
+       * SQLite only Drizzle-framed transactions take one (libSQL's
+       * transaction handle); a raw-BEGIN profile cannot open a transaction
+       * over a caller's at all.
+       */
+      function backendOverCallerTransaction(
+        native: unknown,
+      ): AdapterBackend<unknown> {
+        return context.driver === "libsql" ?
+            (createSqliteBackend(native as never, {
+              executionProfile: { transactionMode: "drizzle" },
+            }) as AdapterBackend<unknown>)
+          : (createPostgresBackend(native as never) as AdapterBackend<unknown>);
+      }
+
+      /** Runs one statement of the caller's own on its transaction handle. */
+      async function callerStatement(
+        native: unknown,
+        text: string,
+      ): Promise<void> {
+        const handle = native as Readonly<{
+          execute?: (query: unknown) => Promise<unknown>;
+          run?: (query: unknown) => Promise<unknown>;
+        }>;
+        const query = drizzleSql.raw(text);
+        await (handle.execute === undefined ?
+          requireDefined(handle.run).call(handle, query)
+        : handle.execute(query));
+      }
+
+      /**
+       * `backend`, with every member call of it and of the transactions it
+       * opens appended to `trace` once the call has RESOLVED: the work a call
+       * completed, so a refused call leaves no entry.
+       */
+      function completedCallsOf(backend: AdapterBackend<unknown>): Readonly<{
+        backend: AdapterBackend<unknown>;
+        trace: TracedCall[];
+      }> {
+        const trace: TracedCall[] = [];
+        function traced<TBackend extends object>(
+          target: TBackend,
+          extra: Readonly<Record<string, unknown>> = {},
+        ): TBackend {
+          const overrides: Record<string, unknown> = { ...extra };
+          for (const key of GRAPH_BACKEND_PROJECTION_KEYS) {
+            const member: unknown = (target as Record<string, unknown>)[key];
+            if (typeof member !== "function" || key in overrides) continue;
+            overrides[key] = async (...args: unknown[]) => {
+              const result: unknown = await (
+                member as (...memberArguments: unknown[]) => Promise<unknown>
+              ).apply(target, args);
+              trace.push({
+                member: key,
+                rendered: inspect(args, {
+                  depth: 8,
+                  maxStringLength: Infinity,
+                }),
+              });
+              return result;
+            };
+          }
+          return deriveBackend(target as never, overrides as never);
+        }
+        return {
+          trace,
+          backend: traced(backend, {
+            transaction: (
+              callback: (tx: TransactionBackend) => Promise<unknown>,
+              options?: Parameters<GraphBackend["transaction"]>[1],
+            ) => backend.transaction((raw) => callback(traced(raw)), options),
+          }),
+        };
+      }
+
+      type CallerTransactionStore = Readonly<{
+        nodes: Readonly<{
+          HzItem: Readonly<{
+            create: (
+              props: { label: string },
+              options?: { id: string },
+            ) => Promise<unknown>;
+            find: () => Promise<readonly unknown[]>;
+          }>;
+        }>;
+        transaction: (
+          fn: (tx: CallerTransactionStore) => Promise<unknown>,
+        ) => Promise<unknown>;
+      }>;
+
+      /**
+       * Runs `run` with a Store over a backend built on a caller's open
+       * transaction, and returns the ids committed with it and the calls the
+       * Store completed.
+       */
+      async function withCallerTransactionStore(
+        run: (store: CallerTransactionStore, native: unknown) => Promise<void>,
+      ): Promise<
+        Readonly<{ items: readonly string[]; trace: readonly TracedCall[] }>
+      > {
         const graph = buildGraph();
         const backend = context.getBackend();
         const [setup] = await createAdapterStoreWithSchema(graph, backend);
         await setup.nodes.HzItem.create({ label: "taken" }, { id: "taken" });
+        let trace: readonly TracedCall[] = [];
         await backend.transactionWithNative(async (_target, native) => {
+          const completed = completedCallsOf(
+            backendOverCallerTransaction(native),
+          );
           const [store] = await createAdapterStoreWithSchema(
             graph,
-            createPostgresBackend(native as never) as AdapterBackend<unknown>,
+            completed.backend,
           );
-          await run(store as unknown as ItemCreatorWithTransaction);
+          // Traced only from here: the schema load above is setup.
+          completed.trace.length = 0;
+          await run(store as unknown as CallerTransactionStore, native);
+          trace = completed.trace;
         });
-        return ids(() => setup.nodes.HzItem.find());
+        return { items: await ids(() => setup.nodes.HzItem.find()), trace };
       }
 
-      // SQLite has no factory for a backend over a caller's transaction.
-      describe.runIf(POSTGRES_DRIVERS.includes(context.driver))(
-        "a Store over createPostgresTransactionBackend",
+      // Each call that writes opens a savepoint on the caller's transaction,
+      // in a transaction session of its own: a call started while another
+      // call's savepoint is open would run inside it and be rolled back with
+      // it, so it is refused before any statement (`savepoint-open`).
+      describe.runIf(CALLER_TRANSACTION_DRIVERS.includes(context.driver))(
+        "a Store over a backend built on a caller's transaction",
         () => {
-          it("commits two overlapping creates", async () => {
-            let creates: readonly Status[] = [];
-            const items = await withTransactionStore(async (store) => {
-              creates = await Promise.all([
-                statusOf(
-                  store.nodes.HzItem.create({ label: "a" }, { id: "a" }),
-                ),
-                statusOf(
-                  store.nodes.HzItem.create({ label: "b" }, { id: "b" }),
-                ),
-              ]);
-            });
-            expect({ creates, items }).toEqual({
-              creates: ["fulfilled", "fulfilled"],
-              items: ["a", "b", "taken"],
-            });
-          });
-
-          it("commits a create that succeeded beside an overlapping create that failed", async () => {
-            let creates: readonly Status[] = [];
-            const items = await withTransactionStore(async (store) => {
-              creates = await Promise.all([
-                statusOf(
-                  store.nodes.HzItem.create({ label: "c" }, { id: "c" }),
-                ),
-                statusOf(
-                  store.nodes.HzItem.create({ label: "taken" }, { id: "d" }),
-                ),
-              ]);
-            });
-            expectOnLane(
-              context,
-              { creates, items },
-              { creates: ["fulfilled", "rejected"], items: ["c", "taken"] },
-              [
-                {
-                  label: "hazard 4b",
-                  on: ON_POSTGRES_DRIVERS,
-                  today: {
-                    creates: ["fulfilled", "rejected"],
-                    items: ["taken"],
-                  },
-                },
-              ],
+          it("refuses the later of two overlapping creates before any statement, and commits the earlier", async () => {
+            let creates: readonly Refusal[] = [];
+            const { items, trace } = await withCallerTransactionStore(
+              async (store) => {
+                creates = await Promise.all([
+                  refusalOf(
+                    store.nodes.HzItem.create({ label: "a" }, { id: "a" }),
+                  ),
+                  refusalOf(
+                    store.nodes.HzItem.create({ label: "b" }, { id: "b" }),
+                  ),
+                ]);
+              },
             );
+            expect({
+              creates,
+              items,
+              laterStatements: statementsMentioning(trace, "'b'"),
+            }).toEqual({
+              creates: [{ fulfilled: true }, SAVEPOINT_OPEN_REFUSAL],
+              items: ["a", "taken"],
+              laterStatements: [],
+            });
           });
 
-          it("commits a create that overlapped a nested store.transaction() that rolled back", async () => {
-            let outcomes: readonly Status[] = [];
-            const items = await withTransactionStore(async (store) => {
-              const innerWritten = createGate();
-              const siblingStarted = createGate();
-              let sibling: Promise<Status> = Promise.resolve("rejected");
-              const nested = statusOf(
+          it("refuses a create beside an overlapping create that fails, before any statement, and keeps neither", async () => {
+            let creates: readonly Refusal[] = [];
+            const { items, trace } = await withCallerTransactionStore(
+              async (store) => {
+                creates = await Promise.all([
+                  refusalOf(
+                    store.nodes.HzItem.create({ label: "taken" }, { id: "d" }),
+                  ),
+                  refusalOf(
+                    store.nodes.HzItem.create({ label: "c" }, { id: "c" }),
+                  ),
+                ]);
+              },
+            );
+            expect({
+              failed: (creates[0] as TypedError | undefined)?.code,
+              refused: creates[1],
+              items,
+              refusedStatements: statementsMentioning(trace, "'c'"),
+            }).toEqual({
+              failed: "UNIQUENESS_VIOLATION",
+              refused: SAVEPOINT_OPEN_REFUSAL,
+              items: ["taken"],
+              refusedStatements: [],
+            });
+          });
+
+          it("commits a create that succeeded and refuses an overlapping create beside it", async () => {
+            let creates: readonly Refusal[] = [];
+            const { items, trace } = await withCallerTransactionStore(
+              async (store) => {
+                creates = await Promise.all([
+                  refusalOf(
+                    store.nodes.HzItem.create({ label: "c" }, { id: "c" }),
+                  ),
+                  refusalOf(
+                    store.nodes.HzItem.create({ label: "taken" }, { id: "d" }),
+                  ),
+                ]);
+              },
+            );
+            expect({
+              creates,
+              items,
+              refusedStatements: statementsMentioning(trace, "'d'"),
+            }).toEqual({
+              creates: [{ fulfilled: true }, SAVEPOINT_OPEN_REFUSAL],
+              items: ["c", "taken"],
+              refusedStatements: [],
+            });
+          });
+
+          it("refuses a create that starts while a nested store.transaction() is open, before any statement", async () => {
+            let outcomes: readonly Refusal[] = [];
+            const { items, trace } = await withCallerTransactionStore(
+              async (store) => {
+                const innerWritten = createGate();
+                const siblingStarted = createGate();
+                let sibling: Promise<Refusal> =
+                  Promise.resolve("never started");
+                const nested = refusalOf(
+                  store.transaction(async (tx) => {
+                    await tx.nodes.HzItem.create({ label: "e" }, { id: "e" });
+                    innerWritten.open();
+                    await siblingStarted.opened;
+                    await sibling;
+                    throw new Error("the nested transaction fails");
+                  }),
+                );
+                await innerWritten.opened;
+                sibling = refusalOf(
+                  store.nodes.HzItem.create({ label: "f" }, { id: "f" }),
+                );
+                siblingStarted.open();
+                outcomes = await Promise.all([nested, sibling]);
+              },
+            );
+            expect({
+              outcomes,
+              items,
+              siblingStatements: statementsMentioning(trace, "'f'"),
+            }).toEqual({
+              outcomes: [
+                "Error: the nested transaction fails",
+                SAVEPOINT_OPEN_REFUSAL,
+              ],
+              items: ["taken"],
+              siblingStatements: [],
+            });
+          });
+
+          it("refuses a read that starts while a nested store.transaction() is open, before any statement", async () => {
+            let read: Refusal = "never read";
+            const { items, trace } = await withCallerTransactionStore(
+              async (store) => {
+                await store.transaction(async (tx) => {
+                  await tx.nodes.HzItem.create({ label: "r" }, { id: "r" });
+                  read = await refusalOf(store.nodes.HzItem.find());
+                });
+              },
+            );
+            expect({
+              read,
+              items,
+              reads: trace
+                .map((call) => call.member)
+                .filter((member) => member.startsWith("find")),
+            }).toEqual({
+              read: SAVEPOINT_OPEN_REFUSAL,
+              items: ["r", "taken"],
+              reads: [],
+            });
+          });
+
+          it("runs calls awaited in sequence, each in a savepoint of its own", async () => {
+            let found = 0;
+            const { items } = await withCallerTransactionStore(
+              async (store) => {
+                await store.nodes.HzItem.create({ label: "g" }, { id: "g" });
+                await store.transaction(async (tx) => {
+                  await tx.nodes.HzItem.create({ label: "h" }, { id: "h" });
+                });
+                const rows = await store.nodes.HzItem.find();
+                found = rows.length;
+                await store.nodes.HzItem.create({ label: "i" }, { id: "i" });
+              },
+            );
+            expect({ found, items }).toEqual({
+              found: 3,
+              items: ["g", "h", "i", "taken"],
+            });
+          });
+
+          // The caller's own statements on its transaction are not TypeGraph
+          // calls and are never refused. One issued while a call's savepoint
+          // is open runs inside that savepoint, and the call's rollback takes
+          // it with it.
+          it("keeps a statement the caller runs on its transaction while a call's savepoint is open", async () => {
+            let callerRows = -1;
+            await withCallerTransactionStore(async (store, native) => {
+              await callerStatement(
+                native,
+                "CREATE TEMP TABLE hz_caller_rows (id TEXT)",
+              );
+              const failed = await statusOf(
                 store.transaction(async (tx) => {
-                  await tx.nodes.HzItem.create({ label: "e" }, { id: "e" });
-                  innerWritten.open();
-                  await siblingStarted.opened;
-                  await sibling;
+                  await tx.nodes.HzItem.create({ label: "u" }, { id: "u" });
+                  await callerStatement(
+                    native,
+                    "INSERT INTO hz_caller_rows (id) VALUES ('caller')",
+                  );
                   throw new Error("the nested transaction fails");
                 }),
               );
-              await innerWritten.opened;
-              sibling = statusOf(
-                store.nodes.HzItem.create({ label: "f" }, { id: "f" }),
+              expect(failed).toBe("rejected");
+              const backend = backendOverCallerTransaction(native);
+              const rows = await backend.execute<{ count: number | string }>(
+                asCompiledRowsSql(
+                  sql`SELECT COUNT(*) AS count FROM ${sql.identifier("hz_caller_rows")}`,
+                ),
               );
-              siblingStarted.open();
-              outcomes = await Promise.all([nested, sibling]);
+              callerRows = Number(requireDefined(rows[0]).count);
+              await callerStatement(native, "DROP TABLE hz_caller_rows");
             });
-            expectOnLane(
-              context,
-              { outcomes, items },
-              { outcomes: ["rejected", "fulfilled"], items: ["f", "taken"] },
-              [
-                {
-                  label: "hazard 4c",
-                  on: ON_POSTGRES_DRIVERS,
-                  today: {
-                    outcomes: ["rejected", "fulfilled"],
-                    items: ["taken"],
-                  },
-                },
-              ],
-            );
+            expectOnLane(context, { callerRows }, { callerRows: 1 }, [
+              {
+                label: "hazard 4d",
+                on: { driver: CALLER_TRANSACTION_DRIVERS },
+                today: { callerRows: 0 },
+              },
+            ]);
           });
         },
       );
@@ -1325,11 +1684,7 @@ export function registerTransactionSessionHazardTests(
         await backend.transactionWithNative((_target, native) =>
           statusOf(
             runRecordedTransactionSavepoint(
-              enterOperation(
-                openTransactionSession(
-                  transactionBackend(plain.withTransaction(native)),
-                ),
-              ).backend,
+              ...savepointUnitEntry(plain.withTransaction(native)),
               statements,
               "hazard_plain_unit",
               async () => {
@@ -1407,11 +1762,7 @@ export function registerTransactionSessionHazardTests(
         await backend.transactionWithNative((_target, native) =>
           statusOf(
             runRecordedTransactionSavepoint(
-              enterOperation(
-                openTransactionSession(
-                  transactionBackend(plain.withTransaction(native)),
-                ),
-              ).backend,
+              ...savepointUnitEntry(plain.withTransaction(native)),
               statements,
               "hazard_plain_unit",
               async () => {
@@ -1572,23 +1923,18 @@ export function registerTransactionSessionHazardTests(
 
     describe("deferred execution", () => {
       // Each stream page is a fresh query on the transaction (cursor
-      // pagination, queries/execute.md "Batch Size"), so a page read after
-      // the transaction's own delete sees that delete, and a later rollback
-      // cannot change pages already delivered. The stream promises no
-      // snapshot: this pins the read-your-writes page it does promise.
-      it("a stream advanced during a bulkHardDelete reads the transaction's own delete, which then rolls back", async () => {
+      // pagination, queries/execute.md "Batch Size"), and so a call of its
+      // session: a page read while another call's savepoint unit is open is
+      // refused, rather than delivering rows that unit's rollback changes.
+      it("refuses a stream page read inside a bulkHardDelete's unit", async () => {
         const graph = buildGraph();
         const yielded: unknown[] = [];
         let iterator: AsyncIterator<unknown> | undefined;
+        let pageInsideUnit: Refusal = "never read";
         const gated = gatedBackend(context.getBackend(), {
           after: {
             hardDeleteNodesBatch: async () => {
-              const stream = requireDefined(iterator);
-              for (;;) {
-                const next = await stream.next();
-                if (next.done === true) break;
-                yielded.push(next.value);
-              }
+              pageInsideUnit = await refusalOf(requireDefined(iterator).next());
               throw new Error("injected failure after the delete");
             },
           },
@@ -1614,11 +1960,13 @@ export function registerTransactionSessionHazardTests(
         expect({
           unit,
           yielded,
+          pageInsideUnit,
           items: await ids(() => store.nodes.HzItem.find()),
           claims: await liveClaims(context.getBackend(), graph.id, ["s2"]),
         }).toEqual({
           unit: "rejected",
-          yielded: ["s1", "s3"],
+          yielded: ["s1"],
+          pageInsideUnit: SAVEPOINT_OPEN_REFUSAL,
           items: ["s1", "s2", "s3"],
           claims: { s2: 1 },
         });
@@ -1687,18 +2035,3 @@ export function registerTransactionSessionHazardTests(
     });
   });
 }
-
-/** A Store over a caller's transaction, as these cases call it. */
-type ItemCreatorWithTransaction = Readonly<{
-  nodes: Readonly<{
-    HzItem: Readonly<{
-      create: (
-        props: { label: string },
-        options?: { id: string },
-      ) => Promise<unknown>;
-    }>;
-  }>;
-  transaction: (
-    fn: (tx: ItemCreatorWithTransaction) => Promise<unknown>,
-  ) => Promise<unknown>;
-}>;

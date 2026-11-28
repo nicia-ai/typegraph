@@ -13,7 +13,10 @@ import {
 import { type GraphCommandIsolation } from "../../backend/types";
 import { TypeGraphError } from "../../errors";
 import type { Operation } from "../operation-scope";
-import { lockRecordedGraphWrite } from "../recorded-capture";
+import {
+  lockRecordedGraphWrite,
+  recordedGraphLockMemoOf,
+} from "../recorded-capture";
 import { lockSchemaVersionForStoreWrite } from "./write-transaction";
 
 const STALE_SCHEMA_VERSION_CODE = "STALE_SCHEMA_VERSION";
@@ -81,7 +84,11 @@ export async function lockStoreWriteFence(
   }
   if (input.graphLock === "not-required") return;
 
-  const lock = await lockRecordedGraphWrite(txBackend, input.graphId);
+  const lock = await lockRecordedGraphWrite(
+    txBackend,
+    input.graphId,
+    recordedGraphLockMemoOf(operation),
+  );
   if (input.requireFreshSnapshot !== true) return;
   // Serialized engines already own the writer slot. A keyed acquisition's
   // token carries what the fence statement observed on this session; a plan

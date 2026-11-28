@@ -208,6 +208,7 @@ import {
   type OperationEntry,
   operationEntryBackend,
   type OperationScoped,
+  runOperationUnit,
   type StatementBackend,
 } from "../operation-scope";
 import { type GraphWriteLock } from "../recorded-capture/clock";
@@ -4460,12 +4461,26 @@ export async function executeEdgeHardDeleteBatch<G extends GraphDef>(
   ids: readonly string[],
   entry: OperationEntry,
 ): Promise<void> {
+  // The batch takes a savepoint unit inside a caller's transaction, so it
+  // holds that unit from before its first statement.
+  await runOperationUnit(entry, () =>
+    hardDeleteEdgeBatch(ctx, expectedKind, ids, entry),
+  );
+}
+
+/** {@link executeEdgeHardDeleteBatch} once its unit is held. */
+async function hardDeleteEdgeBatch<G extends GraphDef>(
+  ctx: EdgeOperationContext<G>,
+  expectedKind: string,
+  ids: readonly string[],
+  entry: OperationEntry,
+): Promise<void> {
   const holdsCardinalityClaim = edgeHardDeleteReleasesClaim(ctx, expectedKind);
   await runWritePlan(
     ctx,
     edgeWritePlan(edgeDetachNeedsConstraintFence(ctx.registry, expectedKind)),
     entry,
-    async (session, target, _overlaidSession, lock, transactionMode) => {
+    async (session, target, _overlaidSession, lock, transactionMode, frame) => {
       const rowsById = await getEdgeRowsByIds(
         target,
         ctx.batchPointRead,
@@ -4495,7 +4510,7 @@ export async function executeEdgeHardDeleteBatch<G extends GraphDef>(
       // Every refusal is behind us; what is left is the rows and their claim
       // releases, which a caller catching a failure among them inside its own
       // transaction must not keep half of.
-      await runFrameWritesAsUnit(ctx, target, transactionMode, () =>
+      await runFrameWritesAsUnit(ctx, frame, target, transactionMode, () =>
         session.purgeEdges(purges),
       );
       return purges.length;

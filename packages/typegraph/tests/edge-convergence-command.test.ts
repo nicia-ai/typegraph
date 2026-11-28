@@ -78,6 +78,7 @@ async function executeConvergence(
     const coordination = await lockRecordedGraphWrite(
       transaction,
       command.plan.params.graphId,
+      undefined,
     );
     const result = await transaction.commands.execute(
       command,

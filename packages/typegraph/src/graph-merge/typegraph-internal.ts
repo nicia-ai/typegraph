@@ -148,6 +148,7 @@ export {
   mintsOriginNamespacedAnchor,
   readRecordedClock,
   readRevisionOrigin,
+  recordedGraphLockMemoOf,
   recordedRelationsLineage,
   resolveLineage,
   withRecordedIdentityDecision,
@@ -164,6 +165,7 @@ export {
   storeQueryBackend,
   storeRuntime,
   transactionAssertWritable,
+  transactionChildSurface,
   type TransactionDeleteNodeWithPolicy,
   transactionDeleteNodeWithPolicy,
 } from "../store/runtime-port";

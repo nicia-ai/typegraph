@@ -1,10 +1,7 @@
 import { statementExecutionVerdict } from "../backend/capabilities/resolve";
 import { resolveWriteFencePlan } from "../backend/capabilities/write-fence";
 import type { GraphDef } from "../core/define-graph";
-import {
-  type Operation,
-  type OperationBackend,
-} from "../store/operation-scope";
+import { type Operation } from "../store/operation-scope";
 import {
   ensureEngineSerializedWriterSlot,
   hasPendingWriteTransactionRevision,
@@ -24,7 +21,7 @@ export async function assertMergeTransactionPristine<G extends GraphDef>(
 ): Promise<void> {
   const txBackend = operation.backend;
   if (
-    hasPendingRecordedGraphWrites(txBackend, target.graphId) ||
+    hasPendingRecordedGraphWrites(operation, target.graphId) ||
     hasPendingWriteTransactionRevision(operation)
   ) {
     throw new MergePlanCapabilityError(
@@ -41,7 +38,7 @@ export async function assertMergeTransactionPristine<G extends GraphDef>(
     );
   }
   await ensureEngineSerializedWriterSlot(
-    txBackend,
+    operation,
     target.revisionSchema,
     statements,
   );
@@ -67,12 +64,12 @@ const ADOPTED_MERGE_APPLY_SAVEPOINT = "typegraph_merge_apply";
  * A target whose transactions expose no statement execution has no savepoint
  * to take, so it is refused before anything is applied.
  *
- * `txBackend` is the handle of the operation the apply entered in the
- * caller's transaction: the savepoint is taken and released on it.
+ * `operation` is the operation the apply entered in the caller's
+ * transaction: the savepoint is taken and released through it.
  */
 export async function withAdoptedMergeApplySavepoint<G extends GraphDef, T>(
   target: Store<G>,
-  txBackend: OperationBackend,
+  operation: Operation,
   apply: () => Promise<T>,
 ): Promise<T> {
   const statements = statementExecutionVerdict(storeBackend(target));
@@ -83,7 +80,8 @@ export async function withAdoptedMergeApplySavepoint<G extends GraphDef, T>(
     );
   }
   return runRecordedTransactionSavepoint(
-    txBackend,
+    operation,
+    operation.backend,
     statements,
     ADOPTED_MERGE_APPLY_SAVEPOINT,
     async () => ({ action: "release", value: await apply() }),

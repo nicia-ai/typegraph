@@ -421,17 +421,21 @@ describe("identity transition log", () => {
     } as const;
 
     await backend.transaction(async (target) => {
+      const captureOperation = enterOperation(openTransactionSession(target));
       const scope = createRecordedTransactionScope(
-        enterOperation(openTransactionSession(target)).backend,
+        captureOperation,
+        captureOperation.backend,
         batchPointReadVerdict(backend),
         schema,
       );
       await runRecordedTransactionSavepoint(
+        captureOperation,
         scope.backend,
         statementExecution,
         "typegraph_identity_transition_checkpoint_test",
         async () => {
           await withRecordedIdentityMutationTarget(
+            captureOperation,
             scope.backend,
             (_rawTarget, _touch, noteTransition) => {
               noteTransition(graphId, rolledBackDraft);
@@ -446,6 +450,7 @@ describe("identity transition log", () => {
         },
       );
       await withRecordedIdentityMutationTarget(
+        captureOperation,
         scope.backend,
         (_rawTarget, _touch, noteTransition) => {
           noteTransition(graphId, releasedDraft);
@@ -472,15 +477,18 @@ describe("identity transition log", () => {
     const otherGraphId = "identity_transition_log_pending_other";
 
     await backend.transaction(async (target) => {
+      const captureOperation = enterOperation(openTransactionSession(target));
       const scope = createRecordedTransactionScope(
-        enterOperation(openTransactionSession(target)).backend,
+        captureOperation,
+        captureOperation.backend,
         batchPointReadVerdict(backend),
         schema,
       );
       expect(
-        hasPendingIdentityTransitionNotes(scope.backend, notedGraphId),
+        hasPendingIdentityTransitionNotes(captureOperation, notedGraphId),
       ).toBe(false);
       await withRecordedIdentityMutationTarget(
+        captureOperation,
         scope.backend,
         (_rawTarget, _touch, noteTransition) => {
           noteTransition(notedGraphId, {
@@ -493,8 +501,14 @@ describe("identity transition log", () => {
         },
       );
       const pending = {
-        noted: hasPendingIdentityTransitionNotes(scope.backend, notedGraphId),
-        other: hasPendingIdentityTransitionNotes(scope.backend, otherGraphId),
+        noted: hasPendingIdentityTransitionNotes(
+          captureOperation,
+          notedGraphId,
+        ),
+        other: hasPendingIdentityTransitionNotes(
+          captureOperation,
+          otherGraphId,
+        ),
       };
       console.log("pending notes by graph:", pending);
       expect(pending).toEqual({ noted: true, other: false });
@@ -520,8 +534,10 @@ describe("identity transition log", () => {
     const graphId = "identity_transition_log_sealed";
 
     await backend.transaction(async (target) => {
+      const captureOperation = enterOperation(openTransactionSession(target));
       const scope = createRecordedTransactionScope(
-        enterOperation(openTransactionSession(target)).backend,
+        captureOperation,
+        captureOperation.backend,
         batchPointReadVerdict(backend),
         schema,
       );
@@ -529,6 +545,7 @@ describe("identity transition log", () => {
       let caught: unknown;
       try {
         await withRecordedIdentityMutationTarget(
+          captureOperation,
           scope.backend,
           (_rawTarget, _touch, noteTransition) => {
             noteTransition(graphId, {

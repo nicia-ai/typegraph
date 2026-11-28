@@ -15,9 +15,13 @@
  * - **Session.** Where a Store opens or joins a transaction it opens a
  *   {@link TransactionSession}: that transaction as this binding holds it
  *   ({@link openTransactionSession}, or {@link openBoundTransactionSession}
- *   where the binding builds a statement surface over the transaction). A
- *   transaction context carries its session to privileged internals on its
- *   runtime ({@link transactionRuntimeSession}).
+ *   where the binding builds a statement surface over the transaction).
+ *   Where it opens a transaction on a root, {@link openRootTransaction}
+ *   hands it the one session of that transaction: the session a backend
+ *   layer opened itself (recorded capture's overlay, bound over the capture
+ *   surface), or one opened over what the root handed out. A transaction
+ *   context carries its session to privileged internals on its runtime
+ *   ({@link transactionRuntimeSession}).
  * - **Operation.** Each public Store call inside the transaction enters one
  *   {@link Operation} of that session when it executes: {@link enterOperation}
  *   from a session the caller holds, {@link enterTransactionOperation} from a
@@ -42,8 +46,8 @@
  *
  * The backend brand is a phantom: a minted backend is the SAME object it was
  * minted from. That is deliberate. Store state not carried by a session is
- * keyed by the target object's identity (the savepoint-state registry,
- * recorded capture's bindings), and the layers above
+ * keyed by the target object's identity (the savepoint-state registry), and
+ * the layers above
  * discriminate a root from a transaction with `"transaction" in target`; a
  * derived object per operation would change both. An {@link Operation} is
  * therefore a separate small value that CARRIES the handle and its session,
@@ -61,7 +65,10 @@
  * mints below. ESLint's `OPERATION_BRAND_RESTRICTIONS` reports the
  * spellings a selector can see before the test runs.
  */
-import { isBackendDerivedFrom } from "../backend/derive-backend";
+import {
+  backendDerivationChain,
+  isBackendDerivedFrom,
+} from "../backend/derive-backend";
 import type {
   AdapterBackend,
   AdoptedSchemaWriteTransaction,
@@ -73,11 +80,16 @@ import type {
   TransactionBackend,
 } from "../backend/types";
 import {
+  type TransactionCallRefusalReason,
+  TransactionCallRefusedError,
+} from "../errors";
+import {
   type NativeTransactionState,
   resolveNativeTransactionState,
 } from "./native-transaction-state";
 import type { ManagedWriteState } from "./operations/managed-write-state";
 import type { GraphWriteLock } from "./recorded-capture/clock";
+import type { RecordedSessionState } from "./recorded-capture/session-state";
 import { TRANSACTION_RUNTIME } from "./types";
 
 // Declared only and never exported: the brand cannot be spelled outside this
@@ -192,6 +204,13 @@ type EngineEvidence<Engine extends TransactionBackend> =
 // operation from a root backend except through the functions below.
 const SESSION_TRANSACTION: unique symbol = Symbol("typegraph.session");
 const OPERATION_SESSION: unique symbol = Symbol("typegraph.operation");
+const SESSION_CONTROL: unique symbol = Symbol("typegraph.sessionControl");
+const SESSION_CALLS: unique symbol = Symbol("typegraph.sessionCalls");
+const OPERATION_ROOT: unique symbol = Symbol("typegraph.operationRoot");
+const OPERATION_PARENT: unique symbol = Symbol("typegraph.operationParent");
+const OPERATION_IN_FLIGHT: unique symbol = Symbol(
+  "typegraph.operationInFlight",
+);
 
 /**
  * One native transaction as one Store binding opened or joined it: the value
@@ -210,8 +229,12 @@ const OPERATION_SESSION: unique symbol = Symbol("typegraph.operation");
  * write locks its frames hold or are acquiring
  * ({@link GraphWriteLock}, see `write-transaction.ts`), and the managed
  * write state of the `store.transaction` attempt that opened it with the
- * schema fences it leased (`managed-write-state.ts`). It never hands out
- * its transaction; an operation entered from it does.
+ * schema fences it leased (`managed-write-state.ts`), and the recorded
+ * capture scope or engine-native mutation witness bound to it
+ * (`recorded-capture/session-state.ts`). It never hands out its
+ * transaction; an operation entered from it does, as its statement surface
+ * (`Operation.backend`) and as the undecorated holding beneath it
+ * (`Operation.control`).
  *
  * State about the native transaction alone, shared by every binding of it,
  * is on {@link TransactionSession.native}, not on the session.
@@ -228,6 +251,26 @@ export type TransactionSession<
      */
     [SESSION_TRANSACTION]: OperationScoped<Engine>;
   } & Readonly<{
+    /**
+     * The transaction as the session holds it, undecorated: what
+     * {@link Operation.control} hands out. The same object as what the
+     * session's operations hand out, unless the session was bound over a
+     * statement surface.
+     */
+    [SESSION_CONTROL]: OperationScoped<Engine>;
+    /**
+     * Which calls of the session are running and whether one of them holds
+     * a savepoint unit open: what the refusals of {@link enterOperation} and
+     * {@link openOperationUnit} read. Written only by this module.
+     */
+    [SESSION_CALLS]: {
+      /** Root calls {@link enterCall} counted that {@link exitCall} has not released. */
+      inFlight: number;
+      /** Savepoint units open on the session, nested ones included. */
+      unitDepth: number;
+      /** The root call whose units are open, while `unitDepth` is above 0. */
+      unitRoot: Operation | undefined;
+    };
     /**
      * Graph write locks a still-running write frame on this session holds or
      * is still acquiring, by graph id: owned by `write-transaction.ts`.
@@ -246,6 +289,12 @@ export type TransactionSession<
      * session's own when it recorded none.
      */
     native: NativeTransactionState;
+    /**
+     * The recorded-capture scope or engine-native mutation witness bound to
+     * this session, read through `recordedSessionBinding` from the operation
+     * a reader holds: owned by `recorded-capture.ts`.
+     */
+    recorded: RecordedSessionState;
   }>
 >;
 
@@ -256,12 +305,40 @@ export type TransactionSession<
  * executes; work the call composes (a nested write frame, a mutation set's
  * legs, a query's selective attempt and its fallback) runs under the same
  * operation rather than entering another.
+ *
+ * A call that another call composes through a public surface of its own
+ * (merge apply's collection writes, say) is a CHILD: it is entered with its
+ * parent operation, passed explicitly, and belongs to the parent's root call.
+ * A savepoint unit is held by a root call, and a call of any other root is
+ * refused while it is open ({@link enterOperation}).
  */
 export type Operation<Engine extends TransactionBackend = TransactionBackend> =
   OperationScoped<
-    Readonly<{
+    {
+      /**
+       * On a root call: whether {@link enterCall} counted it as running on
+       * its session and {@link exitCall} has not yet released it.
+       */
+      [OPERATION_IN_FLIGHT]: boolean;
+    } & Readonly<{
       [OPERATION_SESSION]: TransactionSession<Engine>;
+      /**
+       * The root call this operation belongs to: itself when it was entered
+       * without a parent, its parent's root otherwise.
+       */
+      [OPERATION_ROOT]: Operation;
+      /** The operation this one was entered as a child of, if any. */
+      [OPERATION_PARENT]: Operation | undefined;
       backend: OperationScoped<Engine>;
+      /**
+       * The session's undecorated holding, as this operation holds it: the
+       * transaction beneath the statement surface `backend` hands out, or
+       * `backend` itself when the session was bound over none. The Store's
+       * own control statements (a savepoint, a fence that bypasses row
+       * capture, a recorded identity write) go through it, in the operation
+       * the call entered.
+       */
+      control: OperationScoped<Engine>;
     }>
   >;
 
@@ -295,9 +372,12 @@ export function openTransactionSession<
   /* eslint-disable no-restricted-syntax -- This module is the mint: a session over a transaction the Store opened or joined is built here and nowhere else. */
   return {
     [SESSION_TRANSACTION]: transaction,
+    [SESSION_CONTROL]: transaction,
+    [SESSION_CALLS]: { inFlight: 0, unitDepth: 0, unitRoot: undefined },
     heldGraphWriteLocks: new Map<string, Promise<GraphWriteLock>>(),
     managedWrite: { writeSession: undefined, schemaFenceLeases: undefined },
     native: resolveNativeTransactionState(transaction),
+    recorded: { binding: undefined },
   } as TransactionSession<Engine>;
   /* eslint-enable no-restricted-syntax */
 }
@@ -331,8 +411,8 @@ export type TransactionSessionBinding<
  * own holding, not an operation's handle, so a later operation's
  * statements go through that operation alone — and returns it; from then on
  * every operation entered from the session hands out that surface. The
- * session reaches no one but `bind` before it is bound, and is never
- * rebound.
+ * session reaches no one but `bind` before it is bound, and is rebound
+ * only by narrowing ({@link narrowSessionSurface}).
  *
  * `Engine` is as for {@link openTransactionSession}: the session it opens is
  * that mint's, specialised only when `transaction` carries the evidence of
@@ -359,22 +439,250 @@ export async function openBoundTransactionSession<
   return { session, binding: bound.binding };
 }
 
+// Module-private: only `withSessionOpener` puts an opener on a backend's
+// `transaction` member, and only `openRootTransaction` reads one back.
+const SESSION_OPENER: unique symbol = Symbol("typegraph.sessionOpener");
+
+/**
+ * A backend layer's own way to open a transaction for a Store: it opens the
+ * transaction, opens the one session over it, and hands the Store that
+ * session, bound over whatever statement surface the layer builds.
+ */
+export type SessionTransactionOpener = <T>(
+  fn: (session: TransactionSession) => Promise<T>,
+  options?: Parameters<GraphBackend["transaction"]>[1],
+) => Promise<T>;
+
+type SessionOpeningTransaction = GraphBackend["transaction"] &
+  Readonly<{ [SESSION_OPENER]?: SessionTransactionOpener }>;
+
+/**
+ * Marks `transaction`, a backend layer's `transaction` member, as one whose
+ * layer opens the session for the transaction it opens (recorded capture's
+ * overlay): {@link openRootTransaction} then hands the Store that session
+ * instead of opening a second one over the surface the member hands out.
+ * Carried by the member function itself, so a derivation that overrides
+ * `transaction` (and so opens its transaction some other way) carries none.
+ */
+export function withSessionOpener(
+  transaction: GraphBackend["transaction"],
+  opener: SessionTransactionOpener,
+): GraphBackend["transaction"] {
+  Object.defineProperty(transaction, SESSION_OPENER, { value: opener });
+  return transaction;
+}
+
+/**
+ * Narrows the statement surface `session`'s later operations hand out to
+ * `surface`, a derivation of the surface it hands out now, and returns the
+ * session. For a backend layer that opened the transaction with its session
+ * ({@link openRootTransaction}) and guards the statements its caller issues
+ * (the recorded read overlay's origin checks) before it hands the session on
+ * through its own opener ({@link withSessionOpener}): the caller runs in that
+ * one session, not in a second one opened over the guarded surface.
+ * Operations entered before the narrowing keep the surface they hold; the
+ * undecorated holding ({@link Operation.control}) is unchanged.
+ *
+ * Refuses a `surface` that is not derived from the current one through
+ * `src/backend/derive-backend.ts`: anything else would drop the layers
+ * beneath it, a capture surface among them.
+ */
+export function narrowSessionSurface<Engine extends TransactionBackend>(
+  session: TransactionSession<Engine>,
+  surface: OperationScoped<Engine>,
+): TransactionSession<Engine> {
+  if (!isBackendDerivedFrom(surface, session[SESSION_TRANSACTION])) {
+    throw new TypeError(
+      "A session's statement surface can only be narrowed to a derivation of it.",
+    );
+  }
+  session[SESSION_TRANSACTION] = surface;
+  return session;
+}
+
+/**
+ * The mint where a Store opens a transaction on a root backend: `fn`
+ * receives the one session of the transaction `root` opens. When `root`'s
+ * `transaction` member opens a session of its own (recorded capture's
+ * overlay, {@link withSessionOpener}), that session is the one; otherwise
+ * the session opens here, over what the member hands out.
+ */
+export function openRootTransaction<T>(
+  root: Pick<GraphBackend, "transaction">,
+  fn: (session: TransactionSession) => Promise<T>,
+  options?: Parameters<GraphBackend["transaction"]>[1],
+): Promise<T> {
+  const member: SessionOpeningTransaction = root.transaction;
+  const opener = member[SESSION_OPENER];
+  if (opener !== undefined) return opener(fn, options);
+  return root.transaction(
+    (transaction: StoreTransactionBackend) =>
+      fn(openTransactionSession(transaction)),
+    options,
+  );
+}
+
 /**
  * The mint at a public Store member: the root backend as itself, or a new
  * {@link Operation} of the session.
+ *
+ * `parent` is the operation of the call that composes this one, passed
+ * explicitly by that call and never looked up: the new operation is its
+ * child and belongs to its root call. Without one, the operation is a root
+ * call of its own.
+ *
+ * A call that starts while a call of another root holds a savepoint unit open
+ * on the session ({@link openOperationUnit}) is refused here, before it can
+ * issue any statement, with a {@link TransactionCallRefusedError}
+ * (`"savepoint-open"`): its writes would run inside that savepoint and be
+ * lost if the unit rolled back.
+ *
+ * The operation is not counted as running: a call that brackets its extent
+ * hands it to {@link enterCall}, so a unit opening beside it is refused.
  */
 export function enterOperation<Engine extends TransactionBackend>(
   scope: TransactionSession<Engine>,
+  parent?: Operation,
 ): Operation<Engine>;
-export function enterOperation(scope: EntryScope): OperationEntry;
-export function enterOperation(scope: EntryScope): OperationEntry {
-  if (!(SESSION_TRANSACTION in scope)) return scope;
-  /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
-  return {
+export function enterOperation(
+  scope: EntryScope,
+  parent?: Operation,
+): OperationEntry;
+export function enterOperation(
+  scope: EntryScope,
+  parent?: Operation,
+): OperationEntry {
+  if (!(SESSION_TRANSACTION in scope)) {
+    if (parent !== undefined) {
+      throw new TypeError(
+        "A call on the root backend cannot be the child of an operation of a transaction session.",
+      );
+    }
+    return scope;
+  }
+  if (parent !== undefined && parent[OPERATION_SESSION] !== scope) {
+    throw new TypeError(
+      "A child operation must be entered on its parent's session.",
+    );
+  }
+  const refusal = callRefusal(scope[SESSION_CALLS], parent?.[OPERATION_ROOT]);
+  if (refusal !== undefined) throw new TransactionCallRefusedError(refusal);
+  // This module is the mint: an operation of a session is built here and
+  // nowhere else. Its root is set once the object exists, so a root call's
+  // root is the operation itself.
+  const operation = {
     [OPERATION_SESSION]: scope,
+    [OPERATION_ROOT]: undefined,
+    [OPERATION_PARENT]: parent,
+    [OPERATION_IN_FLIGHT]: false,
     backend: scope[SESSION_TRANSACTION],
-  } as Operation;
-  /* eslint-enable no-restricted-syntax */
+    control: scope[SESSION_CONTROL],
+  } as unknown as MintedOperation;
+  operation[OPERATION_ROOT] = parent?.[OPERATION_ROOT] ?? operation;
+  return operation;
+}
+
+/** An operation as its mint builds it, before its root is set. */
+type MintedOperation = { -readonly [Key in keyof Operation]: Operation[Key] };
+
+/**
+ * Counts `entry`, the operation a call just entered ({@link enterOperation}),
+ * as running on its session until {@link exitCall} releases it, so a
+ * savepoint unit another root call tries to open meanwhile is refused
+ * (`"siblings-in-flight"`), and returns it. For a call whose extent the
+ * caller brackets: call {@link exitCall} in a `finally` once the call's work
+ * has settled. A child (entered with a `parent`) is not counted: it runs
+ * within its root call's extent. The pooled root has no session to count on.
+ */
+export function enterCall<Entry extends OperationEntry>(entry: Entry): Entry {
+  if (!(OPERATION_SESSION in entry) || entry[OPERATION_PARENT] !== undefined) {
+    return entry;
+  }
+  const root = entry[OPERATION_ROOT];
+  if (!root[OPERATION_IN_FLIGHT]) {
+    root[OPERATION_IN_FLIGHT] = true;
+    entry[OPERATION_SESSION][SESSION_CALLS].inFlight += 1;
+  }
+  return entry;
+}
+
+/** Releases a call {@link enterCall} counted as running; idempotent. */
+export function exitCall(entry: OperationEntry): void {
+  if (!(OPERATION_SESSION in entry) || entry[OPERATION_PARENT] !== undefined) {
+    return;
+  }
+  const root = entry[OPERATION_ROOT];
+  if (!root[OPERATION_IN_FLIGHT]) return;
+  root[OPERATION_IN_FLIGHT] = false;
+  entry[OPERATION_SESSION][SESSION_CALLS].inFlight -= 1;
+}
+
+/**
+ * THE decision of whether an operation of root call `root` (`undefined` for
+ * a new root call) may run on a session with `calls`: refused while a unit of
+ * another root call is open.
+ */
+function callRefusal(
+  calls: TransactionSession[typeof SESSION_CALLS],
+  root: Operation | undefined,
+): TransactionCallRefusalReason | undefined {
+  return calls.unitDepth > 0 && root !== calls.unitRoot ?
+      "savepoint-open"
+    : undefined;
+}
+
+/**
+ * Opens a savepoint unit of `entry`'s root call on its session, before the
+ * unit's first statement. Refused with a {@link TransactionCallRefusedError}
+ * while a unit of another root call is open (`"savepoint-open"`), and while a
+ * root call other than `entry`'s own is running on the session
+ * (`"siblings-in-flight"`), whose statements would otherwise land inside the
+ * savepoint. A unit the same root call already holds open nests. Pair with
+ * {@link closeOperationUnit} in a `finally`. The pooled root has no session
+ * and opens nothing.
+ */
+export function openOperationUnit(entry: OperationEntry): void {
+  if (!(OPERATION_SESSION in entry)) return;
+  const calls = entry[OPERATION_SESSION][SESSION_CALLS];
+  const root = entry[OPERATION_ROOT];
+  const refusal =
+    callRefusal(calls, root) ??
+    ((
+      calls.unitDepth === 0 &&
+      calls.inFlight > (root[OPERATION_IN_FLIGHT] ? 1 : 0)
+    ) ?
+      "siblings-in-flight"
+    : undefined);
+  if (refusal !== undefined) throw new TransactionCallRefusedError(refusal);
+  calls.unitDepth += 1;
+  calls.unitRoot = root;
+}
+
+/**
+ * Runs `run`, the whole of a call that takes a savepoint unit on its session,
+ * holding that unit open from before the call's first statement: the call is
+ * refused before any statement beside running sibling calls, and a call
+ * started while it runs (its pre-savepoint reads included) is refused before
+ * any statement of its own. The savepoints the call takes inside nest in it.
+ */
+export async function runOperationUnit<T>(
+  entry: OperationEntry,
+  run: () => Promise<T>,
+): Promise<T> {
+  openOperationUnit(entry);
+  try {
+    return await run();
+  } finally {
+    closeOperationUnit(entry);
+  }
+}
+
+/** Closes the unit {@link openOperationUnit} opened for `entry`. */
+export function closeOperationUnit(entry: OperationEntry): void {
+  if (!(OPERATION_SESSION in entry)) return;
+  const calls = entry[OPERATION_SESSION][SESSION_CALLS];
+  calls.unitDepth -= 1;
+  if (calls.unitDepth === 0) calls.unitRoot = undefined;
 }
 
 /**
@@ -497,8 +805,16 @@ export function decorateOperation<Engine extends TransactionBackend>(
     );
   }
   const session: TransactionSession = operation[OPERATION_SESSION];
+  const control: OperationBackend = operation.control;
   /* eslint-disable no-restricted-syntax -- This module is the mint: an operation of a session is built here and nowhere else. */
-  return { [OPERATION_SESSION]: session, backend: decorated } as Operation;
+  return {
+    [OPERATION_SESSION]: session,
+    [OPERATION_ROOT]: operation[OPERATION_ROOT],
+    [OPERATION_PARENT]: operation[OPERATION_PARENT],
+    [OPERATION_IN_FLIGHT]: false,
+    backend: decorated,
+    control,
+  } as Operation;
   /* eslint-enable no-restricted-syntax */
 }
 
@@ -508,19 +824,135 @@ export function decorateOperation<Engine extends TransactionBackend>(
  *
  * An operation another copy of TypeGraph minted (the same release loaded as
  * both an ES module and a CommonJS build) reaches this copy's Store through
- * the port's global symbol but carries that copy's private keys, so its
- * session is invisible here: its handle joins as a binding of its own
- * ({@link enterTargetOperation}), exactly as a bare transaction handed across
- * the port did. Read off the value handed in; nothing is looked up.
+ * the port's global symbol but carries that copy's private keys, so its own
+ * session is invisible here. When it was opened over a surface this copy
+ * built for one of its sessions ({@link sessionSurfaceMembers}: a Store's
+ * recorded capture overlay its importer opened a transaction through), it
+ * becomes an operation of that session, keeping its handle: the member runs
+ * under the session's recorded binding and graph-lock memo, and its recorded
+ * control statements go through the session's undecorated holding. Otherwise
+ * its handle joins as a binding of its own ({@link enterTargetOperation}),
+ * exactly as a bare transaction handed across the port did. Read off the
+ * value handed in; nothing is looked up.
+ *
+ * A bare transaction handle ({@link PortEntry}) is still accepted: the call
+ * shape of a copy whose import members took the transaction itself. It is
+ * read as such a foreign operation whose handle and holding are both that
+ * transaction.
  */
-export function portOperationEntry(entry: OperationEntry): OperationEntry {
-  if (isRootBackend(entry) || isOwnOperation(entry)) return entry;
-  return enterTargetOperation(entry.backend);
+export function portOperationEntry(entry: PortEntry): OperationEntry {
+  if (isRootBackend(entry)) return entry;
+  // Every backend states its dialect; an operation is not one.
+  if ("dialect" in entry) {
+    return foreignOperationEntry({ backend: entry, control: entry });
+  }
+  if (isOwnOperation(entry)) return entry;
+  return foreignOperationEntry(entry);
+}
+
+/**
+ * What a Store runtime port member accepts as its caller's entry: an
+ * {@link OperationEntry}, or a bare transaction handle. Another copy of
+ * TypeGraph whose import members took the transaction itself under the same
+ * port version still calls them that way, and
+ * {@link portOperationEntry} normalises either shape.
+ */
+export type PortEntry = OperationEntry | StoreTransactionBackend;
+
+/**
+ * An operation another copy of TypeGraph minted, as this copy enters it: an
+ * operation of the session its holding is a surface of, keeping its handle,
+ * or its handle joined as a binding of its own.
+ */
+function foreignOperationEntry(
+  entry: Readonly<{
+    backend: StoreTransactionBackend;
+    control: SessionCarryingSurface;
+  }>,
+): OperationEntry {
+  const session = surfaceSession(entry.control);
+  if (session === undefined) return enterTargetOperation(entry.backend);
+  // This module is the mint: an operation of a session is built here and
+  // nowhere else. A foreign operation is a root call of its own.
+  const operation = {
+    [OPERATION_SESSION]: session,
+    [OPERATION_ROOT]: undefined,
+    [OPERATION_PARENT]: undefined,
+    [OPERATION_IN_FLIGHT]: false,
+    backend: entry.backend,
+    control: session[SESSION_CONTROL],
+  } as unknown as MintedOperation;
+  operation[OPERATION_ROOT] = operation;
+  return operation;
+}
+
+// Module-private: only `sessionSurfaceMembers` puts a session on a statement
+// surface's members, and only `portOperationEntry` reads one back.
+const SURFACE_SESSION: unique symbol = Symbol("typegraph.surfaceSession");
+
+/**
+ * Marks `members`, the overlay members of a statement surface a backend layer
+ * builds for `session` alone (recorded capture's overlay, an engine-native
+ * mutation witness), as that session's, and returns them: the surface
+ * `deriveBackend` builds from them, and every derivation of it, carries the
+ * session. An operation another copy of TypeGraph opened over that surface
+ * hands it back as its undecorated holding, and {@link portOperationEntry}
+ * re-enters it as an operation of `session`, so a runtime port member it
+ * calls runs under the session's recorded binding and graph-lock memo. The
+ * key is non-enumerable and module-private: no backend member lists or copies
+ * it, and nothing else reads it.
+ */
+export function sessionSurfaceMembers<Members extends object>(
+  session: TransactionSession,
+  members: Members,
+): Members {
+  Object.defineProperty(members, SURFACE_SESSION, { value: session });
+  return members;
+}
+
+/** A statement surface as {@link surfaceSession} reads it. */
+type SessionCarryingSurface = Pick<OperationBackend, "dialect"> &
+  Readonly<{ [SURFACE_SESSION]?: TransactionSession }>;
+
+/** The session `surface` was built for ({@link sessionSurfaceMembers}), if any. */
+function surfaceSession(
+  surface: SessionCarryingSurface,
+): TransactionSession | undefined {
+  return surface[SURFACE_SESSION];
+}
+
+/**
+ * THE test of whether `target` is a statement surface of `session`: what the
+ * session holds or hands out, a backend derived from either through
+ * `src/backend/derive-backend.ts`, or a surface a backend layer built for the
+ * session ({@link sessionSurfaceMembers}), which carries the session through
+ * every derivation of it, another copy of TypeGraph's included. Evidence the
+ * session's operations earned (a recorded graph-lock memo) serves a statement
+ * on `target` only when this holds. It reads which backend `target` is and
+ * was derived from, never a value off one of its members.
+ */
+export function isSessionStatementSurface(
+  session: TransactionSession,
+  target: Pick<OperationBackend, "dialect">,
+): boolean {
+  if (surfaceSession(target) === session) return true;
+  const chain: readonly object[] = backendDerivationChain(target);
+  return (
+    chain.includes(session[SESSION_CONTROL]) ||
+    chain.includes(session[SESSION_TRANSACTION])
+  );
 }
 
 /** Whether `operation` was minted by this copy of the module. */
 function isOwnOperation(operation: Operation): boolean {
   return OPERATION_SESSION in operation;
+}
+
+/** The session `operation` belongs to. */
+export function operationSession<Engine extends TransactionBackend>(
+  operation: Operation<Engine>,
+): TransactionSession {
+  return operation[OPERATION_SESSION];
 }
 
 /** The session `entry` belongs to, or `undefined` for the root backend. */
@@ -533,6 +965,14 @@ export function operationEntrySession(
 /** What `entry`'s statements go through: the root, or the operation's handle. */
 export function operationEntryBackend(entry: OperationEntry): StatementBackend {
   return OPERATION_SESSION in entry ? entry.backend : entry;
+}
+
+/**
+ * What `entry`'s control statements go through: the root, or the
+ * operation's {@link Operation.control}.
+ */
+export function operationEntryControl(entry: OperationEntry): StatementBackend {
+  return OPERATION_SESSION in entry ? entry.control : entry;
 }
 
 /**

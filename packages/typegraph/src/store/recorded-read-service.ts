@@ -38,10 +38,12 @@ import { withRecordedRelationsPrecondition } from "../utils/sql-errors";
 import { type GraphAllocationOwnerRead } from "./allocation-owner";
 import {
   enterOperation,
-  openTransactionSession,
+  narrowSessionSurface,
+  openRootTransaction,
   type OperationBackend,
   type StatementBackend,
-  type StoreTransactionBackend,
+  type TransactionSession,
+  withSessionOpener,
 } from "./operation-scope";
 import { readRecordedAdjacency } from "./recorded-adjacency";
 import {
@@ -212,41 +214,52 @@ function createRecordedReadBackend(
   assertOrigin: (target: StatementBackend) => Promise<void>,
   assertSnapshotOrigin: (target: StatementBackend) => Promise<boolean>,
 ): GraphBackend {
+  /**
+   * The overlay's transaction: it opens the transaction with its one session
+   * (`openRootTransaction`, the capture overlay's beneath a history Store),
+   * runs its origin checks as one operation of it, narrows the session to the
+   * guarded surface, and hands `fn` that session and surface. A caller that
+   * opens through `openRootTransaction` (an iterative algorithm) receives the
+   * session itself and opens no second one over the surface.
+   */
+  async function runRecordedReadTransaction<T>(
+    fn: (session: TransactionSession, guarded: OperationBackend) => Promise<T>,
+    options: TransactionOptions | undefined,
+  ): Promise<T> {
+    await assertOrigin(backend);
+    const result = await openRootTransaction(
+      backend,
+      async (session) => {
+        const target = enterOperation(session).backend;
+        // The owner read resolves snapshot evidence on THIS target. A confirmed
+        // snapshot covers every subsequent read until this callback ends;
+        // the root check below still rejects retirement outside that snapshot.
+        const pinned = await assertSnapshotOrigin(target);
+        const guarded = deriveBackend(
+          target,
+          recordedReadExecutionMembers(
+            target,
+            surface,
+            pinned ? undefined : assertOrigin,
+          ),
+        );
+        return fn(narrowSessionSurface(session, guarded), guarded);
+      },
+      options,
+    );
+    await assertOrigin(backend);
+    return result;
+  }
+
   const projectedBackend = projectGraphBackend(backend);
   return deriveBackend(projectedBackend, {
     ...recordedReadExecutionMembers(backend, surface, assertOrigin),
-    transaction: async <T>(
-      fn: (target: OperationBackend) => Promise<T>,
-      options?: TransactionOptions,
-    ): Promise<T> => {
-      await assertOrigin(backend);
-      const result = await backend.transaction(
-        async (transaction: StoreTransactionBackend) => {
-          // This overlay opened the transaction: its session opens here,
-          // and its origin checks and the reads it guards run as one
-          // operation of it.
-          const target = enterOperation(
-            openTransactionSession(transaction),
-          ).backend;
-          // The owner read resolves snapshot evidence on THIS target. A confirmed
-          // snapshot covers every subsequent read until this callback ends;
-          // the root check below still rejects retirement outside that snapshot.
-          const pinned = await assertSnapshotOrigin(target);
-          const guarded = deriveBackend(
-            target,
-            recordedReadExecutionMembers(
-              target,
-              surface,
-              pinned ? undefined : assertOrigin,
-            ),
-          );
-          return fn(guarded);
-        },
-        options,
-      );
-      await assertOrigin(backend);
-      return result;
-    },
+    transaction: withSessionOpener(
+      (fn, options) =>
+        runRecordedReadTransaction((_session, guarded) => fn(guarded), options),
+      (fn, options) =>
+        runRecordedReadTransaction((session) => fn(session), options),
+    ),
   });
 }
 

@@ -9,8 +9,10 @@ import { getDialect } from "../query/dialect";
 import { sql } from "../query/sql-fragment";
 import { asCompiledRowsSql } from "../query/sql-intent";
 import {
+  enterCall,
   enterOperation,
   type EntryScope,
+  exitCall,
   type OperationEntry,
   operationEntryBackend,
   type StatementBackend,
@@ -567,6 +569,9 @@ type IdentityMutationBody<T> = (
   touch: IdentityTouch,
   markWritten: () => void,
   noteTransition: IdentityTransitionNoteFunction,
+  // The operation the mutation's write frame runs under: a nested identity
+  // write the body issues runs in it too.
+  frame: OperationEntry,
 ) => Promise<T>;
 
 export async function runIdentityMutation<G extends GraphDef, T>(
@@ -602,10 +607,11 @@ export async function runIdentityMutation<G extends GraphDef, T>(
       revisionSchema: ctx.schema,
     },
     entry,
-    async (target) => {
+    async (target, _lock, _transactionMode, frame) => {
       touchedBox.touched = false;
       await lockIdentityGraph(target, ctx.graphId);
       return withRecordedIdentityMutationTarget(
+        frame,
         target,
         (rawTarget, touch, noteTransition) =>
           fn(
@@ -621,6 +627,7 @@ export async function runIdentityMutation<G extends GraphDef, T>(
               touchedBox.touched = true;
               noteTransition(graphId, note);
             },
+            frame,
           ),
       );
     },
@@ -1376,10 +1383,21 @@ export function createIdentityFacade<G extends GraphDef>(
   source: IdentityFacadeSource<G>,
 ): IdentityFacade<G> {
   const ctx = source.context;
-  /** One mutation call: its operation, entered, runs `fn` in the write executor. */
-  function mutate<T>(fn: IdentityMutationBody<T>): Promise<T> {
-    const call = enterIdentityCall(source);
-    return runIdentityMutation(call.ctx, fn, call.entry);
+  /**
+   * One mutation call: its operation, entered and counted as running on its
+   * session until it settles, runs `fn` in the write executor.
+   */
+  async function mutate<T>(fn: IdentityMutationBody<T>): Promise<T> {
+    const entry = enterCall(enterOperation(source.scope));
+    try {
+      return await runIdentityMutation(
+        source.callContext(operationEntryBackend(entry)),
+        fn,
+        entry,
+      );
+    } finally {
+      exitCall(entry);
+    }
   }
   return {
     ...createIdentityReadFacade(source),
@@ -1559,11 +1577,8 @@ export function createIdentityFacade<G extends GraphDef>(
         options,
         "transitionsOf",
       );
-      return identityTransitionsOf(
-        enterIdentityCall(source).ctx,
-        request,
-        options,
-      );
+      const call = enterIdentityCall(source);
+      return identityTransitionsOf(call.ctx, call.entry, request, options);
     },
 
     async replay(ref, options) {
@@ -1573,7 +1588,8 @@ export function createIdentityFacade<G extends GraphDef>(
         options,
         "replay",
       );
-      return identityReplay(enterIdentityCall(source).ctx, request, options);
+      const call = enterIdentityCall(source);
+      return identityReplay(call.ctx, call.entry, request, options);
     },
   };
 }

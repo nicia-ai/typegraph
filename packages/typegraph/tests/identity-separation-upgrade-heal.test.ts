@@ -301,13 +301,16 @@ describe("fenced upgrade against a concurrent creator", () => {
           enablement: false,
           registry: buildKindRegistry(foldGraph),
           recomputeDerivedRelations: (entry) =>
-            rebuildIdentityClosureForContext<typeof foldGraph>({
-              backend: operationEntryBackend(entry),
-              graphId: GRAPH_ID,
-              registry: buildKindRegistry(foldGraph),
-              schema: createSqlSchema(result.backend.tableNames),
-              sameIdAcrossKinds: "fold",
-            }),
+            rebuildIdentityClosureForContext<typeof foldGraph>(
+              {
+                backend: operationEntryBackend(entry),
+                graphId: GRAPH_ID,
+                registry: buildKindRegistry(foldGraph),
+                schema: createSqlSchema(result.backend.tableNames),
+                sameIdAcrossKinds: "fold",
+              },
+              entry,
+            ),
         },
       );
 

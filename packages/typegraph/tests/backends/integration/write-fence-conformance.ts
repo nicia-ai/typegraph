@@ -574,7 +574,7 @@ export function registerWriteFenceConformanceIntegrationTests(
             );
             const graphId = `write-fence-conformance-${generateId()}`;
             await backend.transaction(async (tx) => {
-              const lock = await lockRecordedGraphWrite(tx, graphId);
+              const lock = await lockRecordedGraphWrite(tx, graphId, undefined);
               const coordination = requireDefined(
                 lock.coordination,
                 "an advisory-mechanism lock always mints coordination",
@@ -603,6 +603,7 @@ export function registerWriteFenceConformanceIntegrationTests(
             const lock = await lockRecordedGraphWrite(
               tx,
               `write-fence-conformance-${generateId()}`,
+              undefined,
             );
             // No key was ever acquired, so there is nothing to certify: a
             // caller-serialized mechanism never mints a coordination token.
@@ -928,7 +929,7 @@ export function registerWriteFenceConformanceIntegrationTests(
             // mechanism's `isolationFactExpression` rides the SAME acquisition
             // statement `postgresFenceSql` already supplies.
             await backend.transaction(async (tx) => {
-              const lock = await lockRecordedGraphWrite(tx, graphId);
+              const lock = await lockRecordedGraphWrite(tx, graphId, undefined);
               const coordination = requireDefined(
                 lock.coordination,
                 "a row-mechanism lock always mints coordination",
@@ -1002,7 +1003,7 @@ export function registerWriteFenceConformanceIntegrationTests(
           ).resolves.toBeUndefined();
 
           await backend.transaction(async (tx) => {
-            const lock = await lockRecordedGraphWrite(tx, graphId);
+            const lock = await lockRecordedGraphWrite(tx, graphId, undefined);
             const coordination = requireDefined(
               lock.coordination,
               "a row-mechanism lock always mints coordination",
