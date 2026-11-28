@@ -102,6 +102,22 @@ const VAULT_CODE_UNIQUE = {
   collation: "binary",
 } as const;
 
+/**
+ * A parent and child that declare one constraint name under DIFFERENT scopes:
+ * the parent's is kind-scoped (its axis is its own kind), the child's spans
+ * the hierarchy (its axis is the child, the code-point least kind). A child
+ * claim left at the parent's kind is off the child's axis and exactly where
+ * the parent's own claims sit, so no claim at the child's axis can stand in
+ * for it when a parent row is probed.
+ */
+const SvcShelf = defineNode("SvcShelf", {
+  schema: z.object({ code: z.string() }),
+});
+const SvcBookShelf = defineNode("SvcBookShelf", {
+  schema: z.object({ code: z.string() }),
+});
+const SHELF_CODE_NAME = "SvcShelf_code";
+
 const ACCOUNT_CODE_UNIQUE = {
   name: "SvcAccount_code",
   fields: ["code"],
@@ -153,6 +169,28 @@ function buildGraph(id: string) {
         type: SvcPartnerAccount,
         unique: [ACCOUNT_CODE_UNIQUE],
       },
+      SvcShelf: {
+        type: SvcShelf,
+        unique: [
+          {
+            name: SHELF_CODE_NAME,
+            fields: ["code"],
+            scope: "kind",
+            collation: "binary",
+          },
+        ],
+      },
+      SvcBookShelf: {
+        type: SvcBookShelf,
+        unique: [
+          {
+            name: SHELF_CODE_NAME,
+            fields: ["code"],
+            scope: "kindWithSubClasses",
+            collation: "binary",
+          },
+        ],
+      },
       SvcSource: { type: SvcSource },
       SvcJustification: { type: SvcJustification },
     },
@@ -171,6 +209,7 @@ function buildGraph(id: string) {
     ontology: [
       subClassOf(SvcPartnerAccount, SvcAccount),
       subClassOf(SvcAgentVault, SvcVault),
+      subClassOf(SvcBookShelf, SvcShelf),
     ],
   });
 }
@@ -551,5 +590,71 @@ export function registerStoredValueClaimIntegrationTests(
         }).toEqual({ import: ["parent"], childCode: "k" });
       });
     }
+
+    // The child's update keeps its legacy claim of `k` at the parent's kind
+    // (the release keeps the key it moves onto at every axis). The parent's
+    // kind-scoped constraint of the same name probes only that kind, so a
+    // later parent row of `k` must meet the kept claim there: refused for that
+    // row alone, not passed by the import's cache and then failing the flush,
+    // which would roll the child's update back.
+    it("an import update keeps a legacy-axis claim that a later kind-scoped row of the same constraint name is refused against", async () => {
+      const graphId = nextGraphId();
+      const store = await context.createStore(buildGraph(graphId));
+      await store.nodes.SvcBookShelf.create({ code: "j" }, { id: "child" });
+      await store.backend.insertUnique({
+        graphId,
+        nodeKind: "SvcShelf",
+        constraintName: SHELF_CODE_NAME,
+        key: codeKey("k"),
+        nodeId: "child",
+        concreteKind: "SvcBookShelf",
+      });
+
+      const imported = await outcomeOf(() =>
+        importGraph(
+          store,
+          {
+            formatVersion: FORMAT_VERSION,
+            exportedAt: new Date().toISOString(),
+            source: { type: "external", description: "legacy axis" },
+            nodes: [
+              { kind: "SvcBookShelf", id: "child", properties: { code: "k" } },
+              { kind: "SvcShelf", id: "parent", properties: { code: "k" } },
+            ],
+            edges: [],
+          },
+          { onConflict: "update", onUnknownProperty: "error" },
+        ),
+      );
+      const child = await store.nodes.SvcBookShelf.getById("child" as never);
+      const parent = await store.nodes.SvcShelf.getById("parent" as never);
+
+      expectObservation({
+        lane: { driver: context.driver },
+        observed: {
+          import:
+            typeof imported === "string" ? imported : (
+              imported.errors.map((error) => error.id)
+            ),
+          childCode: child?.code,
+          parentCode: parent?.code,
+        },
+        correct: { import: ["parent"], childCode: "k", parentCode: undefined },
+        defects: [
+          {
+            // Main's `src` produces the same value: the import cache records
+            // the moved-onto key as vacant at every axis but the canonical
+            // one, while the claim the owner kept sits at one of them.
+            label: "import cache marks a kept legacy-axis claim vacant",
+            on: {},
+            today: {
+              import: "UniquenessError",
+              childCode: "j",
+              parentCode: undefined,
+            },
+          },
+        ],
+      });
+    });
   });
 }
