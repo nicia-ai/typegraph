@@ -624,9 +624,13 @@ of tens of thousands of nodes of one kind can stay below that trigger
 indefinitely, and until it is crossed the planner estimates the new kind at
 about one row.
 
-The write phase of `updateWhere()` and `compareAndSet()` reaches the nodes table
-only through the selected rows' keys. It reads the candidates once and never
-rescans them, so whatever the statistics say it is bounded by one scan of the
+`updateWhere()` and `compareAndSet()` reach the nodes table only through the
+selected rows' keys. Their dry-run reads the candidates once and never rescans
+them, and their keyed write looks each validated row up by its id from a bound
+list, which stale statistics cannot shrink. The "Now" figures below were
+measured for the single statement of the previous release, whose read the
+dry-run repeats unchanged; the keyed write adds two keyed lookups per row in
+every state tested. Whatever the statistics say, the update is bounded by one scan of the
 nodes table plus a constant amount of work per candidate, as long as each
 candidate's id is unique within its graph across kinds. Generated ids are. An
 id that other kinds of the same graph also hold costs more, as described

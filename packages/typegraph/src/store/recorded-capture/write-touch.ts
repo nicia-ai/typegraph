@@ -3,8 +3,8 @@
  * wrapped backend call actually changed a row — rather than merely having
  * been called. TypeGraph-owned recorded-time capture and the engine-native
  * mutation witness both need this exact decision (insertNodeIfAbsent's
- * `undefined` result is not a write, a `compareAndSetNode`/`updateNodeSet`
- * whose `rows` come back empty coalesced to nothing, and so on), so both
+ * `undefined` result is not a write, an `updateNodeSet` whose
+ * `rows` come back empty coalesced to nothing, and so on), so both
  * read it through this shared wrapper instead of re-deriving it — a second,
  * independent spelling of "did this member write" is exactly the kind of
  * drift `AGENTS.md`'s "one predicate, one owner" rule exists to prevent.
@@ -172,7 +172,6 @@ export type RecordedWriteMembersOverlay = Pick<
       | "updateResolvedNodesBatch"
       | "updateNodeSet"
       | "upsertHeterogeneousNodes"
-      | "compareAndSetNode"
       | "insertEdgeNoReturn"
       | "insertEdgesBatch"
       | "insertEdgesBatchReturning"
@@ -367,19 +366,6 @@ export function buildRecordedWriteMembers(
         async updateNodeSet(params) {
           await hooks.beforeOne?.(params.graphId);
           const result = await requireDefined(target.updateNodeSet)(params);
-          for (const row of result.rows) {
-            sink.touchNode(row.graph_id, row.kind, row.id, row);
-          }
-          return result;
-        },
-      }),
-
-    ...(target.compareAndSetNode === undefined ?
-      {}
-    : {
-        async compareAndSetNode(params) {
-          await hooks.beforeOne?.(params.graphId);
-          const result = await requireDefined(target.compareAndSetNode)(params);
           for (const row of result.rows) {
             sink.touchNode(row.graph_id, row.kind, row.id, row);
           }

@@ -3894,9 +3894,14 @@ function createPostgresOperationBackend(
     });
   }
 
-  const batchConfig = computePostgresBatchChunkSizes(
-    capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
-  );
+  const batchConfig = {
+    ...computePostgresBatchChunkSizes(
+      capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
+    ),
+    ...(capabilities.maxBoundValueBytes === undefined ?
+      {}
+    : { setUpdateKeyBytes: capabilities.maxBoundValueBytes }),
+  };
 
   const fulltextMembers =
     fulltextStrategy === undefined ?

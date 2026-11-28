@@ -108,7 +108,6 @@ import type {
   ClaimEdgeCardinalityParams,
   CommitSchemaVersionIfKindsEmptyResult,
   CommitSchemaVersionParams,
-  CompareAndSetNodeParams,
   CompositionClaimScope,
   ConstraintFenceViolationRows,
   ContendedEdgeRow,
@@ -157,7 +156,9 @@ import type {
   NodeCreateCommandResult,
   NodeRow,
   NodeRowLock,
+  NodeSetUpdatePreview,
   PopulatedSchemaKind,
+  PreviewNodeSetUpdateParams,
   PurgeEdgeClaimsParams,
   ReadConstraintFenceViolationsParams,
   ResolvedNodeUpdateBatchParams,
@@ -189,8 +190,14 @@ import {
   claimPredicateShapeKey,
 } from "./operations/edge-claims";
 import {
+  SET_COUNT_COLUMN,
+  SET_ROW_TOKEN_COLUMN,
+  splitNodeSetRowKeys,
+} from "./operations/nodes";
+import {
   type CommonOperationStrategy,
   createCachedTableExistence,
+  EMPTY_ROW_LOCK,
   NO_NODE_ROW_LOCK_CLAUSES,
   type TableExistenceCacheOptions,
 } from "./operations/strategy";
@@ -651,7 +658,6 @@ export type CommonOperationBackend = Pick<
   | "checkUniqueBatch"
   | "clearGraph"
   | "clearGraphPreservingContributionMaterializations"
-  | "compareAndSetNode"
   | "countEdgesByKind"
   | "countEdgesAtEndpoint"
   | "countNodesByKind"
@@ -677,6 +683,7 @@ export type CommonOperationBackend = Pick<
   | "getNode"
   | "getNodes"
   | "lockNodes"
+  | "previewNodeSetUpdate"
   | "getSchemaVersion"
   | "hardDeleteEdge"
   | "hardDeleteEdgesBatch"
@@ -797,7 +804,16 @@ export type OperationBackendBatchConfig = Readonly<{
   nodeSchemaFencedInsertBatchSize: number;
   uniqueDeleteChunkSize: number;
   uniqueInsertBatchSize: number;
+  /**
+   * The bound-value budget a keyed set write splits its row keys under
+   * (`BackendCapabilities.maxBoundValueBytes`). Absent means
+   * {@link DEFAULT_MAX_BOUND_VALUE_BYTES}.
+   */
+  setUpdateKeyBytes?: number;
 }>;
+
+/** The bound-value budget a backend that declares none gets: 64 MiB. */
+const DEFAULT_MAX_BOUND_VALUE_BYTES = 64 * 1024 * 1024;
 
 export type OperationBackendRowMappers = Readonly<{
   toEdgeRow: (row: Record<string, unknown>) => EdgeRow;
@@ -2155,6 +2171,10 @@ export function createCommonOperationBackend(
       operationStrategy.nodeRowLockClauses
     : NO_NODE_ROW_LOCK_CLAUSES;
   const endpointLock = nodeRowLockClauses.edgeEndpoint;
+  const nodeSetUpdateRowLock =
+    nodeRowLocks.kind === "row-lock" ?
+      operationStrategy.nodeSetUpdateRowLock
+    : EMPTY_ROW_LOCK;
 
   /** The fence rows a `fence-row` plan takes on `nodes`; none otherwise. */
   function nodeRowFences(
@@ -4959,16 +4979,6 @@ export function createCommonOperationBackend(
 
   const commandsPort = { session: commandSession, execute: executeCommand };
 
-  async function executeNodeSetUpdate(
-    params: CompareAndSetNodeParams | UpdateNodeSetParams,
-  ): Promise<UpdateNodeSetResult> {
-    const timestamp = nowIso();
-    const query = operationStrategy.buildUpdateNodeSet(params, timestamp);
-    const rows = await execution.execAll<Record<string, unknown>>(query);
-    const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
-    return { affectedCount: updatedRows.length, rows: updatedRows };
-  }
-
   /**
    * Drops the claim rows the named edges hold: the one owner behind the
    * `purgeEdgeClaims` member and the node hard-delete cascades, which call it
@@ -5042,7 +5052,9 @@ export function createCommonOperationBackend(
       Math.floor(batchConfig.getEdgesChunkSize / 2),
     );
     for (const run of chunkArray(ordered, targetChunkSize)) {
-      await execution.execAll(lockOrder.buildLockEdgeClaimTargets(graphId, run));
+      await execution.execAll(
+        lockOrder.buildLockEdgeClaimTargets(graphId, run),
+      );
     }
   }
 
@@ -5298,6 +5310,60 @@ export function createCommonOperationBackend(
       return rows.map((row) => rowMappers.toNodeRow(row));
     },
 
+    async previewNodeSetUpdate(
+      params: PreviewNodeSetUpdateParams,
+    ): Promise<NodeSetUpdatePreview> {
+      if (
+        Object.keys(params.patch).length === 0 &&
+        (params.unsetProperties?.length ?? 0) === 0
+      ) {
+        throw new ConfigurationError(
+          params.operation === "compareAndSet" ?
+            "Node compare-and-set requires at least one property patch"
+          : "Set-based node update requires at least one property",
+          { operation: "previewNodeSetUpdate", kind: params.kind },
+        );
+      }
+      if (params.candidateIdColumn.length === 0) {
+        throw new ConfigurationError(
+          "Set-based node update requires a candidate id column",
+          { operation: "previewNodeSetUpdate", kind: params.kind },
+        );
+      }
+      if (
+        params.operation === "compareAndSet" &&
+        Object.keys(params.expected).length === 0
+      ) {
+        throw new ConfigurationError(
+          "Node compare-and-set requires at least one expected property",
+          { operation: "previewNodeSetUpdate", kind: params.kind },
+        );
+      }
+      const query = operationStrategy.buildPreviewNodeSetUpdate(
+        params,
+        nodeSetUpdateRowLock,
+      );
+      const rows = await execution.execAll<Record<string, unknown>>(query);
+      return {
+        rows: rows.map((row) => {
+          const node = rowMappers.toNodeRow(row);
+          const rowToken = row[SET_ROW_TOKEN_COLUMN];
+          if (typeof rowToken !== "string") {
+            throw new CompilerInvariantError(
+              "A set update's dry-run returned a row without its row token.",
+              { operation: "previewNodeSetUpdate", kind: params.kind },
+            );
+          }
+          return {
+            id: node.id,
+            version: node.version,
+            props: node.props,
+            rowToken,
+          };
+        }),
+      };
+    },
+
     async updateNodeSet(
       params: UpdateNodeSetParams,
     ): Promise<UpdateNodeSetResult> {
@@ -5310,34 +5376,78 @@ export function createCommonOperationBackend(
           { operation: "updateNodeSet", kind: params.kind },
         );
       }
-      if (params.candidateIdColumn.length === 0) {
-        throw new ConfigurationError(
-          "Set-based node update requires a candidate id column",
-          { operation: "updateNodeSet", kind: params.kind },
-        );
-      }
-      return executeNodeSetUpdate(params);
-    },
-
-    async compareAndSetNode(
-      params: CompareAndSetNodeParams,
-    ): Promise<UpdateNodeSetResult> {
+      if (params.rows.length === 0) return { affectedCount: 0, rows: [] };
+      // The row keys are bound as one value per statement, and that value
+      // carries every row's stored props: unsplit, a large enough set could
+      // not even be built as one string. Split under the budget, the write is
+      // one statement per part, which keeps all or nothing only inside a
+      // transaction — a root session would commit each part on its own, so
+      // a split there is refused before anything runs.
+      const budgetBytes =
+        batchConfig.setUpdateKeyBytes ?? DEFAULT_MAX_BOUND_VALUE_BYTES;
+      const split = splitNodeSetRowKeys(params.rows, budgetBytes);
       if (
-        Object.keys(params.patch).length === 0 &&
-        (params.unsetProperties?.length ?? 0) === 0
+        !split.fits ||
+        (split.parts.length > 1 && commandSession !== "transaction")
       ) {
         throw new ConfigurationError(
-          "Node compare-and-set requires at least one property patch",
-          { operation: "compareAndSetNode", kind: params.kind },
+          split.fits ?
+            "A set update whose row keys exceed one statement's bound-value budget must run inside a transaction"
+          : "A set update row's key alone exceeds the backend's bound-value budget",
+          {
+            code: "SET_UPDATE_KEY_BUDGET_EXCEEDED",
+            operation: "updateNodeSet",
+            kind: params.kind,
+            budgetBytes,
+            ...(split.fits ?
+              { parts: split.parts.length }
+            : { keyBytes: split.keyBytes }),
+          },
+          {
+            suggestion:
+              "Run the set update inside a transaction, select fewer rows per call, or raise the backend's maxBoundValueBytes capability.",
+          },
         );
       }
-      if (Object.keys(params.expected).length === 0) {
-        throw new ConfigurationError(
-          "Node compare-and-set requires at least one expected property",
-          { operation: "compareAndSetNode", kind: params.kind },
-        );
+      // A `fence-row` plan locks the rows the dry-run read before writing
+      // them, as `lockNodes` does; a row-lock engine already holds them from
+      // the dry-run, and a serializing one needs nothing.
+      for (const fence of nodeRowFences(
+        params.graphId,
+        params.rows.map((row) => ({ kind: params.kind, id: row.id })),
+      )) {
+        await execution.execRun(fence);
       }
-      return executeNodeSetUpdate(params);
+      // A split write counts — and locks — every part before it writes the
+      // first: a part whose rows no longer all carry their tokens is found
+      // while nothing is written, and the counted rows stay locked until the
+      // writes, so each part's own count then holds.
+      if (split.parts.length > 1) {
+        for (const part of split.parts) {
+          const counted = await execution.execGet<Record<string, unknown>>(
+            operationStrategy.buildCountNodeSetKeys(
+              { graphId: params.graphId, kind: params.kind, rows: part },
+              nodeSetUpdateRowLock,
+            ),
+          );
+          if (Number(counted?.[SET_COUNT_COLUMN]) !== part.length) {
+            return { affectedCount: 0, rows: [] };
+          }
+        }
+      }
+      const timestamp = nowIso();
+      const updatedRows: NodeRow[] = [];
+      for (const part of split.parts) {
+        const rows = await execution.execAll<Record<string, unknown>>(
+          operationStrategy.buildUpdateNodeSet(
+            { ...params, rows: part },
+            timestamp,
+            nodeSetUpdateRowLock,
+          ),
+        );
+        updatedRows.push(...rows.map((row) => rowMappers.toNodeRow(row)));
+      }
+      return { affectedCount: updatedRows.length, rows: updatedRows };
     },
 
     async deleteNode(params: DeleteNodeParams): Promise<void> {

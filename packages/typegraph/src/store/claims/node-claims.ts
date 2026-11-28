@@ -943,6 +943,194 @@ export function withNodeCreateClaimsBatch<T>(
 }
 
 /**
+ * The identity of one claim row — `(axis, constraint, key)`, the relation's
+ * conflict target within a graph — as one comparable string. What a probe
+ * reports a holder for and what a reservation writes are compared through it.
+ */
+export function claimRowIdentity(
+  axis: string,
+  constraintName: string,
+  key: string,
+): string {
+  return encodeTupleKey([axis, constraintName, key]);
+}
+
+/**
+ * The claim members a set update's claim transition calls, bound off the
+ * transaction target it runs on.
+ *
+ * The batched probe is not among them: the set's verdict binds it itself
+ * (`validateResolvedNodeClaims`), before any statement that writes, and keeps
+ * its own refusal code for a port that lacks it.
+ */
+export type NodeSetClaimMembers = Readonly<{
+  insertUniqueBatch: NonNullable<UniqueConstraintBackend["insertUniqueBatch"]>;
+  hardDeleteUniquesByNodeIds: NonNullable<
+    UniqueConstraintBackend["hardDeleteUniquesByNodeIds"]
+  >;
+}>;
+
+/**
+ * Binds every batched claim member a set update calls, off the PORT it runs
+ * on, against the threaded verdict; `undefined` when the verdict lacks one or
+ * the port cannot serve it.
+ *
+ * A transaction handle may implement less than the backend its verdict was
+ * resolved from, so presence in the verdict is not enough: a member found
+ * missing only once the row write has landed would refuse with the write
+ * already applied. Binding them all before the first statement makes that
+ * refusal one with nothing written.
+ */
+export function bindNodeSetClaimMembers(
+  ctx: UniquenessContext,
+): NodeSetClaimMembers | undefined {
+  const extras = ctx.uniqueSidecarBatch.extras;
+  const insert = bindExtraIfReachable(
+    ctx.backend,
+    extras.insertUniqueBatch,
+    UNIQUE_SIDECAR_BATCH.id,
+  );
+  const hardDelete = bindExtraIfReachable(
+    ctx.backend,
+    extras.hardDeleteUniquesByNodeIds,
+    UNIQUE_SIDECAR_BATCH.id,
+  );
+  if (insert === undefined || hardDelete === undefined) return undefined;
+  return {
+    insertUniqueBatch: insert.insertUniqueBatch,
+    hardDeleteUniquesByNodeIds: hardDelete.hardDeleteUniquesByNodeIds,
+  };
+}
+
+/** A {@link ClaimIssuer} that sends a group as one `insertUniqueBatch` call. */
+function issueThrough(
+  insertUniqueBatch: NodeSetClaimMembers["insertUniqueBatch"],
+): ClaimIssuer {
+  return async (ctx, claims, onIssued) => {
+    if (claims.length === 0) return;
+    await issuingClaims(
+      claims.map((claim) => claim.entry),
+      () =>
+        insertUniqueBatch(
+          claims.map((claim) => claimInsertParams(ctx.graphId, claim)),
+        ),
+    );
+    onIssued?.(claims);
+  };
+}
+
+/**
+ * A {@link ClaimIssuer} for reservations whose every key was free or
+ * tombstoned when probed: it reports the whole group as issued BEFORE the
+ * statement runs, so a statement that writes some rows and then throws — a
+ * batch upsert reports a conflict only after its chunk ran — is compensated for
+ * every row it may have taken.
+ *
+ * Sound only for that precondition. The compensation releases exactly the
+ * owner's reservation at the claimed axis, so a row the owner did not take — a
+ * conflicting one another node holds — is untouched, and none of the group was
+ * the owner's live reservation beforehand, so none is stripped.
+ */
+function reserveThrough(
+  insertUniqueBatch: NodeSetClaimMembers["insertUniqueBatch"],
+): ClaimIssuer {
+  const issue = issueThrough(insertUniqueBatch);
+  return async (ctx, claims, onIssued) => {
+    onIssued?.(claims);
+    await issue(ctx, claims);
+  };
+}
+
+/**
+ * Runs a set update's row write with its claim transition around it — the
+ * set-shaped twin of {@link withNodeClaimTransition}, in the same order and for
+ * the same reason: the reservation IS the conflict gate, so it is taken before
+ * the row write it gates, and the claims the write supersedes are given up
+ * after it.
+ *
+ *  1. **Reserve the new keys** a writer outside the set could still take:
+ *     every uniqueness claim the after-images owe whose row the set's probe
+ *     did not find a member holding (`heldBySet`, from
+ *     {@link file://./resolved-node-claims.ts validateResolvedNodeClaims}).
+ *     A writer that reserved one after the probe makes this statement raise
+ *     the `UniquenessError` — before any row is written, with every
+ *     reservation the statement took given back ({@link reserveThrough}).
+ *  2. **The row write.** A refusal from it gives the reservations back too.
+ *  3. **Release, then re-take.** The set's rows are rewritten without their
+ *     before-images, so the keys they gave up are not known by name: every
+ *     claim the rows hold is dropped by owner and the after-images' claims —
+ *     both families, so a `disjointWith` reservation survives — are taken
+ *     again through the create claim seam. Nothing outside the set can hold
+ *     any of them by then: the step-1 keys are this transaction's, and a key
+ *     a member held (a swap, a handoff, an unchanged key) was held live until
+ *     this transaction dropped it, so a writer that met it was refused.
+ *
+ * A key a member holds is not reserved in step 1 because it cannot be: its
+ * holder still holds it, and a handoff between two members would conflict with
+ * itself. A writer outside the set cannot take it either, for the reason in
+ * step 3.
+ */
+export async function withNodeSetClaimTransition<T>(
+  ctx: NodeClaimContext,
+  backend: StatementBackend,
+  set: Readonly<{
+    kind: string;
+    items: readonly NodeClaimItem[];
+    heldBySet: ReadonlySet<string>;
+    members: NodeSetClaimMembers;
+  }>,
+  gatedWrite: () => Promise<T>,
+): Promise<T> {
+  const claimContext = createUniquenessContext(
+    ctx.graphId,
+    ctx.registry,
+    backend,
+    ctx.uniqueSidecarBatch,
+  );
+  const claims = placedNodeCreateClaims(ctx, set.items);
+  const refusal = claimFenceRefusal(
+    ctx,
+    backend,
+    claims.map((claim) => claim.entry),
+  );
+  if (refusal !== undefined) throw refusal;
+
+  const reservations = claims
+    .filter(
+      (claim) =>
+        isUniquenessClaimEntry(claim.entry) &&
+        !set.heldBySet.has(
+          claimRowIdentity(
+            claim.entry.axis,
+            claim.entry.constraintName,
+            claim.entry.key,
+          ),
+        ),
+    )
+    .toSorted((left, right) => compareClaimTargets(left.target, right.target));
+  const result = await claimGroupThenWrite(
+    claimContext,
+    ctx.operation,
+    reserveThrough(set.members.insertUniqueBatch),
+    reservations,
+    gatedWrite,
+  );
+  await set.members.hardDeleteUniquesByNodeIds({
+    graphId: ctx.graphId,
+    concreteKind: set.kind,
+    nodeIds: set.items.map((item) => item.id),
+  });
+  await withNodeCreateClaimsIssuedBy(
+    ctx,
+    set.items,
+    backend,
+    issueThrough(set.members.insertUniqueBatch),
+    alreadyAppliedRowWrite,
+  );
+  return result;
+}
+
+/**
  * The gate for a claim set whose row write has ALREADY been applied — a
  * re-claim after a set update, or a test seeding a reservation.
  *

@@ -110,7 +110,7 @@ describe("capability bundle totality (T9)", () => {
     }
   });
 
-  it("43 reasoned entries sum to 133 accesses; 51 deferred entries sum to 250", () => {
+  it("43 reasoned entries sum to 133 accesses; 51 deferred entries sum to 248", () => {
     const entries = Object.values(UNBUNDLED_OPTIONAL_MEMBERS);
     const reasoned = entries.filter((entry) => entry.kind === "reasoned");
     const deferred = entries.filter((entry) => entry.kind === "deferred");
@@ -196,6 +196,8 @@ describe("capability bundle totality (T9)", () => {
     // heterogeneous endpoint-set consumer: 243 -> 245.
     // Node bulkHardDelete's `hardDeleteNodesBatch` has five live access
     // sites: 245 -> 250.
-    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(250);
+    // The set update (#948) replaces `compareAndSetNode` (six) with
+    // `previewNodeSetUpdate` (four): 250 -> 248.
+    expect(deferred.reduce((sum, entry) => sum + entry.ceiling, 0)).toBe(248);
   });
 });

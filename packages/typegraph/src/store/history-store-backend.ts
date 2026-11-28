@@ -149,7 +149,10 @@ const HISTORY_STORE_BACKEND_KEYS = [
   "updateNode",
   "upsertHeterogeneousNodes",
   "updateResolvedNodesBatch",
-  "compareAndSetNode",
+  // A set update's dry-run: it locks the rows it reads and writes none, so it
+  // cannot bypass a capture flush; the write that follows is `updateNodeSet`,
+  // which the capture overlay wraps.
+  "previewNodeSetUpdate",
   "updateNodeSet",
   "upsertEmbedding",
   "upsertEmbeddingBatch",

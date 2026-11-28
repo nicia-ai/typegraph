@@ -39,10 +39,10 @@ import { assumeRecursiveTraversalSupported } from "../src/backend/capabilities/r
 import { deriveBackend } from "../src/backend/derive-backend";
 import type {
   GraphBackend,
+  NodeSetUpdatePreview,
+  PreviewNodeSetUpdateParams,
   TransactionBackend,
   TransactionOptions,
-  UpdateNodeSetParams,
-  UpdateNodeSetResult,
 } from "../src/backend/types";
 import {
   createRecordedInstant,
@@ -2423,29 +2423,29 @@ describe("compile-golden: store statement builders", () => {
 /**
  * `updateWhere` compiles its selectors (`where`, `candidates`, `exists`)
  * into one candidate-id relation and hands it to the backend's
- * `updateNodeSet` port. These cells run the real collection and pin the
- * relation that port receives; the capture answers the port with no
- * affected rows, so no write statement runs.
+ * `previewNodeSetUpdate` port. These cells run the real collection and pin
+ * the relation that port receives; the capture answers the port with no
+ * rows, so no write statement runs.
  */
 function candidateSelectionCapture(
   dialect: Dialect,
 ): Readonly<{ backend: GraphBackend; received: SqlFragment[] }> {
   const received: SqlFragment[] = [];
   const { backend: capture } = algorithmStatementCapture(dialect, () => []);
-  const updateNodeSet = (
-    params: UpdateNodeSetParams,
-  ): Promise<UpdateNodeSetResult> => {
+  const previewNodeSetUpdate = (
+    params: PreviewNodeSetUpdateParams,
+  ): Promise<NodeSetUpdatePreview> => {
     received.push(params.candidateIds);
-    return Promise.resolve({ affectedCount: 0, rows: [] });
+    return Promise.resolve({ rows: [] });
   };
   const backend = deriveBackend(capture, {
-    updateNodeSet,
+    previewNodeSetUpdate,
     transaction: <T>(
       fn: (tx: TransactionBackend) => Promise<T>,
       options?: TransactionOptions,
     ): Promise<T> =>
       capture.transaction(
-        (tx) => fn(deriveBackend(tx, { updateNodeSet })),
+        (tx) => fn(deriveBackend(tx, { previewNodeSetUpdate })),
         options,
       ),
   });

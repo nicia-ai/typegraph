@@ -429,6 +429,12 @@ export const sqliteDialect: BuiltinDialectAdapter = {
     return sql`${left} ${operator} (SELECT value FROM json_each(${packedValues}))`;
   },
 
+  textMapParameterRows(packedMap, alias) {
+    // `json_each` over an object yields its entries as `key` and `value`;
+    // string values are returned as text.
+    return sql`json_each(${packedMap}) AS ${alias}`;
+  },
+
   packListValue(values) {
     return packSqlListValue(values, "sqlite");
   },

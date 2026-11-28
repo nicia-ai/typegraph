@@ -60,6 +60,9 @@ const READ_MEMBERS = [
   // A read that row-locks what it returns. It writes no row: the lock is what
   // an edge write's endpoint check and a delete's preflight pair on.
   "lockNodes",
+  // A set update's dry-run: reads and locks the rows the selection names and
+  // returns their after-images. It writes no row; `updateNodeSet` does.
+  "previewNodeSetUpdate",
   "findNodesByKind",
   "findNodesAcrossKinds",
   "countNodesByKind",
@@ -117,7 +120,6 @@ export const ENTITY_WRITE_MEMBERS = [
   "updateNode",
   "upsertHeterogeneousNodes",
   "updateResolvedNodesBatch",
-  "compareAndSetNode",
   "updateNodeSet",
   "deleteNode",
   "hardDeleteNode",

@@ -1128,24 +1128,43 @@ Each `exists` entry is evaluated independently and ANDed with the other
 selectors. The patch is shallow: values replace top-level properties, explicit
 `null` is preserved, and `undefined` removes an optional property. TypeGraph
 validates every complete after-image and updates uniqueness, fulltext, vector,
-history, and revision state in the same transaction. If any row or sidecar is
-invalid, the whole update rolls back. Backends without transactional set-write
-and batched sidecar support reject the operation before writing.
+history, and revision state in the same transaction. Backends without
+transactional set-write and batched sidecar support reject the operation before
+writing.
 
-The selectors are evaluated once, against the snapshot of the one statement
-that also writes, and the write applies only to a row whose stored version is
-still the one that snapshot selected. Under PostgreSQL `READ COMMITTED`, a row
-that another transaction changes and commits after that snapshot (while this
-update waits for its row lock) is skipped rather than patched on the strength
-of its previous state, and `affectedCount` does not count it. The same holds
-for a row deleted and re-created under the same id, even though the new row's
-version starts again at the one the snapshot read: it is a different row, and
-it is written only when it already matched the selectors in that snapshot.
-Re-run `updateWhere()` to apply the patch to rows that still match.
+The update runs as two statements. A dry-run reads every selected row, locks it
+where the engine has row locks (PostgreSQL takes the lock an `UPDATE` of the
+row takes), and computes its after-image in SQL. TypeGraph validates every
+after-image (the schema, normalization, and uniqueness across the whole set)
+and only then writes exactly those rows, applying the same SQL expression to
+the same stored rows. A refusal therefore writes nothing: no row, uniqueness
+claim, fulltext or vector entry, recorded history, or receipt entry. That
+holds inside `store.transaction()` too, so a callback that catches the
+`ValidationError` or `UniquenessError` and returns normally commits the
+database as it was before the call.
 
-The statement evaluates its candidate query once on every backend and reaches
-the stored rows only through the selected keys, so its write phase never
-rescans: it costs at most one scan of the nodes table plus constant work per
+The selectors are evaluated once, against the dry-run's snapshot, and a row is
+read only when its stored version is still the one that snapshot selected.
+Under PostgreSQL `READ COMMITTED`, a row that another transaction changes and
+commits after that snapshot (while the dry-run waits for its row lock) is
+skipped rather than patched on the strength of its previous state, and
+`affectedCount` does not count it. The same holds for a row deleted and
+re-created under the same id, even though the new row's version starts again
+at the one the snapshot read: it is a different row, and it is written only
+when it already matched the selectors in that snapshot. Re-run `updateWhere()`
+to apply the patch to rows that still match.
+
+The write is keyed to the exact stored rows the dry-run read (id, version,
+properties, validity window and creation time) and is all or nothing. If one of them changes between the two
+statements, which only the same transaction can do on an engine with row locks
+(for example an overlapping call on the same transaction that deletes and
+re-creates the row), the write changes no row and the call throws
+`DatabaseOperationError` with `details.reason: "no_row_returned"`, the error
+every keyed node write raises for a row that is no longer the one it read.
+
+The dry-run evaluates its candidate query once on every backend and both
+statements reach the stored rows only through the selected keys, so the update
+never rescans: it costs at most one scan of the nodes table plus constant work per
 candidate, however stale PostgreSQL's planner statistics are. That matters
 after a bulk load into a large shared table, which can leave PostgreSQL
 believing the kind holds almost no rows. Whether PostgreSQL looks the keys up
@@ -1155,8 +1174,30 @@ query too: under stale statistics, selecting one row by id can still read every
 un-analyzed row of the kind, so a loop of single-row updates over a freshly
 loaded kind slows as the kind grows until the table is analyzed (see
 [stale statistics](/backend-setup#stale-statistics-on-a-large-shared-table-postgresql)).
-Because the update is one statement, a backend's `updateNodeSet` called
-directly on an autocommit connection is as atomic as one inside a transaction.
+The keyed write compares each row's token in the `UPDATE`'s own predicate,
+whatever write fence the backend declares, so a row version the dry-run did not
+read is never written, even when the engine re-evaluates a waiting row after a
+concurrent commit.
+
+A uniqueness key the update moves a row onto is reserved before the keyed
+write, and the keys the rows give up are released after it, in the order a
+single-row `update()` uses. Another transaction that claims one of those keys
+after the uniqueness check therefore makes the reservation fail with
+`UniquenessError` before any row is written.
+
+The keyed write binds every row's key, which carries the row's stored
+properties, as one value. When that value would exceed the backend's
+`maxBoundValueBytes` capability (64 MiB unless the backend declares another),
+the write splits the rows across statements. Inside a transaction, which is
+where the store runs it, it counts and locks every part before writing the
+first, so it still writes all of the rows or none. A backend's
+`updateNodeSet` called directly on an autocommit connection runs one statement
+and is as atomic as one inside a transaction; when its keys need more than one
+statement it refuses with `ConfigurationError`
+(`SET_UPDATE_KEY_BUDGET_EXCEEDED`) before running any. A single row whose key
+alone exceeds the budget is refused the same way. See
+[a set update's keyed write can come back short](/limitations#a-set-updates-keyed-write-can-come-back-short)
+for the cases the count cannot cover.
 
 `updateWhere()` is current-state only and is intentionally unavailable on a
 `StoreView`. Use `all: true` for an intentional whole-kind update:

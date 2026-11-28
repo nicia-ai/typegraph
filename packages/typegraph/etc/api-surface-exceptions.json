@@ -262,5 +262,677 @@
     "kind": "member-removed",
     "reason": "The removed edge option `endpointExistence` (#945) is no longer part of the serialized edge model. The schema document still carries the field on every edge as a fixed `\"notDeleted\"` document-format constant, so stored documents and every hash over them are unchanged, but no reader may depend on it and the type stops declaring it.",
     "issue": "#945"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "nodeSetUpdateRowLock",
+    "kind": "required-member-added",
+    "reason": "The set update's dry-run locks its rows with the dialect's UPDATE-strength row lock, which this strategy member spells; the node-row lock plan decides whether it is used (#948).",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "buildPreviewNodeSetUpdate",
+    "kind": "required-member-added",
+    "reason": "The operation backend builds the set update's locked dry-run from this strategy member; a strategy without it cannot run `updateWhere()` / `compareAndSet()` without writing before validation (#948).",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "CommonOperationStrategy",
+    "member": "buildCountNodeSetKeys",
+    "kind": "required-member-added",
+    "reason": "A keyed set write whose row keys exceed the backend bound-value budget splits across statements and counts and locks every part with this strategy member before writing any, so the split write stays all or nothing (#948).",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "rows",
+    "kind": "required-member-added",
+    "reason": "The keyed set write must name the rows it writes: the ids and row tokens a `previewNodeSetUpdate` dry-run returned, written all or nothing (#948). A write without them would be the unvalidated write the change removes.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-engine.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-pglite.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres-working-copy.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-postgres.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-libsql.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite-local.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-adapters-drizzle-sqlite.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-backend.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-graph-merge.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-identity.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-interchange.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-maintenance.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-postgres-pglite.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-profiler.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-provenance.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-query.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-query.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-query.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-query.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-schema.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-sqlite-local.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph-store.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "GraphBackend",
+    "member": "compareAndSetNode",
+    "kind": "member-removed",
+    "reason": "A set update is now a locked dry-run (`previewNodeSetUpdate`, which applies the compare-and-set `expected` predicates) followed by one keyed write (`updateNodeSet`) shared by both verbs, so a validation or uniqueness refusal is raised before any row is written (#948). The compare-and-set write port has no remaining role.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "operation",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIds",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
+  },
+  {
+    "entrypoint": "typegraph.api.md",
+    "declaration": "UpdateNodeSetParams",
+    "member": "candidateIdColumn",
+    "kind": "member-removed",
+    "reason": "`UpdateNodeSetParams` is now the keyed write of a set update: it names the exact rows a `previewNodeSetUpdate` dry-run returned (`rows`) instead of a candidate query, so validation runs before the write (#948). The former selection shape is `UpdateWhereNodeSetParams`.",
+    "issue": "#948"
   }
 ]

@@ -17,7 +17,6 @@
  */
 import { type z } from "zod";
 
-import { bindExtraIfReachable } from "../../backend/capabilities/bind";
 import { UNIQUE_SIDECAR_BATCH } from "../../backend/capabilities/bundle-registry";
 import { resolveBackendFulltext } from "../../backend/capabilities/fulltext";
 import {
@@ -42,6 +41,7 @@ import {
 } from "../../core/types";
 import {
   ConfigurationError,
+  DatabaseOperationError,
   RestrictedDeleteError,
   ValidationError,
 } from "../../errors";
@@ -54,6 +54,7 @@ import { claimSupport } from "../claims/backing";
 import { purgeEdgeClaims } from "../claims/edge-claims";
 import {
   alreadyAppliedRowWrite,
+  bindNodeSetClaimMembers,
   createUniquenessContext,
   deleteUniquenessEntries,
   hardDeleteClaimsByNodeIds,
@@ -64,6 +65,7 @@ import {
   type UniquenessUpdatePlan,
   withNodeClaimTransition,
   withNodeCreateClaimsBatch,
+  withNodeSetClaimTransition,
 } from "../claims/node-claims";
 import {
   resolvedNodeUniqueSidecarBatchIsReachable,
@@ -1093,29 +1095,90 @@ export type NodeSetUpdateWork = NodeSetUpdateCommonWork &
 /** What a set update reports: how many live rows it rewrote. */
 export type NodeSetUpdateResult = Readonly<{ affectedCount: number }>;
 
+/** The two backend members a set update runs on, bound off one backend. */
+type NodeSetUpdateMembers = Readonly<{
+  previewNodeSetUpdate: NonNullable<Backend["previewNodeSetUpdate"]>;
+  updateNodeSet: NonNullable<Backend["updateNodeSet"]>;
+}>;
+
 /**
- * Applies a set-based node update: one UPDATE over every candidate row, then a
- * full rebuild of the sidecars those after-images oblige.
+ * The typed refusal a backend without both set-update members earns. THE one
+ * owner of that refusal: the entry point probes the backend it was handed
+ * before opening the transaction, and {@link applyNodeSetUpdate} probes the
+ * transaction target, which is a different object — a backend may hand out a
+ * transaction handle that implements less than the top-level one. Both report
+ * the same code.
+ */
+export function nodeSetUpdateUnsupportedError(
+  operation: NodeSetUpdateWork["operation"],
+  kind: string,
+): ConfigurationError {
+  return operation === "compareAndSet" ?
+      new ConfigurationError(
+        "This backend does not support node compare-and-set",
+        { code: "COMPARE_AND_SET_UNSUPPORTED", kind },
+      )
+    : new ConfigurationError(
+        "This backend does not support set-based node updates",
+        { code: "SET_UPDATE_UNSUPPORTED", kind },
+      );
+}
+
+/** The set-update members of `backend`, or {@link nodeSetUpdateUnsupportedError}. */
+function requireNodeSetUpdateMembers(
+  backend: Backend,
+  operation: NodeSetUpdateWork["operation"],
+  kind: string,
+): NodeSetUpdateMembers {
+  const previewNodeSetUpdate = backend.previewNodeSetUpdate;
+  const updateNodeSet = backend.updateNodeSet;
+  if (previewNodeSetUpdate === undefined || updateNodeSet === undefined) {
+    throw nodeSetUpdateUnsupportedError(operation, kind);
+  }
+  return { previewNodeSetUpdate, updateNodeSet };
+}
+
+/**
+ * Applies a set-based node update: a locked dry-run of every candidate row,
+ * validation of every after-image it returns, then one keyed UPDATE of
+ * exactly those rows and a full rebuild of the sidecars they oblige.
+ *
+ * ## Why validation runs between a dry-run and the write
+ *
+ * Every refusal this function raises — the schema, the normalization check,
+ * the uniqueness verdict across the resolved set — is decided from the
+ * after-images, and runs before the first write. A refused call has therefore
+ * written nothing: no row, claim, sidecar, recorded capture or receipt entry,
+ * so a caller that catches the refusal inside its own transaction and commits
+ * finds the database as it was. It holds on every path, a transaction the
+ * call opens itself included, and it depends on neither a savepoint nor on
+ * the transaction excluding a sibling call.
+ *
+ * The after-image is never computed in JS: the dry-run and the write apply the
+ * same SQL expression to the same stored row (locked by the dry-run where the
+ * engine has row locks, alone where the engine serializes writers), so what is
+ * validated is what is written. The write is keyed to the row tokens the
+ * dry-run returned and is all or nothing: if a row was changed, deleted, or
+ * deleted and re-created under its id in between — possible only through this
+ * transaction, or on an engine without row locks — it writes no row and the
+ * call fails with the `no_row_returned` {@link DatabaseOperationError} every
+ * other keyed node write raises for a row that is no longer the one it read.
  *
  * ## Why the capability refusals are HERE and not at the entry point
  *
- * The caller probes the backend it was handed before opening the transaction;
- * these four probe the transaction target, which is a different object — a
- * backend may hand out a transaction handle that implements less than the
- * top-level one. They keep the entry point's error codes, so a caller that
- * refuses before the transaction and one that refuses inside it report the
- * same class.
+ * See {@link nodeSetUpdateUnsupportedError}. The sidecar refusals below keep the
+ * entry point's error codes for the same reason.
  *
- * ## Why the order is row -> probe -> drop -> re-claim
+ * ## Why the claims are rebuilt after the row write
  *
- * Unlike every other node write, the uniqueness claim happens AFTER the row
- * write: the statement rewrites whole rows without reading their before-images,
- * so the keys to release are not knowable until the after-images come back.
- * The cross-kind re-check below is what makes that safe — it re-probes every
- * changed key across the constraint's scope and refuses the whole transaction
- * before a single entry is dropped. The per-graph write fence (which a
- * shared-scope constraint forces this write to take) is what keeps a concurrent
- * claim from landing between the probe and the reinsert.
+ * Unlike every other node write, the uniqueness claim is re-taken AFTER the
+ * row write: the statement rewrites whole rows without reading their
+ * before-images, so the keys to release are not knowable until the rows are
+ * read. The cross-kind re-check runs before the write — it re-probes every
+ * changed key across the constraint's scope and refuses the whole call before
+ * a single row or entry changes. The per-graph write fence (which a
+ * shared-scope constraint forces this write to take) is what keeps a
+ * concurrent claim from landing between the probe and the reinsert.
  */
 export async function applyNodeSetUpdate(
   ctx: NodeWriteContext,
@@ -1123,40 +1186,7 @@ export async function applyNodeSetUpdate(
   backend: Backend,
 ): Promise<NodeSetUpdateResult> {
   const { kind, schema, uniqueConstraints } = args;
-  const commonParams = {
-    graphId: ctx.graphId,
-    kind,
-    patch: args.patch,
-    unsetProperties: args.unsetProperties,
-    candidateIds: args.candidateIds,
-    candidateIdColumn: args.candidateIdColumn,
-  } as const;
-  let executeNodeSetUpdate: () => Promise<UpdateNodeSetResult>;
-  if (args.operation === "compareAndSet") {
-    const compareAndSetNode = backend.compareAndSetNode;
-    if (compareAndSetNode === undefined) {
-      throw new ConfigurationError(
-        "The transaction backend does not support node compare-and-set",
-        { code: "COMPARE_AND_SET_UNSUPPORTED", kind },
-      );
-    }
-    executeNodeSetUpdate = () =>
-      compareAndSetNode({
-        ...commonParams,
-        operation: "compareAndSet",
-        expected: args.expected,
-      });
-  } else {
-    const updateNodeSet = backend.updateNodeSet;
-    if (updateNodeSet === undefined) {
-      throw new ConfigurationError(
-        "The transaction backend does not support set-based node updates",
-        { code: "SET_UPDATE_UNSUPPORTED", kind },
-      );
-    }
-    executeNodeSetUpdate = () =>
-      updateNodeSet({ ...commonParams, operation: "updateWhere" });
-  }
+  const members = requireNodeSetUpdateMembers(backend, args.operation, kind);
   if (
     uniqueConstraints.length > 0 &&
     missingRequiredExtras(
@@ -1208,10 +1238,41 @@ export async function applyNodeSetUpdate(
       { code: "SET_UPDATE_VECTOR_UNSUPPORTED", kind },
     );
   }
-  const result = await executeNodeSetUpdate();
-  if (result.affectedCount === 0) return { affectedCount: 0 };
+  // Every batched claim member the transition below calls, bound off the
+  // PORT before anything is read. The verdict above was resolved from the root;
+  // a transaction handle can implement less, and a member found missing only
+  // after the row write would refuse with that write applied.
+  const claimMembers =
+    uniqueConstraints.length > 0 ?
+      bindNodeSetClaimMembers(uniquenessContext(ctx, backend))
+    : undefined;
+  if (uniqueConstraints.length > 0 && claimMembers === undefined) {
+    throw new ConfigurationError(
+      "The transaction backend lacks batched uniqueness operations",
+      { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
+    );
+  }
 
-  const sidecarItems = result.rows.map((row) => {
+  // Both statements serialize the patch. A copy taken before the first keeps
+  // them serializing the same value even if the caller mutates a nested value
+  // of its patch while the dry-run or the uniqueness probe is in flight.
+  const patch = structuredClone(args.patch);
+  const selection = {
+    graphId: ctx.graphId,
+    kind,
+    patch,
+    unsetProperties: args.unsetProperties,
+    candidateIds: args.candidateIds,
+    candidateIdColumn: args.candidateIdColumn,
+  } as const;
+  const preview = await members.previewNodeSetUpdate(
+    args.operation === "compareAndSet" ?
+      { ...selection, operation: "compareAndSet", expected: args.expected }
+    : { ...selection, operation: "updateWhere" },
+  );
+  if (preview.rows.length === 0) return { affectedCount: 0 };
+
+  const sidecarItems = preview.rows.map((row) => {
     const props = rowPropsToObject(row.props);
     const validatedProps = validateNodeProps(
       schema,
@@ -1254,62 +1315,88 @@ export async function applyNodeSetUpdate(
     props: item.props,
     constraints: item.uniqueConstraints,
   }));
-  if (uniqueConstraints.length > 0) {
-    // The re-claim below (`withNodeCreateClaimsBatch`) reaches `insertUniqueBatch`
-    // only through the shared, fallback-dispositioned `issueClaimsBatched`
-    // (`../claims/node-claims.ts`), which silently degrades to per-row inserts
-    // when the PORT lacks the member — the right answer for a plain create,
-    // but not for this REFUSE operation. Re-checking the port here, before the
-    // destructive hard-delete below, closes that gap: the later call binds off
-    // the same `backend`/verdict pair checked here, so its internal fallback
-    // branch can never fire for this call.
-    if (
-      bindExtraIfReachable(
-        backend,
-        ctx.uniqueSidecarBatch.extras.insertUniqueBatch,
-        UNIQUE_SIDECAR_BATCH.id,
-      ) === undefined
-    ) {
-      throw new ConfigurationError(
-        "The transaction backend lacks batched uniqueness operations",
-        { code: "SET_UPDATE_UNIQUENESS_UNSUPPORTED", kind },
-      );
-    }
-    // The RESOLVED-SET verdict, not a row-at-a-time one: the statement rewrote
-    // every candidate at once, so a swap or a handoff of one key between two
-    // rows it touched is legal in the final state and refused by every
-    // intermediate one. One owner of that verdict, shared with the graph merge.
-    await validateResolvedNodeClaims(
-      createUniquenessContext(
-        ctx.graphId,
-        ctx.registry,
-        backend,
-        ctx.uniqueSidecarBatch,
-      ),
-      claimItems,
-      [],
-    );
-    await hardDeleteClaimsByNodeIds(
-      uniquenessContext(ctx, backend),
+  async function writeValidatedRows(): Promise<UpdateNodeSetResult> {
+    const result = await members.updateNodeSet({
+      graphId: ctx.graphId,
       kind,
-      result.rows.map((row) => row.id),
-    );
+      patch,
+      unsetProperties: args.unsetProperties,
+      rows: preview.rows.map((row) => ({ id: row.id, rowToken: row.rowToken })),
+    });
+    assertNodeSetUpdateWroteValidatedRows(kind, preview.rows, result);
+    return result;
   }
-  // The same claim seam every create-shaped writer uses, with an ALREADY-APPLIED
-  // row write as its gate: the rows landed above and the old claims were
-  // hard-deleted, so what is left is a re-claim and there is no row write left
-  // for a claim to precede. Inverting it would mean reserving keys the update has
-  // not written. What covers this site on a backend that cannot fence is stated
-  // per kind shape: a kind whose scope spans siblings declares
-  // `fencesConstraintProbe` at the entry point and is refused before this body
-  // runs; a kind-scoped one is not refused, before or after — its
-  // delete-then-rebuild window is unchanged in shape and extent here.
-  await withNodeCreateClaimsBatch(
-    ctx,
+
+  if (claimMembers === undefined) {
+    const result = await writeValidatedRows();
+    await applyNodeInsertSyncFansBatch(ctx, sidecarItems, backend);
+    return { affectedCount: result.affectedCount };
+  }
+  // The RESOLVED-SET verdict, not a row-at-a-time one: the statement rewrites
+  // every candidate at once, so a swap or a handoff of one key between two
+  // rows it touches is legal in the final state and refused by every
+  // intermediate one. One owner of that verdict, shared with the graph merge.
+  // What it returns — the new keys a member already holds — is what the
+  // transition needs to tell the keys it must reserve from the ones it cannot.
+  const heldBySet = await validateResolvedNodeClaims(
+    createUniquenessContext(
+      ctx.graphId,
+      ctx.registry,
+      backend,
+      ctx.uniqueSidecarBatch,
+    ),
     claimItems,
+    [],
+  );
+  // Reserve, write, release: the reservation of every key a writer outside the
+  // set can still take gates the row write, so a writer that took one after the
+  // probe above is refused with no row written (see
+  // `withNodeSetClaimTransition`). What covers this site on a backend that
+  // cannot fence is stated per kind shape: a kind whose scope spans siblings
+  // declares `fencesConstraintProbe` at the entry point and is refused before
+  // this body runs; a kind-scoped one is not refused, and a writer racing its
+  // reservation is refused by the reservation itself.
+  const result = await withNodeSetClaimTransition(
+    ctx,
     backend,
-    alreadyAppliedRowWrite,
+    { kind, items: claimItems, heldBySet, members: claimMembers },
+    writeValidatedRows,
   );
   await applyNodeInsertSyncFansBatch(ctx, sidecarItems, backend);
   return { affectedCount: result.affectedCount };
+}
+
+/**
+ * Checks that the keyed write wrote exactly the rows the dry-run returned.
+ *
+ * No row written is the keyed write's all-or-nothing refusal: some row is no
+ * longer the stored row its after-image was validated from, so nothing was
+ * written and the call reports the `no_row_returned` conflict. Any other
+ * difference is a backend that broke the `updateNodeSet` contract, reported as
+ * such.
+ */
+function assertNodeSetUpdateWroteValidatedRows(
+  kind: string,
+  validated: readonly Readonly<{ id: string }>[],
+  result: UpdateNodeSetResult,
+): void {
+  if (result.rows.length === 0) {
+    throw new DatabaseOperationError(
+      `Set update of ${kind} wrote no row: a row it validated changed before the write`,
+      { operation: "update", entity: "node", reason: "no_row_returned" },
+    );
+  }
+  const validatedIds = new Set(validated.map((row) => row.id));
+  const writtenIds = new Set(result.rows.map((row) => row.id));
+  const exact =
+    result.rows.length === validated.length &&
+    result.affectedCount === validated.length &&
+    writtenIds.size === validatedIds.size &&
+    result.rows.every((row) => row.kind === kind && validatedIds.has(row.id));
+  if (!exact) {
+    throw new ConfigurationError(
+      "The set update's keyed write returned rows other than the ones it was given",
+      { operation: "updateNodeSet", kind },
+    );
+  }
 }

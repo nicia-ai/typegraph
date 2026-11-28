@@ -418,6 +418,10 @@ export const postgresDialect: BuiltinDialectAdapter = {
     return sql`${left} ${operator} (SELECT ${element} FROM jsonb_array_elements_text(${packedValues}::jsonb) AS in_list_element(value))`;
   },
 
+  textMapParameterRows(packedMap, alias) {
+    return sql`jsonb_each_text(${packedMap}::jsonb) AS ${alias}(key, value)`;
+  },
+
   packListValue(values) {
     return packSqlListValue(values, "postgres");
   },

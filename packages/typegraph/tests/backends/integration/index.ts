@@ -140,6 +140,7 @@ export { registerSetUpdateConcurrencyTests } from "./set-update-concurrency";
 export { registerSetUpdateRefusalIntegrationTests } from "./set-update-refusal";
 export { registerSharedNativeTransactionTests } from "./shared-native-transaction";
 export { registerSqlIdentifierIdentityIntegrationTests } from "./sql-identifier-identity";
+export { registerStatementBeforeRefusalIntegrationTests } from "./statement-before-refusal";
 export { registerStoreAnalysisIntegrationTests } from "./store-analysis";
 export { registerStoreOperationIntegrationTests } from "./store-operation";
 export { registerStoreViewIntegrationTests } from "./store-view";

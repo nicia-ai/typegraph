@@ -1,5 +1,4 @@
 import {
-  type CompareAndSetNodeParams,
   type DeleteEdgeParams,
   type DeleteEdgesBatchParams,
   type DeleteNodeParams,
@@ -52,7 +51,6 @@ export const RECORDED_OPTIONAL_WRITE_METHODS = [
   "insertNodeWithSchemaFence",
   "insertNodesBatch",
   "insertNodesBatchReturning",
-  "compareAndSetNode",
   "updateNodeSet",
   "upsertHeterogeneousNodes",
   "updateResolvedNodesBatch",
@@ -87,7 +85,6 @@ type FunctionKeys<T> = {
 
 /** First-parameter shapes that mark a backend method a graph-entity write. */
 type GraphEntityWriteParam =
-  | CompareAndSetNodeParams
   | InsertNodeParams
   | UpdateNodeParams
   | UpdateNodeSetParams

@@ -471,6 +471,15 @@ export type BackendCapabilities = Readonly<{
    */
   maxBindParameters?: number;
   /**
+   * The largest single bound value, in UTF-8 bytes, a bundled backend sends
+   * in one statement where it sizes the value itself. Today that is the keyed
+   * write of a set update (`updateWhere`, `compareAndSet`), which binds its
+   * rows' keys — each carrying the row's stored properties — as one value and
+   * splits them across statements to stay under this budget. Absent means
+   * 64 MiB.
+   */
+  maxBoundValueBytes?: number;
+  /**
    * Whether this backend supplies the claim relations that fence declared
    * constraints (`uniques`, re-keyed onto claim axes, plus
    * `typegraph_edge_claims`) AND implements the claim members.
@@ -889,23 +898,21 @@ export type UpdateNodeParams = Readonly<{
   BackendValidityEndMutation;
 
 /**
- * Parameters for updating a set of live nodes selected by a compiled
- * TypeGraph query.
+ * The selection a set update runs over: live nodes selected by a compiled
+ * TypeGraph query, and the patch each selected row's after-image applies.
  *
  * The candidate query must expose the named node-id column from the same graph
- * and kind. The backend independently fences the rows it writes to
- * `graphId` and `kind`; constructing the matching candidate query remains the
- * caller's responsibility.
- * Property values replace top-level keys, including preserving an explicit
- * JSON `null` value.
+ * and kind. The backend independently fences the rows it reads to `graphId`
+ * and `kind`; constructing the matching candidate query remains the caller's
+ * responsibility. Property values replace top-level keys, including preserving
+ * an explicit JSON `null` value.
  *
- * This is a storage primitive: callers that expose it as a graph mutation are
- * responsible for schema validation and for synchronizing uniqueness,
- * fulltext, and vector sidecars. The result contains after-images only; callers
- * that need previous property values must freeze the candidate set and retain
- * its before-images in the same transaction before invoking this method.
+ * This is an input of {@link GraphBackend.previewNodeSetUpdate}, which writes
+ * nothing: a caller that exposes a set update as a graph mutation validates
+ * the after-images it returns and then writes exactly those rows through
+ * {@link GraphBackend.updateNodeSet}.
  */
-export type UpdateNodeSetParams = Readonly<{
+export type UpdateWhereNodeSetParams = Readonly<{
   operation: "updateWhere";
   graphId: string;
   kind: string;
@@ -918,14 +925,17 @@ export type UpdateNodeSetParams = Readonly<{
 }>;
 
 /**
- * A guarded set update whose exact current-value predicates are applied by the
- * same outer UPDATE that writes the row. Kept as a distinct backend port so an
- * older/custom `updateNodeSet` implementation can never silently ignore the
- * compare-and-set fence.
+ * An exact scalar-or-absence predicate a compare-and-set selection applies to
+ * the row it reads and locks.
  */
 export type NodePropertyExpectation =
   Readonly<{ kind: "value"; value: JsonScalar }> | Readonly<{ kind: "absent" }>;
 
+/**
+ * A guarded set selection whose exact current-value predicates are applied by
+ * the same statement that reads and locks the row. A discriminated arm of its
+ * own, so an `expected` map can never be read as an ordinary selection.
+ */
 export type CompareAndSetNodeParams = Readonly<{
   operation: "compareAndSet";
   graphId: string;
@@ -935,13 +945,68 @@ export type CompareAndSetNodeParams = Readonly<{
   candidateIds: CompiledSelectSql;
   candidateIdColumn: string;
   /**
-   * Exact scalar-or-absence predicates re-checked by the outer UPDATE. This
-   * discriminated map cannot be assigned to an ordinary set update.
+   * Exact scalar-or-absence predicates checked on the locked row. This
+   * discriminated map cannot be assigned to an ordinary set selection.
    */
   expected: Readonly<Record<string, NodePropertyExpectation>>;
 }>;
 
-/** The after-images changed by {@link GraphBackend.updateNodeSet}. */
+/** What {@link GraphBackend.previewNodeSetUpdate} reads. */
+export type PreviewNodeSetUpdateParams =
+  UpdateWhereNodeSetParams | CompareAndSetNodeParams;
+
+/**
+ * One row a set update would write, as its locked dry-run read it.
+ *
+ * `props` is the after-image, computed in SQL by the same expression the
+ * write applies, so what a caller validates is what is written. `rowToken`
+ * names the exact stored row the after-image was computed from (its id,
+ * version, stored properties, validity window and creation time) and is
+ * opaque: a caller hands it back to
+ * {@link GraphBackend.updateNodeSet} unchanged.
+ */
+export type NodeSetUpdatePreviewRow = Readonly<{
+  id: string;
+  /** The stored version the after-image was computed from. */
+  version: number;
+  props: RowProps;
+  rowToken: string;
+}>;
+
+/** The rows a set update would write, read and locked by its dry-run. */
+export type NodeSetUpdatePreview = Readonly<{
+  rows: readonly NodeSetUpdatePreviewRow[];
+}>;
+
+/** One row a keyed set update writes: the dry-run's id and row token. */
+export type NodeSetUpdateRowKey = Readonly<{ id: string; rowToken: string }>;
+
+/**
+ * The keyed write of a set update: the patch, applied to exactly the rows a
+ * {@link GraphBackend.previewNodeSetUpdate} returned.
+ *
+ * All or nothing. A backend writes the rows only when EVERY key still names
+ * the live stored row it was read from — same id, version, stored properties,
+ * validity window and creation time — and that holds without the dry-run's
+ * locks too (a direct call on an autocommit connection). When any key does not (the row was changed, deleted, or deleted
+ * and re-created under its id since the dry-run), it writes nothing and
+ * returns no row. A backend that cannot honor that must not implement
+ * {@link GraphBackend.updateNodeSet}.
+ *
+ * This is a storage primitive: callers that expose it as a graph mutation are
+ * responsible for schema validation and for synchronizing uniqueness,
+ * fulltext, and vector sidecars.
+ */
+export type UpdateNodeSetParams = Readonly<{
+  graphId: string;
+  kind: string;
+  patch: Readonly<Record<string, JsonValue>>;
+  /** Top-level properties to remove (the storage form of an `undefined` patch value). */
+  unsetProperties?: readonly string[];
+  rows: readonly NodeSetUpdateRowKey[];
+}>;
+
+/** The after-images written by {@link GraphBackend.updateNodeSet}. */
 export type UpdateNodeSetResult = Readonly<{
   affectedCount: number;
   rows: readonly NodeRow[];
@@ -2541,6 +2606,22 @@ export type GraphBackend = Readonly<{
     this: void,
     params: HeterogeneousNodeUpsertParams,
   ) => Promise<readonly NodeRow[]>;
+  /**
+   * The locked dry-run of a set update (`updateWhere`, `compareAndSet`): reads
+   * every live row the selection names and returns its after-image, writing
+   * nothing. On an engine with row locks the rows are locked as an UPDATE
+   * locks them, so the {@link GraphBackend.updateNodeSet} that follows in the
+   * same transaction finds them unchanged by any other session.
+   */
+  previewNodeSetUpdate?: (
+    this: void,
+    params: PreviewNodeSetUpdateParams,
+  ) => Promise<NodeSetUpdatePreview>;
+  /**
+   * The keyed write of a set update: applies the patch to exactly the rows a
+   * {@link GraphBackend.previewNodeSetUpdate} returned, all or nothing (see
+   * {@link UpdateNodeSetParams}).
+   */
   updateNodeSet?: (
     this: void,
     params: UpdateNodeSetParams,
@@ -2549,10 +2630,6 @@ export type GraphBackend = Readonly<{
     this: void,
     params: ResolvedNodeUpdateBatchParams,
   ) => Promise<readonly NodeRow[]>;
-  compareAndSetNode?: (
-    this: void,
-    params: CompareAndSetNodeParams,
-  ) => Promise<UpdateNodeSetResult>;
   deleteNode: (this: void, params: DeleteNodeParams) => Promise<void>;
   /**
    * Permanently removes one node and what it owns: its uniqueness entries,
@@ -4075,7 +4152,7 @@ export type NodeEntityWriteBackend = Pick<
   | "updateNode"
   | "upsertHeterogeneousNodes"
   | "updateResolvedNodesBatch"
-  | "compareAndSetNode"
+  | "previewNodeSetUpdate"
   | "updateNodeSet"
   | "deleteNode"
   | "hardDeleteNode"

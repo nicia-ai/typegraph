@@ -902,9 +902,14 @@ function createSqliteOperationBackend(
     });
   }
 
-  const batchConfig = computeSqliteBatchChunkSizes(
-    capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
-  );
+  const batchConfig = {
+    ...computeSqliteBatchChunkSizes(
+      capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
+    ),
+    ...(capabilities.maxBoundValueBytes === undefined ?
+      {}
+    : { setUpdateKeyBytes: capabilities.maxBoundValueBytes }),
+  };
 
   const fulltextMembers =
     fulltextStrategy === undefined ?

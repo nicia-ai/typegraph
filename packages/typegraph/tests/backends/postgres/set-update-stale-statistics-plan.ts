@@ -12,11 +12,15 @@
  * multiplies their frequencies and estimates thousands of candidates whatever
  * the actual count.
  *
- * Each case captures the UPDATE that `updateWhere()` or `compareAndSet()`
- * sends, refusing it in the driver before it runs, and replays it under
- * `EXPLAIN (ANALYZE, BUFFERS)` in a rolled-back transaction: the plan
- * measured is the plan of the statement the store sent, executed against the
- * rows it would have written.
+ * A set update sends two statements: a locked dry-run, which evaluates the
+ * candidate query and reads every candidate row, and a keyed UPDATE of the
+ * rows the dry-run returned. Each case captures both — the UPDATE refused in
+ * the driver before it runs — and replays each under `EXPLAIN (ANALYZE,
+ * BUFFERS)` in a rolled-back transaction: the plans measured are those of the
+ * statements the store sent, executed against the rows they would have read
+ * and written. The bounds below that predate the split are the dry-run's,
+ * which reads the candidates exactly as the single UPDATE used to; the keyed
+ * write is measured on its own (`KeyedWriteMeasurement`).
  */
 import { expect, it } from "vitest";
 import { z } from "zod";
@@ -27,6 +31,7 @@ import {
   defineNode,
   type GraphBackend,
 } from "../../../src";
+import { SET_ROW_TOKEN_COLUMN } from "../../../src/backend/drizzle/operations/nodes";
 import type { BundledBackendCapabilityOverrides } from "../../../src/backend/types";
 import { requireDefined } from "../../../src/utils/presence";
 
@@ -215,6 +220,67 @@ function rowsVisited(scan: PlanNode): number {
   );
 }
 
+/** Whether `text` is a set update's locked dry-run. */
+function isSetUpdateDryRun(text: string): boolean {
+  return text.includes(`"${SET_ROW_TOKEN_COLUMN}"`) && !isNodesUpdate(text);
+}
+
+/**
+ * Runs `operation` — one set update — refusing its keyed write unexecuted, and
+ * replays both of its statements under `EXPLAIN (ANALYZE, BUFFERS)`: the
+ * locked dry-run, which reads the candidates, and the keyed write of the rows
+ * that dry-run returned.
+ */
+async function explainSetUpdate(
+  harness: StaleStatisticsHarness,
+  operation: () => Promise<unknown>,
+): Promise<Readonly<{ dryRun: PlanNode; write: PlanNode }>> {
+  const recordedBefore = harness.recorded.length;
+  const intercepted = harness.interceptNextNodesUpdate();
+  await expect(operation()).rejects.toThrow();
+  const write = await intercepted;
+  const dryRun = requireDefined(
+    harness.recorded
+      .slice(recordedBefore)
+      .findLast((statement) => isSetUpdateDryRun(statement.text)),
+  );
+  return {
+    dryRun: await harness.explainAnalyze(dryRun),
+    write: await harness.explainAnalyze(write),
+  };
+}
+
+/**
+ * The keyed write's plan, measured: the rows it wrote, its keyed lookups (one
+ * finds each target row, one counts the rows that still carry their token),
+ * and how many other reads of the nodes table it made — none, whatever the
+ * statistics say, since its keys come from a bound list the planner cannot
+ * mistake for a sliver of the table.
+ */
+type KeyedWriteMeasurement = Readonly<{
+  written: number;
+  keyedLookups: number;
+  otherScans: number;
+}>;
+
+function measureKeyedWrite(
+  plan: PlanNode,
+  written: number,
+): KeyedWriteMeasurement {
+  const scans = nodesTableScans(plan);
+  const keyed = scans.filter((scan) => isKeyedLookup(scan, written));
+  return {
+    written: plan["Actual Rows"],
+    keyedLookups: keyed.length,
+    otherScans: scans.length - keyed.length,
+  };
+}
+
+/** What every keyed write of `written` rows measures. */
+function keyedWriteOf(written: number): KeyedWriteMeasurement {
+  return { written, keyedLookups: 2, otherScans: 0 };
+}
+
 const Item = defineNode("Item", {
   schema: z.object({ status: z.string() }),
 });
@@ -238,6 +304,7 @@ type StaleSetUpdateMeasurement = Readonly<{
   otherScanLoops: readonly number[];
   /** See {@link SeparatedSetUpdateMeasurement.rowsProduced}. */
   rowsProduced: number;
+  write: KeyedWriteMeasurement;
 }>;
 
 const separatedSchema = z.object({ status: z.string() });
@@ -272,6 +339,7 @@ type SeparatedSetUpdateMeasurement = Readonly<{
   tableRows: number;
   /** Heap pages of the nodes table. */
   tablePages: number;
+  write: KeyedWriteMeasurement;
 }>;
 
 /** Ids a by-id selection names in the separated distribution. */
@@ -298,20 +366,18 @@ async function measureSeparatedSetUpdate(
     })),
   );
 
-  const intercepted = harness.interceptNextNodesUpdate();
   const selectedIds = Array.from(
     { length: Math.min(SEPARATED_IDS_SELECTED, candidates) },
     (_, index) => `${idPrefix}-${index}`,
   );
-  await expect(
+  const { dryRun: plan, write } = await explainSetUpdate(harness, () =>
     selection === "all" ?
       collection.updateWhere({ all: true, patch: { status: "promoted" } })
     : collection.updateWhere({
         where: (node) => node.id.in(selectedIds).and(node.status.eq("pending")),
         patch: { status: "promoted" },
       }),
-  ).rejects.toThrow();
-  const plan = await harness.explainAnalyze(await intercepted);
+  );
   const scans = nodesTableScans(plan);
   const written = selection === "all" ? candidates : selectedIds.length;
   const keyed = new Set(scans.filter((scan) => isKeyedLookup(scan, written)));
@@ -330,6 +396,7 @@ async function measureSeparatedSetUpdate(
     tablePages: await harness.queryNumber(
       `SELECT pg_relation_size('${NODES_TABLE}') / current_setting('block_size')::int`,
     ),
+    write: measureKeyedWrite(write, written),
   };
 }
 
@@ -348,14 +415,12 @@ async function measureStaleSetUpdate(
     })),
   );
 
-  const intercepted = harness.interceptNextNodesUpdate();
-  await expect(
+  const { dryRun: plan, write } = await explainSetUpdate(harness, () =>
     store.nodes.Item.updateWhere({
       where: (item) => item.status.eq("pending"),
       patch: { status: "promoted" },
     }),
-  ).rejects.toThrow();
-  const plan = await harness.explainAnalyze(await intercepted);
+  );
   const scans = nodesTableScans(plan);
   const keyed = scans.filter((scan) => isKeyedLookup(scan, candidates));
   const others = scans.filter((scan) => !keyed.includes(scan));
@@ -371,6 +436,7 @@ async function measureStaleSetUpdate(
     keyedLookups: keyed.length,
     otherScanLoops: others.map((scan) => scan["Actual Loops"]),
     rowsProduced: rowsProduced(plan),
+    write: measureKeyedWrite(write, candidates),
   };
 }
 
@@ -400,6 +466,7 @@ type ReusedIdSetUpdateMeasurement = Readonly<{
   otherScans: readonly Readonly<{ loops: number; rowsVisited: number }>[];
   buffers: number;
   tableRows: number;
+  write: KeyedWriteMeasurement;
 }>;
 
 /**
@@ -440,14 +507,12 @@ async function measureReusedIdSetUpdate(
     })),
   );
 
-  const intercepted = harness.interceptNextNodesUpdate();
-  await expect(
+  const { dryRun: plan, write } = await explainSetUpdate(harness, () =>
     store.nodes.Item.updateWhere({
       where: (item) => item.status.eq("pending"),
       patch: { status: "promoted" },
     }),
-  ).rejects.toThrow();
-  const plan = await harness.explainAnalyze(await intercepted);
+  );
   const scans = nodesTableScans(plan);
   const keyed = scans.filter(
     (scan) =>
@@ -470,6 +535,7 @@ async function measureReusedIdSetUpdate(
       })),
     buffers: plan["Shared Hit Blocks"] + plan["Shared Read Blocks"],
     tableRows: await harness.queryNumber(`SELECT count(*) FROM ${NODES_TABLE}`),
+    write: measureKeyedWrite(write, REUSED_ID_CANDIDATES),
   };
 }
 
@@ -482,6 +548,7 @@ type StalePointMutationMeasurement = Readonly<{
   keyedLookups: number;
   /** Rows each other scan of the nodes table returned and filtered out. */
   otherScans: readonly Readonly<{ rows: number; removed: number }>[];
+  write: KeyedWriteMeasurement;
 }>;
 
 async function measureStalePointMutation(
@@ -501,8 +568,7 @@ async function measureStalePointMutation(
   );
   const targetId = target.id;
 
-  const intercepted = harness.interceptNextNodesUpdate();
-  await expect(
+  const { dryRun: plan, write } = await explainSetUpdate(harness, () =>
     operation === "compareAndSet" ?
       store.nodes.Item.compareAndSet(targetId, {
         expected: { status: "pending" },
@@ -512,8 +578,7 @@ async function measureStalePointMutation(
         where: (item) => item.id.eq(targetId),
         patch: { status: "promoted" },
       }),
-  ).rejects.toThrow();
-  const plan = await harness.explainAnalyze(await intercepted);
+  );
   const scans = nodesTableScans(plan);
   const keyed = scans.filter((scan) => isKeyedLookup(scan, 1));
   return {
@@ -525,6 +590,7 @@ async function measureStalePointMutation(
         rows: scan["Actual Rows"],
         removed: scan["Rows Removed by Filter"] ?? 0,
       })),
+    write: measureKeyedWrite(write, 1),
   };
 }
 
@@ -558,6 +624,7 @@ export function registerStaleStatisticsPlanCases(
           measured.rowsProduced <= MAX_PLAN_ROWS_PER_CANDIDATE * candidates,
         withinBuffers:
           measured.buffers <= MAX_BUFFERS_PER_CANDIDATE * candidates,
+        write: measured.write,
       }).toEqual({
         written: candidates,
         keyedLookups: 2,
@@ -565,6 +632,7 @@ export function registerStaleStatisticsPlanCases(
         withinRowsVisited: true,
         withinRowsProduced: true,
         withinBuffers: true,
+        write: keyedWriteOf(candidates),
       });
     },
   );
@@ -610,6 +678,7 @@ export function registerStaleStatisticsPlanCases(
         withinBuffers:
           measured.buffers <=
           measured.tablePages + MAX_BUFFERS_PER_CANDIDATE * candidates,
+        write: measured.write,
       }).toEqual({
         written: candidates,
         everyOtherReadRunsOnce: true,
@@ -617,6 +686,7 @@ export function registerStaleStatisticsPlanCases(
         withinRowsVisited: true,
         withinRowsProduced: true,
         withinBuffers: true,
+        write: keyedWriteOf(candidates),
       });
     },
   );
@@ -650,16 +720,18 @@ export function registerStaleStatisticsPlanCases(
         MAX_ROWS_VISITED_PER_CANDIDATE * SEPARATED_IDS_SELECTED,
       withinBuffers:
         measured.buffers <= MAX_BUFFERS_PER_CANDIDATE * SEPARATED_IDS_SELECTED,
+      write: measured.write,
     }).toEqual({
       written: SEPARATED_IDS_SELECTED,
       wholeTableScans: 0,
       everyOtherReadRunsOnce: true,
       withinRowsVisited: true,
       withinBuffers: true,
+      write: keyedWriteOf(SEPARATED_IDS_SELECTED),
     });
   });
 
-  it("writes every candidate in one statement whatever the bind budget", async (ctx) => {
+  it("reads and writes every candidate in one statement each whatever the bind budget", async (ctx) => {
     const active = harness();
     if (active === undefined) {
       ctx.skip();
@@ -686,9 +758,17 @@ export function registerStaleStatisticsPlanCases(
       isNodesUpdate(statement.text),
     );
 
+    const dryRuns = active.recorded.filter((statement) =>
+      isSetUpdateDryRun(statement.text),
+    );
+
     expect(affectedCount).toBe(ids.length);
     expect(updates).toHaveLength(1);
+    expect(dryRuns).toHaveLength(1);
     expect(requireDefined(updates[0]).values.length).toBeLessThanOrEqual(
+      bindBudget,
+    );
+    expect(requireDefined(dryRuns[0]).values.length).toBeLessThanOrEqual(
       bindBudget,
     );
   });
@@ -725,11 +805,17 @@ export function registerStaleStatisticsPlanCases(
       const candidateReadByKey = measured.otherScans.length === 0;
       expect(measured).toEqual(
         candidateReadByKey ?
-          { written: 1, keyedLookups: writeLookups + 1, otherScans: [] }
+          {
+            written: 1,
+            keyedLookups: writeLookups + 1,
+            otherScans: [],
+            write: keyedWriteOf(1),
+          }
         : {
             written: 1,
             keyedLookups: writeLookups,
             otherScans: [{ rows: 1, removed: POINT_MUTATION_FRESH_ROWS - 1 }],
+            write: keyedWriteOf(1),
           },
       );
     },
@@ -760,10 +846,12 @@ export function registerStaleStatisticsPlanCases(
       written: measured.written,
       keyedLookups: measured.keyedLookups,
       otherScanLoops: measured.otherScans.map((scan) => scan.loops),
+      write: measured.write,
     }).toEqual({
       written: REUSED_ID_CANDIDATES,
       keyedLookups: [lookup, lookup],
       otherScanLoops: [1],
+      write: keyedWriteOf(REUSED_ID_CANDIDATES),
     });
   });
 }
