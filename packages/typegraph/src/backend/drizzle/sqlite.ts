@@ -902,9 +902,14 @@ function createSqliteOperationBackend(
     });
   }
 
-  const batchConfig = computeSqliteBatchChunkSizes(
-    capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
-  );
+  const batchConfig = {
+    ...computeSqliteBatchChunkSizes(
+      capabilities.maxBindParameters ?? SQLITE_MAX_BIND_PARAMETERS,
+    ),
+    ...(capabilities.maxBoundValueBytes === undefined ?
+      {}
+    : { setUpdateKeyBytes: capabilities.maxBoundValueBytes }),
+  };
 
   const fulltextMembers =
     fulltextStrategy === undefined ?
@@ -2311,7 +2316,8 @@ export function buildSqliteEngineProfile(
                         gateFulltext(
                           txBackend,
                           ctx.contributionMaterializer.assertInitialized,
-                          ctx.contributionMaterializer.refuseUnavailableFulltext,
+                          ctx.contributionMaterializer
+                            .refuseUnavailableFulltext,
                         ),
                         fencePlan,
                       ),
@@ -2822,8 +2828,9 @@ function sqliteNativeHandle(db: AnySqliteDatabase): NativeHandle {
  */
 function readSqliteInTransaction(client: object): boolean {
   try {
-    return (client as Readonly<{ inTransaction?: unknown }>).inTransaction ===
-      true;
+    return (
+      (client as Readonly<{ inTransaction?: unknown }>).inTransaction === true
+    );
   } catch {
     return false;
   }

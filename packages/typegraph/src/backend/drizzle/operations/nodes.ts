@@ -26,6 +26,7 @@ import type {
   HardDeleteNodesBatchParams,
   InsertNodeParams,
   NodePropertyExpectation,
+  NodeSetUpdateRowKey,
   PreviewNodeSetUpdateParams,
   ResolvedNodeUpdateBatchParams,
   SchemaWriteFenceParams,
@@ -1447,43 +1448,11 @@ export function buildUpdateNodeSet(
   const { nodes } = tables;
   const adapter = getDialect(dialect);
   const relationNames = statementRelationNames(tables, SET_RELATIONS);
-  const selected = relationNames[SET_SELECTED];
   const locked = sql.identifier(relationNames[SET_LOCKED]);
-  const keyRows = portableSql.identifier(relationNames[SET_KEY_ROWS]);
-  const key = setKeyColumns(relationNames);
-  // Built entry by entry rather than through `Object.fromEntries`, so no id
-  // is ever read as an object's special key: each entry is JSON as written.
-  const packedRows = `{${params.rows
-    .map((row) => `${JSON.stringify(row.id)}:${JSON.stringify(row.rowToken)}`)
-    .join(",")}}`;
-  const keysCte = setKeysCte(
-    adapter,
-    dialect,
-    relationNames,
-    params,
-    adapter.textMapParameterRows(portableSql`${packedRows}`, keyRows),
-    portableSql`${keyRows}.${portableSql.identifier("key")}`,
-    portableSql`${keyRows}.${portableSql.identifier("value")}`,
-  );
-  const keyToken = portableSql`${portableSql.identifier(relationNames[SET_KEYS])}.${portableSql.identifier(SET_KEY_TOKEN)}`;
   const lockedColumn = (name: string): SQL =>
     sql`${locked}.${sql.identifier(name)}`;
   return sql`
-    ${keysCte},
-    ${locked} AS MATERIALIZED (
-      SELECT ${qualifiedColumn(selected, nodes.graphId)} AS ${sql.identifier(SET_LOCKED_GRAPH_ID)},
-             ${qualifiedColumn(selected, nodes.kind)} AS ${sql.identifier(SET_LOCKED_KIND)},
-             ${qualifiedColumn(selected, nodes.id)} AS ${sql.identifier(SET_LOCKED_ID)},
-             ${key.token} AS ${sql.identifier(SET_LOCKED_TOKEN)}
-      FROM ${key.keys}
-      JOIN ${nodes} AS ${sql.identifier(selected)}
-        ON ${qualifiedColumn(selected, nodes.graphId)} = ${key.graphId}
-       AND ${qualifiedColumn(selected, nodes.kind)} = ${key.kind}
-       AND ${qualifiedColumn(selected, nodes.id)} = ${key.id}
-      WHERE ${qualifiedColumn(selected, nodes.deletedAt)} IS NULL
-        AND ${toDrizzleSql(setRowTokenMatches(adapter, nodes, selected, keyToken), dialect)}
-      ${rowLock([selected])}
-    )
+    ${setKeyedRowsCtes(tables, dialect, relationNames, params, rowLock)}
     UPDATE ${nodes}
     SET ${quotedColumn(nodes.props)} = ${setPatchedProps(adapter, dialect, nodes, params)},
         ${quotedColumn(nodes.updatedAt)} = ${timestamp},
@@ -1510,6 +1479,152 @@ export function buildUpdateNodeSet(
       ].map((column) => quotedColumn(column)),
       sql`, `,
     )}
+  `;
+}
+
+/**
+ * Builds the count half of a SPLIT keyed write: how many of `params.rows`
+ * still carry their tokens, each counted row locked by `rowLock` — the same
+ * key and locked CTEs ({@link setKeyedRowsCtes}) the write itself opens with,
+ * so the rows counted here are the rows a write of the same keys would write.
+ *
+ * A write whose keys exceed one statement's bound-value budget runs one count
+ * per part before it writes any part, inside one transaction: a part whose
+ * count is short is found before the first part is written, and the locks the
+ * counts took hold every counted row until the writes.
+ */
+export function buildCountNodeSetKeys(
+  tables: Tables,
+  dialect: SqlDialect,
+  params: Pick<UpdateNodeSetParams, "graphId" | "kind" | "rows">,
+  rowLock: RowLockClause,
+): SQL {
+  const relationNames = statementRelationNames(tables, SET_RELATIONS);
+  return sql`
+    ${setKeyedRowsCtes(tables, dialect, relationNames, params, rowLock)}
+    SELECT COUNT(*) AS ${sql.identifier(SET_COUNT_COLUMN)}
+    FROM ${sql.identifier(relationNames[SET_LOCKED])}
+  `;
+}
+
+/** The column {@link buildCountNodeSetKeys} reports its count under. */
+export const SET_COUNT_COLUMN = "tg_set_count";
+
+/**
+ * The bytes one row key adds to the bound value of a keyed write — its entry
+ * in the JSON object {@link setPackedRows} builds, with its separator.
+ */
+function setRowKeyBytes(row: NodeSetUpdateRowKey): number {
+  return (
+    TEXT_ENCODER.encode(setPackedRowEntry(row)).byteLength +
+    PACKED_SEPARATOR_BYTES
+  );
+}
+
+const TEXT_ENCODER = new TextEncoder();
+
+/** The bytes of the object braces and one entry separator. */
+const PACKED_SEPARATOR_BYTES = 1;
+const PACKED_BRACES_BYTES = 2;
+
+/** One row key as an entry of the packed object: `"id":"token"`. */
+function setPackedRowEntry(row: NodeSetUpdateRowKey): string {
+  return `${JSON.stringify(row.id)}:${JSON.stringify(row.rowToken)}`;
+}
+
+/**
+ * The row keys as ONE JSON object from each id to its token. Built entry by
+ * entry rather than through `Object.fromEntries`, so no id is ever read as an
+ * object's special key: each entry is JSON as written.
+ */
+function setPackedRows(rows: readonly NodeSetUpdateRowKey[]): string {
+  return `{${rows.map((row) => setPackedRowEntry(row)).join(",")}}`;
+}
+
+/**
+ * How a keyed write's rows split so that no statement binds a packed key
+ * value over `budgetBytes`: consecutive parts, in the given order, or the
+ * size of the one row key that alone exceeds the budget.
+ */
+export type NodeSetKeyParts =
+  | Readonly<{ fits: true; parts: readonly (readonly NodeSetUpdateRowKey[])[] }>
+  | Readonly<{ fits: false; keyBytes: number }>;
+
+/**
+ * Splits `rows` into the fewest consecutive parts whose packed key value
+ * ({@link setPackedRows}) each stays within `budgetBytes`. THE one owner of
+ * the packed size: it measures the same entries the statement binds.
+ */
+export function splitNodeSetRowKeys(
+  rows: readonly NodeSetUpdateRowKey[],
+  budgetBytes: number,
+): NodeSetKeyParts {
+  const parts: NodeSetUpdateRowKey[][] = [];
+  let current: NodeSetUpdateRowKey[] = [];
+  let currentBytes = PACKED_BRACES_BYTES;
+  for (const row of rows) {
+    const rowBytes = setRowKeyBytes(row);
+    if (PACKED_BRACES_BYTES + rowBytes > budgetBytes) {
+      return { fits: false, keyBytes: PACKED_BRACES_BYTES + rowBytes };
+    }
+    if (current.length > 0 && currentBytes + rowBytes > budgetBytes) {
+      parts.push(current);
+      current = [];
+      currentBytes = PACKED_BRACES_BYTES;
+    }
+    current.push(row);
+    currentBytes += rowBytes;
+  }
+  if (current.length > 0) parts.push(current);
+  return { fits: true, parts };
+}
+
+/**
+ * The key and locked CTEs a keyed write opens with — the rows to write, keyed
+ * by id, with the token each must still carry, and those of them that still
+ * carry it, locked by `rowLock`. Shared by the write and by its split count,
+ * so the two cannot disagree about which rows are counted.
+ */
+function setKeyedRowsCtes(
+  tables: Tables,
+  dialect: SqlDialect,
+  relationNames: SetRelationNames,
+  params: Pick<UpdateNodeSetParams, "graphId" | "kind" | "rows">,
+  rowLock: RowLockClause,
+): SQL {
+  const { nodes } = tables;
+  const adapter = getDialect(dialect);
+  const selected = relationNames[SET_SELECTED];
+  const locked = sql.identifier(relationNames[SET_LOCKED]);
+  const keyRows = portableSql.identifier(relationNames[SET_KEY_ROWS]);
+  const key = setKeyColumns(relationNames);
+  const packedRows = setPackedRows(params.rows);
+  const keysCte = setKeysCte(
+    adapter,
+    dialect,
+    relationNames,
+    params,
+    adapter.textMapParameterRows(portableSql`${packedRows}`, keyRows),
+    portableSql`${keyRows}.${portableSql.identifier("key")}`,
+    portableSql`${keyRows}.${portableSql.identifier("value")}`,
+  );
+  const keyToken = portableSql`${portableSql.identifier(relationNames[SET_KEYS])}.${portableSql.identifier(SET_KEY_TOKEN)}`;
+  return sql`
+    ${keysCte},
+    ${locked} AS MATERIALIZED (
+      SELECT ${qualifiedColumn(selected, nodes.graphId)} AS ${sql.identifier(SET_LOCKED_GRAPH_ID)},
+             ${qualifiedColumn(selected, nodes.kind)} AS ${sql.identifier(SET_LOCKED_KIND)},
+             ${qualifiedColumn(selected, nodes.id)} AS ${sql.identifier(SET_LOCKED_ID)},
+             ${key.token} AS ${sql.identifier(SET_LOCKED_TOKEN)}
+      FROM ${key.keys}
+      JOIN ${nodes} AS ${sql.identifier(selected)}
+        ON ${qualifiedColumn(selected, nodes.graphId)} = ${key.graphId}
+       AND ${qualifiedColumn(selected, nodes.kind)} = ${key.kind}
+       AND ${qualifiedColumn(selected, nodes.id)} = ${key.id}
+      WHERE ${qualifiedColumn(selected, nodes.deletedAt)} IS NULL
+        AND ${toDrizzleSql(setRowTokenMatches(adapter, nodes, selected, keyToken), dialect)}
+      ${rowLock([selected])}
+    )
   `;
 }
 

@@ -17,10 +17,7 @@
  * before this extraction and is unchanged.
  */
 import type { KindRemovalRow, RecordKindRemovalParams } from "../../../types";
-import {
-  mapKindRemovalRow,
-  type RawKindRemovalRow,
-} from "../../kind-removals";
+import { mapKindRemovalRow, type RawKindRemovalRow } from "../../kind-removals";
 
 /**
  * The three statements the kind-removals table needs, bound to one

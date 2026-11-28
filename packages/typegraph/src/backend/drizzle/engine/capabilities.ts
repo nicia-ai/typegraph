@@ -133,8 +133,10 @@ export function finalizeEngineCapabilities(
         deps.writeFenceConflict !== "commit-time"),
     execution: {
       ...declaredExecutionWithoutCommitOutcome,
-      ...(declaredCommitOutcome === undefined ||
-      !declared.execution.interactiveTransactions ?
+      ...((
+        declaredCommitOutcome === undefined ||
+        !declared.execution.interactiveTransactions
+      ) ?
         {}
       : { commitOutcome: declaredCommitOutcome }),
       atomicBatch,

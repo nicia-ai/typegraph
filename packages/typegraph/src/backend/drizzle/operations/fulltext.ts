@@ -70,7 +70,9 @@ export function buildFulltextSearch(
   // not a cleverer SQL form.
   if (candidates !== undefined) {
     const candidateSql =
-      isSqlFragment(candidates) ? toDrizzleSql(candidates, dialect) : candidates;
+      isSqlFragment(candidates) ?
+        toDrizzleSql(candidates, dialect)
+      : candidates;
     conditions.push(sql`"node_id" IN (${candidateSql})`);
   }
 

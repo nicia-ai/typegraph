@@ -50,7 +50,10 @@ export type {
  * profile author implementing `instantiateStatement` needs the type to
  * switch on its `kind`.
  */
-export type { FenceStatements, WriteFencePlan } from "../../capabilities/write-fence";
+export type {
+  FenceStatements,
+  WriteFencePlan,
+} from "../../capabilities/write-fence";
 /**
  * The PostgreSQL {@link SqlEngineProfile} builder — the derivation base
  * `deriveEngineProfile` (this entrypoint) starts every derived PostgreSQL

@@ -757,7 +757,10 @@ function incumbentOrder(tables: Tables, dialect: SqlDialect): SQL {
   const { edges } = tables;
   const relation = getTableName(edges).replaceAll('"', '""');
   const column = edges.id.name.replaceAll('"', '""');
-  return codePointOrderKey(fragmentSql.raw(`"${relation}"."${column}"`), dialect);
+  return codePointOrderKey(
+    fragmentSql.raw(`"${relation}"."${column}"`),
+    dialect,
+  );
 }
 
 /**

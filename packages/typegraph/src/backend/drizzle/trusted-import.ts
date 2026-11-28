@@ -319,8 +319,11 @@ export function createSqliteTrustedImportSession(
           item.kind,
           item.id,
           JSON.stringify(item.props),
-          resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
-            DATABASE_NULL,
+          resolveStampedValidityLowerBound(
+            item.validFrom,
+            item.validTo,
+            timestamp,
+          ) ?? DATABASE_NULL,
           item.validTo ?? DATABASE_NULL,
           timestamp,
           timestamp,
@@ -343,8 +346,11 @@ export function createSqliteTrustedImportSession(
           JSON.stringify(item.props),
           item.matchIdentity?.name ?? DATABASE_NULL,
           item.matchIdentity?.key ?? DATABASE_NULL,
-          resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
-            DATABASE_NULL,
+          resolveStampedValidityLowerBound(
+            item.validFrom,
+            item.validTo,
+            timestamp,
+          ) ?? DATABASE_NULL,
           item.validTo ?? DATABASE_NULL,
           timestamp,
           timestamp,
@@ -391,8 +397,11 @@ export function createPostgresTrustedImportSession(
         postgresArray(
           params.map(
             (item) =>
-              resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
-              DATABASE_NULL,
+              resolveStampedValidityLowerBound(
+                item.validFrom,
+                item.validTo,
+                timestamp,
+              ) ?? DATABASE_NULL,
           ),
         ),
         postgresArray(params.map((item) => item.validTo ?? DATABASE_NULL)),
@@ -420,8 +429,11 @@ export function createPostgresTrustedImportSession(
         postgresArray(
           params.map(
             (item) =>
-              resolveStampedValidityLowerBound(item.validFrom, item.validTo, timestamp) ??
-              DATABASE_NULL,
+              resolveStampedValidityLowerBound(
+                item.validFrom,
+                item.validTo,
+                timestamp,
+              ) ?? DATABASE_NULL,
           ),
         ),
         postgresArray(params.map((item) => item.validTo ?? DATABASE_NULL)),

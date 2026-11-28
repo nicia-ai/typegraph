@@ -192,10 +192,7 @@ type ContributionMembers = Readonly<{
   deleteVectorSlotContribution?: (slot: VectorSlot) => Promise<void>;
   ensureReconciliationMarkersTable: () => Promise<void>;
   getReconciliationMarker: (graphId: string) => Promise<number | undefined>;
-  setReconciliationMarker: (
-    graphId: string,
-    version: number,
-  ) => Promise<void>;
+  setReconciliationMarker: (graphId: string, version: number) => Promise<void>;
 }>;
 
 /**
@@ -321,9 +318,7 @@ export function createContributionMembers(
    * diagnostic's whole job is to notice that a table confirmed present
    * earlier has since been dropped.
    */
-  async function contributionTableExists(
-    tableName: string,
-  ): Promise<boolean> {
+  async function contributionTableExists(tableName: string): Promise<boolean> {
     const rows = await execute<Record<string, unknown>>(
       operationStrategy.buildTableExists(tableName),
     );
@@ -352,9 +347,7 @@ export function createContributionMembers(
     // Withheld rather than wired-and-throwing when the driver cannot hold a
     // session: the rebuild must refuse with its own typed error naming the
     // absent fence, matching `capabilities.contributions.rebuild`.
-    ...(schemaWriteTransaction === undefined ?
-      {}
-    : { schemaWriteTransaction }),
+    ...(schemaWriteTransaction === undefined ? {} : { schemaWriteTransaction }),
   });
 
   const members: ContributionMembers = {
@@ -392,30 +385,21 @@ export function createContributionMembers(
       graphId: string,
       vectorSlots: readonly VectorSlot[],
     ): Promise<readonly ContributionDiagnostic[]> {
-      return contributionMaterializer.verifyContributions(
-        graphId,
-        vectorSlots,
-      );
+      return contributionMaterializer.verifyContributions(graphId, vectorSlots);
     },
 
     async repairContributions(
       graphId: string,
       vectorSlots: readonly VectorSlot[],
     ): Promise<ContributionRepairResult> {
-      return contributionMaterializer.repairContributions(
-        graphId,
-        vectorSlots,
-      );
+      return contributionMaterializer.repairContributions(graphId, vectorSlots);
     },
 
     async probeContributions(
       graphId: string,
       vectorSlots: readonly VectorSlot[],
     ): Promise<readonly ContributionProbeEntry[]> {
-      return contributionMaterializer.probeContributions(
-        graphId,
-        vectorSlots,
-      );
+      return contributionMaterializer.probeContributions(graphId, vectorSlots);
     },
 
     async rebuildContribution(
@@ -459,9 +443,7 @@ export function createContributionMembers(
           await contributionMaterializer.assertVectorSlots(slots);
         },
 
-        async deleteVectorSlotContribution(
-          slot: VectorSlot,
-        ): Promise<void> {
+        async deleteVectorSlotContribution(slot: VectorSlot): Promise<void> {
           await contributionMaterializer.dropVectorSlot(slot);
         },
       }),

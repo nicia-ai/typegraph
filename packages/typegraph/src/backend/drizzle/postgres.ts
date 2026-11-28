@@ -1164,7 +1164,8 @@ function postgresNativeHandle(db: object): NativeHandle {
         pinned,
         // PGlite marks its transaction client closed once the transaction
         // has committed or rolled back, and refuses statements from then on.
-        isOpen: () => (pinned as Readonly<{ closed?: unknown }>).closed !== true,
+        isOpen: () =>
+          (pinned as Readonly<{ closed?: unknown }>).closed !== true,
       };
 }
 
@@ -1350,8 +1351,7 @@ function buildPostgresEngineProfileInternal(
   // object carries one anyway, so it is read as what it may be.
   const requestedCommitOutcome: unknown = (
     options.capabilities?.execution as
-      | Readonly<{ commitOutcome?: unknown }>
-      | undefined
+      Readonly<{ commitOutcome?: unknown }> | undefined
   )?.commitOutcome;
   if (transactionScoped && requestedCommitOutcome === "commit-reply") {
     throw new ConfigurationError(
@@ -2558,58 +2558,55 @@ function buildPostgresEngineProfileInternal(
           SCHEMA_WRITE_ADVISORY_FENCE_TRANSACTION
         : undefined;
       const attempt = (): Promise<T> =>
-        openCommittingTransaction(
-          transactionConfig,
-          async (tx) => {
-            await acquireSchemaWriteFence(tx, graphId, fence, {
-              kind: "read-with-lock",
+        openCommittingTransaction(transactionConfig, async (tx) => {
+          await acquireSchemaWriteFence(tx, graphId, fence, {
+            kind: "read-with-lock",
+          });
+          // Schema writes run DDL: over an allocation, where it lives.
+          await bindSchemaWriteSessionToAllocation(tx);
+          // The fence resolved above is held here, so the schema-write-capable
+          // InternalOperationBackend is used intentionally (see its type).
+          const { backend: txBackend, drainAndClose } =
+            createTransactionBackend({
+              db: tx,
+              connection: nestedTransactionConnection,
+              adapterOptions,
+              operationStrategy,
+              tableNames,
+              capabilities,
+              fulltextStrategy,
+              vectorStrategy,
+              contributionMaterializer: ctx.contributionMaterializer,
+              iterativeScanProbe,
+              schemaVersionsTable: tables.schemaVersions,
+              contributionMaterializationsTable:
+                tables.contributionMaterializations,
+              fenceTarget,
+              allocationSchema,
+              lineage: provisioning.lineage,
+              recordedTime: provisioning.recordedTime,
+              isFirstParty,
             });
-            // Schema writes run DDL: over an allocation, where it lives.
-            await bindSchemaWriteSessionToAllocation(tx);
-            // The fence resolved above is held here, so the schema-write-capable
-            // InternalOperationBackend is used intentionally (see its type).
-            const { backend: txBackend, drainAndClose } =
-              createTransactionBackend({
-                db: tx,
-                connection: nestedTransactionConnection,
-                adapterOptions,
-                operationStrategy,
-                tableNames,
-                capabilities,
-                fulltextStrategy,
-                vectorStrategy,
-                contributionMaterializer: ctx.contributionMaterializer,
-                iterativeScanProbe,
-                schemaVersionsTable: tables.schemaVersions,
-                contributionMaterializationsTable:
-                  tables.contributionMaterializations,
-                fenceTarget,
-                allocationSchema,
-                lineage: provisioning.lineage,
-                recordedTime: provisioning.recordedTime,
-                isFirstParty,
-              });
-            // `executeSchemaDdl` forwards any SQL text, transaction control
-            // included: the view handed to code TypeGraph does not own (a
-            // preflight, a public `schemaWriteTransaction` callback)
-            // releases control of the transaction before its statement is
-            // sent.
-            registerRawSqlReleasingView(
-              txBackend,
-              deriveBackend(txBackend, {
-                executeSchemaDdl(ddl: string): Promise<void> {
-                  releaseNativeTransaction(tx);
-                  return txBackend.executeSchemaDdl(ddl);
-                },
-              }),
-            );
-            try {
-              return await fn(txBackend);
-            } finally {
-              await drainAndClose();
-            }
-          },
-        );
+          // `executeSchemaDdl` forwards any SQL text, transaction control
+          // included: the view handed to code TypeGraph does not own (a
+          // preflight, a public `schemaWriteTransaction` callback)
+          // releases control of the transaction before its statement is
+          // sent.
+          registerRawSqlReleasingView(
+            txBackend,
+            deriveBackend(txBackend, {
+              executeSchemaDdl(ddl: string): Promise<void> {
+                releaseNativeTransaction(tx);
+                return txBackend.executeSchemaDdl(ddl);
+              },
+            }),
+          );
+          try {
+            return await fn(txBackend);
+          } finally {
+            await drainAndClose();
+          }
+        });
 
       if (!isOptimisticRetryTier(fenceTarget)) return attempt();
       return runRetriedUnit(
@@ -2736,35 +2733,29 @@ function buildPostgresEngineProfileInternal(
               }
             : undefined;
 
-          return openCommittingTransaction(
-            txConfig,
-            async (tx) => {
-              const { backend: txBackend, drainAndClose } =
-                bindTransactionBackend(
-                  tx,
-                  isFirstParty,
-                  nestedTransactionConnection,
-                );
-              try {
-                return await fn(
-                  markSchemaFencedInsertEligibleUnderFence(
-                    txBackend,
-                    fencePlan,
-                  ),
-                  nativeHandleForCallback(tx, options),
-                );
-              } finally {
-                // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
-                // instant the callback settles, and those control statements do not
-                // travel through the backend's statement queue. Wait for whatever is
-                // on the wire, and refuse anything the callback left running — a
-                // `Promise.all` that rejects orphans its siblings, whose statements
-                // would otherwise overlap the ROLLBACK and then land on a connection
-                // the pool had already handed to somebody else.
-                await drainAndClose();
-              }
-            },
-          );
+          return openCommittingTransaction(txConfig, async (tx) => {
+            const { backend: txBackend, drainAndClose } =
+              bindTransactionBackend(
+                tx,
+                isFirstParty,
+                nestedTransactionConnection,
+              );
+            try {
+              return await fn(
+                markSchemaFencedInsertEligibleUnderFence(txBackend, fencePlan),
+                nativeHandleForCallback(tx, options),
+              );
+            } finally {
+              // Drizzle emits COMMIT / ROLLBACK on this same pinned connection the
+              // instant the callback settles, and those control statements do not
+              // travel through the backend's statement queue. Wait for whatever is
+              // on the wire, and refuse anything the callback left running — a
+              // `Promise.all` that rejects orphans its siblings, whose statements
+              // would otherwise overlap the ROLLBACK and then land on a connection
+              // the pool had already handed to somebody else.
+              await drainAndClose();
+            }
+          });
         },
 
         adoptTransaction(externalTx: AnyPgTransaction): TransactionBackend {
@@ -3843,7 +3834,9 @@ function createPostgresOperationBackend(
       // restored with a NULL value, which resets it to its default.
       for (const snapshot of snapshots) {
         const previous =
-          snapshot.previous === undefined ? sql`NULL` : sql`${snapshot.previous}`;
+          snapshot.previous === undefined ?
+            sql`NULL`
+          : sql`${snapshot.previous}`;
         await connection.execute(
           sql`SELECT set_config(${snapshot.name}, ${previous}, true)`,
         );
@@ -3894,9 +3887,14 @@ function createPostgresOperationBackend(
     });
   }
 
-  const batchConfig = computePostgresBatchChunkSizes(
-    capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
-  );
+  const batchConfig = {
+    ...computePostgresBatchChunkSizes(
+      capabilities.maxBindParameters ?? POSTGRES_MAX_BIND_PARAMETERS,
+    ),
+    ...(capabilities.maxBoundValueBytes === undefined ?
+      {}
+    : { setUpdateKeyBytes: capabilities.maxBoundValueBytes }),
+  };
 
   const fulltextMembers =
     fulltextStrategy === undefined ?

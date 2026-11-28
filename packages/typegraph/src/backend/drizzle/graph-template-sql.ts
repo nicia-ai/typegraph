@@ -151,13 +151,14 @@ export function postgresInstantiateGraphTemplateStatement(
   );
   const active = getDialect("postgres").booleanLiteral(true);
   const lockedCte =
-    plan.kind === "row" ? sql.empty() : (
+    plan.kind === "row" ?
+      sql.empty()
       // eslint-disable-next-line unicorn/template-indent -- this text is spliced verbatim into the statement below, whose own byte-identical shape is snapshot-asserted (tests/engine-profile-parity.test.ts); autofix would reindent it to this closure's nesting depth and change the captured statement text.
-      sql`locked AS (
+    : sql`locked AS (
       SELECT ${advisoryLockSingleExpression(params.graphId)}
-    ), `
-    );
-  const insertedFrom = plan.kind === "row" ? sql`template` : sql`template, locked`;
+    ), `;
+  const insertedFrom =
+    plan.kind === "row" ? sql`template` : sql`template, locked`;
   return sql`
     WITH ${lockedCte}template AS (
       SELECT schema_hash, schema_doc FROM ${templates}

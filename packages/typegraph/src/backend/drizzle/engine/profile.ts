@@ -49,9 +49,7 @@ import type { CreateKindRemovalMembersDeps } from "./members/kind-removal-member
 export type EngineTableNames = ResolvedSqlTableNames;
 
 /** Resolve the adapter's physical-provisioning policy once at construction. */
-export function resolveSchemaProvisioning(
-  value: unknown,
-): SchemaProvisioning {
+export function resolveSchemaProvisioning(value: unknown): SchemaProvisioning {
   if (value === undefined) return "dml-only";
   if (value === "dml-only" || value === "transactional") return value;
   throw new ConfigurationError(

@@ -30,10 +30,7 @@ import type {
   TransactionBackend,
 } from "../../types";
 import type { ContributionMaterializer } from "../contribution-materializations";
-import type {
-  CompiledSqlQuery,
-  ExecutableSql,
-} from "../execution/types";
+import type { CompiledSqlQuery, ExecutableSql } from "../execution/types";
 import {
   type createCommonOperationBackend,
   type InternalOperationBackend,
@@ -51,7 +48,9 @@ import type { EngineTableNames } from "./profile";
  * module-private in `../operation-backend-core`, and re-declaring its shape
  * by hand is exactly the kind of second copy that drifts.
  */
-type CommonOperationOptions = Parameters<typeof createCommonOperationBackend>[0];
+type CommonOperationOptions = Parameters<
+  typeof createCommonOperationBackend
+>[0];
 
 /**
  * The operation-layer fusion knobs `buildCommonOperationOptions` reads to
@@ -160,8 +159,10 @@ export function buildCommonOperationOptions(
     batchConfig: deps.batchConfig,
     commandSession: deps.commandSession,
     execution: deps.execution,
-    ...(atomicSqlProgramExecutorExcludedAtScope ||
-    deps.atomicSqlProgramExecutor === undefined ?
+    ...((
+      atomicSqlProgramExecutorExcludedAtScope ||
+      deps.atomicSqlProgramExecutor === undefined
+    ) ?
       {}
     : { atomicSqlProgramExecutor: deps.atomicSqlProgramExecutor }),
     nowIso: deps.nowIso,

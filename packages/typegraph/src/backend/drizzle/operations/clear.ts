@@ -51,7 +51,13 @@ export function buildClearGraph(
   options?: Readonly<{ preserveContributionMaterializations?: boolean }>,
 ): readonly ClearGraphStatement[] {
   return GRAPH_RELATION_CLEAR_SEQUENCE.flatMap((step) => {
-    const statement = clearStatement(step, tables, graphId, fulltextStrategy, options);
+    const statement = clearStatement(
+      step,
+      tables,
+      graphId,
+      fulltextStrategy,
+      options,
+    );
     return statement === undefined ? [] : [statement];
   });
 }
@@ -61,7 +67,8 @@ function clearStatement(
   tables: Tables,
   graphId: string,
   fulltextStrategy: FulltextStrategy | undefined,
-  options: Readonly<{ preserveContributionMaterializations?: boolean }> | undefined,
+  options:
+    Readonly<{ preserveContributionMaterializations?: boolean }> | undefined,
 ): ClearGraphStatement | undefined {
   const { clear } = step;
   switch (clear.kind) {

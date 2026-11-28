@@ -189,7 +189,11 @@ import {
   ATOMIC_EDGE_CLAIM_PROPOSED_COLUMN_COUNT,
   claimPredicateShapeKey,
 } from "./operations/edge-claims";
-import { SET_ROW_TOKEN_COLUMN } from "./operations/nodes";
+import {
+  SET_COUNT_COLUMN,
+  SET_ROW_TOKEN_COLUMN,
+  splitNodeSetRowKeys,
+} from "./operations/nodes";
 import {
   type CommonOperationStrategy,
   createCachedTableExistence,
@@ -800,7 +804,16 @@ export type OperationBackendBatchConfig = Readonly<{
   nodeSchemaFencedInsertBatchSize: number;
   uniqueDeleteChunkSize: number;
   uniqueInsertBatchSize: number;
+  /**
+   * The bound-value budget a keyed set write splits its row keys under
+   * (`BackendCapabilities.maxBoundValueBytes`). Absent means
+   * {@link DEFAULT_MAX_BOUND_VALUE_BYTES}.
+   */
+  setUpdateKeyBytes?: number;
 }>;
+
+/** The bound-value budget a backend that declares none gets: 64 MiB. */
+export const DEFAULT_MAX_BOUND_VALUE_BYTES = 64 * 1024 * 1024;
 
 export type OperationBackendRowMappers = Readonly<{
   toEdgeRow: (row: Record<string, unknown>) => EdgeRow;
@@ -5364,6 +5377,38 @@ export function createCommonOperationBackend(
         );
       }
       if (params.rows.length === 0) return { affectedCount: 0, rows: [] };
+      // The row keys are bound as one value per statement, and that value
+      // carries every row's stored props: unsplit, a large enough set could
+      // not even be built as one string. Split under the budget, the write is
+      // one statement per part, which keeps all or nothing only inside a
+      // transaction — a root session would commit each part on its own, so
+      // a split there is refused before anything runs.
+      const budgetBytes =
+        batchConfig.setUpdateKeyBytes ?? DEFAULT_MAX_BOUND_VALUE_BYTES;
+      const split = splitNodeSetRowKeys(params.rows, budgetBytes);
+      if (
+        !split.fits ||
+        (split.parts.length > 1 && commandSession !== "transaction")
+      ) {
+        throw new ConfigurationError(
+          split.fits ?
+            "A set update whose row keys exceed one statement's bound-value budget must run inside a transaction"
+          : "A set update row's key alone exceeds the backend's bound-value budget",
+          {
+            code: "SET_UPDATE_KEY_BUDGET_EXCEEDED",
+            operation: "updateNodeSet",
+            kind: params.kind,
+            budgetBytes,
+            ...(split.fits ?
+              { parts: split.parts.length }
+            : { keyBytes: split.keyBytes }),
+          },
+          {
+            suggestion:
+              "Run the set update inside a transaction, select fewer rows per call, or raise the backend's maxBoundValueBytes capability.",
+          },
+        );
+      }
       // A `fence-row` plan locks the rows the dry-run read before writing
       // them, as `lockNodes` does; a row-lock engine already holds them from
       // the dry-run, and a serializing one needs nothing.
@@ -5373,13 +5418,35 @@ export function createCommonOperationBackend(
       )) {
         await execution.execRun(fence);
       }
-      const query = operationStrategy.buildUpdateNodeSet(
-        params,
-        nowIso(),
-        nodeSetUpdateRowLock,
-      );
-      const rows = await execution.execAll<Record<string, unknown>>(query);
-      const updatedRows = rows.map((row) => rowMappers.toNodeRow(row));
+      // A split write counts — and locks — every part before it writes the
+      // first: a part whose rows no longer all carry their tokens is found
+      // while nothing is written, and the counted rows stay locked until the
+      // writes, so each part's own count then holds.
+      if (split.parts.length > 1) {
+        for (const part of split.parts) {
+          const counted = await execution.execGet<Record<string, unknown>>(
+            operationStrategy.buildCountNodeSetKeys(
+              { graphId: params.graphId, kind: params.kind, rows: part },
+              nodeSetUpdateRowLock,
+            ),
+          );
+          if (Number(counted?.[SET_COUNT_COLUMN]) !== part.length) {
+            return { affectedCount: 0, rows: [] };
+          }
+        }
+      }
+      const timestamp = nowIso();
+      const updatedRows: NodeRow[] = [];
+      for (const part of split.parts) {
+        const rows = await execution.execAll<Record<string, unknown>>(
+          operationStrategy.buildUpdateNodeSet(
+            { ...params, rows: part },
+            timestamp,
+            nodeSetUpdateRowLock,
+          ),
+        );
+        updatedRows.push(...rows.map((row) => rowMappers.toNodeRow(row)));
+      }
       return { affectedCount: updatedRows.length, rows: updatedRows };
     },
 

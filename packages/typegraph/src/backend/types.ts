@@ -471,6 +471,15 @@ export type BackendCapabilities = Readonly<{
    */
   maxBindParameters?: number;
   /**
+   * The largest single bound value, in UTF-8 bytes, a bundled backend sends
+   * in one statement where it sizes the value itself. Today that is the keyed
+   * write of a set update (`updateWhere`, `compareAndSet`), which binds its
+   * rows' keys — each carrying the row's stored properties — as one value and
+   * splits them across statements to stay under this budget. Absent means
+   * 64 MiB.
+   */
+  maxBoundValueBytes?: number;
+  /**
    * Whether this backend supplies the claim relations that fence declared
    * constraints (`uniques`, re-keyed onto claim axes, plus
    * `typegraph_edge_claims`) AND implements the claim members.

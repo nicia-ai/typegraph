@@ -162,6 +162,7 @@ import {
   buildAtomicNodeDeleteBatchWithSchemaFence,
   buildAtomicNodeReplacementBatchWithSchemaFence,
   buildAtomicNodeResolvedUpdateBatch,
+  buildCountNodeSetKeys,
   buildDeleteNode,
   buildGetNode,
   buildGetNodes,
@@ -427,6 +428,15 @@ export type CommonOperationStrategy = Readonly<{
   buildUpdateNodeSet: (
     params: UpdateNodeSetParams,
     timestamp: string,
+    rowLock: RowLockClause,
+  ) => SQL;
+  /**
+   * The count a keyed write split across statements runs per part before it
+   * writes any part: how many of the part's rows still carry their tokens,
+   * each locked by `rowLock` exactly as the write's own count locks it.
+   */
+  buildCountNodeSetKeys: (
+    params: Pick<UpdateNodeSetParams, "graphId" | "kind" | "rows">,
     rowLock: RowLockClause,
   ) => SQL;
   buildResolvedNodeUpdateBatch: (
@@ -1403,6 +1413,12 @@ function createCommonOperationStrategy(
       rowLock: RowLockClause,
     ): SQL {
       return buildUpdateNodeSet(tables, dialect, params, timestamp, rowLock);
+    },
+    buildCountNodeSetKeys(
+      params: Pick<UpdateNodeSetParams, "graphId" | "kind" | "rows">,
+      rowLock: RowLockClause,
+    ): SQL {
+      return buildCountNodeSetKeys(tables, dialect, params, rowLock);
     },
     buildResolvedNodeUpdateBatch(params, timestamp): SQL {
       return buildResolvedNodeUpdateBatch(
