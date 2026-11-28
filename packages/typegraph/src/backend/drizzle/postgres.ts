@@ -2351,10 +2351,17 @@ function buildPostgresEngineProfileInternal(
      * `db.transaction` opens a savepoint on the enclosing transaction, whose
      * outcome is decided by whoever opened that transaction.
      */
-    function openCommittingTransaction<T>(
+    async function openCommittingTransaction<T>(
       config: PgTransactionConfig | undefined,
       body: (tx: AnyPgTransaction) => Promise<T>,
     ): Promise<T> {
+      // The savepoint a transaction-scoped backend opens runs on the
+      // enclosing transaction's connection: refused, as its statements are,
+      // once that transaction ended. Admitted and settled before the
+      // savepoint opens, so the savepoint's body does not wait on it.
+      if (transactionScoped) {
+        await runHandleStatement(executionAdapter, () => Promise.resolve());
+      }
       // On a transaction-scoped backend `tx` is a savepoint on `db`: it runs
       // in `db`'s native transaction, not one of its own.
       const run = (tx: AnyPgTransaction): Promise<T> => {

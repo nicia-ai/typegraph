@@ -2396,6 +2396,12 @@ export function buildSqliteEngineProfile(
             "or use individual operations with manual error handling.",
         );
       }
+      // A backend built over a transaction's handle opens its transaction
+      // (a savepoint) on that transaction's session: refused, as its
+      // statements are, once that transaction ended.
+      if (isSqliteTransactionHandle(db)) {
+        await runHandleStatement(executionAdapter, () => Promise.resolve());
+      }
 
       // #134/#135: NO DDL or ensure here. The tx-scoped backend
       // exposes raw fulltext methods without self-ensure wrappers; the

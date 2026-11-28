@@ -108,7 +108,7 @@ const UNADMITTED_HANDLE_CALLS: Readonly<Record<string, Allowance>> = {
   "drizzle/postgres.ts#openCommittingTransaction#db.transaction": {
     bypass: "transaction-opener",
     reason:
-      "Opens the transaction `transaction()` and schema writes run in. On a transaction's handle it is a savepoint whose body admits through the shared statement queue, so admitting the opener would hold the queue slot its body waits for. Savepoint lifetime is a pinned known limit (tests/backends/integration/transaction-view-consumers.ts).",
+      "Opens the transaction `transaction()` and schema writes run in. On a transaction's handle it is a savepoint whose body admits through the shared statement queue, so admitting the opener would hold the queue slot its body waits for; an empty admission settled before it refuses the opener once the enclosing transaction ended. A savepoint that outlives its enclosing transaction is a pinned known limit (tests/backends/integration/transaction-view-consumers.ts).",
     sites: 2,
   },
   "drizzle/postgres.ts#runVectorSearch#db.transaction": {
@@ -119,7 +119,7 @@ const UNADMITTED_HANDLE_CALLS: Readonly<Record<string, Allowance>> = {
   "drizzle/sqlite.ts#openTransaction#db.transaction": {
     bypass: "transaction-opener",
     reason:
-      "Opens the transaction `transaction()` runs in through Drizzle; its body admits through the view the opened transaction's owner closes. On a libSQL transaction's handle the nested `BEGIN IMMEDIATE` fails, so no savepoint opens.",
+      "Opens the transaction `transaction()` runs in through Drizzle; its body admits through the view the opened transaction's owner closes. On a transaction's handle (a libSQL transaction under Drizzle's transaction mode) it is a savepoint, refused at entry once the enclosing transaction ended by an empty admission through the handle's view; under the SQL mode the nested `BEGIN IMMEDIATE` fails.",
   },
   "drizzle/sqlite.ts#runSchemaWriteTransaction#db.transaction": {
     bypass: "transaction-opener",
